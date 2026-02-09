@@ -114,8 +114,7 @@ publish_pip_cache = false
 
 [repo_precache_exts]
 # Apps to run and precache
-apps = [
-]
+apps = ["${root}/source/apps/moprh.base.kit", "${root}/source/apps/morph.explorer.kit", "${root}/source/apps/morph.viewer.kit"]
 
 registries = [
     { name = "kit/default", url = "https://ovextensionsprod.blob.core.windows.net/exts/kit/prod/${kit_version_major}/shared" },
