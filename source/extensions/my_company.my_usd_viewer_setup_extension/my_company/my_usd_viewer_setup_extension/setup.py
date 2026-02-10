@@ -30,6 +30,7 @@ COMMAND_MACRO_FILE_SETTING = COMMAND_MACRO_SETTING + "macro_file"
 AUTO_SHOW_WINDOWS = [
     "Section Control (Dummy UI)",
     "USD Loader",
+    "Pick Filter",
 ]
 
 
