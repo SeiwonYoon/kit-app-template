@@ -18,3 +18,5 @@ repo_build.prebuild_copy {
 
 define_app("morph.editor.kit")
 define_app("morph.editor_streaming.kit")
+define_app("my_company.my_usd_viewer.kit")
+define_app("my_company.my_usd_viewer_streaming.kit")
