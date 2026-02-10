@@ -26,6 +26,13 @@ class SectionControlService:
         self._subscribe_stage_events()
         self._register_web_api()
 
+        # ✅ 추가: 시작 시 enabled 상태면 바로 apply 루프를 걸어준다
+        try:
+            if self.controller and self.controller.get_state().get("enabled"):
+                self.schedule_apply("startup_enabled", retries=240)
+        except Exception as ex:
+            _log_exc("startup initial schedule_apply failed", ex)
+
     def shutdown(self):
         try:
             if self._post_update_sub:
@@ -49,6 +56,40 @@ class SectionControlService:
         self.api = None
 
         self.controller = None
+
+    # ---------- internal helper ----------
+    def _apply_changes(self, enabled: bool, axis: str, flip: bool, offset: float) -> bool:
+        """
+        ✅ 핵심: '변경된 값만' controller에 반영.
+        UI 슬라이더/필드 조작 중에도 axis/flip을 불필요하게 재설정하지 않도록 방지.
+        """
+        st0 = self.controller.get_state()
+        changed = False
+
+        try:
+            if bool(enabled) != bool(st0.get("enabled")):
+                self.controller.set_enabled(enabled)
+                changed = True
+
+            if (axis or "").upper() != (st0.get("axis") or "").upper():
+                self.controller.set_axis(axis)
+                changed = True
+
+            if bool(flip) != bool(st0.get("flip")):
+                self.controller.set_flip(flip)
+                changed = True
+
+            # float 미세오차 방지
+            if abs(float(offset) - float(st0.get("offset", 0.0))) > 1e-9:
+                self.controller.set_offset(offset)
+                changed = True
+
+        except Exception as ex:
+            _log_exc("_apply_changes failed", ex)
+            # 변경 적용 중 예외가 나면 그래도 apply 루프는 돌려보는 게 낫다
+            changed = True
+
+        return changed
 
     # ---------- web API ----------
     def _register_web_api(self):
@@ -82,21 +123,17 @@ class SectionControlService:
 
         @self.api.request(name="section_set_all")
         def section_set_all(enabled: bool, axis: str, flip: bool, offset: float):
-            self.controller.set_enabled(enabled)
-            self.controller.set_axis(axis)
-            self.controller.set_flip(flip)
-            self.controller.set_offset(offset)
-            self.schedule_apply("web_set_all")
+            changed = self._apply_changes(enabled, axis, flip, offset)
+            if changed:
+                self.schedule_apply("web_set_all")
             return self.controller.get_state()
 
     # ---------- UI/common entrypoints ----------
-    # UI에서도 이 메서드들만 호출하도록 맞추면 됨.
+    # UI에서도 이 메서드만 호출하도록 맞추면 됨.
     def set_all_from_ui(self, enabled: bool, axis: str, flip: bool, offset: float, reason: str):
-        self.controller.set_enabled(enabled)
-        self.controller.set_axis(axis)
-        self.controller.set_flip(flip)
-        self.controller.set_offset(offset)
-        self.schedule_apply(reason)
+        changed = self._apply_changes(enabled, axis, flip, offset)
+        if changed:
+            self.schedule_apply(reason)
         return self.controller.get_state()
 
     # ---------- stage events ----------

@@ -16,7 +16,7 @@ class DummySectionControlUI:
         self._m_flip = ui.SimpleBoolModel(st0["flip"])
         self._m_offset = ui.SimpleFloatModel(st0["offset"])
 
-        self._window = ui.Window("Section Control (Dummy UI)", width=420, height=220, visible=False)
+        self._window = ui.Window("Section Control (Dummy UI)", width=460, height=230, visible=False)
         self._controls_stack = None
         self._btn_axis = {"X": None, "Y": None, "Z": None}
 
@@ -40,7 +40,7 @@ class DummySectionControlUI:
 
         _log(f"apply_from_models reason={reason} enabled={enabled} axis={axis} flip={flip} offset={offset}")
 
-        # 핵심: UI는 service 한 군데만 때린다
+        # ✅ 핵심: UI는 service 한 군데만 때린다 (service가 변경된 항목만 반영하도록 개선됨)
         self._service.set_all_from_ui(enabled, axis, flip, offset, reason)
 
         if self._controls_stack:
@@ -83,11 +83,14 @@ class DummySectionControlUI:
                         ui.CheckBox(model=self._m_flip)
                         ui.Spacer()
 
+                    # ✅ Offset: 숫자 입력이 커밋/반영 안 되는 체감을 줄이기 위해 Apply 버튼 추가
                     with ui.HStack(height=24):
                         ui.Label("Offset", width=60)
                         ui.FloatSlider(model=self._m_offset, min=-1000.0, max=1000.0)
                         ui.Spacer(width=8)
                         ui.FloatField(model=self._m_offset, width=90)
+                        ui.Spacer(width=8)
+                        ui.Button("Apply", width=60, clicked_fn=lambda: self._apply_from_models("ui_offset_apply_btn"))
 
                 ui.Separator()
                 ui.Label("즉시 반영 모드 (UI 조작 시 post_update에서 재시도 적용)", style={"color": 0xFFAAAAAA})
