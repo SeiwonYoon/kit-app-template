@@ -69,11 +69,14 @@ template_name = "kit_base_editor"
 "omni.rtx.settings.core" = {} # RTX Settings
 "omni.uiaudio" = {} # for audio playback.
 "omni.warp.core" = {} # Warp support
+"omni.kit.quicklayout" = {} # 레이아웃 로드 (setup에서 뷰포트 전용 레이아웃 적용)
+"morph.morph_base_viewer" = { order = 1000 } # 실행 시 Property/Render Settings 창 숨김용 뷰포트 전용 레이아웃 로드
 # "omni.usd.metrics.assembler.ui" = {}
 # "omni.usd.schema.metrics.assembler" = {}
 
 [settings.persistent.app]
 viewport.autoFrame.mode = "first_open"  # Auto frame the first time the viewport is opened
+viewport.noPadding = true  # 뷰포트만 표시할 때 프레임 여백 제거 (Viewer와 동일)
 
 
 [settings]
@@ -123,11 +126,29 @@ hangDetector.enabled = true
 hangDetector.timeout = 120
 renderer.skipWhileMinimized = true
 window.title = "My Editor"
+window.showStatusBar = false  # 하단 콘솔/로그(상태) 바 숨김
 
 
 [settings.app.environment]
 name = "My Editor"
 
+# 뷰포트 위주: 일부 메뉴/패널만 제외 (의존성 깨지지 않도록 유지하는 항목 있음)
+# 주의: window.property, rtx.window.settings 제외 시 property.bundle·rtx.settings.core 등 로드 실패
+[settings.app.extensions]
+excluded = [
+	"omni.kit.window.console",
+	"omni.kit.window.content_browser",
+	"omni.kit.window.stage",
+	"omni.kit.window.status_bar",
+	"omni.kit.window.toolbar",
+	"omni.kit.menu.file",
+	"omni.kit.menu.edit",
+	"omni.kit.menu.create",
+	"omni.kit.menu.common",
+	"omni.kit.developer.bundle",
+	"omni.kit.widget.cache_indicator",
+	"omni.kit.tool.asset_importer",
+]
 
 [settings.app.exts]
 folders.'++' = [  # 확장을 검색할 폴더 경로
