@@ -29,6 +29,7 @@ COMMAND_MACRO_FILE_SETTING = COMMAND_MACRO_SETTING + "macro_file"
 # ✅ 레이아웃 로드 이후 "자동으로 띄우고 싶은" 창 타이틀 목록
 AUTO_SHOW_WINDOWS = [
     "Section Control (Dummy UI)",
+    "USD Loader",
 ]
 
 
