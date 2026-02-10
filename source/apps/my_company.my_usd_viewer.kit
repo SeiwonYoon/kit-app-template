@@ -37,6 +37,11 @@ template_name = "omni.usd_viewer"
 "usdrt.scenegraph" = {}
 "my_company.my_usd_viewer_setup_extension" = { order = 1000 }
 
+"morph.force_ko_locale" = { order = -1000 }
+"omni.kit.language.core" = {}
+"omni.kit.language.korean" = {}
+
+"morph.section_control" = {}
 
 [settings.persistent.app]
 viewport.autoFrame.mode = "first_open"  # Auto frame the first time the viewport is opened
@@ -88,7 +93,7 @@ scene.lights.visible = false
 ignoreUnsavedOnExit = true  # enable quitting without confirmation
 
 [settings.app.font]
-file = "${fonts}/OpenSans-SemiBold.ttf"
+file = "${app}/fonts/Pretendard-Medium.otf"
 size = 16
 
 [settings.app.layout]  # this is a custom setting used in our app setup to choose the Layout

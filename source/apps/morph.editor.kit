@@ -68,6 +68,10 @@ template_name = "kit_base_editor"
 "omni.usd.schema.metrics.assembler" = {}
 "omni.warp.core" = {} # Warp support
 
+"morph.force_ko_locale" = { order = -1000 }
+"omni.kit.language.core" = {}
+"omni.kit.language.korean" = {}
+
 
 [settings.persistent.app]
 viewport.autoFrame.mode = "first_open"  # Auto frame the first time the viewport is opened
@@ -92,8 +96,8 @@ privacy.externalBuild = true
 
 [settings.app]
 content.emptyStageOnStart = true
-font.file = "${fonts}/OpenSans-SemiBold.ttf"
-font.size = 16
+file = "${app}/fonts/Pretendard-Medium.otf"
+size = 16
 hangDetector.enabled = true
 hangDetector.timeout = 120
 renderer.skipWhileMinimized = true

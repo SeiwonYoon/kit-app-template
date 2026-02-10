@@ -11,11 +11,13 @@
 import asyncio
 from pathlib import Path
 
+import carb
 import carb.settings
 import carb.tokens
 import omni.ext
 import omni.kit.app
 import omni.kit.imgui as _imgui
+import omni.ui as ui  # ✅ Workspace.get_window
 import omni.usd
 from omni.kit.mainwindow import get_main_window
 from omni.kit.quicklayout import QuickLayout
@@ -24,9 +26,16 @@ from omni.kit.viewport.utility import get_viewport_from_window_name
 COMMAND_MACRO_SETTING = "/exts/omni.kit.command_macro.core/"
 COMMAND_MACRO_FILE_SETTING = COMMAND_MACRO_SETTING + "macro_file"
 
+# ✅ 레이아웃 로드 이후 "자동으로 띄우고 싶은" 창 타이틀 목록
+AUTO_SHOW_WINDOWS = [
+    "Section Control (Dummy UI)",
+]
 
-async def _load_layout(layout_file: str):
-    """Loads a provided layout file and ensures the viewport is set to FILL."""
+
+async def _load_layout(layout_file: str, windows_to_show=None):
+    """Loads a provided layout file and ensures the viewport is set to FILL.
+    Additionally can force-show specific UI windows after layout restore.
+    """
     await omni.kit.app.get_app().next_update_async()
     QuickLayout.load_file(layout_file)
 
@@ -35,29 +44,42 @@ async def _load_layout(layout_file: str):
     if viewport_api and hasattr(viewport_api, "fill_frame"):
         viewport_api.fill_frame = True
 
+    # ✅ 레이아웃 복원 직후 1프레임 더 기다린 뒤 창을 강제 표시
+    if windows_to_show:
+        await omni.kit.app.get_app().next_update_async()
+        for title in windows_to_show:
+            try:
+                w = ui.Workspace.get_window(title)
+                if w:
+                    w.visible = True
+                    w.focus()
+                else:
+                    carb.log_warn(f"SetupExtension: Window not found to show: '{title}'")
+            except Exception as ex:
+                carb.log_warn(f"SetupExtension: Failed to show window '{title}': {ex}")
+
 
 class SetupExtension(omni.ext.IExt):
     """Extension that sets up the USD Viewer application."""
+
     def on_startup(self, _ext_id: str):
-        """This is called every time the extension is activated. It is used to
-        set up the application and load the stage."""
+        """Called every time the extension is activated."""
         self._settings = carb.settings.get_settings()
+
         if self._settings and self._settings.get("/app/warmupMode"):
-            # if warmup mode is enabled, we don't want to load the stage just return
+            # warmup 모드면 레이아웃/스테이지 로드 불필요
             return
+
         # get auto load stage name
         stage_url = self._settings.get_as_string("/app/auto_load_usd")
 
         # check if setup have benchmark macro file to activate - ignore setup
         # auto_load_usd name, in order to run proper benchmark.
-        benchmark_macro_file_name = self._settings.get(
-            COMMAND_MACRO_FILE_SETTING)
+        benchmark_macro_file_name = self._settings.get(COMMAND_MACRO_FILE_SETTING)
         if benchmark_macro_file_name:
             stage_url = None
 
-        # if no benchmark is activated (not applicable on production -
-        # provided macro file name will always be None) -
-        # load provided by setup stage.
+        # if no benchmark is activated - load provided by setup stage.
         if stage_url:
             stage_url = carb.tokens.get_tokens_interface().resolve(stage_url)
             try:
@@ -73,31 +95,31 @@ class SetupExtension(omni.ext.IExt):
         get_main_window().get_main_menu_bar().visible = False
 
     async def _delayed_layout(self):
-        """This function is used to delay the layout loading until the
-        application has finished its initial setup."""
+        """Delay layout loading until initial setup finishes."""
         main_menu_bar = get_main_window().get_main_menu_bar()
         main_menu_bar.visible = False
-        # few frame delay to allow automatic Layout of window that want their
-        # own positions
+
+        # few frame delay to allow automatic Layout of window that want their own positions
         app = omni.kit.app.get_app()
         for _ in range(4):
             await app.next_update_async()  # type: ignore
 
         settings = carb.settings.get_settings()
+
         # setup the Layout for your app
         token = "${my_company.my_usd_viewer_setup_extension}/layouts"
-
         layouts_path = carb.tokens.get_tokens_interface().resolve(token)
+
         layout_name = settings.get("/app/layout/name")
         layout_file = Path(layouts_path).joinpath(f"{layout_name}.json")
 
-        asyncio.ensure_future(_load_layout(f"{layout_file}"))
+        # ✅ 레이아웃 로드 후 특정 창 강제 표시
+        asyncio.ensure_future(_load_layout(f"{layout_file}", windows_to_show=AUTO_SHOW_WINDOWS))
 
         # using imgui directly to adjust some color and Variable
         imgui = _imgui.acquire_imgui()
 
-        # DockSplitterSize is the variable that drive the size of the
-        # Dock Split connection
+        # DockSplitterSize is the variable that drive the size of the Dock Split connection
         imgui.push_style_var_float(_imgui.StyleVar.DockSplitterSize, 2)
 
     async def __open_stage(self, url, frame_delay: int = 5):
@@ -122,19 +144,16 @@ class SetupExtension(omni.ext.IExt):
 
         if not timed_out:
             await usd_context.open_stage_async(
-                url, omni.usd.UsdContextInitialLoadSet.LOAD_ALL)
+                url, omni.usd.UsdContextInitialLoadSet.LOAD_ALL
+            )
         else:
-            carb.log_warn(
-                f"SetupExtension: Timed out waiting to open stage {url}")
+            carb.log_warn(f"SetupExtension: Timed out waiting to open stage {url}")
             return
 
-        # If this was the first Usd data opened, explicitly restore
-        # render-settings now as the renderer may not have been fully
-        # setup when the stage was opened.
+        # If this was the first Usd data opened, explicitly restore render-settings now
         if not bool(self._settings.get("/app/content/emptyStageOnStart")):
-            usd_context.load_render_settings_from_stage(
-                usd_context.get_stage_id())
+            usd_context.load_render_settings_from_stage(usd_context.get_stage_id())
 
     def on_shutdown(self):
-        """This is called every time the extension is deactivated."""
+        """Called every time the extension is deactivated."""
         return
