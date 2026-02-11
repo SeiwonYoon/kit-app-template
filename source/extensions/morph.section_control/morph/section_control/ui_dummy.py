@@ -1,9 +1,7 @@
-# morph/section_control/ui_dummy.py
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 import omni.ui as ui
-from .core import _log
 
 
 class DummySectionControlUI:
@@ -31,16 +29,12 @@ class DummySectionControlUI:
         self._window = None
         self._service = None
 
-    # ---------------- internals ----------------
     def _apply_from_models(self, reason: str):
         enabled = self._m_enabled.get_value_as_bool()
         axis = self._m_axis.get_value_as_string()
         flip = self._m_flip.get_value_as_bool()
         offset = self._m_offset.get_value_as_float()
 
-        _log(f"apply_from_models reason={reason} enabled={enabled} axis={axis} flip={flip} offset={offset}")
-
-        # ✅ 핵심: UI는 service 한 군데만 때린다 (service가 변경된 항목만 반영하도록 개선됨)
         self._service.set_all_from_ui(enabled, axis, flip, offset, reason)
 
         if self._controls_stack:
@@ -83,14 +77,17 @@ class DummySectionControlUI:
                         ui.CheckBox(model=self._m_flip)
                         ui.Spacer()
 
-                    # ✅ Offset: 숫자 입력이 커밋/반영 안 되는 체감을 줄이기 위해 Apply 버튼 추가
                     with ui.HStack(height=24):
                         ui.Label("Offset", width=60)
                         ui.FloatSlider(model=self._m_offset, min=-1000.0, max=1000.0)
                         ui.Spacer(width=8)
                         ui.FloatField(model=self._m_offset, width=90)
                         ui.Spacer(width=8)
-                        ui.Button("Apply", width=60, clicked_fn=lambda: self._apply_from_models("ui_offset_apply_btn"))
+                        ui.Button(
+                            "Apply",
+                            width=60,
+                            clicked_fn=lambda: self._apply_from_models("ui_offset_apply_btn"),
+                        )
 
                 ui.Separator()
                 ui.Label("즉시 반영 모드 (UI 조작 시 post_update에서 재시도 적용)", style={"color": 0xFFAAAAAA})

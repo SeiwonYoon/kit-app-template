@@ -1,11 +1,9 @@
-# morph/section_control/extension.py
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 import omni.ext
 import omni.kit.app
 
-from .core import _log, _log_exc
 from .service import SectionControlService
 from .ui_dummy import DummySectionControlUI
 
@@ -13,15 +11,12 @@ from .ui_dummy import DummySectionControlUI
 class MyCompanySectionControlExtension(omni.ext.IExt):
     def on_startup(self, ext_id):
         self._ext_id = ext_id
-        _log("startup begin")
 
         self._service = SectionControlService()
         self._service.startup()
 
-        # UI는 완전히 옵션으로 만들 수 있음
         self._ui = DummySectionControlUI(self._service)
 
-        # window show once
         self._show_once_sub = None
         try:
             app = omni.kit.app.get_app()
@@ -31,7 +26,6 @@ class MyCompanySectionControlExtension(omni.ext.IExt):
                 if self._ui and self._ui.window:
                     self._ui.window.visible = True
                     self._ui.window.focus()
-                    _log(f"window shown+focused title='{self._ui.window.title}'")
                 if self._show_once_sub:
                     self._show_once_sub.unsubscribe()
                     self._show_once_sub = None
@@ -40,17 +34,13 @@ class MyCompanySectionControlExtension(omni.ext.IExt):
                 _show_once,
                 name="section_control_show_window_once",
             )
-        except Exception as ex:
-            _log_exc("failed to schedule window show", ex)
+        except Exception:
             try:
                 self._ui.window.visible = True
             except Exception:
                 pass
 
-        _log("startup done")
-
     def on_shutdown(self):
-        _log("shutdown begin")
         try:
             if self._show_once_sub:
                 self._show_once_sub.unsubscribe()
@@ -71,5 +61,3 @@ class MyCompanySectionControlExtension(omni.ext.IExt):
         except Exception:
             pass
         self._service = None
-
-        _log("shutdown done")

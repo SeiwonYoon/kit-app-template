@@ -1,4 +1,3 @@
-# morph/section_control/service.py
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
@@ -7,7 +6,7 @@ import carb.events
 import omni.usd
 import omni.kit.app
 
-from .core import SectionController, MessageBusAPI, _log, _log_exc, StageEventType
+from .core import SectionController, MessageBusAPI, StageEventType
 
 
 class SectionControlService:
@@ -30,8 +29,8 @@ class SectionControlService:
         try:
             if self.controller and self.controller.get_state().get("enabled"):
                 self.schedule_apply("startup_enabled", retries=240)
-        except Exception as ex:
-            _log_exc("startup initial schedule_apply failed", ex)
+        except Exception:
+            pass
 
     def shutdown(self):
         try:
@@ -84,8 +83,7 @@ class SectionControlService:
                 self.controller.set_offset(offset)
                 changed = True
 
-        except Exception as ex:
-            _log_exc("_apply_changes failed", ex)
+        except Exception:
             # 변경 적용 중 예외가 나면 그래도 apply 루프는 돌려보는 게 낫다
             changed = True
 
@@ -144,14 +142,12 @@ class SectionControlService:
                 self._on_stage_event,
                 name="section_control_stage_events",
             )
-            _log("stage_event subscription OK")
-        except Exception as ex:
-            _log_exc("failed to subscribe stage events", ex)
+        except Exception:
+            pass
 
     def _on_stage_event(self, e: carb.events.IEvent):
         etype = int(e.type)
         payload = dict(e.payload.get_dict()) if e.payload else {}
-        _log(f"stage_event: type={etype}, payload={payload}")
 
         big = False
         if StageEventType is not None:
@@ -159,11 +155,12 @@ class SectionControlService:
                 if etype in (
                     int(StageEventType.OPENED),
                     int(StageEventType.CLOSED),
-                    int(StageEventType.NEW_STAGE),
+                    int(StageEventType.NEW_STAGE),  # ✅ 원본 동작 유지: 없으면 예외 -> 아래 except에서 pass
                     int(StageEventType.CLEARED),
                 ):
                     big = True
             except Exception:
+                # ✅ 원본 동작 유지: enum 멤버 차이로 예외 나도 크래시 없이 넘어감
                 pass
         else:
             if etype in (2, 3):
@@ -179,7 +176,6 @@ class SectionControlService:
     # ---------- apply loop ----------
     def schedule_apply(self, reason: str, retries: int = 240):
         self._apply_retries_left = max(self._apply_retries_left, retries)
-        _log(f"schedule_apply retries={self._apply_retries_left} reason={reason}")
 
         if self._post_update_sub is None:
             stream = omni.kit.app.get_app().get_post_update_event_stream()
@@ -197,12 +193,10 @@ class SectionControlService:
 
         self._apply_retries_left -= 1
         self._apply_attempt += 1
-        _log(f"post_update tick retry_left={self._apply_retries_left}")
 
         try:
             ok = self.controller.apply_once_if_possible(self._apply_attempt)
             if ok:
-                _log("APPLY DONE -> stop loop")
                 self._apply_retries_left = 0
-        except Exception as ex:
-            _log_exc("apply loop exception", ex)
+        except Exception:
+            pass
