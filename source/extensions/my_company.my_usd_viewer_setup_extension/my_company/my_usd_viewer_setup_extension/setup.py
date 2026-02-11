@@ -31,6 +31,7 @@ AUTO_SHOW_WINDOWS = [
     "Section Control (Dummy UI)",
     "USD Loader",
     "Pick Filter",
+    "Temp Alarm (hynix:temperature)"
 ]
 
 

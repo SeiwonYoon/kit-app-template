@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 import asyncio
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable, Set
 
 import omni.usd
 import omni.kit.app
-from pxr import Usd
+from pxr import Usd, Sdf
 
 try:
     from omni.usd import StageEventType
@@ -15,11 +15,38 @@ except Exception:
     StageEventType = None
 
 
+TEMP_ATTR = "hynix:temperature"
+
+# -------------------------------------------------------------------------
+# Temperature change signal (cross-extension)
+# - temp_alarm 같은 다른 익스텐션이 여기에 리스너 등록해서 "즉시" 반영 가능
+# -------------------------------------------------------------------------
+_TEMP_LISTENERS: Set[Callable[[str, float], None]] = set()
+
+
+def register_temperature_listener(fn: Callable[[str, float], None]):
+    _TEMP_LISTENERS.add(fn)
+
+
+def unregister_temperature_listener(fn: Callable[[str, float], None]):
+    if fn in _TEMP_LISTENERS:
+        _TEMP_LISTENERS.remove(fn)
+
+
+def _notify_temperature_changed(path: str, value: float):
+    for fn in list(_TEMP_LISTENERS):
+        try:
+            fn(path, float(value))
+        except Exception:
+            pass
+
+
 class PickFilterService:
     """
     Pickable 제어 서비스
     - stage_event 폭주로 refresh_cache 연속 호출되는 문제를 디바운스로 완화
-    - ctx getter가 없는 환경에서도 overrides를 source-of-truth로 사용
+    - overrides를 source-of-truth로 사용 (ctx getter 부재 환경 대응)
+    - [추가] prim 온도 어트리뷰트(hynix:temperature) 더미 제어/캐시 노출 + 즉시 신호 발행
     """
 
     def __init__(self):
@@ -75,7 +102,6 @@ class PickFilterService:
                     self.refresh_cache()
                     return
                 except Exception:
-                    # 다음 프레임에 재시도
                     pass
             await app.next_update_async()
 
@@ -117,10 +143,7 @@ class PickFilterService:
             try:
                 ctx.set_pickable(p, bool(pickable))
             except Exception:
-                # 실패해도 overrides는 갱신해 UI/캐시가 "원하는 상태"를 유지하도록 함
                 pass
-
-            # ctx getter가 불가한 환경에서 overrides가 source-of-truth
             self._overrides[p] = bool(pickable)
 
         self.refresh_cache()
@@ -130,6 +153,80 @@ class PickFilterService:
 
     def unlock_all(self):
         self._set_all_pickable(True)
+
+    # ---------------- temperature ops (NEW) ----------------
+    def get_temperature(self, path: str) -> Optional[float]:
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not stage:
+            return None
+        prim = stage.GetPrimAtPath(path)
+        if not prim or not prim.IsValid():
+            return None
+        return self._read_temperature(prim)
+
+    def set_temperature(self, path: str, value: Optional[float]):
+        """
+        hynix:temperature 를 생성/갱신.
+        value=None이면 attribute 제거(삭제) 시도.
+        """
+        path = (path or "").strip()
+        if not path:
+            return
+
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not stage:
+            return
+
+        prim = stage.GetPrimAtPath(path)
+        if not prim or not prim.IsValid():
+            return
+
+        if value is None:
+            attr = prim.GetAttribute(TEMP_ATTR)
+            if attr and attr.IsValid():
+                try:
+                    prim.RemoveProperty(TEMP_ATTR)
+                except Exception:
+                    try:
+                        attr.Clear()
+                    except Exception:
+                        pass
+            self.refresh_cache()
+            return
+
+        try:
+            attr = prim.GetAttribute(TEMP_ATTR)
+            if not attr or not attr.IsValid():
+                attr = prim.CreateAttribute(TEMP_ATTR, Sdf.ValueTypeNames.Float, custom=True)
+            attr.Set(float(value))
+
+            # ✅ 즉시 신호 발행 (temp_alarm 등이 즉시 반영 가능)
+            _notify_temperature_changed(path, float(value))
+
+        except Exception:
+            pass
+
+        self.refresh_cache()
+
+    def cycle_temperature_dummy(self, path: str) -> Optional[float]:
+        """
+        더미 순환: None/미설정 -> 25 -> 80 -> 100 -> 120 -> 25 ...
+        """
+        cur = self.get_temperature(path)
+        seq = [25.0, 80.0, 100.0, 120.0]
+        if cur is None:
+            nxt = seq[0]
+        else:
+            try:
+                idx = min(range(len(seq)), key=lambda i: abs(seq[i] - float(cur)))
+                nxt = seq[(idx + 1) % len(seq)]
+            except Exception:
+                nxt = seq[0]
+
+        self.set_temperature(path, nxt)
+        return nxt
 
     # ---------------- internals ----------------
     @staticmethod
@@ -156,11 +253,22 @@ class PickFilterService:
             return ""
 
     def _effective_pickable(self, path: str) -> bool:
-        # ctx getter가 없는 환경에서는 overrides만 신뢰
         if path in self._overrides:
             return bool(self._overrides[path])
-        # 기본은 pickable(True)
         return True
+
+    @staticmethod
+    def _read_temperature(prim) -> Optional[float]:
+        try:
+            attr = prim.GetAttribute(TEMP_ATTR)
+            if not attr or not attr.IsValid():
+                return None
+            v = attr.Get()
+            if v is None:
+                return None
+            return float(v)
+        except Exception:
+            return None
 
     def _scan_stage_flat(self, root_path: str, limit: int = 50000) -> List[Dict[str, Any]]:
         ctx = omni.usd.get_context()
@@ -181,6 +289,8 @@ class PickFilterService:
             p = prim.GetPath().pathString
             depth = max(0, self._depth_from_path(p) - root_depth)
 
+            temp = self._read_temperature(prim)
+
             items.append(
                 {
                     "path": p,
@@ -190,6 +300,7 @@ class PickFilterService:
                     "depth": depth,
                     "pickable": bool(self._effective_pickable(p)),
                     "overridden": (p in self._overrides),
+                    "temperature": temp,
                 }
             )
 
@@ -228,7 +339,6 @@ class PickFilterService:
 
         async def _run():
             app = omni.kit.app.get_app()
-            # 다음 프레임 + 약간의 지연으로 폭주 합치기
             await app.next_update_async()
             await asyncio.sleep(delay_sec)
             self._debounce_requested = False
@@ -248,10 +358,8 @@ class PickFilterService:
             except Exception:
                 return False
 
-        # OPENED 류는 즉시
         if _is("OPENED") or _is("OPENED_STAGE") or _is("ASSETS_LOADED"):
             self.refresh_cache()
             return
 
-        # 나머지는 디바운스로 합치기
         self._request_debounced_refresh(delay_sec=0.15)

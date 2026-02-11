@@ -21,9 +21,10 @@ def get_service() -> PickFilterService:
 
 class MyExtension(omni.ext.IExt):
     """
-    - UI 리렌더링 시에도 체크박스 모델을 path별로 유지 (중요!)
+    - UI 리렌더링 시에도 체크박스 모델을 path별로 유지
     - 이벤트/드로우 콜백에서 clear() 금지 -> defer(next frame)에서만 렌더
-    - 개별 토글 조작 시 실제 pickable 상태 변경 + refresh로 재동기화
+    - [추가] 각 prim 우측 '⚠' 버튼으로 hynix:temperature 더미 순환
+            (core에서 temp 변경 신호를 즉시 발행하므로 temp_alarm이 즉시 반영 가능)
     """
 
     def on_startup(self, ext_id):
@@ -37,28 +38,25 @@ class MyExtension(omni.ext.IExt):
         self._revision_seen = -1
         self._has_children: dict[str, bool] = {}
 
-        # path별 체크박스 모델 캐시
         self._pick_models: Dict[str, ui.SimpleBoolModel] = {}
-        self._pick_model_subs: Dict[str, Any] = {}  # subscription handles
+        self._pick_model_subs: Dict[str, Any] = {}
         self._suppress_model_events: bool = False
 
-        # deferred work queue
         self._pending_ui_render: bool = False
         self._pending_refresh: bool = False
         self._pending_refresh_force: bool = False
         self._pending_pick_ops: Deque[Tuple[str, bool]] = deque()
+        self._pending_temp_ops: Deque[str] = deque()
         self._processing_task: Optional[asyncio.Task] = None
 
-        self._window = ui.Window(WINDOW_TITLE, width=820, height=860)
+        self._window = ui.Window(WINDOW_TITLE, width=880, height=860)
         self._window.visible = True
         with self._window.frame:
             with ui.VStack(spacing=8):
                 self._build_header()
                 self._build_tree()
 
-        # 최초 1회는 startup 컨텍스트에서 안전
         self._refresh_items(force=True)
-
         self._ui_tick_task = asyncio.ensure_future(self._ui_tick())
 
     def on_shutdown(self):
@@ -74,7 +72,6 @@ class MyExtension(omni.ext.IExt):
         except Exception:
             pass
 
-        # 모델 subscription 정리
         for _, sub in list(self._pick_model_subs.items()):
             try:
                 if hasattr(sub, "unsubscribe"):
@@ -147,12 +144,14 @@ class MyExtension(omni.ext.IExt):
         if not svc:
             return
 
-        # 1) pick ops
         while self._pending_pick_ops:
             path, new_val = self._pending_pick_ops.popleft()
             svc.set_pickable(path, new_val, include_descendants=False)
 
-        # 2) refresh 요청
+        while self._pending_temp_ops:
+            path = self._pending_temp_ops.popleft()
+            svc.cycle_temperature_dummy(path)
+
         if self._pending_refresh:
             force = bool(self._pending_refresh_force)
             self._pending_refresh = False
@@ -160,7 +159,6 @@ class MyExtension(omni.ext.IExt):
             self._refresh_items(force=force)
             return
 
-        # 3) render only
         if self._pending_ui_render:
             self._pending_ui_render = False
             self._render_tree()
@@ -177,7 +175,10 @@ class MyExtension(omni.ext.IExt):
 
     def _request_pick_op(self, path: str, new_val: bool):
         self._pending_pick_ops.append((path, bool(new_val)))
-        # pick op 후에는 refresh 예약
+        self._request_refresh(force=True)
+
+    def _request_temp_dummy(self, path: str):
+        self._pending_temp_ops.append(path)
         self._request_refresh(force=True)
 
     # ---------------- refresh loop ----------------
@@ -248,7 +249,6 @@ class MyExtension(omni.ext.IExt):
             if path not in self._expanded_paths:
                 hidden_from_depth = depth + 1
 
-    # path별 모델을 가져오거나 만들고, 1회만 value_changed 콜백을 건다
     def _get_or_create_pick_model(self, path: str, initial: bool) -> ui.SimpleBoolModel:
         m = self._pick_models.get(path)
         if m is None:
@@ -270,9 +270,6 @@ class MyExtension(omni.ext.IExt):
         return m
 
     def _render_tree(self):
-        """
-        ⚠️ clear()가 들어가므로, 반드시 defer된 컨텍스트(= _process_deferred)에서만 호출되어야 함.
-        """
         items = list(self._iter_visible_tree_items())
 
         self._list_vstack.clear()
@@ -288,13 +285,11 @@ class MyExtension(omni.ext.IExt):
                 tname = it.get("type", "")
                 depth = int(it.get("depth", 0))
 
-                # 서비스가 계산한 현재 pickable
-                svc_pickable = bool(it.get("pickable", True))
+                temp = it.get("temperature", None)
 
-                # 모델은 path별로 재사용
+                svc_pickable = bool(it.get("pickable", True))
                 pick_model = self._get_or_create_pick_model(path, svc_pickable)
 
-                # 리렌더링 시 서비스 값으로 모델 동기화(이 동기화는 suppress)
                 cur_ui = bool(pick_model.get_value_as_bool())
                 if cur_ui != svc_pickable:
                     self._suppress_model_events = True
@@ -324,6 +319,11 @@ class MyExtension(omni.ext.IExt):
                     label_left = f"{label_left} ({disp})"
                 if tname:
                     label_left = f"{label_left} [{tname}]"
+                if temp is not None:
+                    try:
+                        label_left = f"{label_left}  |  T={float(temp):.1f}"
+                    except Exception:
+                        pass
 
                 with ui.HStack(height=22):
                     ui.Spacer(width=indent_w)
@@ -333,6 +333,8 @@ class MyExtension(omni.ext.IExt):
                     else:
                         ui.Label(" ", width=26)
 
-                    # changed_fn은 불필요(모델 콜백으로 처리). 그래도 안전하게 None.
                     ui.CheckBox(model=pick_model, width=24)
                     ui.Label(label_left, width=740, word_wrap=False)
+
+                    # 경고 테스트(더미 온도 순환)
+                    ui.Button("⚠", width=28, clicked_fn=(lambda p=path: self._request_temp_dummy(p)))
