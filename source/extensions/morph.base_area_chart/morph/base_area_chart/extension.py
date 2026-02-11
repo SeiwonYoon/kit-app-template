@@ -8,4 +8,18 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from .test_hello_world import *
+import math
+from typing import List, Tuple
+
+import omni.ext
+import omni.ui as ui
+
+class BaseAreaChartExtension(omni.ext.IExt):
+    """베이스 UI에서 사용할 Area Chart 확장입니다."""
+
+    def on_startup(self, _ext_id: str):
+        print("[morph.base_area_chart] Extension startup")
+
+    def on_shutdown(self):
+        print("[morph.base_area_chart] Extension shutdown")
+        self._window = None
