@@ -6,8 +6,11 @@ import asyncio
 from collections import deque
 from typing import Deque, Tuple, Any, Dict, Optional
 
+import carb
 import omni.ext
 import omni.ui as ui
+import omni.kit.app
+import omni.kit.viewport.utility as vp_util  # ✅ Focus/Frame
 
 from .core import PickFilterService
 
@@ -25,6 +28,8 @@ class MyExtension(omni.ext.IExt):
     - 이벤트/드로우 콜백에서 clear() 금지 -> defer(next frame)에서만 렌더
     - [추가] 각 prim 우측 '⚠' 버튼으로 hynix:temperature 더미 순환
             (core에서 temp 변경 신호를 즉시 발행하므로 temp_alarm이 즉시 반영 가능)
+    - [추가] 각 prim 우측 'F' 버튼으로 뷰포트 포커스(프레임)
+            (active viewport를 명시 + 1프레임 defer)
     """
 
     def on_startup(self, ext_id):
@@ -129,6 +134,42 @@ class MyExtension(omni.ext.IExt):
         self._expanded_paths.clear()
         self._expanded_paths.add("/World")
         self._request_render()
+
+    # ---------------- focus helpers ----------------
+    def _focus_prim(self, path: str):
+        """
+        유니티 에디터의 F(프레임)처럼 현재 활성 뷰포트 카메라를 해당 prim에 맞게 이동.
+        - Selection을 바꾸지 않기 위해 frame_viewport_prims 사용
+        - UI 클릭 타이밍/포커스 이슈 완화 위해 1프레임 defer
+        - active viewport를 명시적으로 찾아 전달
+        """
+        if not path:
+            return
+
+        async def _do_focus():
+            app = omni.kit.app.get_app()
+            await app.next_update_async()
+
+            try:
+                viewport_api = None
+
+                # Kit 버전에 따라 함수명이 다를 수 있어 둘 다 시도
+                if hasattr(vp_util, "get_active_viewport"):
+                    viewport_api = vp_util.get_active_viewport()
+                elif hasattr(vp_util, "get_active_viewport_window"):
+                    win = vp_util.get_active_viewport_window()
+                    viewport_api = win.viewport_api if win else None
+
+                if not viewport_api:
+                    carb.log_warn(f"[pick_filter] Focus failed: no active viewport. path={path}")
+                    return
+
+                vp_util.frame_viewport_prims(viewport_api, prims=[path])
+                # carb.log_info(f"[pick_filter] Focus OK: {path}")
+            except Exception as e:
+                carb.log_error(f"[pick_filter] Focus exception: {e}")
+
+        asyncio.ensure_future(_do_focus())
 
     # ---------------- deferred processing ----------------
     def _kick_processing(self):
@@ -338,3 +379,6 @@ class MyExtension(omni.ext.IExt):
 
                     # 경고 테스트(더미 온도 순환)
                     ui.Button("⚠", width=28, clicked_fn=(lambda p=path: self._request_temp_dummy(p)))
+
+                    # ✅ 포커스(프레임)
+                    ui.Button("F", width=28, clicked_fn=(lambda p=path: self._focus_prim(p)))
