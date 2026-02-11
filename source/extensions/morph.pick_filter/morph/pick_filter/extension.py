@@ -3,10 +3,11 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 import asyncio
+from collections import deque
+from typing import Deque, Tuple, Any, Dict, Optional
 
 import omni.ext
 import omni.ui as ui
-import carb
 
 from .core import PickFilterService
 
@@ -20,16 +21,13 @@ def get_service() -> PickFilterService:
 
 class MyExtension(omni.ext.IExt):
     """
-    UI:
-    - 상단: 새로고침 / 전체락 / 전체언락 / 모두펼치기 / 모두접기
-    - 트리: 접기/펼치기 + pickable 토글
-      ✅ 체크 ON = 선택/픽업 가능 (pickable True)
-      ✅ 체크 OFF = 선택/픽업 불가 (pickable False)
+    - UI 리렌더링 시에도 체크박스 모델을 path별로 유지 (중요!)
+    - 이벤트/드로우 콜백에서 clear() 금지 -> defer(next frame)에서만 렌더
+    - 개별 토글 조작 시 실제 pickable 상태 변경 + refresh로 재동기화
     """
 
     def on_startup(self, ext_id):
         global _SERVICE
-        carb.log_info("[morph.pick_filter] Extension startup (Tree + Pickable Toggle)")
 
         _SERVICE = PickFilterService()
         _SERVICE.start()
@@ -37,8 +35,19 @@ class MyExtension(omni.ext.IExt):
         self._expanded_paths: set[str] = {"/World"}
         self._items = []
         self._revision_seen = -1
-        self._ui_tick_task = None
         self._has_children: dict[str, bool] = {}
+
+        # path별 체크박스 모델 캐시
+        self._pick_models: Dict[str, ui.SimpleBoolModel] = {}
+        self._pick_model_subs: Dict[str, Any] = {}  # subscription handles
+        self._suppress_model_events: bool = False
+
+        # deferred work queue
+        self._pending_ui_render: bool = False
+        self._pending_refresh: bool = False
+        self._pending_refresh_force: bool = False
+        self._pending_pick_ops: Deque[Tuple[str, bool]] = deque()
+        self._processing_task: Optional[asyncio.Task] = None
 
         self._window = ui.Window(WINDOW_TITLE, width=820, height=860)
         self._window.visible = True
@@ -47,27 +56,43 @@ class MyExtension(omni.ext.IExt):
                 self._build_header()
                 self._build_tree()
 
+        # 최초 1회는 startup 컨텍스트에서 안전
         self._refresh_items(force=True)
+
         self._ui_tick_task = asyncio.ensure_future(self._ui_tick())
 
     def on_shutdown(self):
         global _SERVICE
-        carb.log_info("[morph.pick_filter] Extension shutdown")
         try:
             if self._ui_tick_task:
                 self._ui_tick_task.cancel()
         except Exception:
             pass
+        try:
+            if self._processing_task:
+                self._processing_task.cancel()
+        except Exception:
+            pass
+
+        # 모델 subscription 정리
+        for _, sub in list(self._pick_model_subs.items()):
+            try:
+                if hasattr(sub, "unsubscribe"):
+                    sub.unsubscribe()
+            except Exception:
+                pass
+        self._pick_model_subs.clear()
+        self._pick_models.clear()
 
         if _SERVICE:
             _SERVICE.stop()
         _SERVICE = None
         self._window = None
 
-    # ---------------- UI ----------------
+    # ---------------- UI header ----------------
     def _build_header(self):
         with ui.HStack(height=34, spacing=6):
-            ui.Button("새로고침", clicked_fn=lambda: self._refresh_items(force=True), width=120)
+            ui.Button("새로고침", clicked_fn=self._on_click_refresh, width=120)
             ui.Button("전체락", clicked_fn=self._lock_all, width=110)
             ui.Button("전체언락", clicked_fn=self._unlock_all, width=110)
             ui.Spacer()
@@ -79,6 +104,82 @@ class MyExtension(omni.ext.IExt):
         with self._list_container:
             self._list_vstack = ui.VStack(spacing=2)
 
+    # ---------------- button handlers ----------------
+    def _on_click_refresh(self):
+        self._request_refresh(force=True)
+
+    def _lock_all(self):
+        svc = get_service()
+        if not svc:
+            return
+        svc.lock_all()
+        self._request_refresh(force=True)
+
+    def _unlock_all(self):
+        svc = get_service()
+        if not svc:
+            return
+        svc.unlock_all()
+        self._request_refresh(force=True)
+
+    def _expand_all(self):
+        for p, hc in (self._has_children or {}).items():
+            if hc:
+                self._expanded_paths.add(p)
+        self._request_render()
+
+    def _collapse_all(self):
+        self._expanded_paths.clear()
+        self._expanded_paths.add("/World")
+        self._request_render()
+
+    # ---------------- deferred processing ----------------
+    def _kick_processing(self):
+        if self._processing_task and not self._processing_task.done():
+            return
+        self._processing_task = asyncio.ensure_future(self._process_deferred())
+
+    async def _process_deferred(self):
+        app = __import__("omni.kit.app").kit.app.get_app()
+        await app.next_update_async()
+
+        svc = get_service()
+        if not svc:
+            return
+
+        # 1) pick ops
+        while self._pending_pick_ops:
+            path, new_val = self._pending_pick_ops.popleft()
+            svc.set_pickable(path, new_val, include_descendants=False)
+
+        # 2) refresh 요청
+        if self._pending_refresh:
+            force = bool(self._pending_refresh_force)
+            self._pending_refresh = False
+            self._pending_refresh_force = False
+            self._refresh_items(force=force)
+            return
+
+        # 3) render only
+        if self._pending_ui_render:
+            self._pending_ui_render = False
+            self._render_tree()
+            return
+
+    def _request_render(self):
+        self._pending_ui_render = True
+        self._kick_processing()
+
+    def _request_refresh(self, force: bool):
+        self._pending_refresh = True
+        self._pending_refresh_force = bool(force)
+        self._kick_processing()
+
+    def _request_pick_op(self, path: str, new_val: bool):
+        self._pending_pick_ops.append((path, bool(new_val)))
+        # pick op 후에는 refresh 예약
+        self._request_refresh(force=True)
+
     # ---------------- refresh loop ----------------
     async def _ui_tick(self):
         app = __import__("omni.kit.app").kit.app.get_app()
@@ -89,16 +190,20 @@ class MyExtension(omni.ext.IExt):
                 return
             rev = svc.get_revision()
             if rev != self._revision_seen:
-                self._refresh_items(force=False)
+                self._request_refresh(force=False)
 
+    # ---------------- data + render ----------------
     def _refresh_items(self, force: bool = False):
         svc = get_service()
         if not svc:
             return
 
-        self._items = svc.refresh_cache() if force else svc.get_items_cached()
-        self._revision_seen = svc.get_revision()
+        if force:
+            self._items = svc.refresh_cache()
+        else:
+            self._items = svc.get_items_cached()
 
+        self._revision_seen = svc.get_revision()
         self._rebuild_has_children()
         self._render_tree()
 
@@ -117,7 +222,6 @@ class MyExtension(omni.ext.IExt):
                     hc = True
             self._has_children[p] = hc
 
-    # ---------------- tree visibility ----------------
     def _iter_visible_tree_items(self):
         items = self._items or []
         hidden_from_depth = None
@@ -144,8 +248,31 @@ class MyExtension(omni.ext.IExt):
             if path not in self._expanded_paths:
                 hidden_from_depth = depth + 1
 
-    # ---------------- render ----------------
+    # path별 모델을 가져오거나 만들고, 1회만 value_changed 콜백을 건다
+    def _get_or_create_pick_model(self, path: str, initial: bool) -> ui.SimpleBoolModel:
+        m = self._pick_models.get(path)
+        if m is None:
+            m = ui.SimpleBoolModel(bool(initial))
+            self._pick_models[path] = m
+
+            def _on_model_changed(model):
+                if self._suppress_model_events:
+                    return
+                new_val = bool(model.get_value_as_bool())
+                self._request_pick_op(path, new_val)
+
+            try:
+                sub = m.add_value_changed_fn(_on_model_changed)
+                self._pick_model_subs[path] = sub
+            except Exception:
+                pass
+
+        return m
+
     def _render_tree(self):
+        """
+        ⚠️ clear()가 들어가므로, 반드시 defer된 컨텍스트(= _process_deferred)에서만 호출되어야 함.
+        """
         items = list(self._iter_visible_tree_items())
 
         self._list_vstack.clear()
@@ -161,36 +288,36 @@ class MyExtension(omni.ext.IExt):
                 tname = it.get("type", "")
                 depth = int(it.get("depth", 0))
 
-                # ✅ 체크박스는 pickable 그 자체
-                pickable = bool(it.get("pickable", True))
-                pick_model = ui.SimpleBoolModel(pickable)
+                # 서비스가 계산한 현재 pickable
+                svc_pickable = bool(it.get("pickable", True))
+
+                # 모델은 path별로 재사용
+                pick_model = self._get_or_create_pick_model(path, svc_pickable)
+
+                # 리렌더링 시 서비스 값으로 모델 동기화(이 동기화는 suppress)
+                cur_ui = bool(pick_model.get_value_as_bool())
+                if cur_ui != svc_pickable:
+                    self._suppress_model_events = True
+                    try:
+                        pick_model.set_value(bool(svc_pickable))
+                    finally:
+                        self._suppress_model_events = False
 
                 has_children = bool(self._has_children.get(path, False))
                 is_expanded = (path in self._expanded_paths)
                 indent_w = min(depth * 16, 320)
 
-                def _toggle_expand(p: str):
+                def _toggle_expand_request(p: str):
                     if p in self._expanded_paths:
                         self._expanded_paths.remove(p)
                     else:
                         self._expanded_paths.add(p)
-                    self._render_tree()
+                    self._request_render()
 
                 def _make_toggle_fn(p: str):
                     def _fn():
-                        _toggle_expand(p)
+                        _toggle_expand_request(p)
                     return _fn
-
-                def _make_pick_changed_fn(p: str):
-                    def _changed(m):
-                        svc = get_service()
-                        if not svc:
-                            return
-                        # ✅ 사용자가 바꾼 체크값을 그대로 pickable로 적용
-                        svc.set_pickable(p, bool(m.as_bool), include_descendants=False)
-                        # service 내부에서 refresh_cache까지 수행하므로 UI도 즉시 동기화
-                        self._refresh_items(force=False)
-                    return _changed
 
                 label_left = name or "(no-name)"
                 if disp:
@@ -206,32 +333,6 @@ class MyExtension(omni.ext.IExt):
                     else:
                         ui.Label(" ", width=26)
 
-                    ui.CheckBox(model=pick_model, changed_fn=_make_pick_changed_fn(path), width=24)
-
+                    # changed_fn은 불필요(모델 콜백으로 처리). 그래도 안전하게 None.
+                    ui.CheckBox(model=pick_model, width=24)
                     ui.Label(label_left, width=740, word_wrap=False)
-
-    # ---------------- header actions ----------------
-    def _lock_all(self):
-        svc = get_service()
-        if not svc:
-            return
-        svc.lock_all()
-        self._refresh_items(force=False)
-
-    def _unlock_all(self):
-        svc = get_service()
-        if not svc:
-            return
-        svc.unlock_all()
-        self._refresh_items(force=False)
-
-    def _expand_all(self):
-        for p, hc in (self._has_children or {}).items():
-            if hc:
-                self._expanded_paths.add(p)
-        self._render_tree()
-
-    def _collapse_all(self):
-        self._expanded_paths.clear()
-        self._expanded_paths.add("/World")
-        self._render_tree()
