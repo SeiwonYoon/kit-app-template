@@ -17,8 +17,8 @@ template_name = "kit_base_editor"
 
 
 [dependencies]
-"omni.activity.profiler" = {} # For showing RTX loading progress
-"omni.activity.pump" = {} # For showing RTX loading progress
+# "omni.activity.profiler" = {} # For showing RTX loading progress
+# "omni.activity.pump" = {} # For showing RTX loading progress
 "omni.anim.curve.core" = {} # Runtime support for animcurves
 "omni.graph.action" = {} # Action graph runtime
 "omni.graph.core" = {} # Omni Graph runtime
@@ -30,7 +30,7 @@ template_name = "kit_base_editor"
 "omni.kit.developer.bundle" = {}
 "omni.kit.mainwindow" = {}  # Main uiapp
 "omni.kit.manipulator.camera" = {}  # Load the camera-manipulator (navigation)
-"omni.kit.manipulator.prim" = {}  # Load the prim-manipulator (translate, rotate, scale)
+# "omni.kit.manipulator.prim" = {}  # 제거 시 선택 시 이동/회전/스케일 기즈모 미표시 (Viewer처럼)
 "omni.kit.manipulator.selection" = {}  # Load the selection-manipulator (selectable prims)
 "omni.kit.material.library" = {} # Create and assign materials.
 "omni.kit.menu.common" = { order = 1000 } # Common menu library. Loads last so omni.kit.activity.ui can be available.
@@ -54,7 +54,7 @@ template_name = "kit_base_editor"
 "omni.kit.viewport.menubar.lighting" = {}  # 조명/Stage Lights 관련 뷰포트 메뉴
 "omni.kit.viewport.menubar.render" = {}  # RTX 렌더러 선택 메뉴
 "omni.kit.viewport.menubar.settings" = {}  # 뷰포트 세부 설정 메뉴
-"omni.kit.viewport.ready" = {} # Show RTX loading information during startup
+# "omni.kit.viewport.ready" = {} # Show RTX loading information during startup
 "omni.kit.viewport.navigation.usd_explorer.bundle" = {}  # Orbit, Teleport, Measure, Section, Screenshot 등을 포함한 뷰포트 내비게이션 번들
 "omni.kit.viewport.scene_camera_model" = {} # 뷰포트 카메라와 씬 카메라 UI 동기화
 "omni.kit.viewport.window" = {}  # 실제 뷰포트 창을 생성하는 확장
@@ -71,8 +71,10 @@ template_name = "kit_base_editor"
 "omni.warp.core" = {} # Warp support
 "omni.kit.quicklayout" = {} # 레이아웃 로드 (setup에서 뷰포트 전용 레이아웃 적용)
 "morph.morph_base_viewer" = { order = 1000 } # 실행 시 Property/Render Settings 창 숨김용 뷰포트 전용 레이아웃 로드
+"my_company.usd_loader" = {}
 # "omni.usd.metrics.assembler.ui" = {}
 # "omni.usd.schema.metrics.assembler" = {}
+
 
 [settings.persistent.app]
 viewport.autoFrame.mode = "first_open"  # Auto frame the first time the viewport is opened
@@ -86,6 +88,7 @@ exts."omni.rtx.window.settings".window_menu = "Window" # Where to put the render
 exts."omni.kit.viewport.menubar.lighting".defaultRigIgnorePattern = "" # Allows auto light rig with anon layers
 exts."omni.kit.viewport.window".windowMenu.entryCount = 1
 exts."omni.kit.viewport.window".windowMenu.label="" # Put Viewport menuitem under Window menu
+exts."omni.kit.window.viewport".showContextMenu = false  # 뷰포트 우클릭 시 컨텍스트 메뉴 숨김 (Viewer와 동일)
 renderer.gpuEnumeration.glInterop.enabled = false # Improves startup speed.
 renderer.asyncInit = true # Don't block while renderer inits
 rtx.ecoMode.enabled = true
@@ -159,11 +162,11 @@ folders.'++' = [  # 확장을 검색할 폴더 경로
 
 [settings.app.viewport.defaults]
 fillViewport = true  # 기본적으로 뷰포트 영역을 채우도록 설정
-# guide.grid.visible = false  # 그리드 선 숨김 (Viewer 템플릿과 동일 설정)
+guide.grid.visible = false  # 그리드 선 숨김 (Viewer 템플릿과 동일 설정)
 guide.axis.visible = false  # 좌하단 축 위젯(X/Y/Z, 단위) 숨김
 hud.visible = false  # 성능 HUD(FPS, 메모리, 해상도 말풍선) 숨김
-# scene.cameras.visible = false
-# scene.lights.visible = false
+scene.cameras.visible = false
+scene.lights.visible = false
 
 # HUD(스탯 표시) 세부 항목 보이기/숨기기 설정
 [settings.app.viewport.defaults.hud]
