@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+[package]
+title = "Morph Base Viewer"
+version = "0.1.0"
+description = "Base editor setup: loads viewport-only layout at startup so Property and Render Settings windows do not appear."
+category = "Setup"
+keywords = ["kit", "extension", "setup", "viewer"]
+readme = "docs/README.md"
+
+[dependencies]
+"omni.kit.quicklayout" = {}
+"omni.kit.viewport.utility" = {}
+
+[settings.exts."morph.morph_base_viewer"]
+menu_visible = false
+
+[[python.module]]
+name = "morph.morph_base_viewer"
