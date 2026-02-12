@@ -1,7 +1,9 @@
+# morph/section_control/core.py
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 import time
+import traceback
 from typing import Optional, Dict, Any
 
 import carb
@@ -18,6 +20,10 @@ from omni.kit.window.section.common import (
     SETTING_SECTION_DIRECTION,
     SETTING_SECTION_ALWAYS_DISPLAY,
     SETTING_SECTION_LIGHT,
+    # ✅ 추가: manipulator 표시 토글(= Display Section Manipulator)
+    SETTING_SECTION_MANIPULATOR,
+    # ✅ 추가: RTX 기본 manipulator 토글(버전에 따라 UI 초기값 영향)
+    SETTING_RTX_DEFAULT_SECTION_MANIPULATOR,
 )
 
 try:
@@ -26,20 +32,28 @@ except Exception:
     StageEventType = None
 
 
-class MessageBusAPI:
-    """
-    Web client sends event: <name>_request payload { id, ...args }
-    Kit responds: <name>_response payload { id, response } or { id, error }
-    """
+def _ts():
+    return time.strftime("%H:%M:%S", time.localtime())
 
+
+def _log(msg: str):
+    carb.log_warn(f"[section_control] {_ts()} {msg}")
+
+
+def _log_exc(prefix: str, ex: Exception):
+    tb = traceback.format_exc()
+    carb.log_warn(f"[section_control] {_ts()} {prefix}: {ex}\n{tb}")
+
+
+class MessageBusAPI:
     def __init__(self):
-        self._subs = {}
         self._bus = omni.kit.app.get_app().get_message_bus_event_stream()
+        self._subs = {}
 
     def destroy(self):
-        for sub in self._subs.values():
+        for s in self._subs.values():
             try:
-                sub.unsubscribe()
+                s.unsubscribe()
             except Exception:
                 pass
         self._subs.clear()
@@ -58,7 +72,6 @@ class MessageBusAPI:
             def _on_event(e: carb.events.IEvent):
                 payload = dict(e.payload.get_dict())
                 call_id = payload.pop("id", -1)
-
                 try:
                     result = f(**payload)
                     out = {"id": call_id, "response": result}
@@ -69,9 +82,7 @@ class MessageBusAPI:
                     self._bus.dispatch(resp_type, payload=out)
                     self._bus.pump()
 
-            sub = self._bus.create_subscription_to_pop_by_type(
-                req_type, _on_event, name=req_name
-            )
+            sub = self._bus.create_subscription_to_pop_by_type(req_type, _on_event, name=req_name)
             self._subs[req_name] = sub
             return f
 
@@ -93,7 +104,7 @@ class SectionController:
 
         self._enabled = bool(self._settings.get(SETTING_SECTION_ENABLED) or False)
         self._axis = "X"
-        self._flip = False
+        self._flip = bool(self._settings.get(SETTING_SECTION_DIRECTION) == 0)  # 0=flip, 1=normal (프로젝트 가정 유지)
         self._offset = 0.0
 
         self._always_display = bool(self._settings.get(SETTING_SECTION_ALWAYS_DISPLAY) or False)
@@ -106,7 +117,27 @@ class SectionController:
         self._dirty_axis: bool = True
         self._dirty_offset: bool = True
 
-    # ---------- stage helpers ----------
+        # ✅ 시작 시점에도 강제로 OFF (UI 초기 토글이 ON인 문제를 여기서 해결)
+        self._force_section_manipulator_off()
+
+    # -------------------- ✅ 핵심: manipulator 토글 OFF --------------------
+    def _force_section_manipulator_off(self) -> None:
+        """
+        UI의 'Display Section Manipulator' 토글과 동일한 setting을 강제로 OFF.
+        - SETTING_SECTION_MANIPULATOR
+        - SETTING_RTX_DEFAULT_SECTION_MANIPULATOR (RTX 환경에서 초기값에 영향)
+        """
+        try:
+            self._settings.set(SETTING_SECTION_MANIPULATOR, False)
+        except Exception:
+            pass
+
+        try:
+            self._settings.set(SETTING_RTX_DEFAULT_SECTION_MANIPULATOR, False)
+        except Exception:
+            pass
+
+    # ---------------- stage helpers ----------------
     def _get_stage(self) -> Optional[Usd.Stage]:
         return omni.usd.get_context().get_stage()
 
@@ -126,6 +157,9 @@ class SectionController:
         self._applied_signed_offset = 0.0
         self._dirty_axis = True
         self._dirty_offset = True
+
+        # ✅ stage swap 후에도 다시 OFF 보장
+        self._force_section_manipulator_off()
 
     def _axis_to_align_arg(self, axis: str) -> str:
         axis = (axis or "X").upper()
@@ -166,17 +200,6 @@ class SectionController:
 
         return True
 
-    def _get_widget_prim(self) -> Optional[Usd.Prim]:
-        if not self._ensure_ready():
-            return None
-        stage = self._get_stage()
-        if stage is None or self._widget_path is None:
-            return None
-        prim = stage.GetPrimAtPath(self._widget_path)
-        if not prim or not prim.IsValid():
-            return None
-        return prim
-
     def _with_section_edit_context(self):
         class _NoOpCtx:
             def __enter__(self): return self
@@ -189,15 +212,30 @@ class SectionController:
                 pass
         return _NoOpCtx()
 
+    def _get_widget_prim(self) -> Optional[Usd.Prim]:
+        if not self._ensure_ready():
+            return None
+        stage = self._get_stage()
+        if stage is None or self._widget_path is None:
+            return None
+        prim = stage.GetPrimAtPath(self._widget_path)
+        if not prim or not prim.IsValid():
+            return None
+        return prim
+
     def _get_widget_world_translation(self, prim: Usd.Prim) -> Gf.Vec3d:
         xform = UsdGeom.Xformable(prim)
         m = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         t = m.ExtractTranslation()
         return Gf.Vec3d(t[0], t[1], t[2])
 
+    # ---------------- apply ----------------
     def _apply_axis_to_stage_if_needed(self) -> bool:
         if not self._ensure_ready():
             return False
+
+        # ✅ 매 apply에서 OFF 재보장 (다른 쪽이 건드려도 다시 꺼짐)
+        self._force_section_manipulator_off()
 
         if not self._dirty_axis and self._applied_axis == self._axis:
             return True
@@ -207,9 +245,7 @@ class SectionController:
             self._sec_mgr.align_widget(arg)
 
         prim = self._get_widget_prim()
-        self._base_world_pos = (
-            self._get_widget_world_translation(prim) if prim else None
-        )
+        self._base_world_pos = self._get_widget_world_translation(prim) if prim else None
 
         self._applied_axis = self._axis
         self._applied_signed_offset = 0.0
@@ -219,13 +255,17 @@ class SectionController:
 
     def _apply_offset_to_stage_absolute_if_needed(self) -> bool:
         if not self._ensure_ready() or not self._dirty_offset:
+            # ✅ offset 변경 없어도 OFF 재보장
+            self._force_section_manipulator_off()
             return True
 
         prim = self._get_widget_prim()
         if prim is None:
             return False
 
-        signed_offset = self._offset
+        # ✅ flip은 direction setting으로 이미 처리 중이므로,
+        # 여기서는 offset을 그대로 사용 (프로젝트 기존 로직 유지)
+        signed_offset = float(self._offset)
 
         if self._base_world_pos is None:
             cur = self._get_widget_world_translation(prim)
@@ -239,11 +279,7 @@ class SectionController:
                     base[2] -= self._applied_signed_offset
             self._base_world_pos = base
 
-        tgt = Gf.Vec3d(
-            self._base_world_pos[0],
-            self._base_world_pos[1],
-            self._base_world_pos[2],
-        )
+        tgt = Gf.Vec3d(self._base_world_pos[0], self._base_world_pos[1], self._base_world_pos[2])
         if self._axis == "X":
             tgt[0] += signed_offset
         elif self._axis == "Y":
@@ -256,22 +292,29 @@ class SectionController:
 
         self._applied_signed_offset = signed_offset
         self._dirty_offset = False
+
+        # ✅ 위치 적용 후에도 OFF 재보장
+        self._force_section_manipulator_off()
         return True
 
     def _apply_all_to_stage(self) -> bool:
         if not self._ensure_ready():
             return False
-        return bool(
-            self._apply_axis_to_stage_if_needed()
-            and self._apply_offset_to_stage_absolute_if_needed()
-        )
+        ok = bool(self._apply_axis_to_stage_if_needed() and self._apply_offset_to_stage_absolute_if_needed())
+        # ✅ 최종적으로도 OFF 보장
+        self._force_section_manipulator_off()
+        return ok
 
-    # ---------- external API ----------
+    # ---------------- external API ----------------
     def set_enabled(self, enabled: bool) -> Dict[str, Any]:
         self._enabled = bool(enabled)
         self._settings.set(SETTING_SECTION_ENABLED, self._enabled)
+
         if self._enabled:
             self._settings.set(SETTING_SECTION_ALWAYS_DISPLAY, True)
+            # ✅ enable 켜는 순간에도 manipulator OFF 강제
+            self._force_section_manipulator_off()
+
         self._dirty_axis = True
         self._dirty_offset = True
         return self.get_state()
@@ -315,7 +358,14 @@ class SectionController:
 
     def apply_once_if_possible(self, attempt: int) -> bool:
         if not self._enabled:
+            # enable이 꺼져있어도 UI 토글이 다시 켜지는 걸 막고 싶다면 여기서도 OFF 유지
+            self._force_section_manipulator_off()
             return True
+
+        # ✅ ready/적용 전에 항상 OFF
+        self._force_section_manipulator_off()
+
         if not (self._dirty_axis or self._dirty_offset):
             return True
+
         return self._apply_all_to_stage()
