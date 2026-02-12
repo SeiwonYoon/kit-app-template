@@ -1,0 +1,21 @@
+[package]
+title = "USD to GLB Converter"
+version = "0.1.0"
+description = "Receives conversion requests and handles USD to GLB conversion jobs."
+category = "Messaging"
+keywords = ["kit", "usd", "glb", "converter", "messaging"]
+readme = "docs/README.md"
+
+[dependencies]
+"omni.kit.livestream.messaging" = {}
+"omni.kit.asset_converter" = {}
+
+[[python.module]]
+name = "my_company.usd_to_glb_converter"
+
+[documentation]
+pages = [
+    "docs/Overview.md",
+    "docs/CHANGELOG.md",
+]
+
