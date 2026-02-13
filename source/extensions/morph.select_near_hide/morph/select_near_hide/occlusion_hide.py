@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
+# All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+#
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express agreement with NVIDIA CORPORATION is strictly prohibited.
+
+"""
+카메라와 선택한 오브젝트 사이에 있는 prim을 숨기는 기능 모듈.
+
+Sibling 기반 + ray-AABB 검사: 선택 prim의 sibling만 대상으로,
+카메라~선택 오브젝트 사이에 ray가 교차하는 것만 수집합니다.
+전체 Stage 순회 없이 빠르게 동작합니다.
+"""
+
+import math
+
+from pxr import Gf, Sdf, Usd, UsdGeom
+
+try:
+    from omni.kit.viewport.utility import get_active_viewport_camera_string
+except ImportError:
+    get_active_viewport_camera_string = None
+
+
+def get_camera_world_position(stage: Usd.Stage):
+    """
+    현재 활성 뷰포트 카메라의 월드 좌표를 반환합니다.
+    실패 시 None.
+    """
+    if not stage or not get_active_viewport_camera_string:
+        return None
+    try:
+        cam_path = get_active_viewport_camera_string()
+        if not cam_path:
+            return None
+        cam_prim = stage.GetPrimAtPath(cam_path)
+        if not cam_prim or not cam_prim.IsValid():
+            return None
+        xform = UsdGeom.Xformable(cam_prim)
+        if not xform:
+            return None
+        xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        m = xform_cache.GetLocalToWorldTransform(cam_prim)
+        return m.ExtractTranslation()
+    except Exception:
+        return None
+
+
+def _get_selected_world_center(
+    stage: Usd.Stage,
+    selected_paths: list[str],
+    cache: UsdGeom.BBoxCache,
+    xform_cache: UsdGeom.XformCache,
+) -> Gf.Vec3d | None:
+    """선택된 prim들의 바운드 중심(월드)을 반환합니다."""
+    if not selected_paths:
+        return None
+    centers = []
+    for path_str in selected_paths:
+        prim = stage.GetPrimAtPath(Sdf.Path(path_str))
+        if not prim or not prim.IsValid():
+            continue
+        try:
+            bbox = cache.ComputeWorldBound(prim).ComputeAlignedBox()
+            centers.append(bbox.GetCenter())
+        except Exception:
+            try:
+                xform = UsdGeom.Xformable(prim)
+                if xform:
+                    m = xform_cache.GetLocalToWorldTransform(prim)
+                    centers.append(m.ExtractTranslation())
+            except Exception:
+                pass
+    if not centers:
+        return None
+    acc = Gf.Vec3d(0, 0, 0)
+    for c in centers:
+        acc += c
+    acc /= len(centers)
+    return acc
+
+
+def _ray_aabb_intersects_before_distance(
+    ray_origin: Gf.Vec3d,
+    ray_dir: Gf.Vec3d,
+    ray_length: float,
+    box,
+) -> bool:
+    """레이가 AABB와 ray_length 이내에서 교차하는지 검사합니다."""
+    mn = box.GetMin()
+    mx = box.GetMax()
+    inv_dir = Gf.Vec3d(
+        1.0 / ray_dir[0] if abs(ray_dir[0]) > 1e-9 else float("inf"),
+        1.0 / ray_dir[1] if abs(ray_dir[1]) > 1e-9 else float("inf"),
+        1.0 / ray_dir[2] if abs(ray_dir[2]) > 1e-9 else float("inf"),
+    )
+    t1 = (mn[0] - ray_origin[0]) * inv_dir[0]
+    t2 = (mx[0] - ray_origin[0]) * inv_dir[0]
+    t3 = (mn[1] - ray_origin[1]) * inv_dir[1]
+    t4 = (mx[1] - ray_origin[1]) * inv_dir[1]
+    t5 = (mn[2] - ray_origin[2]) * inv_dir[2]
+    t6 = (mx[2] - ray_origin[2]) * inv_dir[2]
+    t_min_x = min(t1, t2)
+    t_max_x = max(t1, t2)
+    t_min_y = min(t3, t4)
+    t_max_y = max(t3, t4)
+    t_min_z = min(t5, t6)
+    t_max_z = max(t5, t6)
+    t_enter = max(t_min_x, t_min_y, t_min_z)
+    t_exit = min(t_max_x, t_max_y, t_max_z)
+    if t_enter > t_exit:
+        return False
+    if t_exit < 0:
+        return False
+    hit_t = t_enter if t_enter >= 0 else 0
+    return 0 < hit_t < ray_length
+
+
+def collect_occlusion_prim_paths_sibling(
+    stage: Usd.Stage,
+    selected_paths: list[str],
+    sibling_paths: set[str],
+) -> set[str]:
+    """
+    Sibling 기반 occlusion 수집: sibling만 대상으로 ray-AABB 교차 검사.
+
+    - 카메라 위치: 활성 뷰포트 카메라
+    - 선택 중심: 선택 prim들의 바운드 중심 (ray 방향)
+    - 대상: sibling_paths (전체 Stage 순회 없음)
+    - 조건: 레이가 sibling prim AABB와 교차하고, 교차점이 선택 중심보다 가까움
+    """
+    result: set[str] = set()
+    if not stage or not selected_paths or not sibling_paths:
+        return result
+
+    cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(),
+        [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+        useExtentsHint=True,
+    )
+    xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+
+    camera_pos = get_camera_world_position(stage)
+    if camera_pos is None:
+        return result
+
+    selected_center = _get_selected_world_center(stage, selected_paths, cache, xform_cache)
+    if selected_center is None:
+        return result
+
+    diff = selected_center - camera_pos
+    ray_length = math.sqrt(diff[0] ** 2 + diff[1] ** 2 + diff[2] ** 2)
+    if ray_length < 1e-6:
+        return result
+
+    ray_dir = Gf.Vec3d(
+        diff[0] / ray_length,
+        diff[1] / ray_length,
+        diff[2] / ray_length,
+    )
+
+    for path_str in sibling_paths:
+        prim = stage.GetPrimAtPath(Sdf.Path(path_str))
+        if not prim or not prim.IsValid():
+            continue
+        imageable = UsdGeom.Imageable(prim)
+        if not imageable:
+            continue
+        try:
+            bbox = cache.ComputeWorldBound(prim).ComputeAlignedBox()
+        except Exception:
+            continue
+        mn = bbox.GetMin()
+        mx = bbox.GetMax()
+        if not all(
+            math.isfinite(mn[i]) and math.isfinite(mx[i]) and mn[i] <= mx[i]
+            for i in range(3)
+        ):
+            continue
+        if _ray_aabb_intersects_before_distance(camera_pos, ray_dir, ray_length, bbox):
+            result.add(path_str)
+
+    return result
