@@ -67,13 +67,17 @@ def _get_selected_world_center(
             continue
         try:
             bbox = cache.ComputeWorldBound(prim).ComputeAlignedBox()
-            centers.append(bbox.GetCenter())
+            center = bbox.GetCenter()
+            if all(math.isfinite(center[i]) for i in range(3)):
+                centers.append(center)
         except Exception:
             try:
                 xform = UsdGeom.Xformable(prim)
                 if xform:
                     m = xform_cache.GetLocalToWorldTransform(prim)
-                    centers.append(m.ExtractTranslation())
+                    center = m.ExtractTranslation()
+                    if all(math.isfinite(center[i]) for i in range(3)):
+                        centers.append(center)
             except Exception:
                 pass
     if not centers:
@@ -100,31 +104,48 @@ def _ray_aabb_intersect_info(ray_origin: Gf.Vec3d, ray_dir: Gf.Vec3d, ray_length
     """ray-AABB 교차 검사 결과와 hit_t를 반환. (intersects, hit_t)"""
     mn = box.GetMin()
     mx = box.GetMax()
-    inv_dir = Gf.Vec3d(
-        1.0 / ray_dir[0] if abs(ray_dir[0]) > 1e-9 else float("inf"),
-        1.0 / ray_dir[1] if abs(ray_dir[1]) > 1e-9 else float("inf"),
-        1.0 / ray_dir[2] if abs(ray_dir[2]) > 1e-9 else float("inf"),
-    )
-    t1 = (mn[0] - ray_origin[0]) * inv_dir[0]
-    t2 = (mx[0] - ray_origin[0]) * inv_dir[0]
-    t3 = (mn[1] - ray_origin[1]) * inv_dir[1]
-    t4 = (mx[1] - ray_origin[1]) * inv_dir[1]
-    t5 = (mn[2] - ray_origin[2]) * inv_dir[2]
-    t6 = (mx[2] - ray_origin[2]) * inv_dir[2]
-    t_min_x = min(t1, t2)
-    t_max_x = max(t1, t2)
-    t_min_y = min(t3, t4)
-    t_max_y = max(t3, t4)
-    t_min_z = min(t5, t6)
-    t_max_z = max(t5, t6)
-    t_enter = max(t_min_x, t_min_y, t_min_z)
-    t_exit = min(t_max_x, t_max_y, t_max_z)
-    if t_enter > t_exit:
+    eps = 1e-9
+    if ray_length <= eps:
         return False, None
-    if t_exit < 0:
+    if not all(math.isfinite(ray_origin[i]) and math.isfinite(ray_dir[i]) for i in range(3)):
         return False, None
-    hit_t = t_enter if t_enter >= 0 else 0
-    return (0 < hit_t < ray_length), hit_t
+
+    # Robust slab intersection on finite segment [0, ray_length].
+    # Avoid inf/NaN artifacts for near-parallel ray components.
+    t_enter = 0.0
+    t_exit = ray_length
+
+    for i in range(3):
+        min_i = mn[i]
+        max_i = mx[i]
+        o = ray_origin[i]
+        d = ray_dir[i]
+        if not (math.isfinite(min_i) and math.isfinite(max_i) and min_i <= max_i):
+            return False, None
+
+        if abs(d) <= eps:
+            if o < min_i or o > max_i:
+                return False, None
+            continue
+
+        inv_d = 1.0 / d
+        t0 = (min_i - o) * inv_d
+        t1 = (max_i - o) * inv_d
+        if t0 > t1:
+            t0, t1 = t1, t0
+
+        if t0 > t_enter:
+            t_enter = t0
+        if t1 < t_exit:
+            t_exit = t1
+        if t_enter > t_exit:
+            return False, None
+
+    if t_exit < 0.0:
+        return False, None
+
+    hit_t = max(t_enter, 0.0)
+    return (hit_t <= ray_length + eps), hit_t
 
 
 def collect_occlusion_prim_paths_sibling(
@@ -153,6 +174,8 @@ def collect_occlusion_prim_paths_sibling(
 
     camera_pos = get_camera_world_position(stage, xform_cache)
     if camera_pos is None:
+        return result
+    if not all(math.isfinite(camera_pos[i]) for i in range(3)):
         return result
 
     selected_center = _get_selected_world_center(stage, selected_paths, cache, xform_cache)
@@ -188,8 +211,7 @@ def collect_occlusion_prim_paths_sibling(
             for i in range(3)
         ):
             continue
-        intersects, _ = _ray_aabb_intersect_info(camera_pos, ray_dir, ray_length, bbox)
-        if intersects:
+        if _ray_aabb_intersects_before_distance(camera_pos, ray_dir, ray_length, bbox):
             result.add(path_str)
 
     return result
