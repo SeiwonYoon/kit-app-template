@@ -1,0 +1,15 @@
+
+[package]
+    archivePath = "https://d4i3qtqj3r0z5.cloudfront.net/omni.kit.tool.measure-200.0.4%2B109.0.zip"
+
+    [package.target]
+
+        [package.target.kit]
+            0 = "109.0"
+
+    [package.publish]
+        kitVersion = "109.0.1+feature.249087.e14748ac.gl"
+        date = 1763738674
+        buildNumber = "109.0.0+main.629.6464f2dc.gl"
+        repoName = "kit-sample-extensions"
+        signed = 1
