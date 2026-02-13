@@ -26,10 +26,10 @@ except ImportError:
     get_active_viewport_camera_string = None
 
 
-def get_camera_world_position(stage: Usd.Stage):
+def get_camera_world_position(stage: Usd.Stage, xform_cache: UsdGeom.XformCache | None = None):
     """
     현재 활성 뷰포트 카메라의 월드 좌표를 반환합니다.
-    실패 시 None.
+    실패 시 None. xform_cache가 제공되면 재사용하여 성능 향상.
     """
     if not stage or not get_active_viewport_camera_string:
         return None
@@ -43,7 +43,8 @@ def get_camera_world_position(stage: Usd.Stage):
         xform = UsdGeom.Xformable(cam_prim)
         if not xform:
             return None
-        xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+        if xform_cache is None:
+            xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         m = xform_cache.GetLocalToWorldTransform(cam_prim)
         return m.ExtractTranslation()
     except Exception:
@@ -91,6 +92,12 @@ def _ray_aabb_intersects_before_distance(
     box,
 ) -> bool:
     """레이가 AABB와 ray_length 이내에서 교차하는지 검사합니다."""
+    intersects, _ = _ray_aabb_intersect_info(ray_origin, ray_dir, ray_length, box)
+    return intersects
+
+
+def _ray_aabb_intersect_info(ray_origin: Gf.Vec3d, ray_dir: Gf.Vec3d, ray_length: float, box) -> tuple[bool, float | None]:
+    """ray-AABB 교차 검사 결과와 hit_t를 반환. (intersects, hit_t)"""
     mn = box.GetMin()
     mx = box.GetMax()
     inv_dir = Gf.Vec3d(
@@ -113,11 +120,11 @@ def _ray_aabb_intersects_before_distance(
     t_enter = max(t_min_x, t_min_y, t_min_z)
     t_exit = min(t_max_x, t_max_y, t_max_z)
     if t_enter > t_exit:
-        return False
+        return False, None
     if t_exit < 0:
-        return False
+        return False, None
     hit_t = t_enter if t_enter >= 0 else 0
-    return 0 < hit_t < ray_length
+    return (0 < hit_t < ray_length), hit_t
 
 
 def collect_occlusion_prim_paths_sibling(
@@ -144,7 +151,7 @@ def collect_occlusion_prim_paths_sibling(
     )
     xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
 
-    camera_pos = get_camera_world_position(stage)
+    camera_pos = get_camera_world_position(stage, xform_cache)
     if camera_pos is None:
         return result
 
@@ -181,7 +188,8 @@ def collect_occlusion_prim_paths_sibling(
             for i in range(3)
         ):
             continue
-        if _ray_aabb_intersects_before_distance(camera_pos, ray_dir, ray_length, bbox):
+        intersects, _ = _ray_aabb_intersect_info(camera_pos, ray_dir, ray_length, bbox)
+        if intersects:
             result.add(path_str)
 
     return result

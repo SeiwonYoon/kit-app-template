@@ -24,6 +24,12 @@ import omni.kit.app
 import omni.ui as ui
 import omni.usd
 from carb.eventdispatcher import get_eventdispatcher
+
+try:
+    from omni.kit.viewport.utility import frame_viewport_selection, get_active_viewport
+except ImportError:
+    frame_viewport_selection = None
+    get_active_viewport = None
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
 
 from morph.select_near_hide.occlusion_hide import (
@@ -41,7 +47,7 @@ ALREADY_GHOST_SENTINEL = "__already_ghost__"
 # 선택 prim 기준 주변 적용 반경 (USD stage 단위)
 TRANSPARENT_RADIUS_METERS = 50.0
 # Occlusion Hide 카메라 추적 시 update 쿼리 최소 간격(초)
-OCCLUSION_UPDATE_INTERVAL_SEC = 0.1
+OCCLUSION_UPDATE_INTERVAL_SEC = 0.2
 
 
 def _log_info(message: str):
@@ -108,6 +114,44 @@ def _get_sibling_paths_with_ancestor_fallback(stage: Usd.Stage, selected_paths: 
                 break
             cur = parent
     return fallback
+
+
+def _get_occlusion_candidates_up_to_common_parent(
+    stage: Usd.Stage, selected_paths: list[str]
+) -> set[str]:
+    """
+    Occlusion Hide용: 선택 prim에서 루트까지 각 조상 레벨의 sibling을 수집합니다.
+    N_05_Assembly의 공통 부모 레벨(N_06_Test, N_07_Laser_Cutting 등)까지 포함됩니다.
+    World(/World) 수준에서는 sibling 수집을 중단하여 Factory 등 최상위 씬 prim은 숨기지 않습니다.
+    """
+    candidates = set()
+    selected_set = set(selected_paths)
+
+    for path_str in selected_paths:
+        prim = stage.GetPrimAtPath(Sdf.Path(path_str))
+        if not prim or not prim.IsValid():
+            continue
+
+        cur = prim
+        while cur and cur.IsValid():
+            parent = cur.GetParent()
+            if not parent or not parent.IsValid():
+                break
+            # World(또는 루트) 수준에서는 sibling 수집 중단 - Factory 등 최상위 prim 숨김 방지
+            parent_path_str = str(parent.GetPath())
+            if parent_path_str in ("/", "/World"):
+                break
+            cur_path = str(cur.GetPath())
+            for child in parent.GetChildren():
+                child_path = str(child.GetPath())
+                if child_path == cur_path:
+                    continue
+                if child_path in selected_set:
+                    continue
+                candidates.add(child_path)
+            cur = parent
+
+    return candidates
 
 
 def _restore_prims(stage: Usd.Stage, session_layer: Sdf.Layer, paths_to_restore: dict[str, dict]) -> None:
@@ -742,16 +786,16 @@ class MyExtension(omni.ext.IExt):
             self._last_affected_saved.clear()
 
         if self._mode == MODE_HIDE:
-            # Hide 모드는 기존 동작을 유지(전체 갱신)
+            # Hide 모드: Occlusion과 동일한 범위(조상 레벨 sibling 전체)를 숨김
             if self._last_affected_saved:
                 _log_info(
                     f"[morph.select_near_hide] restoring previous overrides: {len(self._last_affected_saved)} item(s)"
                 )
                 _restore_prims(stage, session_layer, self._last_affected_saved)
                 self._last_affected_saved.clear()
-            siblings = _get_sibling_paths(stage, selected_paths)
+            siblings = _get_occlusion_candidates_up_to_common_parent(stage, selected_paths)
             if not siblings:
-                _log_info("[morph.select_near_hide] no siblings found for current selection")
+                _log_info("[morph.select_near_hide] no candidates found (up to common parent)")
                 return
             _log_info(
                 f"[morph.select_near_hide] selection changed: mode={self._mode}, "
@@ -768,11 +812,11 @@ class MyExtension(omni.ext.IExt):
                 _restore_prims(stage, session_layer, self._last_affected_saved)
                 self._last_affected_saved.clear()
 
-            siblings = _get_sibling_paths_with_ancestor_fallback(stage, selected_paths)
-            if not siblings:
-                _log_info("[morph.select_near_hide] no sibling/ancestor-sibling found for occlusion hide")
+            candidates = _get_occlusion_candidates_up_to_common_parent(stage, selected_paths)
+            if not candidates:
+                _log_info("[morph.select_near_hide] no occlusion candidates found (up to common parent)")
                 return
-            paths = collect_occlusion_prim_paths_sibling(stage, selected_paths, siblings)
+            paths = collect_occlusion_prim_paths_sibling(stage, selected_paths, candidates)
             if not paths:
                 _log_info(
                     "[morph.select_near_hide] no occlusion prims found (camera or selected center unavailable)"
@@ -872,13 +916,22 @@ class MyExtension(omni.ext.IExt):
             _restore_prims(stage, session_layer, self._last_affected_saved)
             self._last_affected_saved.clear()
 
-        siblings = _get_sibling_paths_with_ancestor_fallback(stage, selected_paths)
-        if not siblings:
+        candidates = _get_occlusion_candidates_up_to_common_parent(stage, selected_paths)
+        if not candidates:
             return
-        paths = collect_occlusion_prim_paths_sibling(stage, selected_paths, siblings)
+        paths = collect_occlusion_prim_paths_sibling(stage, selected_paths, candidates)
         if not paths:
             return
         self._last_affected_saved = _apply_hide(stage, session_layer, paths)
+
+    def _frame_selection(self):
+        """선택한 prim을 중심으로 카메라 이동 (F 단축키와 동일)."""
+        if frame_viewport_selection is None or get_active_viewport is None:
+            _log_warn("[morph.select_near_hide] frame_viewport_selection not available")
+            return
+        viewport = get_active_viewport()
+        if viewport:
+            frame_viewport_selection(viewport)
 
     def _restore_all(self):
         self._stop_occlusion_camera_tracking()
@@ -958,12 +1011,19 @@ class MyExtension(omni.ext.IExt):
                     height=18,
                 )
 
-                ui.Button(
-                    "Restore All",
-                    clicked_fn=lambda: self._restore_all(),
-                    tooltip="Restore hidden/transparent prims to original state",
-                    height=22,
-                )
+                with ui.HStack(spacing=4, height=22):
+                    ui.Button(
+                        "Restore All",
+                        clicked_fn=lambda: self._restore_all(),
+                        tooltip="Restore hidden/transparent prims to original state",
+                        width=0,
+                    )
+                    ui.Button(
+                        "Frame",
+                        clicked_fn=lambda: self._frame_selection(),
+                        tooltip="선택한 prim을 중심으로 카메라 이동 (F 단축키와 동일)",
+                        width=70,
+                    )
 
         try:
             if hasattr(self._window, "undock"):
