@@ -12,6 +12,7 @@ __all__ = ["ViewportMeasurementModel"]
 from typing import Dict, List, Optional
 
 import omni.ui.scene as sc
+from pxr import Gf
 
 from ..common import MeasureMode
 from ..system import MeasurePrim
@@ -33,6 +34,7 @@ class ViewportMeasurementModel(sc.AbstractManipulatorModel):
     def __init__(self):
         super().__init__()
         self._measurements = {}
+        # TODO: BBox 와이어프레임 (add_bbox_wireframe, _wireframe_root 등) - 추후 구현
 
     def __del__(self):
         self.clear()

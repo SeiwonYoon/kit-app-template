@@ -18,12 +18,20 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import omni.kit.raycast.query
 import omni.usd as ou
-from carb import log_error
 from omni import ui
 from omni.ui import scene as sc
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Sdf, Usd, UsdGeom
 
-from ...common import MeasureCreationState, MeasureMode, SnapMode
+from ...common import (
+    DisplayAxisSpace,
+    LabelSize,
+    MeasureCreationState,
+    MeasureMode,
+    Precision,
+    SnapMode,
+    UnitType,
+)
+from ...common.utils import get_stage_meters_per_unit
 from ...manager import MeasurementManager, ReferenceManager
 from ...system import MeasurePayload
 from ..manipulator_items import *
@@ -35,13 +43,35 @@ from .viewport_mode_model import ViewportModeModel
 # UI 버튼 클릭 시 호출되는 모듈 수준 함수 (선택된 메시에 대해 BBox X/Y/Z 측정 생성)
 # -----------------------------------------------------------------------------
 
-def _collect_mesh_prims(prim: Usd.Prim) -> List[Usd.Prim]:
-    """프림과 그 하위의 모든 Mesh 프림을 수집합니다 (통합 바운딩용)."""
+def _collect_mesh_prims(prim: Usd.Prim, root_path: Optional[Sdf.Path] = None) -> List[Usd.Prim]:
+    """
+    프림과 그 하위의 모든 Mesh 프림을 수집합니다 (통합 바운딩용). Camera 프림은 제외합니다.
+
+    - root_path: BBox 기준이 되는 루트 prim 경로.
+      이 루트의 자식 중에서 별도 usd 에셋(Reference/Payload) 루트인 경우는
+      상위 에셋 BBox 계산 시 포함하지 않기 위해 재귀 탐색을 막습니다.
+      예) Automatic_riveting_and_brushing_machine 아래의 Automatic_4_Station_* 은
+          별도 에셋이므로, Automatic_riveting_and_brushing_machine BBox에는 포함되지 않도록 함.
+    """
+    if root_path is None:
+        root_path = prim.GetPath()
+
     result: List[Usd.Prim] = []
+    if prim.IsA(UsdGeom.Camera):
+        return result
     if prim.IsA(UsdGeom.Mesh):
         result.append(prim)
+
     for child in prim.GetChildren():
-        result.extend(_collect_mesh_prims(child))
+        if child.IsA(UsdGeom.Camera):
+            continue
+        # 루트 바로 아래에 있는 별도 usd 에셋(Reference/Payload) 루트는 상위 에셋 BBox에서 제외
+        if (
+            child.GetPath() != root_path
+            and (child.HasAuthoredReferences() or child.HasAuthoredPayloads())
+        ):
+            continue
+        result.extend(_collect_mesh_prims(child, root_path))
     return result
 
 
@@ -99,8 +129,10 @@ def _create_point_to_point_measurement_impl(
     start_point: Gf.Vec3d,
     end_point: Gf.Vec3d,
     label_color: Optional[Gf.Vec4f] = None,
+    axis_index: int = -1,
+    dimension_level: int = 0,
 ) -> None:
-    """PointToPoint 측정을 생성합니다 (모듈 수준). label_color가 있으면 사용, 없으면 display_panel.color."""
+    """PointToPoint 측정을 생성합니다. dimension_level: 0=전체(가장 바깥), 1+=하위프림(안쪽으로 겹치지 않게)."""
     display_panel = ReferenceManager().ui_display_panel
     payload = MeasurePayload()
     payload.prim_paths = [prim_path, prim_path]
@@ -108,76 +140,231 @@ def _create_point_to_point_measurement_impl(
         [start_point, end_point], payload.prim_paths
     )
     payload.tool_mode = MeasureMode.MESH
-    payload.axis_display = display_panel.display_axis
-    payload.unit_type = display_panel.unit
-    payload.precision = display_panel.precision
-    payload.label_size = display_panel.text_size
-    payload.label_color = label_color if label_color is not None else display_panel.color
+    # tool_sub_mode: axis_index(0,1,2) + dimension_level*10 → 겹치지 않는 오프셋 레벨
+    payload.tool_sub_mode = axis_index + dimension_level * 10
+    payload.axis_display = display_panel.display_axis if display_panel else DisplayAxisSpace.NONE
+    payload.unit_type = UnitType.CENTIMETERS  # BBox 측정은 항상 cm 단위로 표시
+    # 수치선 이름: 참조한 Mesh prim 이름 + 축 (트리뷰에서 확인 가능)
+    prim_name = Sdf.Path(prim_path).name
+    payload.name = f"{prim_name} ({'XYZ'[axis_index]})" if axis_index >= 0 else prim_name
+    payload.precision = display_panel.precision if display_panel else Precision.HUNDRETH
+    payload.label_size = display_panel.text_size if display_panel else LabelSize.MEDIUM
+    payload.label_color = label_color if label_color is not None else (display_panel.color if display_panel else Gf.Vec4f(0.15, 0.15, 0.15, 1.0))
     MeasurementManager().create(payload)
 
 
-# X/Y/Z 축별 측정선 색상 (RGBA, 0~1): X=붉은색, Y=연두색, Z=파란색
+# CAD 스타일: 얇은 선과 시인성 좋은 진한 회색 (밝은 배경에서 명확히 보임)
 _AXIS_LABEL_COLORS = {
-    0: Gf.Vec4f(1.0, 0.2, 0.2, 1.0),   # X: 붉은색
-    1: Gf.Vec4f(0.45, 1.0, 0.35, 1.0), # Y: 연두색
-    2: Gf.Vec4f(0.25, 0.5, 1.0, 1.0),  # Z: 파란색
+    0: Gf.Vec4f(0.3, 0.3, 0.3, 1.0),  # X: 진한 회색
+    1: Gf.Vec4f(0.3, 0.3, 0.3, 1.0),  # Y: 진한 회색
+    2: Gf.Vec4f(0.3, 0.3, 0.3, 1.0),  # Z: 진한 회색
 }
 
 
-def _create_bbox_axis_measurements_impl(root_prim: Usd.Prim) -> None:
+def _create_bbox_measurement_single_prim(
+    prim_path: str,
+    mn: Gf.Vec3d,
+    mx: Gf.Vec3d,
+    dimension_level: int,
+) -> None:
+    """한 prim에 X/Y/Z 3축을 담은 BBox 측정 1개 생성. Manage 패널에서 하위 탭 X,Y,Z로 표시됨."""
+    # 6 points: X(start,end), Y(start,end), Z(start,end) — MeshBBoxCompute와 순서 일치
+    x_start = Gf.Vec3d(mx[0], mx[1], mn[2])
+    x_end = Gf.Vec3d(mx[0], mn[1], mn[2])
+    y_start = Gf.Vec3d(mx[0], mx[1], mn[2])
+    y_end = Gf.Vec3d(mn[0], mx[1], mn[2])
+    z_start = Gf.Vec3d(mn[0], mx[1], mn[2])
+    z_end = Gf.Vec3d(mn[0], mx[1], mx[2])
+    world_pts = [x_start, x_end, y_start, y_end, z_start, z_end]
+    prim_paths = [prim_path] * 6
+    local_pts = MeasurePayload.world_to_local_points(world_pts, prim_paths)
+    if len(local_pts) != 6:
+        return
+    display_panel = ReferenceManager().ui_display_panel
+    payload = MeasurePayload()
+    payload.prim_paths = prim_paths
+    payload.points = local_pts
+    payload.tool_mode = MeasureMode.MESH
+    payload.tool_sub_mode = dimension_level * 10  # 오프셋 레벨만 (축은 0,1,2가 6 points에 내장)
+    payload.axis_display = display_panel.display_axis if display_panel else DisplayAxisSpace.NONE
+    payload.unit_type = UnitType.CENTIMETERS
+    prim_name = Sdf.Path(prim_path).name
+    payload.name = prim_name
+    payload.precision = display_panel.precision if display_panel else Precision.HUNDRETH
+    payload.label_size = display_panel.text_size if display_panel else LabelSize.MEDIUM
+    payload.label_color = display_panel.color if display_panel else Gf.Vec4f(0.15, 0.15, 0.15, 1.0)
+    MeasurementManager().create(payload)
+
+# 하위 프림 치수선: 전체와 다르면서 큼직한 부분만 표시 (세부 치수 제외)
+# _SUB_PRIM_MAX_RATIO = 0.95   # 95% 이상이면 전체와 동일로 간주, 생략
+# _SUB_PRIM_MIN_RATIO = 0.05   # 5% 미만이면 너무 작은 세부 부분, 생략
+# _SUB_PRIM_MIN_ABSOLUTE_CM = 10  # 10cm 이하 치수는 표시 안 함 (cm 단위 기준)
+
+
+def _get_sub_prims_with_bbox(
+    root_prim: Usd.Prim,
+    bbox_cache: UsdGeom.BBoxCache,
+    max_depth: int = 1,  # 0이면 자식 탐색 안 함, 1 이상이면 해당 깊이까지 탐색
+    depth: int = 0,
+) -> List[tuple]:
     """
-    선택 prim과 하위 모든 Mesh를 합친 통합 바운딩으로 X/Y/Z 축 PointToPoint 측정을 생성합니다.
-
-    배치 규칙: 시작점·끝점은 반드시 바운딩 박스 꼭짓점(vertex) 위치와 동일.
-    한 꼭짓점 (mn[0], mn[1], mn[2])에서 뻗는 세 모서리를 사용하여,
-    모든 선이 prim 바운더리 내부(모서리/표면)에만 그려지도록 함.
-
-    - X축: (mn[0], mn[1], mn[2]) → (mx[0], mn[1], mn[2])
-    - Y축: (mn[0], mn[1], mn[2]) → (mn[0], mx[1], mn[2])
-    - Z축: (mn[0], mn[1], mn[2]) → (mn[0], mn[1], mx[2])
-
-    색상: X=붉은색, Y=연두색, Z=파란색.
+    Mesh를 가진 프림과 그 bbox (mn, mx) 목록 반환.
+    max_depth가 0이면 자식 탐색 없이 빈 목록 반환.
+    max_depth >= 1이면 직접 자식만(또는 해당 깊이까지) 탐색.
+    반환: [(child_prim, mn, mx), ...]
     """
+    if max_depth == 0:
+        return []
+    if depth >= max_depth:
+        return []
+    result: List[tuple] = []
+    for child in root_prim.GetChildren():
+        if child.IsA(UsdGeom.Camera):
+            continue
+        meshes = _collect_mesh_prims(child, root_prim.GetPath())
+        if not meshes:
+            continue
+        bbox = _compute_combined_bbox(bbox_cache, meshes)
+        if bbox:
+            result.append((child, bbox[0], bbox[1]))
+    if len(result) >= 2:
+        return result
+    if len(result) == 1 and depth + 1 < max_depth:
+        sub = _get_sub_prims_with_bbox(result[0][0], bbox_cache, max_depth, depth + 1)
+        if sub:
+            return sub
+    return result
+
+
+def _create_axis_measurement(
+    prim_path: str,
+    axis_index: int,
+    start_pt: Gf.Vec3d,
+    end_pt: Gf.Vec3d,
+    dimension_level: int,
+) -> None:
+    """단일 축 치수선 생성 (X=0, Y=1, Z=2)."""
+    if (end_pt - start_pt).GetLength() < 1e-9:
+        return
+    _create_point_to_point_measurement_impl(
+        prim_path,
+        start_pt,
+        end_pt,
+        label_color=_AXIS_LABEL_COLORS.get(axis_index),
+        axis_index=axis_index,
+        dimension_level=dimension_level,
+    )
+
+
+def _create_bbox_axis_measurements_impl(root_prim: Usd.Prim, max_depth: int = 0) -> None:
+    """
+    전체 바운딩 박스 + 하위 프림별 치수선을 생성합니다.
+    선택 prim이 Mesh이면 부모 Xform을 보지 않고 해당 Mesh만 BBox 측정 (단일 큐브/복잡한 USD 하위 Mesh 동일).
+    Xform 등이면 max_depth가 0일 때 루트 전체 bbox만, max_depth >= 1이면 직접 자식까지 탐색합니다.
+    """
+    prim_path = str(root_prim.GetPath())
     try:
-        mesh_prims = _collect_mesh_prims(root_prim)
-        if not mesh_prims:
+        # 선택 prim이 Mesh인 경우: 부모 Xform을 보지 않고 해당 Mesh만 BBox 측정 (단일 큐브 등 동일 동작)
+        if root_prim.IsA(UsdGeom.Mesh):
+            bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
+            combined = _compute_combined_bbox(bbox_cache, [root_prim])
+            if not combined:
+                return
+            mn, mx = combined[0], combined[1]
+            stage = root_prim.GetStage()
+            mpu = UsdGeom.GetStageMetersPerUnit(stage) if stage else get_stage_meters_per_unit()
+            if mpu is None or mpu <= 0:
+                mpu = 0.01
+            overall_extent = (mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2])
+            overall_ext_cm = [
+                overall_extent[i] * mpu * 100.0 if overall_extent[i] >= 1e-9 else 0.0
+                for i in (0, 1, 2)
+            ]
+            _create_bbox_measurement_single_prim(prim_path, mn, mx, 0)
             return
 
+        mesh_prims = _collect_mesh_prims(root_prim, root_prim.GetPath())
+        if not mesh_prims:
+            return
         bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_])
         combined = _compute_combined_bbox(bbox_cache, mesh_prims)
         if not combined:
             return
+        mn, mx = combined[0], combined[1]
+        overall_extent = (mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2])
 
-        mn = combined[0]
-        mx = combined[1]
-        prim_path = str(root_prim.GetPath())
+        # 하위 프림 목록을 먼저 구함 (실질 메시가 한 자식에만 있을 때 상위 치수선 제외 판단용)
+        sub_prims = _get_sub_prims_with_bbox(root_prim, bbox_cache, max_depth)
+        # 실질 Mesh가 한 개의 직접 자식(예: Default)에만 있으면 상위 prim 치수선은 생성하지 않음
+        skip_overall = False
+        if len(sub_prims) == 1:
+            _, smn, smx = sub_prims[0]
+            tol = 1e-6
+            if (
+                abs(smn[0] - mn[0]) <= tol and abs(smn[1] - mn[1]) <= tol and abs(smn[2] - mn[2]) <= tol
+                and abs(smx[0] - mx[0]) <= tol and abs(smx[1] - mx[1]) <= tol and abs(smx[2] - mx[2]) <= tol
+            ):
+                skip_overall = True
 
-        # 공통 꼭짓점 (mn[0], mn[1], mn[2])에서 뻗는 X, Y 모서리. 모든 점이 bbox vertex.
-        # 1. X축: Y=mn[1], Z=mn[2] 인 모서리 (min → max)
-        start_x = Gf.Vec3d(mx[0], mx[1], mn[2])
-        end_x   = Gf.Vec3d(mx[0], mn[1], mn[2])
-        if (end_x - start_x).GetLength() >= 1e-9:
-            _create_point_to_point_measurement_impl(
-                prim_path, start_x, end_x, label_color=_AXIS_LABEL_COLORS.get(0)
-            )
+        stage = root_prim.GetStage()
+        mpu = UsdGeom.GetStageMetersPerUnit(stage) if stage else get_stage_meters_per_unit()
+        if mpu is None or mpu <= 0:
+            mpu = 0.01  # cm 기본값
+        overall_ext_cm = [
+            overall_extent[i] * mpu * 100.0 if overall_extent[i] >= 1e-9 else 0.0
+            for i in (0, 1, 2)
+        ]
 
-        # 2. Y축: X=mn[0], Z=mn[2] 인 모서리 (min → max)
-        start_y = Gf.Vec3d(mx[0], mx[1], mn[2])
-        end_y   = Gf.Vec3d(mn[0], mx[1], mn[2])
-        if (end_y - start_y).GetLength() >= 1e-9:
-            _create_point_to_point_measurement_impl(
-                prim_path, start_y, end_y, label_color=_AXIS_LABEL_COLORS.get(1)
-            )
+        # 1. 전체 바운딩 박스 치수선. 실질 메시가 한 자식에만 있으면 상위는 제외.
+        if not skip_overall:
+            # if not any(ecm <= _SUB_PRIM_MIN_ABSOLUTE_CM for ecm in overall_ext_cm if ecm > 0):
+            _create_bbox_measurement_single_prim(prim_path, mn, mx, 0)
 
-        # 3. Z축: X, Y축이 만나는 반대편 모서리 (mx[0], mx[1], mn[2]) → (mx[0], mx[1], mx[2])
-        start_z = Gf.Vec3d(mn[0], mx[1], mn[2])  # X, Y축 끝점이 만나는 곳
-        end_z   = Gf.Vec3d(mn[0], mx[1], mx[2])    # Z축 최대값
-        if (end_z - start_z).GetLength() >= 1e-9:
-            _create_point_to_point_measurement_impl(
-                prim_path, start_z, end_z, label_color=_AXIS_LABEL_COLORS.get(2)
-            )
-    except Exception as e:
-        log_error(f"메시 BBox 측정 생성 중 오류: {e}")
+        # 2. 하위 프림별 치수선. max_depth==0이면 _SUB_PRIM_* 조건 없이 모두 표시
+        apply_filters = max_depth != 0
+        for level, (child_prim, smn, smx) in enumerate(sub_prims):
+            child_path = str(child_prim.GetPath())
+            sub_extent = (smx[0] - smn[0], smx[1] - smn[1], smx[2] - smn[2])
+            dim_level = level + 1
+
+            # if apply_filters:
+            #     # 한 축이라도 10cm 이하면 해당 하위 프림 전체 생략 (비율과 무관하게 sub의 모든 축 검사)
+            #     skip_this_sub = False
+            #     for axis in (0, 1, 2):
+            #         if sub_extent[axis] < 1e-9:
+            #             continue
+            #         ext_cm = sub_extent[axis] * mpu * 100.0
+            #         if ext_cm <= _SUB_PRIM_MIN_ABSOLUTE_CM:
+            #             skip_this_sub = True
+            #             break
+            #     if skip_this_sub:
+            #         continue
+
+            # 표시할 축 후보 수집 (max_depth==0이면 비율/최소길이 조건 없이 전체 축)
+            candidate_axes: List[tuple] = []
+            for axis in (0, 1, 2):
+                if overall_extent[axis] < 1e-9 or sub_extent[axis] < 1e-9:
+                    continue
+                ext = sub_extent[axis]
+                ext_cm = ext * mpu * 100.0
+                # if apply_filters:
+                #     ratio = ext / overall_extent[axis]
+                #     if ratio >= _SUB_PRIM_MAX_RATIO:
+                #         continue
+                #     if ratio < _SUB_PRIM_MIN_RATIO:
+                #         continue
+                #     if ext_cm <= _SUB_PRIM_MIN_ABSOLUTE_CM:
+                #         continue
+                candidate_axes.append((axis, ext_cm))
+
+            # if apply_filters and any(ecm <= _SUB_PRIM_MIN_ABSOLUTE_CM for _, ecm in candidate_axes):
+            #     continue
+            # 조건 만족(또는 max_depth==0) → 하위 탭 1 prim (X,Y,Z) 생성
+            _create_bbox_measurement_single_prim(child_path, smn, smx, dim_level)
+
+        # TODO: 흰색 AABB 와이어프레임 박스 - 추후 구현 예정 (BBoxWireframeOverlayItem)
+    except Exception:
+        pass
 
 
 def run_mesh_bbox_measurement_for_selection() -> None:
@@ -189,11 +376,16 @@ def run_mesh_bbox_measurement_for_selection() -> None:
     stage = ctx.get_stage()
     if not stage:
         return
-    for path in ctx.get_selection().get_selected_prim_paths():
+    selected_paths = ctx.get_selection().get_selected_prim_paths()
+    if not selected_paths:
+        return
+    for path in selected_paths:
         prim = stage.GetPrimAtPath(path)
         if not prim or not prim.IsValid():
             continue
-        _create_bbox_axis_measurements_impl(prim)
+        if prim.IsA(UsdGeom.Camera):
+            continue
+        _create_bbox_axis_measurements_impl(prim, max_depth=0)  # 직접 자식만 하위 치수선으로 표시
 
 
 # -----------------------------------------------------------------------------
@@ -333,7 +525,7 @@ class MeshModel(ViewportModeModel):
         )
         payload.tool_mode = MeasureMode.MESH
         payload.axis_display = display_panel.display_axis
-        payload.unit_type = display_panel.unit
+        payload.unit_type = UnitType.CENTIMETERS  # BBox 측정은 항상 cm 단위로 표시
         payload.precision = display_panel.precision
         payload.label_size = display_panel.text_size
         payload.label_color = display_panel.color

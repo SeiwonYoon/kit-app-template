@@ -12,6 +12,7 @@ __all__ = [
     "MeasureCompute",
     "PointToPointCompute",
     "MultiPointCompute",
+    "MeshBBoxCompute",
     "AngleCompute",
     "AreaCompute",
     "DiameterCompute",
@@ -125,6 +126,26 @@ class MultiPointCompute(MeasureCompute):
         out_sub_lengths = [convert_distance_and_units(val, payload.unit_type.value)[0] for val in sub_point_lengths]
 
         return ComputeOutput(computed_points, out_length, out_sub_lengths)
+
+
+class MeshBBoxCompute(MeasureCompute):
+    """MESH BBox: 6 points (X/Y/Z 축 각각 start,end) → primary=합, secondary=[x,y,z] → 하위 탭 X,Y,Z."""
+
+    def execute(self, payload: MeasurePayload) -> Optional[ComputeOutput]:
+        if len(payload.prim_paths) != len(payload.points) or len(payload.points) != 6:
+            return None
+        if len(self._point_models) == 0:
+            for i in range(6):
+                self._point_models.append(PointPrimRelationshipModel(payload.points[i], payload.prim, i))
+        computed_points = [model.computed_point for model in self._point_models]
+        lengths = [
+            (computed_points[0] - computed_points[1]).GetLength(),
+            (computed_points[2] - computed_points[3]).GetLength(),
+            (computed_points[4] - computed_points[5]).GetLength(),
+        ]
+        out_lengths = [convert_distance_and_units(L, payload.unit_type.value)[0] for L in lengths]
+        total = sum(out_lengths)
+        return ComputeOutput(computed_points, total, out_lengths)
 
 
 class AngleCompute(MeasureCompute):
@@ -410,7 +431,7 @@ class SelectedCompute(MeasureCompute):
 COMPUTE_MAP: Dict = {
     MeasureMode.NONE: None,
     MeasureMode.POINT_TO_POINT: PointToPointCompute,
-    MeasureMode.MESH: PointToPointCompute,  # MESH 모드는 POINT_TO_POINT와 동일하게 처리
+    MeasureMode.MESH: MeshBBoxCompute,  # MESH BBox: 1 prim, 6 points, 하위 탭 X/Y/Z
     MeasureMode.MULTI_POINT: MultiPointCompute,
     MeasureMode.ANGLE: AngleCompute,
     MeasureMode.AREA: AreaCompute,

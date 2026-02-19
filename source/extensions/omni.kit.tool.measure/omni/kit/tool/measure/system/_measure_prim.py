@@ -152,8 +152,10 @@ class MeasurePrim(ui.AbstractItem):
     @carb.profiler.profile
     def __update_children(self):
         def name_mapping(tool_mode: MeasureMode):
-            if tool_mode not in [MeasureMode.POINT_TO_POINT, MeasureMode.ANGLE]:
+            if tool_mode not in [MeasureMode.POINT_TO_POINT, MeasureMode.ANGLE, MeasureMode.MESH]:
                 return None
+            if tool_mode == MeasureMode.MESH:
+                return ["X", "Y", "Z"]
             return ["X", "Y", "Z"] if tool_mode == MeasureMode.POINT_TO_POINT else ["Secondary Angle"]
 
         self._children.clear()

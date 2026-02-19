@@ -208,6 +208,7 @@ class GlobalPanel(SubPanelBase):
     def _has_mesh_prim(self, prim) -> bool:
         """
         프림 또는 그 자식 프림 중에 Mesh가 있는지 재귀적으로 확인합니다.
+        Camera 프림은 제외합니다.
 
         Args:
             prim: 확인할 USD 프림
@@ -215,10 +216,12 @@ class GlobalPanel(SubPanelBase):
         Returns:
             bool: Mesh 프림이 있으면 True, 없으면 False
         """
+        if prim.IsA(UsdGeom.Camera):
+            return False
         if prim.IsA(UsdGeom.Mesh):
             return True
 
-        # 자식 프림들을 확인
+        # 자식 프림들을 확인 (Camera 제외)
         for child in prim.GetChildren():
             if self._has_mesh_prim(child):
                 return True
@@ -277,6 +280,8 @@ class MeshPanel(SubPanelBase):
         run_mesh_bbox_measurement_for_selection()
 
     def _has_mesh_prim(self, prim) -> bool:
+        if prim.IsA(UsdGeom.Camera):
+            return False
         if prim.IsA(UsdGeom.Mesh):
             return True
         for child in prim.GetChildren():

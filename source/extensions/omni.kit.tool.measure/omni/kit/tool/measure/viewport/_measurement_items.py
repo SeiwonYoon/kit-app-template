@@ -8,7 +8,7 @@
 #
 import asyncio
 from abc import abstractmethod
-from math import pi
+from math import cos, pi, sin
 from typing import List, Union
 
 import omni.kit.app as app
@@ -43,6 +43,8 @@ from .tools import MeasureAxisStackLabel  # , triangulate_face
 
 HOVER_COLOR = [1, 1, 0, 1]  # Yellow
 SELECTED_COLOR = [0, 1, 0, 1]  # Green
+
+# TODO: BBoxWireframeOverlayItem - 흰색 AABB 와이어프레임 박스 (추후 구현)
 
 
 class _MeasurementItem(sc.AbstractManipulatorItem):
@@ -229,67 +231,114 @@ class LinearMeasurementItem(_MeasurementItem):
     def _draw(self, label_dirty: bool = True):
         color_list = [*self.payload.label_color]
         interact_color = self._selected_line_color if self._selected else HOVER_COLOR if self._hovered else [0, 0, 0, 0]
-        start, end = [[*vec] for vec in self._payload.computed_points[:2]]
+        pts = self._payload.computed_points
+        is_mesh_6 = (
+            self._payload.tool_mode == MeasureMode.MESH
+            and len(pts) >= 6
+            and self._payload.axis_display.value == 0
+        )
+        if is_mesh_6:
+            segments = [(pts[0], pts[1]), (pts[2], pts[3]), (pts[4], pts[5])]
+        else:
+            segments = [(pts[0], pts[1])] if len(pts) >= 2 else []
+        start, end = [[*vec] for vec in (segments[0] if segments else (Gf.Vec3d(0, 0, 0), Gf.Vec3d(0, 0, 0)))]
 
-        # MESH 모드일 때 라벨 위치 미리 계산 (선분 투명 처리용)
         is_mesh_mode = self._payload.tool_mode == MeasureMode.MESH
-        if is_mesh_mode and (not hasattr(self, '_label_position') or self._label_position is None):
-            self._label_position = (self._payload.computed_points[0] + self._payload.computed_points[1]) * 0.5
-
         self._root.clear()
         with self._root:
-            # Click line (제스처용, 항상 전체 선분)
-            click_line = sc.Line(
-                start,
-                end,
-                color=interact_color,
-                thickness=self._selected_line_width,
-                visible=self.visible,
-                gestures=self._gestures,
-            )
+            # Click line (제스처용; 6 points일 때는 첫 번째 세그먼트)
+            if segments:
+                click_line = sc.Line(
+                    start,
+                    end,
+                    color=interact_color,
+                    thickness=self._selected_line_width,
+                    visible=self.visible,
+                    gestures=self._gestures,
+                )
 
-            if is_mesh_mode and hasattr(self, '_label_position') and self._label_position is not None and self._payload.axis_display.value == 0:
-                # 라벨 위치 근처의 선분을 투명하게 만들기 위해 선분을 세 부분으로 나눔
-                label_pos_3d = self._label_position
-                start_vec = Gf.Vec3d(*start)
-                end_vec = Gf.Vec3d(*end)
-                line_dir = (end_vec - start_vec).GetNormalized()
-                line_length = (end_vec - start_vec).GetLength()
+            if is_mesh_mode and self._payload.axis_display.value == 0:
+                raw_sub = getattr(self._payload, "tool_sub_mode", -1)
+                dimension_level = (raw_sub // 10) if raw_sub >= 10 else 0
+                self._label_position = [] if is_mesh_6 else None
+                stage = ou.get_context().get_stage()
+                is_y_up = (not stage) or (UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.y)
+                MESH_LINE_THICKNESS = 1
+                for seg_idx, (s_vec, e_vec) in enumerate(segments):
+                    start_vec = Gf.Vec3d(*s_vec) if not isinstance(s_vec, Gf.Vec3d) else s_vec
+                    end_vec = Gf.Vec3d(*e_vec) if not isinstance(e_vec, Gf.Vec3d) else e_vec
+                    axis_index = seg_idx
+                    line_dir = (end_vec - start_vec).GetNormalized()
+                    line_length = (end_vec - start_vec).GetLength()
 
-                # 라벨 중심에서 양쪽으로 약간의 투명 영역 생성
-                label_gap_world = 0.05  # 라벨 주변 투명 영역 크기 (월드 단위, 조정 가능)
+                    # 축별 연장 방향: Stage up axis에 따라 달라짐
+                    # Y-up (my_editor.kit): Y가 지면 수직. Z-up (my_usd_explorer.kit): Z가 지면 수직
+                    if is_y_up:
+                        # Y-up: Y가 높이. X,Z는 수평. 연장선은 수평축 측정 시 Y방향, Y측정 시 X방향
+                        if axis_index == 0:
+                            offset_dir = Gf.Vec3d(1, 0, 0)
+                        elif axis_index == 1:
+                            offset_dir = Gf.Vec3d(0, 0, -1)
+                        elif axis_index == 2:
+                            offset_dir = Gf.Vec3d(-1, 0, 0)
+                        else:
+                            offset_dir = Gf.Vec3d(0, 0, 1)
+                    else:
+                        # Z-up: Z가 높이. X,Y는 수평. 연장선은 수평축 측정 시 Z방향, Z측정 시 X방향
+                        if axis_index == 0:
+                            offset_dir = Gf.Vec3d(1, 0, 0)
+                        elif axis_index == 1:
+                            offset_dir = Gf.Vec3d(0, 1, 0)
+                        elif axis_index == 2:
+                            offset_dir = Gf.Vec3d(-1, 0, 0)
+                        else:
+                            offset_dir = Gf.Vec3d(0, 1, 0)
 
-                # 라벨 위치에서 선분까지의 최단 거리 계산
-                t = Gf.Dot(label_pos_3d - start_vec, line_dir) / line_length if line_length > 0 else 0.5
-                t = max(0.0, min(1.0, t))  # [0, 1] 범위로 클램프
+                    # 오프셋 거리: level 0=최상위(더 바깥), 1+=하위(더 안쪽, 겹치지 않게)
+                    if dimension_level == 0:
+                        offset_ratio = 0.12  # 최상위 치수선: 바깥쪽
+                    else:
+                        offset_ratio = max(0.02, 0.07 - dimension_level * 0.015)  # 하위: 안쪽으로
+                    offset_dist = max(line_length * offset_ratio, 0.015)
+                    ext_start = start_vec + offset_dir * offset_dist
+                    ext_end = end_vec + offset_dir * offset_dist
 
-                # 라벨 주변 투명 영역의 시작/끝 위치
-                gap_start_t = max(0.0, t - label_gap_world / line_length)
-                gap_end_t = min(1.0, t + label_gap_world / line_length)
+                    # 연장선 2개 (객체 모서리 → 치수선)
+                    sc.Line([*start_vec], [*ext_start], color=color_list, thickness=MESH_LINE_THICKNESS, visible=self.visible)
+                    sc.Line([*end_vec], [*ext_end], color=color_list, thickness=MESH_LINE_THICKNESS, visible=self.visible)
+                    # 치수선 (연장선 끝 연결)
+                    sc.Line([*ext_start], [*ext_end], color=color_list, thickness=MESH_LINE_THICKNESS, visible=self.visible)
 
-                # 선분을 세 부분으로 나눔: 시작-투명시작, 투명끝-끝
-                if gap_start_t > 0:
-                    gap_start_pos = start_vec + line_dir * (line_length * gap_start_t)
-                    # 시작 부분 선분
-                    sc.Line(start, [*gap_start_pos], color=color_list, thickness=3, visible=self.visible)
+                    # CAD 스타일 화살표: 치수선 양끝에 V자형 화살표 (치수선 쪽으로 열림)
+                    _arrow_len = max(line_length * 0.2, 0.005)
+                    line_cm = getattr(self._payload, "primary_value", None)
+                    if line_cm is not None and line_cm >= 50:
+                        _arrow_len = min(_arrow_len, 5)
+                    _arrow_angle = 15 * pi / 180
+                    _arrow_base_1 = line_dir * (_arrow_len * cos(_arrow_angle))
+                    _arrow_base_2 = -line_dir * (_arrow_len * cos(_arrow_angle))
+                    _arrow_side = offset_dir * (_arrow_len * sin(_arrow_angle))
+                    _a1_left = ext_start + _arrow_base_1 + _arrow_side
+                    _a1_right = ext_start + _arrow_base_1 - _arrow_side
+                    sc.Line([*ext_start], [*_a1_left], color=color_list, thickness=MESH_LINE_THICKNESS, visible=self.visible)
+                    sc.Line([*ext_start], [*_a1_right], color=color_list, thickness=MESH_LINE_THICKNESS, visible=self.visible)
+                    _a2_left = ext_end + _arrow_base_2 + _arrow_side
+                    _a2_right = ext_end + _arrow_base_2 - _arrow_side
+                    sc.Line([*ext_end], [*_a2_left], color=color_list, thickness=MESH_LINE_THICKNESS, visible=self.visible)
+                    sc.Line([*ext_end], [*_a2_right], color=color_list, thickness=MESH_LINE_THICKNESS, visible=self.visible)
 
-                if gap_end_t < 1:
-                    gap_end_pos = start_vec + line_dir * (line_length * gap_end_t)
-                    # 끝 부분 선분
-                    sc.Line([*gap_end_pos], end, color=color_list, thickness=3, visible=self.visible)
-
-                # 중간 투명 부분은 그리지 않음 (또는 투명하게 그림)
-                # 투명 영역의 선분 (투명하게)
-                if gap_start_t < gap_end_t:
-                    gap_start_pos = start_vec + line_dir * (line_length * gap_start_t)
-                    gap_end_pos = start_vec + line_dir * (line_length * gap_end_t)
-                    transparent_color = [*color_list[:3], 0.0]  # 알파 0으로 투명
-                    sc.Line([*gap_start_pos], [*gap_end_pos], color=transparent_color, thickness=3, visible=self.visible)
+                    # 라벨 위치: 치수선 중앙 (6 points일 때 리스트에 추가)
+                    mid = (ext_start + ext_end) * 0.5
+                    if is_mesh_6:
+                        self._label_position.append(mid)
+                    else:
+                        self._label_position = mid
+                    # 객체 모서리 포인트 (작게, 연장선 시작점 표시)
+                    sc.Points([[*start_vec], [*end_vec]], sizes=[2, 2], colors=[color_list, color_list], visible=self.visible)
             else:
                 # 일반 모드: 전체 선분을 그림
                 line = sc.Line(start, end, color=color_list, thickness=3, visible=self.visible)
-
-            points = sc.Points([start, end], sizes=[5, 5], colors=[color_list, color_list], visible=self.visible)
+                points = sc.Points([start, end], sizes=[5, 5], colors=[color_list, color_list], visible=self.visible)
 
         if label_dirty:
             if self._payload.axis_display.value != 0:
@@ -316,23 +365,70 @@ class LinearMeasurementItem(_MeasurementItem):
                         self._stack_label,
                         self._payload.unit_type.value,
                         list(Precision).index(self._payload.precision),
+                        hide_unit=(self._payload.tool_mode == MeasureMode.MESH),
                     )
 
     def _draw_label(self) -> sc.Transform:
         # Get properties we need to draw the label
         precision = list(Precision).index(self._payload.precision.value)
+        secondary_vals = getattr(self._payload, "secondary_values", None) or []
 
-        label_pos = (self._payload.computed_points[0] + self._payload.computed_points[1]) * 0.5
-        self._label_position = label_pos  # 라벨 위치 저장 (선분 투명 처리용)
-        label_text = f"{self._payload.primary_value:.{precision}f} {self._payload.unit_type.value}"
+        # MESH 연장선 모드: 라벨은 치수선 중앙 (_draw에서 설정됨)
+        is_mesh_ext = self._payload.tool_mode == MeasureMode.MESH and self._payload.axis_display.value == 0
+        if is_mesh_ext and hasattr(self, "_label_position") and self._label_position is not None:
+            label_pos = self._label_position
+        else:
+            label_pos = (self._payload.computed_points[0] + self._payload.computed_points[1]) * 0.5
+            self._label_position = label_pos
+        # MESH 6 points: 3개 축 라벨 (X, Y, Z 값)
+        is_mesh_3_labels = (
+            self._payload.tool_mode == MeasureMode.MESH
+            and isinstance(label_pos, (list, tuple))
+            and len(label_pos) == 3
+            and len(secondary_vals) == 3
+        )
+        is_mesh_mode = self._payload.tool_mode == MeasureMode.MESH
+        label_text = (
+            f"{self._payload.primary_value:.{precision}f}"
+            if is_mesh_mode
+            else f"{self._payload.primary_value:.{precision}f} {self._payload.unit_type.value}"
+        )
         text_size = self._payload.label_size
         size_bias = LABEL_SCALE_MAPPING[text_size]
 
-        # MESH 모드인지 확인
-        is_mesh_mode = self._payload.tool_mode == MeasureMode.MESH
-
         self._lbl_root.clear()
         with self._lbl_root:
+            if is_mesh_3_labels:
+                # 3개 위치에 X, Y, Z 값 라벨 (단위 없음)
+                text_color = [1.0, 1.0, 1.0, 1.0]
+                stroke_color = [0.0, 0.0, 0.0, 1.0]
+                stroke_offset = 1.5
+                offsets = [
+                    (-stroke_offset, -stroke_offset), (-stroke_offset, 0), (-stroke_offset, stroke_offset),
+                    (0, -stroke_offset), (0, stroke_offset),
+                    (stroke_offset, -stroke_offset), (stroke_offset, 0), (stroke_offset, stroke_offset),
+                ]
+                last_xform = None
+                for i in range(3):
+                    pos = label_pos[i]
+                    seg_text = f"{secondary_vals[i]:.{precision}f}"
+                    xform = sc.Transform(
+                        look_at=sc.Transform.LookAt.CAMERA,
+                        transform=sc.Matrix44.get_translation_matrix(*pos),
+                        visible=False,
+                    )
+                    with xform:
+                        with sc.Transform(scale_to=sc.Space.SCREEN):
+                            for dx, dy in offsets:
+                                with sc.Transform(transform=sc.Matrix44.get_translation_matrix(dx, dy, 0)):
+                                    sc.Label(seg_text, size=text_size.value, color=stroke_color, alignment=ui.Alignment.CENTER)
+                            _label_kw = dict(size=text_size.value, color=text_color, alignment=ui.Alignment.CENTER)
+                            if i == 0:
+                                _label_kw["gestures"] = self._gestures
+                            sc.Label(seg_text, **_label_kw)
+                    xform.visible = self.visible
+                    last_xform = xform
+                return last_xform
             xform = sc.Transform(
                 look_at=sc.Transform.LookAt.CAMERA,
                 transform=sc.Matrix44.get_translation_matrix(*label_pos),

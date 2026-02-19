@@ -45,6 +45,10 @@ class MeasureDrawManipulator(sc.Manipulator):
         # Assign the draw manipulator to the Reference Manager
         ReferenceManager().measure_scene = self
 
+        # __root를 manipulator에 추가하여 씬 그래프에 연결 (없으면 측정선이 렌더되지 않음)
+        with self:
+            self.__root
+
     @carb.profiler.profile
     def __draw(self, item):
         with self.__root:
@@ -52,11 +56,6 @@ class MeasureDrawManipulator(sc.Manipulator):
 
     def __on_item_changed(self, model, item):
         self.__draw(item)
-
-    def on_build(self):
-        if not self._model:
-            log_error("Model was not found for MeasureDrawManipulator")
-            return
 
     # TODO: Needs actual implementation, could be utilized for show/hide state?
     def get_active(self) -> bool:

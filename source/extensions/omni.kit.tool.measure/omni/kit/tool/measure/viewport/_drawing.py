@@ -28,6 +28,7 @@ def draw_display_axis(
     label_stack: MeasureAxisStackLabel,
     unit_type: str,
     precision: int,
+    hide_unit: bool = False,
 ) -> None:
     """
     Draws the World or local XYZ offset
@@ -72,11 +73,16 @@ def draw_display_axis(
     y_txt, y_unit = convert_distance_and_units(y_dist, unit_type)
     z_txt, z_unit = convert_distance_and_units(z_dist, unit_type)
 
+    unit_suffix = "" if hide_unit else m_unit
+    x_suffix = "" if hide_unit else x_unit
+    y_suffix = "" if hide_unit else y_unit
+    z_suffix = "" if hide_unit else z_unit
+
     label_stack.update_text(
-        main=f"{m_txt:.{precision}f}{m_unit}",
-        x=f"{x_txt:.{precision}f}{x_unit}",
-        y=f"{y_txt:.{precision}f}{y_unit}",
-        z=f"{z_txt:.{precision}f}{z_unit}",
+        main=f"{m_txt:.{precision}f}{unit_suffix}",
+        x=f"{x_txt:.{precision}f}{x_suffix}",
+        y=f"{y_txt:.{precision}f}{y_suffix}",
+        z=f"{z_txt:.{precision}f}{z_suffix}",
     )
     label_stack.visible = True
 

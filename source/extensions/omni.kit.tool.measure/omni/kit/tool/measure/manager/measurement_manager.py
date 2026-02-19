@@ -346,6 +346,8 @@ class MeasurementManager:
             # 뷰포트 씬에 측정선 생성
             ReferenceManager().measure_scene.create(measure_prim)
 
+        # TODO: rebuild_bbox_wireframes_from_measurements - 흰색 AABB 와이어프레임 복원 (추후 구현)
+
     def _create_internal(self, measure_payload: MeasurePayload):
         with ReferenceManager().edit_context:
             stage = ou.get_context().get_stage()
@@ -389,7 +391,7 @@ class MeasurementManager:
         await omni.kit.app.get_app().next_update_async()
         await omni.kit.app.get_app().next_update_async()
         measure_prim = MeasurePrim.from_prim(spec_path)
-        measure_prim.name = Sdf.Path(spec_path).name
+        # payload.name은 measure:prop:name에서 로드됨. 덮어쓰지 않음 (참조 Mesh prim 이름 유지)
         self._model.add(measure_prim.uuid, measure_prim)
         ReferenceManager().measure_scene.create(measure_prim)
 

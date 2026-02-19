@@ -525,6 +525,30 @@ MeasureScene
   - `DisplayPanel` 상위에 위치
   - BBox 버튼: 선택된 프림에 Mesh가 있을 때 활성화
 
+## Stage Up Axis와 치수선 방향
+
+### 축 방향이 달라지는 원인
+
+앱마다 **Stage Up Axis** 설정이 다르면, "지면에 수직인 축"이 달라집니다.
+
+| 앱 | 설정 파일 | Up Axis | 지면 수직 축 |
+|----|-----------|---------|--------------|
+| **My Editor** | `my_company.my_editor.kit` | (기본값 Y) | **Y축** |
+| **My USD Explorer** | `my_company.my_usd_explorer.kit` | `upAxis = 'Z'` | **Z축** |
+
+**설정 위치:**
+- `[settings.app.viewport.defaults.hud.stage]` → `upAxis = 'Z'`
+- `[settings.persistent.app.stage]` → `upAxis = 'Z'`
+
+USD Explorer는 CAD/건축 도면에서 많이 쓰이는 Z-up을 사용합니다.
+
+### 치수선/연장선 방향 자동 조정
+
+`LinearMeasurementItem._draw()`에서 `UsdGeom.GetStageUpAxis(stage)`로 up axis를 읽고, 그에 맞게 연장선 방향을 바꿉니다.
+
+- **Y-up**: X축 → X, Y축 → Y, Z축 → -X 방향 연장선
+- **Z-up**: X축 → Z, Y축 → Z, Z축 → -X 방향 연장선 (수평 치수는 Z로, 높이 치수는 X로 연장)
+
 ---
 
 ### 1. 배치 처리

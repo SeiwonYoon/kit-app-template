@@ -86,6 +86,8 @@ class MeasureScene:
     def delete(self, uuid: int) -> Optional["MeasurePayload"]:
         return self.__measurement_model.delete(uuid)
 
+    # TODO: add_bbox_wireframe, remove_bbox_wireframe, rebuild_bbox_wireframes_from_measurements - 흰색 AABB 와이어프레임 (추후 구현)
+
     # Selection
     @property
     def selected(self) -> List[int]:
