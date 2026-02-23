@@ -1,22 +1,42 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
+# ---------------------------------------------------------------------
+# extension.py  (외부에서 service를 가져와 호출할 수 있도록 싱글톤 제공)
+# ---------------------------------------------------------------------
 import omni.ext
 import omni.kit.app
 
 from .service import SectionControlService
 from .ui_dummy import DummySectionControlUI
 
+# ✅ 외부 호출용 전역 핸들 (다른 익스텐션/스크립트에서 import 가능)
+_SERVICE_SINGLETON = None
+
+
+def get_service() -> SectionControlService:
+    """
+    다른 익스텐션/스크립트에서:
+        from morph.section_control.extension import get_service
+        svc = get_service()
+    형태로 호출한다.
+    """
+    return _SERVICE_SINGLETON
+
 
 class MyCompanySectionControlExtension(omni.ext.IExt):
     def on_startup(self, ext_id):
+        global _SERVICE_SINGLETON
+
         self._ext_id = ext_id
 
         self._service = SectionControlService()
         self._service.startup()
 
+        # ✅ singleton 공개
+        _SERVICE_SINGLETON = self._service
+
+        # (선택) 로컬 디버그 UI
         self._ui = DummySectionControlUI(self._service)
 
+        # 시작 시 window 한 번만 보이게
         self._show_once_sub = None
         try:
             app = omni.kit.app.get_app()
@@ -41,6 +61,8 @@ class MyCompanySectionControlExtension(omni.ext.IExt):
                 pass
 
     def on_shutdown(self):
+        global _SERVICE_SINGLETON
+
         try:
             if self._show_once_sub:
                 self._show_once_sub.unsubscribe()
@@ -61,3 +83,6 @@ class MyCompanySectionControlExtension(omni.ext.IExt):
         except Exception:
             pass
         self._service = None
+
+        # ✅ singleton 해제
+        _SERVICE_SINGLETON = None
