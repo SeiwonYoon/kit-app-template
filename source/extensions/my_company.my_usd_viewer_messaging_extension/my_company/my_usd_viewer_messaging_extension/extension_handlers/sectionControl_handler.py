@@ -10,18 +10,25 @@
 
 import carb
 import carb.events
-import omni.kit.app
-import morph.section_control
-import omni.kit.livestream.messaging as messaging
+import my_company.usd_loader
+from morph.section_control.extension import get_service
 
-from carb.eventdispatcher import get_eventdispatcher
+from typing import Dict, Callable, List
 
-class ExtensionSectionControlManager:
-    """Section Control 메시지를 처리하는 클래스"""
+from .base_handler import BaseHandler
+
+
+class SectionControlHandler(BaseHandler):
+    """section_control 익스텐션과의 메시지 통신을 처리하는 클래스"""
 
     def __init__(self):
-        self._subscriptions = []
-        outgoing = [
+        self._usd_loader = my_company.usd_loader.get_instance()
+        print(f"self._usd_loader: {self._usd_loader}")
+        super().__init__()
+
+    def get_outgoing_events(self) -> List[str]:
+        """클라이언트로 보낼 이벤트 리스트"""
+        return [
             "section_get_response",
             "section_set_enabled_response",
             "section_set_all_response",
@@ -30,15 +37,9 @@ class ExtensionSectionControlManager:
             "section_set_offset_response",
         ]
 
-        for o in outgoing:
-            messaging.register_event_type_to_send(o)
-            omni.kit.app.register_event_alias(
-                carb.events.type_from_string(o),
-                o,
-            )
-
-        incoming = {
-            # request to get children of a prim
+    def get_event_handlers(self) -> Dict[str, Callable]:
+        """이벤트 핸들러 맵 반환"""
+        return {
             'section_get_request': self._on_get_state,
             'section_set_enabled_request': self._on_set_enabled,
             'section_set_all_request': self._on_set_all,
@@ -46,27 +47,6 @@ class ExtensionSectionControlManager:
             'section_set_flip_request': self._on_set_flip,
             'section_set_offset_request': self._on_set_offset,
         }
-
-        # loadUSD 이벤트 등록
-        event_type = 'section_get_request'
-        omni.kit.app.register_event_alias(
-            carb.events.type_from_string(event_type),
-            event_type,
-        )
-
-        ed = get_eventdispatcher()
-        for event_type, handler in incoming.items():
-            omni.kit.app.register_event_alias(
-                carb.events.type_from_string(event_type),
-                event_type,
-            )
-            self._subscriptions.append(
-                ed.observe_event(
-                    observer_name=f"SectionController:{event_type}",
-                    event_name=event_type,
-                    on_event=handler,
-                )
-            )
 
     def _payload_to_dict(e: carb.events.IEvent) -> dict:
         try:
@@ -78,66 +58,66 @@ class ExtensionSectionControlManager:
 
     def _on_get_state(self, event: carb.events.IEvent) -> None:
         """ ??? """
-        service = morph.section_control.get_service()
+        service = get_service()
         result = service._service.get_state()
         print(f"get_state result: {result}")
-        get_eventdispatcher().dispatch_event("section_get_response", payload=result)
+
+        self.dispatch_event("section_get_response", result)
 
 
     def _on_set_all(self, event: carb.events.IEvent) -> None:
-        """ ??? """
+        """ 전체 값 설정 """
         p = self._payload_to_dict(event)
-        service = morph.section_control.get_service()
+        service = get_service()
         enabled = p.get("enabled", False)
         axis = p.get("axis", 'X')
         flip = p.get("flip", False)
         offset = p.get("offset", 0.0)
         result = service._service.set_all(enabled, axis, flip, offset)
         print(f"set_all result: {result}")
-        get_eventdispatcher().dispatch_event("section_set_all_response", payload=result)
+
+        self.dispatch_event("section_set_all_response", result)
 
 
     def _on_set_enabled(self, event: carb.events.IEvent) -> None:
-        """ ??? """
+        """ 부분 설정 - 활성화 여부 """
         p = self._payload_to_dict(event)
-        service = morph.section_control.get_service()
+        service = get_service()
         enabled = p.get("enabled", False)
         result = service._service.set_enabled(enabled)
         print(f"set_enabled result: {result}")
-        get_eventdispatcher().dispatch_event("section_set_enabled_response", payload=result)
+
+        self.dispatch_event("section_set_enabled_response", result)
 
 
     def _on_set_axis(self, event: carb.events.IEvent) -> None:
-        """ ??? """
+        """ 부분 설정 - 축 설정 """
         p = self._payload_to_dict(event)
-        service = morph.section_control.get_service()
+        service = get_service()
         axis = p.get("axis", 'X')
         result = service._service.set_axis(axis)
         print(f"set_axis result: {result}")
-        get_eventdispatcher().dispatch_event("section_set_axis_response", payload=result)
+
+        self.dispatch_event("section_set_axis_response", result)
 
 
     def _on_set_flip(self, event: carb.events.IEvent) -> None:
-        """ ??? """
+        """ 부분 설정 - 뒤집기 여부 """
         p = self._payload_to_dict(event)
-        service = morph.section_control.get_service()
+        service = get_service()
         flip = p.get("flip", False)
         result = service._service.set_flip(flip)
         print(f"set_flip result: {result}")
-        get_eventdispatcher().dispatch_event("section_set_flip_response", payload=result)
+
+        self.dispatch_event("section_set_flip_response", result)
 
 
     def _on_set_offset(self, event: carb.events.IEvent) -> None:
-        """ ??? """
+        """ 부분 설정 - 오프셋 설정 """
         p = self._payload_to_dict(event)
-        service = morph.section_control.get_service()
+        service = get_service()
         offset = p.get("offset", 0.0)
         result = service._service.set_offset(offset)
         print(f"set_offset result: {result}")
-        get_eventdispatcher().dispatch_event("section_set_offset_response", payload=result)
 
-
-    def on_shutdown(self) -> None:
-        """Extension이 비활성화될 때 호출되어 상태를 정리합니다."""
-        self._subscriptions.clear()
-        carb.log_info("ExtensionSectionController shutdown complete")
+        self.dispatch_event("section_set_offset_response", result)
