@@ -10,6 +10,7 @@
 
 from .stage_loading import LoadingManager
 from .stage_management import StageManager
+from .extension_management import ExtensionManager
 import omni.ext
 
 
@@ -18,13 +19,14 @@ import omni.ext
 # gets enabled and `on_startup(ext_id)` will be called. Later when extension
 # gets disabled on_shutdown() is called.
 class Extension(omni.ext.IExt):
-    """This extension manages creating the loading and stage
-    messaging managers"""
+    """This extension manages creating the loading, stage,
+    and extension messaging managers"""
     def on_startup(self):
         """This is called every time the extension is activated."""
         # Internal messaging state
         self._loading_manager: LoadingManager = LoadingManager()
         self._stage_manager: StageManager = StageManager()
+        self._extension_manager: ExtensionManager = ExtensionManager()
 
     def on_shutdown(self):
         """This is called every time the extension is deactivated. It is used to
@@ -36,3 +38,6 @@ class Extension(omni.ext.IExt):
         if self._stage_manager:
             self._stage_manager.on_shutdown()
             self._stage_manager = None
+        if self._extension_manager:
+            self._extension_manager.on_shutdown()
+            self._extension_manager = None
