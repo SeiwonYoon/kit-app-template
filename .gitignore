@@ -1,4 +1,4 @@
-﻿# All folders starting with _ are local.
+# All folders starting with _ are local.
 _*/
 
 # Compiled python files.
@@ -36,3 +36,4 @@ deps/**/user.toml
 
 # Streaming EventTrace
 *.etli
+*.etl

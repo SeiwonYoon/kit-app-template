@@ -1,7 +1,6 @@
-# service.py (깜빡임/반복 열림 방지 버전)
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
+# ---------------------------------------------------------------------
+# service.py  (외부 호출용 Section Control Service)
+# ---------------------------------------------------------------------
 import asyncio
 
 import carb
@@ -9,16 +8,22 @@ import carb.events
 import omni.kit.app
 import omni.usd
 
-from .core import SectionController, MessageBusAPI, StageEventType
+from .core import SectionController
 
 
 class SectionControlService:
+    """
+    SectionControlService
+    - 섹션(omni.kit.window.section) 백엔드를 보장(ensure)하고,
+      SectionController를 통해 enabled/axis/flip/offset을 적용한다.
+    - 외부(다른 익스텐션/스크립트)에서 본 서비스의 public API를 호출하는 방식으로 사용한다.
+    """
+
     DEBUG_WARMUP_LOG = True
-    WARMUP_FRAMES = 5  # 10이면 눈에 띄게 켜져있을 수 있어서 2 추천 (필요하면 다시 10)
+    WARMUP_FRAMES = 5  # 10이면 눈에 띄게 켜져있을 수 있어서 2~5 추천
 
     def __init__(self):
         self.controller = SectionController()
-        self.api = MessageBusAPI()
 
         self._stage_event_sub = None
         self._post_update_sub = None
@@ -35,7 +40,6 @@ class SectionControlService:
     # ---------------- lifecycle ----------------
     def startup(self):
         self._subscribe_stage_events()
-        self._register_web_api()
         self.ensure_section_backend_running(force=True)
 
     def shutdown(self):
@@ -52,13 +56,6 @@ class SectionControlService:
         except Exception:
             pass
         self._stage_event_sub = None
-
-        try:
-            if self.api:
-                self.api.destroy()
-        except Exception:
-            pass
-        self.api = None
 
         self.controller = None
         self._warmup_task = None
@@ -93,6 +90,13 @@ class SectionControlService:
 
     # ---------------- ensure backend ----------------
     def ensure_section_backend_running(self, force: bool = False) -> bool:
+        """
+        omni.kit.window.section(또는 유사 확장)이 로드/활성화되어 있어야
+        SectionManager가 안정적으로 동작한다.
+
+        - force=False: 한 번 성공하면 이후 재시도 안 함
+        - force=True: 매번 활성화 시도(디버깅/환경차 대응용)
+        """
         if self._ensured_section_backend_once and not force:
             return True
 
@@ -139,6 +143,11 @@ class SectionControlService:
 
     # ---------------- warm-up (enable ON 때만) ----------------
     def warmup_section_window(self, force: bool = False):
+        """
+        최초 enable ON 시 '섹션 윈도우'를 잠깐 show/hide 하여
+        내부 위젯/prim 준비를 유도(깜빡임 최소화).
+        - post_update apply loop 에서는 호출하지 않는다.
+        """
         stage_id = self._get_stage_id()
 
         if stage_id is None:
@@ -192,6 +201,10 @@ class SectionControlService:
 
     # ---------------- state apply ----------------
     def _apply_changes(self, enabled: bool, axis: str, flip: bool, offset: float) -> bool:
+        """
+        controller 상태값만 갱신하고,
+        실제 USD stage 반영은 schedule_apply()에서 post_update loop로 수행한다.
+        """
         st0 = self.controller.get_state()
         changed = False
 
@@ -224,24 +237,68 @@ class SectionControlService:
 
         return changed
 
-    # ---------------- web api ----------------
-    def _register_web_api(self):
-        @self.api.request(name="section_get")
-        def section_get():
-            return self.controller.get_state()
+    # ---------------- Public API (외부 호출용) ----------------
+    def get_state(self) -> dict:
+        """현재 service/controller 상태 조회 (즉시)"""
+        return self.controller.get_state()
 
-        @self.api.request(name="section_set_all")
-        def section_set_all(enabled: bool, axis: str, flip: bool, offset: float):
-            changed = self._apply_changes(enabled, axis, flip, offset)
-            if changed:
-                self.schedule_apply("web_set_all")
-            return self.controller.get_state()
-
-    def set_all_from_ui(self, enabled: bool, axis: str, flip: bool, offset: float, reason: str):
+    def set_all(self, enabled: bool, axis: str, flip: bool, offset: float, reason: str = "set_all") -> dict:
+        """enabled/axis/flip/offset 한번에 설정 + (필요 시) schedule_apply"""
         changed = self._apply_changes(enabled, axis, flip, offset)
         if changed:
             self.schedule_apply(reason)
         return self.controller.get_state()
+
+    def set_enabled(self, enabled: bool, reason: str = "set_enabled") -> dict:
+        st0 = self.controller.get_state()
+        return self.set_all(
+            enabled=bool(enabled),
+            axis=str(st0.get("axis", "X")),
+            flip=bool(st0.get("flip", False)),
+            offset=float(st0.get("offset", 0.0)),
+            reason=reason,
+        )
+
+    def set_axis(self, axis: str, reason: str = "set_axis") -> dict:
+        st0 = self.controller.get_state()
+        return self.set_all(
+            enabled=bool(st0.get("enabled", False)),
+            axis=str(axis),
+            flip=bool(st0.get("flip", False)),
+            offset=float(st0.get("offset", 0.0)),
+            reason=reason,
+        )
+
+    def set_flip(self, flip: bool, reason: str = "set_flip") -> dict:
+        st0 = self.controller.get_state()
+        return self.set_all(
+            enabled=bool(st0.get("enabled", False)),
+            axis=str(st0.get("axis", "X")),
+            flip=bool(flip),
+            offset=float(st0.get("offset", 0.0)),
+            reason=reason,
+        )
+
+    def set_offset(self, offset: float, reason: str = "set_offset") -> dict:
+        st0 = self.controller.get_state()
+        try:
+            off = float(offset)
+        except Exception:
+            off = 0.0
+        return self.set_all(
+            enabled=bool(st0.get("enabled", False)),
+            axis=str(st0.get("axis", "X")),
+            flip=bool(st0.get("flip", False)),
+            offset=off,
+            reason=reason,
+        )
+
+    def apply_now(self, reason: str = "apply_now", retries: int = 240) -> None:
+        """
+        변경된 dirty 값을 반영하도록 apply loop를 예약.
+        - set_* 호출은 내부적으로 schedule_apply를 수행하므로 일반적으로 호출할 필요는 없다.
+        """
+        self.schedule_apply(reason, retries=retries)
 
     # ---------------- stage events ----------------
     def _subscribe_stage_events(self):
@@ -259,11 +316,15 @@ class SectionControlService:
         self._warmed_once_for_stage_id = None
 
         if self.controller and self.controller.get_state().get("enabled"):
-            # stage 교체 후에도 section이 켜져 있으면 apply만 재시도 (warm-up은 여기서 하지 않음)
+            # stage 교체 후에도 section이 켜져 있으면 apply만 재시도
             self.schedule_apply("stage_event_enabled")
 
     # ---------------- apply loop ----------------
     def schedule_apply(self, reason: str, retries: int = 240):
+        """
+        post_update에서 apply_once_if_possible 를 재시도.
+        - warm-up은 여기서 호출하지 않는다(깜빡임 최소화 목적).
+        """
         self._apply_retries_left = max(self._apply_retries_left, retries)
 
         if self._post_update_sub is None:
@@ -283,7 +344,6 @@ class SectionControlService:
         self._apply_retries_left -= 1
         self._apply_attempt += 1
 
-        # ✅ 여기서는 warm-up 호출 금지 (UI 깜빡임/반복 열림 방지)
         try:
             ok = self.controller.apply_once_if_possible(self._apply_attempt)
             if ok:

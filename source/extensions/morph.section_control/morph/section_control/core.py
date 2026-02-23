@@ -1,17 +1,13 @@
-# morph/section_control/core.py
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
+# ---------------------------------------------------------------------
+# core.py  (morph/section_control/core.py)
+# ---------------------------------------------------------------------
 import time
 import traceback
 from typing import Optional, Dict, Any
 
 import carb
-import carb.events
 import carb.settings
 import omni.usd
-import omni.kit.app
-import omni.kit.livestream.messaging as messaging
 
 from pxr import Gf, Usd, UsdGeom, Sdf
 from omni.kit.window.section.common import SectionManager
@@ -43,52 +39,6 @@ def _log(msg: str):
 def _log_exc(prefix: str, ex: Exception):
     tb = traceback.format_exc()
     carb.log_warn(f"[section_control] {_ts()} {prefix}: {ex}\n{tb}")
-
-
-class MessageBusAPI:
-    def __init__(self):
-        self._bus = omni.kit.app.get_app().get_message_bus_event_stream()
-        self._subs = {}
-
-    def destroy(self):
-        for s in self._subs.values():
-            try:
-                s.unsubscribe()
-            except Exception:
-                pass
-        self._subs.clear()
-
-    def request(self, func=None, *, name=None):
-        def _decorator(f):
-            api_name = name or f.__name__
-            req_name = f"{api_name}_request"
-            resp_name = f"{api_name}_response"
-
-            req_type = carb.events.type_from_string(req_name)
-            resp_type = carb.events.type_from_string(resp_name)
-
-            messaging.register_event_type_to_send(resp_name)
-
-            def _on_event(e: carb.events.IEvent):
-                payload = dict(e.payload.get_dict())
-                call_id = payload.pop("id", -1)
-                try:
-                    result = f(**payload)
-                    out = {"id": call_id, "response": result}
-                except Exception as ex:
-                    out = {"id": call_id, "error": str(ex)}
-
-                if call_id != -1:
-                    self._bus.dispatch(resp_type, payload=out)
-                    self._bus.pump()
-
-            sub = self._bus.create_subscription_to_pop_by_type(req_type, _on_event, name=req_name)
-            self._subs[req_name] = sub
-            return f
-
-        if func is None:
-            return _decorator
-        return _decorator(func)
 
 
 class SectionController:
@@ -263,8 +213,6 @@ class SectionController:
         if prim is None:
             return False
 
-        # ✅ flip은 direction setting으로 이미 처리 중이므로,
-        # 여기서는 offset을 그대로 사용 (프로젝트 기존 로직 유지)
         signed_offset = float(self._offset)
 
         if self._base_world_pos is None:
@@ -358,7 +306,6 @@ class SectionController:
 
     def apply_once_if_possible(self, attempt: int) -> bool:
         if not self._enabled:
-            # enable이 꺼져있어도 UI 토글이 다시 켜지는 걸 막고 싶다면 여기서도 OFF 유지
             self._force_section_manipulator_off()
             return True
 
