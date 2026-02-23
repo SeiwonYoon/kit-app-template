@@ -10,7 +10,7 @@
 
 from .stage_loading import LoadingManager
 from .stage_management import StageManager
-from .extension_management import ExtensionManager
+from .extension_handlers import HANDLERS
 import omni.ext
 
 
@@ -26,7 +26,11 @@ class Extension(omni.ext.IExt):
         # Internal messaging state
         self._loading_manager: LoadingManager = LoadingManager()
         self._stage_manager: StageManager = StageManager()
-        self._extension_manager: ExtensionManager = ExtensionManager()
+
+        print(f"HANDLERS: {HANDLERS}")
+
+        # 모든 핸들러 자동 초기화
+        self._handlers = [handler_class() for handler_class in HANDLERS]
 
     def on_shutdown(self):
         """This is called every time the extension is deactivated. It is used to
@@ -38,6 +42,8 @@ class Extension(omni.ext.IExt):
         if self._stage_manager:
             self._stage_manager.on_shutdown()
             self._stage_manager = None
-        if self._extension_manager:
-            self._extension_manager.on_shutdown()
-            self._extension_manager = None
+
+        # 모든 핸들러 자동 정리
+        for handler in self._handlers:
+            handler.on_shutdown()
+        self._handlers.clear()

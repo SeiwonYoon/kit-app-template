@@ -9,14 +9,16 @@ DEFAULT_USD_URL = (
     "PhysicalAI_SceneAssembly_Start/SceneAssembly.usd"
 )
 
+_extension_instance = None
+
 def get_instance():
-    global _global_instance
-    return _global_instance
+    global _extension_instance
+    return _extension_instance
 
 class UsdLoader(omni.ext.IExt):
     def on_startup(self, ext_id):
-        global _global_instance
-        _global_instance = self
+        global _extension_instance
+        _extension_instance = self
 
         self._window = ui.Window("USD Loader", width=450, height=130)
         with self._window.frame:
