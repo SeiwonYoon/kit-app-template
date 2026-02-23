@@ -9,8 +9,15 @@ DEFAULT_USD_URL = (
     "PhysicalAI_SceneAssembly_Start/SceneAssembly.usd"
 )
 
+def get_instance():
+    global _global_instance
+    return _global_instance
+
 class UsdLoader(omni.ext.IExt):
     def on_startup(self, ext_id):
+        global _global_instance
+        _global_instance = self
+
         self._window = ui.Window("USD Loader", width=450, height=130)
         with self._window.frame:
             with ui.VStack(padding=10, spacing=10):
@@ -39,6 +46,25 @@ class UsdLoader(omni.ext.IExt):
         path = self.fld.model.get_value_as_string().strip()
         self.lbl.text = ""
 
+        if not path or not path.lower().endswith(('.usd', '.usda', '.usdc')):
+            self.lbl.text = "Error: Invalid URL or File extension."
+            return
+
+        try:
+            result, _ = await asyncio.wait_for(
+                omni.client.stat_async(path), timeout=1.5
+            )
+            if result != omni.client.Result.OK:
+                self.lbl.text = "Error: This URL does not exist."
+                return
+        except Exception:
+            self.lbl.text = "Error: Connection timeout (Wrong Domain)."
+            return
+
+        print("[Success] Valid path found. Loading...")
+        omni.usd.get_context().open_stage(path)
+
+    async def _validate_and_load_path(self, path):
         if not path or not path.lower().endswith(('.usd', '.usda', '.usdc')):
             self.lbl.text = "Error: Invalid URL or File extension."
             return
