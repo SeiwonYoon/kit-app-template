@@ -1,5 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+# ---------------------------------------------------------------------
+# extension.py
+# ---------------------------------------------------------------------
 
 import omni.ext
 import omni.kit.app

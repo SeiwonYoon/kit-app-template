@@ -1,13 +1,11 @@
-# morph/section_control/core.py
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
+# ---------------------------------------------------------------------
+# core.py  (morph/section_control/core.py)
+# ---------------------------------------------------------------------
 import time
 import traceback
 from typing import Optional, Dict, Any
 
 import carb
-import carb.events
 import carb.settings
 import omni.usd
 import omni.kit.app
@@ -263,8 +261,6 @@ class SectionController:
         if prim is None:
             return False
 
-        # ✅ flip은 direction setting으로 이미 처리 중이므로,
-        # 여기서는 offset을 그대로 사용 (프로젝트 기존 로직 유지)
         signed_offset = float(self._offset)
 
         if self._base_world_pos is None:
@@ -358,7 +354,6 @@ class SectionController:
 
     def apply_once_if_possible(self, attempt: int) -> bool:
         if not self._enabled:
-            # enable이 꺼져있어도 UI 토글이 다시 켜지는 걸 막고 싶다면 여기서도 OFF 유지
             self._force_section_manipulator_off()
             return True
 

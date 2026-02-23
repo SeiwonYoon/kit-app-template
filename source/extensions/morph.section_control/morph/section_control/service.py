@@ -1,20 +1,42 @@
-# service.py (깜빡임/반복 열림 방지 버전)
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
+# ---------------------------------------------------------------------
+# service.py  (깜빡임/반복 열림 방지 + 브라우저(MessageBus) 연동 버전)
+# ---------------------------------------------------------------------
 import asyncio
 
 import carb
 import carb.events
 import omni.kit.app
 import omni.usd
+import omni.kit.livestream.messaging as messaging
 
-from .core import SectionController, MessageBusAPI, StageEventType
+from .core import SectionController, MessageBusAPI
 
 
 class SectionControlService:
     DEBUG_WARMUP_LOG = True
-    WARMUP_FRAMES = 5  # 10이면 눈에 띄게 켜져있을 수 있어서 2 추천 (필요하면 다시 10)
+    WARMUP_FRAMES = 5  # 10이면 눈에 띄게 켜져있을 수 있어서 2~5 추천
+
+    # =========================
+    # ✅ MessageBus (Browser/WebViewer) 연동 이벤트명
+    # =========================
+    EVT_SECTION_GET_REQ = "section_get_request"
+    EVT_SECTION_GET_RESP = "section_get_response"
+
+    EVT_SECTION_SET_ALL_REQ = "section_set_all_request"
+    EVT_SECTION_SET_ALL_RESP = "section_set_all_response"
+
+    # (선택) 부분 제어를 원하면 확장 가능
+    EVT_SECTION_SET_ENABLED_REQ = "section_set_enabled_request"
+    EVT_SECTION_SET_ENABLED_RESP = "section_set_enabled_response"
+
+    EVT_SECTION_SET_AXIS_REQ = "section_set_axis_request"
+    EVT_SECTION_SET_AXIS_RESP = "section_set_axis_response"
+
+    EVT_SECTION_SET_FLIP_REQ = "section_set_flip_request"
+    EVT_SECTION_SET_FLIP_RESP = "section_set_flip_response"
+
+    EVT_SECTION_SET_OFFSET_REQ = "section_set_offset_request"
+    EVT_SECTION_SET_OFFSET_RESP = "section_set_offset_response"
 
     def __init__(self):
         self.controller = SectionController()
@@ -32,13 +54,24 @@ class SectionControlService:
         self._warmup_task = None
         self._warmed_once_for_stage_id = None
 
+        # ✅ message bus
+        self._bus = None
+        self._bus_subs = {}
+
     # ---------------- lifecycle ----------------
     def startup(self):
         self._subscribe_stage_events()
         self._register_web_api()
+
+        # ✅ Browser/WebViewer → Kit 제어용 MessageBus 구독
+        self._subscribe_message_bus_bridge()
+
         self.ensure_section_backend_running(force=True)
 
     def shutdown(self):
+        # ✅ message bus 정리
+        self._unsubscribe_message_bus_bridge()
+
         try:
             if self._post_update_sub:
                 self._post_update_sub.unsubscribe()
@@ -90,6 +123,196 @@ class SectionControlService:
                     out.append(item[0])
             return out
         return []
+
+    @staticmethod
+    def _payload_to_dict(e: carb.events.IEvent) -> dict:
+        try:
+            if e is None or e.payload is None:
+                return {}
+            return dict(e.payload.get_dict())
+        except Exception:
+            return {}
+
+    def _reply(self, resp_evt_name: str, payload: dict):
+        """
+        브라우저로 응답 보내기.
+        - messaging.register_event_type_to_send(resp_evt_name) 는 startup에서 해둔다.
+        """
+        if not self._bus:
+            return
+        try:
+            resp_type = carb.events.type_from_string(resp_evt_name)
+            self._bus.dispatch(resp_type, payload=payload)
+            self._bus.pump()
+        except Exception as ex:
+            self._log(f"bus reply failed ({resp_evt_name}): {ex}")
+
+    # ---------------- ✅ MessageBus Bridge ----------------
+    def _subscribe_message_bus_bridge(self):
+        """
+        Browser/WebViewer → Kit 확장 제어용 bridge.
+        Turntable 예시처럼 get_message_bus_event_stream()에서 이벤트를 직접 수신한다.
+        """
+        try:
+            app = omni.kit.app.get_app()
+            self._bus = app.get_message_bus_event_stream()
+
+            # ---- 응답 이벤트 타입 send 등록 ----
+            messaging.register_event_type_to_send(self.EVT_SECTION_GET_RESP)
+            messaging.register_event_type_to_send(self.EVT_SECTION_SET_ALL_RESP)
+            messaging.register_event_type_to_send(self.EVT_SECTION_SET_ENABLED_RESP)
+            messaging.register_event_type_to_send(self.EVT_SECTION_SET_AXIS_RESP)
+            messaging.register_event_type_to_send(self.EVT_SECTION_SET_FLIP_RESP)
+            messaging.register_event_type_to_send(self.EVT_SECTION_SET_OFFSET_RESP)
+
+            # ---- 구독 등록 헬퍼 ----
+            def _sub(evt_name: str, cb, sub_name: str):
+                evt_type = carb.events.type_from_string(evt_name)
+                sub = self._bus.create_subscription_to_pop_by_type(evt_type, cb, name=sub_name)
+                self._bus_subs[evt_name] = sub
+
+            # ---- section_get_request ----
+            def _on_get(e: carb.events.IEvent):
+                p = self._payload_to_dict(e)
+                call_id = p.get("id", -1)
+                try:
+                    st = self.controller.get_state()
+                    out = {"id": call_id, "response": st}
+                except Exception as ex:
+                    out = {"id": call_id, "error": str(ex)}
+                if call_id != -1:
+                    self._reply(self.EVT_SECTION_GET_RESP, out)
+
+            _sub(self.EVT_SECTION_GET_REQ, _on_get, "section_control_bus_get")
+
+            # ---- section_set_all_request ----
+            def _on_set_all(e: carb.events.IEvent):
+                p = self._payload_to_dict(e)
+                call_id = p.get("id", -1)
+
+                enabled = bool(p.get("enabled", False))
+                axis = str(p.get("axis", "X"))
+                flip = bool(p.get("flip", False))
+                try:
+                    offset = float(p.get("offset", 0.0))
+                except Exception:
+                    offset = 0.0
+
+                try:
+                    st = self.set_all_from_ui(enabled, axis, flip, offset, reason="bus_set_all")
+                    out = {"id": call_id, "response": st}
+                except Exception as ex:
+                    out = {"id": call_id, "error": str(ex)}
+
+                if call_id != -1:
+                    self._reply(self.EVT_SECTION_SET_ALL_RESP, out)
+
+            _sub(self.EVT_SECTION_SET_ALL_REQ, _on_set_all, "section_control_bus_set_all")
+
+            # ---- (선택) enabled만 ----
+            def _on_set_enabled(e: carb.events.IEvent):
+                p = self._payload_to_dict(e)
+                call_id = p.get("id", -1)
+                enabled = bool(p.get("enabled", False))
+                st0 = self.controller.get_state()
+                try:
+                    st = self.set_all_from_ui(
+                        enabled=enabled,
+                        axis=str(st0.get("axis", "X")),
+                        flip=bool(st0.get("flip", False)),
+                        offset=float(st0.get("offset", 0.0)),
+                        reason="bus_set_enabled",
+                    )
+                    out = {"id": call_id, "response": st}
+                except Exception as ex:
+                    out = {"id": call_id, "error": str(ex)}
+                if call_id != -1:
+                    self._reply(self.EVT_SECTION_SET_ENABLED_RESP, out)
+
+            _sub(self.EVT_SECTION_SET_ENABLED_REQ, _on_set_enabled, "section_control_bus_set_enabled")
+
+            # ---- (선택) axis만 ----
+            def _on_set_axis(e: carb.events.IEvent):
+                p = self._payload_to_dict(e)
+                call_id = p.get("id", -1)
+                axis = str(p.get("axis", "X"))
+                st0 = self.controller.get_state()
+                try:
+                    st = self.set_all_from_ui(
+                        enabled=bool(st0.get("enabled", False)),
+                        axis=axis,
+                        flip=bool(st0.get("flip", False)),
+                        offset=float(st0.get("offset", 0.0)),
+                        reason="bus_set_axis",
+                    )
+                    out = {"id": call_id, "response": st}
+                except Exception as ex:
+                    out = {"id": call_id, "error": str(ex)}
+                if call_id != -1:
+                    self._reply(self.EVT_SECTION_SET_AXIS_RESP, out)
+
+            _sub(self.EVT_SECTION_SET_AXIS_REQ, _on_set_axis, "section_control_bus_set_axis")
+
+            # ---- (선택) flip만 ----
+            def _on_set_flip(e: carb.events.IEvent):
+                p = self._payload_to_dict(e)
+                call_id = p.get("id", -1)
+                flip = bool(p.get("flip", False))
+                st0 = self.controller.get_state()
+                try:
+                    st = self.set_all_from_ui(
+                        enabled=bool(st0.get("enabled", False)),
+                        axis=str(st0.get("axis", "X")),
+                        flip=flip,
+                        offset=float(st0.get("offset", 0.0)),
+                        reason="bus_set_flip",
+                    )
+                    out = {"id": call_id, "response": st}
+                except Exception as ex:
+                    out = {"id": call_id, "error": str(ex)}
+                if call_id != -1:
+                    self._reply(self.EVT_SECTION_SET_FLIP_RESP, out)
+
+            _sub(self.EVT_SECTION_SET_FLIP_REQ, _on_set_flip, "section_control_bus_set_flip")
+
+            # ---- (선택) offset만 ----
+            def _on_set_offset(e: carb.events.IEvent):
+                p = self._payload_to_dict(e)
+                call_id = p.get("id", -1)
+                try:
+                    offset = float(p.get("offset", 0.0))
+                except Exception:
+                    offset = 0.0
+                st0 = self.controller.get_state()
+                try:
+                    st = self.set_all_from_ui(
+                        enabled=bool(st0.get("enabled", False)),
+                        axis=str(st0.get("axis", "X")),
+                        flip=bool(st0.get("flip", False)),
+                        offset=offset,
+                        reason="bus_set_offset",
+                    )
+                    out = {"id": call_id, "response": st}
+                except Exception as ex:
+                    out = {"id": call_id, "error": str(ex)}
+                if call_id != -1:
+                    self._reply(self.EVT_SECTION_SET_OFFSET_RESP, out)
+
+            _sub(self.EVT_SECTION_SET_OFFSET_REQ, _on_set_offset, "section_control_bus_set_offset")
+
+            self._log("message bus bridge: subscribed (get/set_all + optional partial controls)")
+
+        except Exception as ex:
+            self._log(f"message bus bridge: subscribe failed: {ex}")
+
+    def _unsubscribe_message_bus_bridge(self):
+        for _, s in list(self._bus_subs.items()):
+            try:
+                s.unsubscribe()
+            except Exception:
+                pass
+        self._bus_subs.clear()
+        self._bus = None
 
     # ---------------- ensure backend ----------------
     def ensure_section_backend_running(self, force: bool = False) -> bool:

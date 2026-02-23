@@ -1,6 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-
+# ---------------------------------------------------------------------
+# ui_dummy.py
+# ---------------------------------------------------------------------
 import omni.ui as ui
 
 
