@@ -17,7 +17,6 @@ from typing import Dict, Callable, List
 
 from .base_handler import BaseHandler
 
-
 class SectionControlHandler(BaseHandler):
     """section_control 익스텐션과의 메시지 통신을 처리하는 클래스"""
 
@@ -48,18 +47,10 @@ class SectionControlHandler(BaseHandler):
             'section_set_offset_request': self._on_set_offset,
         }
 
-    def _payload_to_dict(e: carb.events.IEvent) -> dict:
-        try:
-            if e is None or e.payload is None:
-                return {}
-            return dict(e.payload.get_dict())
-        except Exception:
-            return {}
-
     def _on_get_state(self, event: carb.events.IEvent) -> None:
-        """ ??? """
+        """ 현재 상태 요청 처리 """
         service = get_service()
-        result = service._service.get_state()
+        result = service.get_state()
         print(f"get_state result: {result}")
 
         self.dispatch_event("section_get_response", result)
@@ -67,13 +58,14 @@ class SectionControlHandler(BaseHandler):
 
     def _on_set_all(self, event: carb.events.IEvent) -> None:
         """ 전체 값 설정 """
-        p = self._payload_to_dict(event)
+        p = event.payload
         service = get_service()
-        enabled = p.get("enabled", False)
-        axis = p.get("axis", 'X')
-        flip = p.get("flip", False)
-        offset = p.get("offset", 0.0)
-        result = service._service.set_all(enabled, axis, flip, offset)
+        enabled = p['enabled']
+        axis =    p['axis']
+        flip =    p['flip']
+        offset =  p['offset']
+        print(f"_on_set_all payload: enabled={enabled}, axis={axis}, flip={flip}, offset={offset}")
+        result = service.set_all(enabled, axis, flip, offset)
         print(f"set_all result: {result}")
 
         self.dispatch_event("section_set_all_response", result)
@@ -81,10 +73,10 @@ class SectionControlHandler(BaseHandler):
 
     def _on_set_enabled(self, event: carb.events.IEvent) -> None:
         """ 부분 설정 - 활성화 여부 """
-        p = self._payload_to_dict(event)
+        p = event.payload
         service = get_service()
-        enabled = p.get("enabled", False)
-        result = service._service.set_enabled(enabled)
+        enabled = p['enabled']
+        result = service.set_enabled(enabled)
         print(f"set_enabled result: {result}")
 
         self.dispatch_event("section_set_enabled_response", result)
@@ -92,10 +84,10 @@ class SectionControlHandler(BaseHandler):
 
     def _on_set_axis(self, event: carb.events.IEvent) -> None:
         """ 부분 설정 - 축 설정 """
-        p = self._payload_to_dict(event)
+        p = event.payload
         service = get_service()
-        axis = p.get("axis", 'X')
-        result = service._service.set_axis(axis)
+        axis = p['axis']
+        result = service.set_axis(axis)
         print(f"set_axis result: {result}")
 
         self.dispatch_event("section_set_axis_response", result)
@@ -103,10 +95,10 @@ class SectionControlHandler(BaseHandler):
 
     def _on_set_flip(self, event: carb.events.IEvent) -> None:
         """ 부분 설정 - 뒤집기 여부 """
-        p = self._payload_to_dict(event)
+        p = event.payload
         service = get_service()
-        flip = p.get("flip", False)
-        result = service._service.set_flip(flip)
+        flip = p['flip']
+        result = service.set_flip(flip)
         print(f"set_flip result: {result}")
 
         self.dispatch_event("section_set_flip_response", result)
@@ -114,10 +106,10 @@ class SectionControlHandler(BaseHandler):
 
     def _on_set_offset(self, event: carb.events.IEvent) -> None:
         """ 부분 설정 - 오프셋 설정 """
-        p = self._payload_to_dict(event)
+        p = event.payload
         service = get_service()
-        offset = p.get("offset", 0.0)
-        result = service._service.set_offset(offset)
+        offset = p['offset']
+        result = service.set_offset(offset)
         print(f"set_offset result: {result}")
 
         self.dispatch_event("section_set_offset_response", result)
