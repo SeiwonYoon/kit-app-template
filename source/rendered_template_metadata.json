@@ -48,6 +48,13 @@
     },
     "Extension": {
         "basic_python_ui_extension": {
+            "morph.multi_viewport": {
+                "basic_python_ui_extension": {
+                    "extension_name": "morph.multi_viewport",
+                    "extension_display_name": "multi viewport",
+                    "version": "0.1.0"
+                }
+            },
             "morph.section_control": {
                 "basic_python_ui_extension": {
                     "extension_name": "morph.section_control",
@@ -62,17 +69,17 @@
                     "version": "0.1.0"
                 }
             },
-            "morph.multi_viewport": {
-                "basic_python_ui_extension": {
-                    "extension_name": "morph.multi_viewport",
-                    "extension_display_name": "multi viewport",
-                    "version": "0.1.0"
-                }
-            },
             "my_company.usd_loader": {
                 "basic_python_ui_extension": {
                     "extension_name": "my_company.usd_loader",
                     "extension_display_name": "usd_loader",
+                    "version": "0.1.0"
+                }
+            },
+            "morph.favorites_seach_prim": {
+                "basic_python_ui_extension": {
+                    "extension_name": "morph.favorites_seach_prim",
+                    "extension_display_name": "Favorites Search Prim",
                     "version": "0.1.0"
                 }
             }
