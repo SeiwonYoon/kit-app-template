@@ -1,0 +1,351 @@
+#usda 1.0
+(
+    customLayerData = {
+        dictionary cameraSettings = {
+            dictionary Perspective = {
+                double3 position = (74.19552787566697, 282.2536868175737, 36.877888821626)
+                double3 target = (-12101.60382979285, -2139.3727112061715, -12383.721921898628)
+            }
+            string boundCamera = "/Cam1"
+        }
+    }
+    defaultPrim = "World"
+    metersPerUnit = 0.01
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Xform "pointcloud"
+    {
+        double3 xformOp:rotateXYZ = (-90, 0, 0)
+        double3 xformOp:scale = (100, 100, 100)
+        double3 xformOp:translate = (0, 345, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+        def NVSealedUsdArchive "points"
+        {
+            token archiveChildName = "Proxy"
+            # To support a relative path in 'instanceId', omni.pointstreaming.test
+            # and omni.app.pointcloud.ujitso have to set
+            # 'exts."omni.pointcloud.streaming.potree".fileStreamerBasePath' to
+            # the root folder of this extension, which will be prepended to the path
+            # specified here, but only if the path is relative.
+            custom string NVSealedUsdArchiveFileSource = "_POTREE2_FILE_HIERARCHY_SOURCE_{'instanceId':'./data/potree/lion','pointScale':7.0}"
+        }
+    }
+}
+
+def Xform "Environment"
+{
+    double3 xformOp:rotateXYZ = (0, 0, 0)
+    double3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (0, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+
+    def DistantLight "defaultLight" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:angle = 1
+        float inputs:intensity = 3000
+        float inputs:shaping:cone:angle = 180
+        float inputs:shaping:cone:softness
+        float inputs:shaping:focus
+        color3f inputs:shaping:focusTint
+        asset inputs:shaping:ies:file
+        token visibility = "invisible"
+        double3 xformOp:rotateXYZ = (315, 0, 0)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (0, 523.5463517520022, 403.87632333584446)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+
+    def DomeLight "DomeLight" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:intensity = 1000
+        float inputs:shaping:cone:angle = 180
+        float inputs:shaping:cone:softness
+        float inputs:shaping:focus
+        color3f inputs:shaping:focusTint
+        asset inputs:shaping:ies:file
+        token inputs:texture:format = "latlong"
+        token visibility = "inherited"
+        bool visibleInPrimaryRay = 0
+        double3 xformOp:rotateXYZ = (270, 0, 0)
+        double3 xformOp:scale = (1, 1, 1)
+        double3 xformOp:translate = (225.22190999435222, 222.26235461875947, 371.23878998568057)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+}
+
+def Camera "Cam1" (
+    prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
+    hide_in_stage_window = false
+    no_delete = false
+)
+{
+    float4[] clippingPlanes = []
+    float2 clippingRange = (1, 10000000)
+    float exposure = 0
+    custom float exposure:fStop = 5
+    custom float exposure:iso = 100
+    custom float exposure:responsivity = 1.1026709
+    custom float exposure:time = 0.02
+    float focalLength = 18.147562
+    float focusDistance = 400
+    float fStop = 0
+    float horizontalAperture = 20.955
+    float horizontalApertureOffset = 0
+    custom vector3d omni:kit:centerOfInterest = (0, 0, -17560.912962254286)
+    custom float omni:rtx:autoExposure:adaptationSpeed = 3.5
+    custom bool omni:rtx:autoExposure:enabled = 0
+    custom bool omni:rtx:autoExposure:histogramClamping:enabled = 1
+    custom float omni:rtx:autoExposure:histogramClamping:maxLuminance = 100000
+    custom float omni:rtx:autoExposure:histogramClamping:minLuminance = 50
+    custom token omni:rtx:autoExposure:histogramFilter = "median"
+    custom float omni:rtx:autoExposure:whitePointScale = 10
+    token projection = "perspective"
+    uniform token purpose = "default"
+    double shutter:close = 0
+    double shutter:open = 0
+    uniform token stereoRole = "mono"
+    float verticalAperture = 15.2908
+    float verticalApertureOffset = 0
+    token visibility = "inherited"
+    float3 xformOp:rotateYXZ = (-5.6513424, 44.704746, 5.5667486)
+    float3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (74.19552787566697, 282.2536868175737, 36.877888821626)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateYXZ", "xformOp:scale"]
+}
+
+def Camera "Cam2" (
+    prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
+    hide_in_stage_window = false
+    no_delete = false
+)
+{
+    float4[] clippingPlanes = []
+    float2 clippingRange = (1, 10000000)
+    float exposure = 0
+    custom float exposure:fStop = 5
+    custom float exposure:iso = 100
+    custom float exposure:responsivity = 1.1026709
+    custom float exposure:time = 0.02
+    float focalLength = 18.147562
+    float focusDistance = 400
+    float fStop = 0
+    float horizontalAperture = 20.955
+    float horizontalApertureOffset = 0
+    custom vector3d omni:kit:centerOfInterest = (0, 0, -17560.912962254286)
+    custom float omni:rtx:autoExposure:adaptationSpeed = 3.5
+    custom bool omni:rtx:autoExposure:enabled = 0
+    custom bool omni:rtx:autoExposure:histogramClamping:enabled = 1
+    custom float omni:rtx:autoExposure:histogramClamping:maxLuminance = 100000
+    custom float omni:rtx:autoExposure:histogramClamping:minLuminance = 50
+    custom token omni:rtx:autoExposure:histogramFilter = "median"
+    custom float omni:rtx:autoExposure:whitePointScale = 10
+    token projection = "perspective"
+    uniform token purpose = "default"
+    double shutter:close = 0
+    double shutter:open = 0
+    uniform token stereoRole = "mono"
+    float verticalAperture = 15.2908
+    float verticalApertureOffset = 0
+    token visibility = "inherited"
+    float3 xformOp:rotateYXZ = (-5.3448257, 44.190823, 5.1743054)
+    float3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (611.6992085685295, 376.7319954028046, 379.5277506455295)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateYXZ", "xformOp:scale"]
+}
+
+def Camera "Cam3" (
+    prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
+    hide_in_stage_window = false
+    no_delete = false
+)
+{
+    float4[] clippingPlanes = []
+    float2 clippingRange = (1, 10000000)
+    float exposure = 0
+    custom float exposure:fStop = 5
+    custom float exposure:iso = 100
+    custom float exposure:responsivity = 1.1026709
+    custom float exposure:time = 0.02
+    float focalLength = 18.147562
+    float focusDistance = 400
+    float fStop = 0
+    float horizontalAperture = 20.955
+    float horizontalApertureOffset = 0
+    custom vector3d omni:kit:centerOfInterest = (0, 0, -17560.912962254286)
+    custom float omni:rtx:autoExposure:adaptationSpeed = 3.5
+    custom bool omni:rtx:autoExposure:enabled = 0
+    custom bool omni:rtx:autoExposure:histogramClamping:enabled = 1
+    custom float omni:rtx:autoExposure:histogramClamping:maxLuminance = 100000
+    custom float omni:rtx:autoExposure:histogramClamping:minLuminance = 50
+    custom token omni:rtx:autoExposure:histogramFilter = "median"
+    custom float omni:rtx:autoExposure:whitePointScale = 10
+    token projection = "perspective"
+    uniform token purpose = "default"
+    double shutter:close = 0
+    double shutter:open = 0
+    uniform token stereoRole = "mono"
+    float verticalAperture = 15.2908
+    float verticalApertureOffset = 0
+    token visibility = "inherited"
+    float3 xformOp:rotateYXZ = (-5.3784685, 52.54382, 6.975492)
+    float3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (1025.253728722777, 457.907939245558, 706.8632737821742)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateYXZ", "xformOp:scale"]
+}
+
+def Camera "Camera_start_flythrough" (
+    prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
+    hide_in_stage_window = false
+    no_delete = false
+)
+{
+    float4[] clippingPlanes = []
+    float2 clippingRange = (1, 10000000)
+    float exposure = 0
+    custom float exposure:fStop = 5
+    custom float exposure:iso = 100
+    custom float exposure:responsivity = 1.1026709
+    custom float exposure:time = 0.02
+    float focalLength = 18.147562
+    float focusDistance = 400
+    float fStop = 0
+    float horizontalAperture = 20.955
+    float horizontalApertureOffset = 0
+    custom vector3d omni:kit:centerOfInterest = (0, 0, -105191.00838698907)
+    custom float omni:rtx:autoExposure:adaptationSpeed = 3.5
+    custom bool omni:rtx:autoExposure:enabled = 0
+    custom bool omni:rtx:autoExposure:histogramClamping:enabled = 1
+    custom float omni:rtx:autoExposure:histogramClamping:maxLuminance = 100000
+    custom float omni:rtx:autoExposure:histogramClamping:minLuminance = 50
+    custom token omni:rtx:autoExposure:histogramFilter = "median"
+    custom float omni:rtx:autoExposure:whitePointScale = 10
+    token projection = "perspective"
+    uniform token purpose = "default"
+    double shutter:close = 0
+    double shutter:open = 0
+    uniform token stereoRole = "mono"
+    float verticalAperture = 15.2908
+    float verticalApertureOffset = 0
+    token visibility = "inherited"
+    float3 xformOp:rotateYXZ = (-0.21818739, 39.043972, 0.17696054)
+    float3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (56426.46556422041, 684.8865422698349, 69548.98589617667)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateYXZ", "xformOp:scale"]
+}
+
+def Camera "Camera_end_flythrough" (
+    prepend apiSchemas = ["OmniRtxCameraAutoExposureAPI_1", "OmniRtxCameraExposureAPI_1"]
+    hide_in_stage_window = false
+    no_delete = false
+)
+{
+    float4[] clippingPlanes = []
+    float2 clippingRange = (1, 10000000)
+    float exposure = 0
+    custom float exposure:fStop = 5
+    custom float exposure:iso = 100
+    custom float exposure:responsivity = 1.1026709
+    custom float exposure:time = 0.02
+    float focalLength = 18.147562
+    float focusDistance = 400
+    float fStop = 0
+    float horizontalAperture = 20.955
+    float horizontalApertureOffset = 0
+    custom vector3d omni:kit:centerOfInterest = (0, 0, -19579.746691692886)
+    custom float omni:rtx:autoExposure:adaptationSpeed = 3.5
+    custom bool omni:rtx:autoExposure:enabled = 0
+    custom bool omni:rtx:autoExposure:histogramClamping:enabled = 1
+    custom float omni:rtx:autoExposure:histogramClamping:maxLuminance = 100000
+    custom float omni:rtx:autoExposure:histogramClamping:minLuminance = 50
+    custom token omni:rtx:autoExposure:histogramFilter = "median"
+    custom float omni:rtx:autoExposure:whitePointScale = 10
+    token projection = "perspective"
+    uniform token purpose = "default"
+    double shutter:close = 0
+    double shutter:open = 0
+    uniform token stereoRole = "mono"
+    float verticalAperture = 15.2908
+    float verticalApertureOffset = 0
+    token visibility = "inherited"
+    float3 xformOp:rotateYXZ = (-0.21818739, 39.043972, 0.17696054)
+    float3 xformOp:scale = (1, 1, 1)
+    double3 xformOp:translate = (2499.5472328067726, 265.1258476183164, 3058.3894986653004)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateYXZ", "xformOp:scale"]
+}
+
+
+
+
+def "Render" (
+    hide_in_stage_window = true
+    no_delete = true
+)
+{
+    def "OmniverseKit"
+    {
+        def "HydraTextures" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            def RenderProduct "omni_kit_widget_viewport_ViewportTexture_0" (
+                prepend apiSchemas = ["OmniRtxSettingsCommonAdvancedAPI_1", "OmniRtxSettingsRtAdvancedAPI_1", "OmniRtxSettingsPtAdvancedAPI_1", "OmniRtxPostColorGradingAPI_1", "OmniRtxPostChromaticAberrationAPI_1", "OmniRtxPostBloomPhysicalAPI_1", "OmniRtxPostMatteObjectAPI_1", "OmniRtxPostCompositingAPI_1", "OmniRtxPostDofAPI_1", "OmniRtxPostMotionBlurAPI_1", "OmniRtxPostTvNoiseAPI_1", "OmniRtxPostTonemapIrayReinhardAPI_1", "OmniRtxPostDebugSettingsAPI_1", "OmniRtxDebugSettingsAPI_1"]
+                hide_in_stage_window = true
+                no_delete = true
+            )
+            {
+                rel camera = </Cam1>
+                token omni:rtx:ambientOcclusion:denoiserMode = "none"
+                token omni:rtx:background:source:texture:textureMode = "repeatMirrored"
+                token omni:rtx:background:source:type = "domeLight"
+                bool omni:rtx:debug:view:pixelDebug:enableFixedTextPos = 1
+                token omni:rtx:directLighting:sampledLighting:denoisingTechnique = "None"
+                bool omni:rtx:dlss:frameGeneration = 1
+                bool omni:rtx:indirectDiffuse:denoiser:enabled = 0
+                bool omni:rtx:post:registeredCompositing:invertColorCorrection = 1
+                bool omni:rtx:post:registeredCompositing:invertToneMap = 1
+                int omni:rtx:pt:maxSamplesPerLaunch = 2073600
+                int omni:rtx:pt:mgpu:maxPixelsPerRegionExponent = 12
+                bool omni:rtx:reflections:denoiser:enabled = 0
+                token omni:rtx:rendermode = "RealTimePathTracing"
+                color3f omni:rtx:rt:ambientLight:color = (0.1, 0.1, 0.1)
+                bool omni:rtx:rt:demoire = 0
+                bool omni:rtx:rt:lightcache:spatialCache:dontResolveConflicts = 1
+                int omni:rtx:rt:sss:samples = 1
+                int omni:rtx:rtpt:maxVolumeBounces = 15
+                float omni:rtx:rtpt:modulatingRoughnessThreshold = 0.08
+                uint omni:rtx:viewTile:limit = 4294967295
+                rel orderedVars = </Render/Vars/LdrColor>
+                custom bool overrideClipRange = 0
+                uniform int2 resolution = (512, 512)
+            }
+        }
+    }
+
+    def RenderSettings "OmniverseGlobalRenderSettings" (
+        prepend apiSchemas = ["OmniRtxSettingsGlobalRtAdvancedAPI_1", "OmniRtxSettingsGlobalPtAdvancedAPI_1"]
+        no_delete = true
+    )
+    {
+        rel products = </Render/OmniverseKit/HydraTextures/omni_kit_widget_viewport_ViewportTexture_0>
+    }
+
+    def "Vars"
+    {
+        def RenderVar "LdrColor" (
+            hide_in_stage_window = true
+            no_delete = true
+        )
+        {
+            uniform string sourceName = "LdrColor"
+        }
+    }
+}

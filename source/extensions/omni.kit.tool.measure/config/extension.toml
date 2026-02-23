@@ -1,0 +1,60 @@
+
+[package]
+title = "Measure Tool"
+description = "In-viewport measure tools."
+category = "Undefined"
+keywords = ["measure", "system", "tool"]
+version = "200.0.4"
+
+icon = "data/icon.png"
+preview_image = "data/preview.png"
+changelog = "docs/CHANGELOG.md"
+readme = "docs/index.rst"
+authors = ["NVIDIA"]
+repository = ""
+
+[package.target]
+kit = ["109.0"]
+
+[package.writeTarget]
+kit = false
+# platform = true  # only required if we have C++ compilation or 3rd party python (c based)
+
+# Main module for the Python interface
+[[python.module]]
+name = "omni.kit.tool.measure"
+
+# [[python.module]]
+# path = "pip_prebundle"
+
+# Watch the .ogn files for hot reloading (only works for Python files)
+[fswatcher.patterns]
+include = ["*.py"]
+exclude = []
+
+# Extensions required to load before this one
+[dependencies]
+"omni.kit.async_engine" = {}
+"omni.kit.manipulator.viewport" = {}
+"omni.kit.notification_manager" = {}
+"omni.kit.pip_archive" = {}
+"omni.kit.property.bundle" = {}
+"omni.kit.raycast.query" = {}
+"omni.kit.viewport.menubar.display" = {}
+"omni.kit.viewport.utility" = {}
+"omni.kit.viewport.window" = {}
+"omni.kit.window.cursor" = {}
+"omni.ui" = {}
+"omni.ui.scene" = {}
+"omni.usd" = {}
+"omni.warp.core" = {}
+"omni.kit.actions.core" = {optional=true}
+"omni.kit.hotekys.core" = {optional=true}
+
+
+[settings]
+exts."omni.kit.tool.measure".startup_tool = "NONE"
+exts."omni.kit.tool.measure".enable_hotkeys = false
+
+[settings.rtx-transient.scenedb]
+useUniformsReindexing = true

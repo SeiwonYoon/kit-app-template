@@ -28,6 +28,16 @@ for /f "usebackq tokens=*" %%i in (`powershell -NoProfile -Command "$PM_PACKAGES
 call "%~dp0tools\packman\python.bat" "%~dp0tools\repoman\repoman.py" %*
 if %errorlevel% neq 0 ( goto Error )
 
+REM ---- JSON Pretty Format Post Process (template new 일 때만) ----
+if /i "%1"=="template" if /i "%2"=="new" (
+    echo Formatting rendered_template_metadata.json...
+    call "%~dp0tools\packman\python.bat" "%~dp0format_json.py"
+    if %errorlevel% neq 0 (
+        echo Warning: format_json.py failed, ignoring.
+        set errorlevel=0
+    )
+)
+
 :Success
 ENDLOCAL
 exit /b 0

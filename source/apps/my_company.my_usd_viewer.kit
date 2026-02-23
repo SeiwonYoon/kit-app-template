@@ -54,6 +54,8 @@ template_name = "omni.usd_viewer"
 "morph.temp_alarm" = {}
 "my_company.usd_to_glb_converter" = {}
 
+"morph.multi_viewport" = {}
+
 [settings.persistent.app]
 viewport.autoFrame.mode = "first_open"  # Auto frame the first time the viewport is opened
 viewport.defaults.tickRate = 60  # Lock to 60fps
@@ -96,6 +98,7 @@ scene.lights.visible = false
 
 [settings.app.exts.folders]
 '++' = [  # Search paths for extensions.
+    "${root}/source/extensions",
     "${app}/../exts",
     "${app}/../extscache/"
 ]
