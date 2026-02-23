@@ -117,7 +117,9 @@ class SetupExtension(omni.ext.IExt):
         layout_file = Path(layouts_path).joinpath(f"{layout_name}.json")
 
         # ✅ 레이아웃 로드 후 특정 창 강제 표시
-        asyncio.ensure_future(_load_layout(f"{layout_file}", windows_to_show=AUTO_SHOW_WINDOWS))
+        # asyncio.ensure_future(_load_layout(f"{layout_file}", windows_to_show=AUTO_SHOW_WINDOWS))
+        # 특정창 표시 하지 않기
+        asyncio.ensure_future(_load_layout(f"{layout_file}", windows_to_show=None))
 
         # using imgui directly to adjust some color and Variable
         imgui = _imgui.acquire_imgui()
