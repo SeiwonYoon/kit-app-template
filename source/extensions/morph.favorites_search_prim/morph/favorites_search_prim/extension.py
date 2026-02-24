@@ -215,16 +215,17 @@ class MyExtension(omni.ext.IExt):
                         "path": path_str,
                         "name": prim.GetName(),
                         "is_default": prim == stage.GetDefaultPrim(),
-                        "icon_path": self._resolve_stage_icon_path(prim),
+                        "icon_paths": self._resolve_stage_icon_paths(prim),
                     }
                 )
         self._favorites_rows = rows
 
-    def _resolve_stage_icon_path(self, prim):
-        """우측 Stage의 Name 컬럼과 동일한 규칙으로 아이콘을 선택한다."""
+    def _resolve_stage_icon_paths(self, prim):
+        """우측 Stage Name 컬럼과 유사하게 다중 아이콘(오버레이) 목록을 만든다."""
         icons = StageIcons()
         node_type = prim.GetTypeName()
 
+        # 기본 타입 아이콘
         if node_type in [
             "DistantLight",
             "SphereLight",
@@ -233,12 +234,27 @@ class MyExtension(omni.ext.IExt):
             "CylinderLight",
             "DomeLight",
         ]:
-            return icons.get(node_type, "Light")
+            type_icon = icons.get(node_type, "Light")
+        else:
+            if not node_type:
+                node_type = "Class"
+            type_icon = icons.get(node_type, "Prim")
 
-        if not node_type:
-            node_type = "Class"
+        icon_paths = [type_icon]
 
-        return icons.get(node_type, "Prim")
+        # 우측 StageWidget의 NameColumnDelegate와 동일한 보조 아이콘 규칙
+        if prim.HasAuthoredReferences():
+            icon_paths.append(icons.get("Reference"))
+        if prim.HasAuthoredPayloads():
+            icon_paths.append(icons.get("Payload"))
+        if prim.IsInstanceable():
+            icon_paths.append(icons.get("Instance"))
+        if prim.HasAuthoredInherits():
+            icon_paths.append(icons.get("Inherited"))
+        if prim.HasAuthoredSpecializes():
+            icon_paths.append(icons.get("Specialized"))
+
+        return icon_paths
 
     def _refresh_right_favorite_column(self):
         """별 상태 변경 후 우측 트리 위젯을 강제로 다시 그린다."""
@@ -277,7 +293,7 @@ class MyExtension(omni.ext.IExt):
                             selected_bg_color=selected_bg_color,
                         )
 
-    def _build_left_row(self, path, name, is_default, icon_path, is_selected, selected_bg_color):
+    def _build_left_row(self, path, name, is_default, icon_paths, is_selected, selected_bg_color):
         """좌측 목록 한 줄을 생성하고 클릭/더블클릭 동작을 연결한다."""
         text = f"{name} (defaultPrim)" if is_default else name
         row = ui.ZStack(height=20, width=ui.Fraction(1.0))
@@ -297,9 +313,25 @@ class MyExtension(omni.ext.IExt):
             with ui.HStack(height=20):
                 ui.Spacer(width=20)
                 with ui.ZStack(width=20, height=20):
-                    ui.Image(icon_path, style_type_name_override="TreeView.Image")
+                    for icon_path in icon_paths:
+                        ui.Image(icon_path, style_type_name_override="TreeView.Image")
                 ui.Spacer(width=4)
                 ui.Label(text, style_type_name_override="TreeView.Item")
+                ui.Spacer()
+                # 좌측 목록 우측 끝에 즐겨찾기 토글(별) 버튼을 배치
+                star_click_area = ui.ZStack(width=FAVORITE_COLUMN_WIDTH, height=FAVORITE_ROW_HEIGHT)
+                with star_click_area:
+                    with ui.HStack():
+                        ui.Spacer()
+                        with ui.VStack(width=0):
+                            ui.Spacer()
+                            ui.Image(STAR_ICON_PATH, width=FAVORITE_ICON_SIZE, height=FAVORITE_ICON_SIZE)
+                            ui.Spacer()
+                        ui.Spacer()
+                star_click_area.set_mouse_pressed_fn(
+                    lambda _x, _y, button, _m, p=path: self._toggle_favorite(p) if button == 0 else None
+                )
+                ui.Spacer(width=2)
 
     def _get_left_selected_bg_color(self):
         """우측 Stage와 동일한 선택 배경색을 우선 사용한다."""
