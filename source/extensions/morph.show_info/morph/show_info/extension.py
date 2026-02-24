@@ -48,8 +48,19 @@ def _post_update_once(callback):
     return sub_ref[0]
 
 
+_extension_instance: Optional["Extension"] = None
+
+
+def get_instance() -> Optional["Extension"]:
+    """싱글톤: 현재 로드된 확장 인스턴스. 비활성 시 None."""
+    return _extension_instance
+
+
 class Extension(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:
+        global _extension_instance
+        _extension_instance = self
+
         # 터미널/콘솔에서 바로 보이도록 print + carb 동시 사용
         print("[morph.show_info] Extension on_startup")  # noqa: T201
         carb.log_info("[morph.show_info] Extension on_startup")
@@ -210,6 +221,9 @@ class Extension(omni.ext.IExt):
         self._apply_selection(paths)
 
     def on_shutdown(self) -> None:
+        global _extension_instance
+        _extension_instance = None
+
         if self._selection_sub is not None and hasattr(self._selection_sub, "release"):
             self._selection_sub.release()
             self._selection_sub = None
