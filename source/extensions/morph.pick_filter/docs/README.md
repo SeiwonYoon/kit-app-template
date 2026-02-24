@@ -9,7 +9,9 @@
 - Viewport Selection 비활성화
 - Frame(Focus)
 - Temperature 메타데이터 관리
+- Mesh(Visibility) 활성/비활성 제어 ✅
 - ✅ **Leaf Name(Prim 이름) 목록 기반 Selection / Selection 제거 / Pickable 일괄 적용**
+- ✅ **Leaf Name(Prim 이름) 목록 기반 Mesh(Visibility) 일괄 적용 / 토글 / 상태 조회**
 
 기능을 제공하는 **서비스형 익스텐션**입니다.
 
@@ -73,6 +75,20 @@ get_items_cached() -> List[Dict[str, Any]]
 
 현재 캐시된 prim 목록 반환
 
+- 캐시 항목(`Dict[str, Any]`) 주요 필드(요약):
+  - `path: str` : prim stage path
+  - `name: str` : prim leaf name
+  - `display: str` : display name(있으면)
+  - `type: str` : type name
+  - `depth: int` : 트리 깊이
+  - `pickable: bool` : pick 가능 여부(서비스 override 반영)
+  - `overridden: bool` : pickable override 여부
+  - `temperature: Optional[float]` : `hynix:temperature`
+  - `mesh_enabled: Optional[bool]` : visibility 기반 mesh 상태
+    - `True`: visible(=inherited 등)
+    - `False`: invisible
+    - `None`: Imageable 아님/판별 불가
+
 ## refresh_cache()
 
 ```python
@@ -116,6 +132,57 @@ unlock_all()
 ```
 
 전체 pick 활성화
+
+---
+
+# Mesh Visibility API (Path 기반)
+
+> Mesh 활성/비활성은 USD `UsdGeom.Imageable`의 `visibility`로 처리합니다.
+> - ON  : `visibility = inherited`
+> - OFF : `visibility = invisible`
+
+## get_mesh_enabled()
+
+```python
+get_mesh_enabled(path: str) -> Optional[bool]
+```
+
+해당 prim의 mesh(visibility) 활성 상태를 반환합니다.
+
+- `True`  : visible(inherited 등)
+- `False` : invisible
+- `None`  : stage/prim invalid 또는 Imageable 아님
+
+## set_mesh_enabled()
+
+```python
+set_mesh_enabled(path: str, enabled: bool, include_descendants: bool = False) -> bool
+```
+
+해당 prim의 mesh(visibility)를 ON/OFF 합니다.
+
+- `include_descendants=True`면 하위 prim에도 동일 적용합니다.
+- 리턴: 변경 시도 성공 여부(대략적인 성공 여부)
+
+## toggle_mesh_enabled()
+
+```python
+toggle_mesh_enabled(path: str, include_descendants: bool = False) -> Optional[bool]
+```
+
+현재 상태를 읽어서 반전시킨 뒤 적용합니다.
+
+- 리턴:
+  - `True/False` : 토글 후 최종 상태
+  - `None` : 토글 불가(Imageable 아님/prim invalid 등)
+
+## set_mesh_enabled_bulk()
+
+```python
+set_mesh_enabled_bulk(paths: List[str], enabled: bool) -> bool
+```
+
+여러 prim에 대해 mesh(visibility)를 **일괄 적용**합니다. (refresh 1회)
 
 ---
 
@@ -279,6 +346,70 @@ leaf name 목록에 해당하는 prim들에 대해 pickable을 **일괄 적용**
 
 ---
 
+# Leaf Name 기반 Mesh Visibility API (외부/Web UI 권장)
+
+## get_mesh_enabled_by_leaf_names()
+
+```python
+get_mesh_enabled_by_leaf_names(
+    leaf_names: List[str],
+    *,
+    use_refresh: bool = False,
+    require_unique: bool = False,
+) -> Dict[str, Any]
+```
+
+leaf name 목록에 해당하는 prim들의 mesh(visibility) 상태를 조회합니다.
+
+리턴(요약):
+- `resolved_paths`, `missing_names`, `ambiguous`, `ok`
+- `states: Dict[path, Optional[bool]]`
+- `count`
+
+## set_mesh_enabled_by_leaf_names()
+
+```python
+set_mesh_enabled_by_leaf_names(
+    leaf_names: List[str],
+    enabled: bool,
+    include_descendants: bool = False,
+    *,
+    use_refresh: bool = False,
+    require_unique: bool = False,
+) -> Dict[str, Any]
+```
+
+leaf name 목록에 해당하는 prim들에 대해 mesh(visibility)를 **일괄 적용**합니다.
+
+- `include_descendants=True`: resolve된 각 path의 하위 prim까지 동일 적용
+
+리턴(요약):
+- `updated`, `missing_names`, `ambiguous`, `ok`
+- `enabled`, `include_descendants`
+
+## toggle_mesh_by_leaf_names()
+
+```python
+toggle_mesh_by_leaf_names(
+    leaf_names: List[str],
+    include_descendants: bool = False,
+    *,
+    use_refresh: bool = False,
+    require_unique: bool = False,
+) -> Dict[str, Any]
+```
+
+leaf name 목록에 해당하는 prim들의 mesh(visibility)를 **개별 토글**합니다.
+(prim마다 현재 상태가 다를 수 있으므로 bulk toggle 대신 per-prim 토글)
+
+리턴(요약):
+- `toggled`, `toggled_paths`
+- `final_states: Dict[path, Optional[bool]]`
+- `missing_names`, `ambiguous`, `ok`
+- `include_descendants`
+
+---
+
 # Usage Example
 
 ```python
@@ -302,11 +433,17 @@ svc.set_viewport_selection_enabled(False)
 svc.set_pickable_by_leaf_names(pcb_leaf_names, pickable=False)
 svc.select_by_leaf_names(pcb_leaf_names, mode="replace")
 
+# mesh(visibility) OFF 일괄 적용
+svc.set_mesh_enabled_by_leaf_names(pcb_leaf_names, enabled=False)
+
 # 현재 selection을 frame
 svc.frame_prims(svc.get_selection())
 
 # 특정 leaf name들만 selection에서 제거
 svc.clear_selection_by_leaf_names(["N_06_Test", "N_07_Laser_Cutting"])
+
+# mesh 토글(개별)
+svc.toggle_mesh_by_leaf_names(["N_06_Test"])
 ```
 
 ---
@@ -318,3 +455,5 @@ svc.clear_selection_by_leaf_names(["N_06_Test", "N_07_Laser_Cutting"])
 3. leaf name resolve는 캐시 기반(best-effort)이며, 동일 name이 복수 path에 존재할 수 있습니다(ambiguous).
 4. temperature는 단순 메타데이터이며 알람/이벤트 발행은 하지 않습니다.
 5. `stop()` 호출 시 viewport selection disable 상태를 복구합니다.
+6. mesh(visibility)는 `UsdGeom.Imageable` 기준입니다.
+   - Imageable이 아닌 prim은 `get_mesh_enabled()`가 `None`을 반환할 수 있습니다.
