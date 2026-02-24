@@ -12,12 +12,14 @@ from .base_handler import BaseHandler
 from .usdLoader_handler import UsdLoaderHandler
 from .sectionControl_handler import SectionControlHandler
 from .pickFilter_handler import PickFilterHandler
+from .manualNav_handler import ManualNavHandler
 
 # 여기에 새 핸들러를 추가하세요
 HANDLERS = [
     UsdLoaderHandler,
     SectionControlHandler,
     PickFilterHandler,
+    ManualNavHandler,
 ]
 
 __all__ = ["BaseHandler", "UsdLoaderHandler", "HANDLERS"]
