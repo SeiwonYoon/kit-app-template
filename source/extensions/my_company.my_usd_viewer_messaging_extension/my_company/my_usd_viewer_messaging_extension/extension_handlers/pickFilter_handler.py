@@ -48,6 +48,10 @@ class PickFilterHandler(BaseHandler):
             "listGroupsResponse",
             "getGroupMembersResponse",
             "selectGroupResponse",
+            # Leaf Name
+            "selectByLeafNamesResponse",
+            "clearSelectionByLeafNamesResponse",
+            "setPickableByLeafNamesResponse",
         ]
 
     def get_event_handlers(self) -> Dict[str, Callable]:
@@ -83,6 +87,10 @@ class PickFilterHandler(BaseHandler):
             'listGroups': self._on_list_groups,
             'getGroupMembers': self._on_get_group_members,
             'selectGroup': self._on_select_group,
+            # Leaf Name
+            'selectByLeafNames': self._on_select_by_leaf_names,
+            'clearSelectionByLeafNames': self._on_clear_selection_by_leaf_names,
+            'setPickableByLeafNames': self._on_set_pickable_by_leaf_names,
         }
 
     # ──────────────────────────────────────────
@@ -413,7 +421,7 @@ class PickFilterHandler(BaseHandler):
         paths = p.get("paths", [])
         if isinstance(paths, carb.dictionary.Item):
             paths = paths.get_dict()
-        expand_descendants = bool(p.get("expand_descendants", False))
+        expand_descendants = bool(p.get("expand_descendants", True))
         result = svc.set_selection(paths, expand_descendants=expand_descendants)
         self.dispatch_event("setSelectionResponse", {"paths": paths, "success": result})
 
@@ -475,6 +483,82 @@ class PickFilterHandler(BaseHandler):
         expand_descendants = bool(p.get("expand_descendants", False))
         result = svc.select_group(group_id, mode=mode, expand_descendants=expand_descendants)
         self.dispatch_event("selectGroupResponse", result)
+
+    # ──────────────────────────────────────────
+    # Leaf Name API
+    # ──────────────────────────────────────────
+
+    def _on_select_by_leaf_names(self, event: carb.events.IEvent) -> None:
+        """Handler for the `selectByLeafNames` event – select prims by leaf name list."""
+        print(f"[PickFilterHandler] _on_select_by_leaf_names event_payload: {event.payload}")
+
+        svc = self._ensure_service()
+        if svc is None:
+            return
+
+        p = event.payload
+        leaf_names = p.get("leaf_names", [])
+        if isinstance(leaf_names, carb.dictionary.Item):
+            leaf_names = leaf_names.get_dict()
+        mode = p.get("mode", "replace")
+        expand_descendants = bool(p.get("expand_descendants", False))
+        use_refresh = bool(p.get("use_refresh", False))
+        require_unique = bool(p.get("require_unique", False))
+
+        result = svc.select_by_leaf_names(
+            leaf_names,
+            mode=mode,
+            expand_descendants=expand_descendants,
+            use_refresh=use_refresh,
+            require_unique=require_unique,
+        )
+        self.dispatch_event("selectByLeafNamesResponse", result)
+
+    def _on_clear_selection_by_leaf_names(self, event: carb.events.IEvent) -> None:
+        """Handler for the `clearSelectionByLeafNames` event – remove prims from selection by leaf name."""
+        print(f"[PickFilterHandler] _on_clear_selection_by_leaf_names event_payload: {event.payload}")
+
+        svc = self._ensure_service()
+        if svc is None:
+            return
+
+        p = event.payload
+        leaf_names = p.get("leaf_names", [])
+        if isinstance(leaf_names, carb.dictionary.Item):
+            leaf_names = leaf_names.get_dict()
+        use_refresh = bool(p.get("use_refresh", False))
+        require_unique = bool(p.get("require_unique", False))
+
+        result = svc.clear_selection_by_leaf_names(
+            leaf_names,
+            use_refresh=use_refresh,
+            require_unique=require_unique,
+        )
+        self.dispatch_event("clearSelectionByLeafNamesResponse", result)
+
+    def _on_set_pickable_by_leaf_names(self, event: carb.events.IEvent) -> None:
+        """Handler for the `setPickableByLeafNames` event – bulk apply pickable state by leaf name."""
+        print(f"[PickFilterHandler] _on_set_pickable_by_leaf_names event_payload: {event.payload}")
+
+        svc = self._ensure_service()
+        if svc is None:
+            return
+
+        p = event.payload
+        leaf_names = p.get("leaf_names", [])
+        if isinstance(leaf_names, carb.dictionary.Item):
+            leaf_names = leaf_names.get_dict()
+        pickable = bool(p.get("pickable", True))
+        use_refresh = bool(p.get("use_refresh", False))
+        require_unique = bool(p.get("require_unique", False))
+
+        result = svc.set_pickable_by_leaf_names(
+            leaf_names,
+            pickable,
+            use_refresh=use_refresh,
+            require_unique=require_unique,
+        )
+        self.dispatch_event("setPickableByLeafNamesResponse", result)
 
     # ──────────────────────────────────────────
     # Helpers
