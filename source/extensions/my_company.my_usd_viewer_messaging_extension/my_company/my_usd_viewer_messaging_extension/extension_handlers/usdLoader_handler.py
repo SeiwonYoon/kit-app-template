@@ -47,12 +47,11 @@ class UsdLoaderHandler(BaseHandler):
 
         if not self._usd_loader:
             self._usd_loader = my_company.usd_loader.get_instance()
-            print(f"self._usd_loader: {self._usd_loader}")
-            return
 
         path = event.payload["path"]
         carb.log_info(f"UsdLoaderHandler received path: {path}")
         asyncio.ensure_future(self._usd_loader._validate_and_load_path(path))
 
+        print(f"self._usd_loader: {self._usd_loader}")
         # 로딩 완료 시 이벤트 전송 예제 (실제로는 async 완료 후 전송해야 함)
         self.dispatch_event("usdLoadComplete", {"path": path})
