@@ -48,6 +48,9 @@ class PickFilterHandler(BaseHandler):
             "listGroupsResponse",
             "getGroupMembersResponse",
             "selectGroupResponse",
+            # Visibility
+            "setVisibilityResponse",
+            "getVisibilityResponse"
         ]
 
     def get_event_handlers(self) -> Dict[str, Callable]:
@@ -83,7 +86,41 @@ class PickFilterHandler(BaseHandler):
             'listGroups': self._on_list_groups,
             'getGroupMembers': self._on_get_group_members,
             'selectGroup': self._on_select_group,
+            # Visibility
+            'setVisibility': self._on_set_visibility,
+            'getVisibility': self._on_get_visibility,
         }
+    
+    # ──────────────────────────────────────────
+    # Visibility
+    # ──────────────────────────────────────────
+    def _on_set_visibility(self, event: carb.events.IEvent) -> None:
+        """Handler for the `setVisibility` event – set visibility state for a single prim."""
+        print(f"[PickFilterHandler] _on_set_visibility event_payload: {event.payload}")
+
+        svc = self._ensure_service()
+        if svc is None:
+            return
+
+        p = event.payload
+        path = p.get("path")
+        visible = bool(p.get("visible", True))
+        include_descendants = bool(p.get("include_descendants", True))
+
+        svc.set_mesh_enabled(path, visible, include_descendants=include_descendants)
+        self.dispatch_event("setVisibilityResponse", {"path": path, "visible": visible, "success": True})
+
+    def _on_get_visibility(self, event: carb.events.IEvent) -> None:
+        """Handler for the `getVisibility` event – get visibility state for a single prim."""
+        print(f"[PickFilterHandler] _on_get_visibility event_payload: {event.payload}")
+
+        svc = self._ensure_service()
+        if svc is None:
+            return
+
+        path = event.payload.get("path") or event.payload.get("prim_path", "")
+        visible = svc.get_mesh_enabled(path)
+        self.dispatch_event("getVisibilityResponse", {"path": path, "visible": visible})
 
     # ──────────────────────────────────────────
     # Children
