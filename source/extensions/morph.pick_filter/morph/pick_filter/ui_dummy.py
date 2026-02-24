@@ -14,13 +14,31 @@ from .service import PickFilterService
 # 더미 UI 전용: 온도 더미 순환 시퀀스
 DUMMY_TEMP_SEQ = [25.0, 80.0, 100.0, 120.0]
 
+# ✅ 더미 UI 전용: "그룹"은 UI가 보유하되, 서비스에는 group 정의를 두지 않는다.
+#    대신 leaf name 목록을 서비스 API(select_by_leaf_names / set_pickable_by_leaf_names / clear_selection_by_leaf_names)에 전달한다.
+DUMMY_GROUPS_BY_LEAF_NAMES: Dict[str, Dict[str, Any]] = {
+    "pcb_steps": {
+        "label": "PCB Steps",
+        "leaf_names": {
+            "N_01_PCB_On_Board",
+            "N_02_PCB_Router",
+            "N_03_Feeder",
+            "N_04_PCB_Assembly",
+            "N_05_Assembly",
+            "N_06_Test",
+            "N_07_Laser_Cutting",
+        },
+    }
+}
+
 
 class PickFilterDummyUI:
     """
     더미 UI (추후 web UI로 대체 예정)
     - raw/정책/더미 로직은 여기서 구현
-      (예: 온도 더미 순환 버튼, 특정 조건의 선택 언락 버튼 등)
+      (예: 온도 더미 순환 버튼, PCB Steps 버튼의 leaf name 목록 관리)
     - 실제 기능 실행은 PickFilterService API만 호출
+      (name 기반 selection/pickable API 사용)
     """
 
     WINDOW_TITLE = "Pick Filter"
@@ -91,7 +109,7 @@ class PickFilterDummyUI:
             ui.Button("전체락", clicked_fn=self._lock_all, width=110)
             ui.Button("전체언락", clicked_fn=self._unlock_all, width=110)
 
-            # 선택 언락/그룹/정책은 더미 UI에서만 구현
+            # ✅ UI는 leaf name 목록만 관리하고, 실행은 서비스 name-based API로 처리
             ui.Button("선택언락(PCB)", clicked_fn=self._unlock_only_pcb_group, width=160)
             ui.Button("그룹선택(PCB)", clicked_fn=self._select_pcb_group, width=160)
 
@@ -121,16 +139,25 @@ class PickFilterDummyUI:
         self._svc.unlock_all()
         self._request_refresh(force=True)
 
+    def _get_group_leaf_names(self, group_id: str) -> List[str]:
+        meta = (DUMMY_GROUPS_BY_LEAF_NAMES or {}).get(group_id) or {}
+        names = list(meta.get("leaf_names") or [])
+        # 안정적으로: 문자열 정리 + dedupe
+        names = [str(n).strip() for n in names if str(n).strip()]
+        return list(dict.fromkeys(names))
+
     def _select_pcb_group(self):
-        r = self._svc.select_group("pcb_steps", mode="replace")
+        leaf_names = self._get_group_leaf_names("pcb_steps")
+        r = self._svc.select_by_leaf_names(leaf_names, mode="replace", use_refresh=False, require_unique=False)
         if not r.get("ok", False):
-            carb.log_warn(f"[pick_filter] select_group failed: {r}")
+            carb.log_warn(f"[pick_filter] select_by_leaf_names failed: {r}")
         self._request_refresh(force=False)
 
     def _unlock_only_pcb_group(self):
-        r = self._svc.set_pickable_for_group("pcb_steps", True)
-        if r.get("error"):
-            carb.log_warn(f"[pick_filter] set_pickable_for_group failed: {r}")
+        leaf_names = self._get_group_leaf_names("pcb_steps")
+        r = self._svc.set_pickable_by_leaf_names(leaf_names, True, use_refresh=False, require_unique=False)
+        if not r.get("ok", True):
+            carb.log_warn(f"[pick_filter] set_pickable_by_leaf_names failed: {r}")
         self._request_refresh(force=True)
 
     def _toggle_viewport_selection(self):
