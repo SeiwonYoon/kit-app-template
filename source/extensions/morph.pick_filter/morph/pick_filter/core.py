@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional
 
 import omni.usd
 import omni.kit.app
-from pxr import Usd, Sdf
+from pxr import Usd, Sdf, UsdGeom
 
 try:
     from omni.usd import StageEventType
@@ -16,6 +16,7 @@ except Exception:
 
 
 TEMP_ATTR = "hynix:temperature"
+
 
 # -------------------------------------------------------------------------
 # Backward-compat shims (TEMP)
@@ -46,6 +47,10 @@ class PickFilterCore:
     - overrides를 source-of-truth로 사용 (ctx getter 부재 환경 대응)
     - prim 온도 어트리뷰트(hynix:temperature) read/write + cache 노출
       (알람/이벤트/버스 발행은 하지 않음)
+
+    [추가] Mesh(Visibility) read/write + cache 노출
+      - UsdGeom.Imageable visibility로 ON/OFF 처리
+      - ON: inherited, OFF: invisible
     """
 
     def __init__(self):
@@ -233,6 +238,108 @@ class PickFilterCore:
         self.refresh_cache()
         return True
 
+    # ---------------- mesh visibility ops ----------------
+    def get_mesh_enabled(self, path: str) -> Optional[bool]:
+        """
+        path prim의 visibility 기반 mesh enabled 상태를 반환.
+        - True  : visible(inherited)
+        - False : invisible
+        - None  : stage/prim invalid 또는 Imageable이 아님
+        """
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not stage:
+            return None
+        prim = stage.GetPrimAtPath((path or "").strip())
+        if not prim or not prim.IsValid():
+            return None
+        return self._read_visibility_enabled(prim)
+
+    def set_mesh_enabled(self, path: str, enabled: bool, include_descendants: bool = False) -> bool:
+        """
+        path prim의 visibility를 ON/OFF.
+        - ON  -> visibility = inherited
+        - OFF -> visibility = invisible
+        include_descendants=True면 하위 prim까지 동일 적용.
+        """
+        path = (path or "").strip()
+        if not path:
+            return False
+
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not stage:
+            return False
+
+        prim = stage.GetPrimAtPath(path)
+        if not prim or not prim.IsValid():
+            return False
+
+        targets = [prim]
+        if include_descendants:
+            targets = [stage.GetPrimAtPath(p) for p in self._expand_with_descendants(prim)]
+            targets = [t for t in targets if t and t.IsValid()]
+
+        ok_any = False
+        for tprim in targets:
+            if self._write_visibility_enabled(tprim, bool(enabled)):
+                ok_any = True
+
+        self.refresh_cache()
+        return bool(ok_any)
+
+    def toggle_mesh_enabled(self, path: str, include_descendants: bool = False) -> Optional[bool]:
+        """
+        현재 상태를 읽어서 반전시킨 뒤 적용.
+        리턴:
+          - True/False: 토글 후 최종 상태
+          - None: 토글 불가(Imageable 아님/prim invalid 등)
+        """
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not stage:
+            return None
+        prim = stage.GetPrimAtPath((path or "").strip())
+        if not prim or not prim.IsValid():
+            return None
+
+        cur = self._read_visibility_enabled(prim)
+        if cur is None:
+            return None
+
+        nxt = (not bool(cur))
+        ok = self.set_mesh_enabled(path, nxt, include_descendants=include_descendants)
+        if not ok:
+            return None
+        return bool(nxt)
+
+    def set_mesh_enabled_bulk(self, paths: List[str], enabled: bool) -> bool:
+        """
+        bulk 적용 (refresh 1회)
+        - include_descendants는 bulk에서는 별도 제공하지 않음(필요 시 caller에서 expand 후 전달)
+        """
+        if not paths:
+            return True
+
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not stage:
+            return False
+
+        ok_any = False
+        for p in paths:
+            p = (p or "").strip()
+            if not p:
+                continue
+            prim = stage.GetPrimAtPath(p)
+            if not prim or not prim.IsValid():
+                continue
+            if self._write_visibility_enabled(prim, bool(enabled)):
+                ok_any = True
+
+        self.refresh_cache()
+        return bool(ok_any)
+
     # ---------------- internals ----------------
     @staticmethod
     def _expand_with_descendants(root_prim) -> List[str]:
@@ -275,6 +382,55 @@ class PickFilterCore:
         except Exception:
             return None
 
+    @staticmethod
+    def _read_visibility_enabled(prim) -> Optional[bool]:
+        """
+        UsdGeom.Imageable visibility를 기준으로 enabled 판정.
+        - visibility == invisible -> False
+        - 그 외(inherited 등) -> True
+        - Imageable이 아니면 None
+        """
+        try:
+            img = UsdGeom.Imageable(prim)
+            if not img:
+                return None
+            attr = img.GetVisibilityAttr()
+            if not attr or not attr.IsValid():
+                # attribute가 없으면 기본은 visible(inherited)로 간주
+                return True
+            v = attr.Get()
+            if v is None:
+                return True
+            return (v != UsdGeom.Tokens.invisible)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _write_visibility_enabled(prim, enabled: bool) -> bool:
+        """
+        visibility 설정
+        - enabled=True  -> inherited
+        - enabled=False -> invisible
+        """
+        try:
+            img = UsdGeom.Imageable(prim)
+            if not img:
+                return False
+            attr = img.GetVisibilityAttr()
+            if not attr or not attr.IsValid():
+                # CreateVisibilityAttr는 존재 버전에 따라 다를 수 있어 CreateAttribute로 보수적으로 처리
+                try:
+                    attr = prim.CreateAttribute("visibility", Sdf.ValueTypeNames.Token, custom=False)
+                except Exception:
+                    attr = img.GetVisibilityAttr()
+            if not attr or not attr.IsValid():
+                return False
+
+            attr.Set(UsdGeom.Tokens.inherited if bool(enabled) else UsdGeom.Tokens.invisible)
+            return True
+        except Exception:
+            return False
+
     def _scan_stage_flat(self, root_path: str, limit: int = 50000) -> List[Dict[str, Any]]:
         ctx = omni.usd.get_context()
         stage = ctx.get_stage() if ctx else None
@@ -295,6 +451,7 @@ class PickFilterCore:
             depth = max(0, self._depth_from_path(p) - root_depth)
 
             temp = self._read_temperature(prim)
+            mesh_enabled = self._read_visibility_enabled(prim)
 
             items.append(
                 {
@@ -306,6 +463,8 @@ class PickFilterCore:
                     "pickable": bool(self._effective_pickable(p)),
                     "overridden": (p in self._overrides),
                     "temperature": temp,
+                    # ✅ mesh visibility cache
+                    "mesh_enabled": mesh_enabled,  # Optional[bool]
                 }
             )
 

@@ -39,6 +39,9 @@ class PickFilterDummyUI:
       (예: 온도 더미 순환 버튼, PCB Steps 버튼의 leaf name 목록 관리)
     - 실제 기능 실행은 PickFilterService API만 호출
       (name 기반 selection/pickable API 사용)
+
+    [추가]
+    - Mesh(visibility) 토글 버튼 'M' 제공
     """
 
     WINDOW_TITLE = "Pick Filter"
@@ -62,6 +65,9 @@ class PickFilterDummyUI:
         self._pending_pick_ops: Deque[Tuple[str, bool]] = deque()
         self._pending_pick_bulk: Deque[Tuple[List[str], bool]] = deque()
         self._pending_temp_ops: Deque[str] = deque()
+
+        # ✅ mesh toggle ops
+        self._pending_mesh_ops: Deque[Tuple[str, bool]] = deque()  # (path, include_descendants)
 
         self._processing_task: Optional[asyncio.Task] = None
         self._ui_tick_task: Optional[asyncio.Task] = None
@@ -225,6 +231,13 @@ class PickFilterDummyUI:
             path = self._pending_temp_ops.popleft()
             self._cycle_temperature_dummy_local(path)
 
+        # ✅ mesh toggle ops
+        while self._pending_mesh_ops:
+            path, include_desc = self._pending_mesh_ops.popleft()
+            st = self._svc.toggle_mesh_enabled(path, include_descendants=bool(include_desc))
+            if st is None:
+                carb.log_warn(f"[pick_filter] toggle_mesh_enabled failed: {path}")
+
         if self._pending_refresh:
             force = bool(self._pending_refresh_force)
             self._pending_refresh = False
@@ -258,6 +271,10 @@ class PickFilterDummyUI:
 
     def _request_temp_dummy(self, path: str):
         self._pending_temp_ops.append(path)
+        self._request_refresh(force=True)
+
+    def _request_mesh_toggle(self, path: str, include_descendants: bool = False):
+        self._pending_mesh_ops.append((path, bool(include_descendants)))
         self._request_refresh(force=True)
 
     # ---------------- refresh loop ----------------
@@ -360,6 +377,7 @@ class PickFilterDummyUI:
                 tname = it.get("type", "")
                 depth = int(it.get("depth", 0))
                 temp = it.get("temperature", None)
+                mesh_enabled = it.get("mesh_enabled", None)  # Optional[bool]
 
                 svc_pickable = bool(it.get("pickable", True))
                 pick_model = self._get_or_create_pick_model(path, svc_pickable)
@@ -398,6 +416,8 @@ class PickFilterDummyUI:
                         label_left = f"{label_left}  |  T={float(temp):.1f}"
                     except Exception:
                         pass
+                if mesh_enabled is not None:
+                    label_left = f"{label_left}  |  M={'ON' if bool(mesh_enabled) else 'OFF'}"
 
                 with ui.HStack(height=22):
                     ui.Spacer(width=indent_w)
@@ -412,6 +432,9 @@ class PickFilterDummyUI:
 
                     # 더미 온도 순환(⚠)
                     ui.Button("⚠", width=28, clicked_fn=(lambda p=path: self._request_temp_dummy(p)))
+
+                    # ✅ 메쉬 토글(M) - service API 호출
+                    ui.Button("M", width=28, clicked_fn=(lambda p=path: self._request_mesh_toggle(p, include_descendants=False)))
 
                     # 포커스(프레임)
                     ui.Button("F", width=28, clicked_fn=(lambda p=path: self._svc.frame_prim(p)))
