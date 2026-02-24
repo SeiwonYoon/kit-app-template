@@ -1,6 +1,6 @@
 # morph.manual_nav
 
-`morph.manual_nav`는 Viewport의 확장 메뉴 Navigation Visor bar의 카메라 제어 기능을 api 형태로 사용하기 위한 익스텐션입니다.
+- `morph.manual_nav`는 Viewport의 확장 메뉴 Navigation Visor bar의 카메라 제어 기능을 api 형태로 사용하기 위한 익스텐션입니다.
 ---
 
 ## 1. 제공 기능
@@ -38,4 +38,6 @@ from morph.manual_nav.extension import get_service
 ```
 
 - teleport_on, teleport_off는 각각 텔레포트 on off 상태를 제어합니다.
-- 만약 navigation bar가 켜져 있어 orbit 혹은 기타 상태일 경우, 해당 상태를 제어하지 않습니다. (텔레포트 on 이전 자동으로 꺼 주지 않는다는 의미)
+- navigation bar의 텔레포트 기능과 동일하게 작동합니다.
+- navigation bar의 dependency와 관계 없이 동작합니다.
+- 만약 navigation bar가 켜져 있어 orbit 혹은 기타 상태일 경우, 해당 상태를 제어하지 않습니다. (teleport_on 호출시 이전 상태를 자동으로 꺼 주지 않음)
