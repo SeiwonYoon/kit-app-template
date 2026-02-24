@@ -18,9 +18,15 @@ from omni.kit.widget.stage import (
     DefaultSelectionWatch,
     StageColumnDelegateRegistry,
     StageIcons,
-    StageWidget,
 )
 from omni.kit.widget.stage.stage_style import Styles as StageStyles
+from .ui_layout import (
+    FAVORITE_COLUMN_WIDTH,
+    FAVORITE_ICON_SIZE,
+    FAVORITE_ROW_HEIGHT,
+    build_main_window,
+    rebuild_left_list,
+)
 
 # 즐겨찾기 경로 집합/콜백은 커스텀 컬럼(delegate)과 확장 본체가 공유한다.
 _FAVORITES_PATHS = set()
@@ -28,16 +34,6 @@ _TOGGLE_FAVORITE_FN = None
 STAR_ICON_PATH = ""
 STAR_EMPTY_ICON_PATH = ""
 
-# Favorite 컬럼 아이콘 배치 상수
-FAVORITE_COLUMN_WIDTH = 24
-FAVORITE_ROW_HEIGHT = 24
-FAVORITE_ICON_SIZE = 16
-
-# 좌측 즐겨찾기 목록 선택 하이라이트 기본색(ARGB)
-LEFT_HIGHLIGHT_COLOR = 0xFF4B4A42
-LEFT_PANEL_OUTER_MARGIN = 2
-LEFT_SELECTION_INSET_X = 2
-LEFT_SELECTION_INSET_Y = 1
 FAVORITES_JSON_NAME = "favorites_search_prim.json"
 
 
@@ -124,48 +120,11 @@ class MyExtension(omni.ext.IExt):
         if not registry.get_column_delegate("Favorite"):
             self._favorite_delegate_sub = registry.register_column_delegate("Favorite", FavoriteColumnDelegate)
 
-        self._window = ui.Window(
-            "Favorites Search Prim",
-            width=600,
-            height=800,
-            flags=ui.WINDOW_FLAGS_NO_SCROLLBAR,
+        self._window, self._left_list_frame, self._right_stage_widget = build_main_window(
+            load_fn=self._on_click_load_favorites,
+            clear_fn=self._on_click_all_clear,
+            favorites_json_path=self._favorites_json_path,
         )
-
-        with self._window.frame:
-            with ui.HStack(spacing=2, height=ui.Fraction(1.0)):
-                # 좌측: 수동 즐겨찾기 목록 영역
-                with ui.VStack(width=ui.Fraction(1), spacing=0):
-                    ui.Spacer(height=LEFT_PANEL_OUTER_MARGIN)
-                    with ui.HStack(spacing=0, height=ui.Fraction(1.0)):
-                        ui.Spacer(width=LEFT_PANEL_OUTER_MARGIN)
-                        with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
-                            with ui.HStack(height=24, spacing=4):
-                                load_btn = ui.Button("Load", width=54, clicked_fn=lambda: self._on_click_load_favorites())
-                                load_btn.tooltip = f"Load favorites from:\n{self._favorites_json_path}"
-                                clear_btn = ui.Button("AllClear", width=72, clicked_fn=lambda: self._on_click_all_clear())
-                                clear_btn.tooltip = "Clear all favorites and save immediately."
-                                ui.Spacer()
-                            ui.Spacer(height=7)
-                            with ui.ZStack(height=7):
-                                ui.Rectangle(style_type_name_override="TreeView.Header")
-                                with ui.HStack():
-                                    ui.Spacer(width=10)
-                                    ui.Label("Name", style_type_name_override="TreeView.Header")
-                            with ui.ScrollingFrame(
-                                style_type_name_override="TreeView.ScrollingFrame",
-                                horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
-                                height=ui.Fraction(1.0),
-                            ):
-                                self._left_list_frame = ui.Frame()
-                        ui.Spacer(width=LEFT_PANEL_OUTER_MARGIN)
-                    ui.Spacer(height=LEFT_PANEL_OUTER_MARGIN)
-
-                # 우측: StageWidget + Favorite/Visibility/Type 컬럼
-                with ui.VStack(width=ui.Fraction(2), spacing=0):
-                    self._right_stage_widget = StageWidget(
-                        None,
-                        columns_enabled=["Favorite", "Visibility", "Type"],
-                    )
 
         # 우측 Stage 선택 동기화
         self._right_selection = DefaultSelectionWatch(usd_context=self._usd_context)
@@ -356,72 +315,15 @@ class MyExtension(omni.ext.IExt):
         if self._usd_context and self._usd_context.get_selection():
             # Sdf.Path/str 혼용 대비를 위해 문자열로 통일
             selected_paths = {str(p) for p in self._usd_context.get_selection().get_selected_prim_paths()}
-
-        self._left_list_frame.clear()
-        with self._left_list_frame:
-            with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
-                if not self._favorites_rows:
-                    with ui.HStack(height=20):
-                        ui.Spacer(width=8)
-                        ui.Label("(empty)", style_type_name_override="TreeView.Item")
-                else:
-                    for row in self._favorites_rows:
-                        self._build_left_row(
-                            **row,
-                            is_selected=row["path"] in selected_paths,
-                        )
-
-    def _build_left_row(self, path, name, is_default, icon_paths, is_selected):
-        """좌측 목록 한 줄을 생성하고 클릭/더블클릭 동작을 연결한다."""
-        text = f"{name} (defaultPrim)" if is_default else name
-        row = ui.ZStack(height=20, width=ui.Fraction(1.0))
-        row.set_mouse_pressed_fn(
-            lambda _x, _y, button, _m, p=path: self._on_left_row_clicked(p) if button == 0 else None
+        rebuild_left_list(
+            frame=self._left_list_frame,
+            favorites_rows=self._favorites_rows,
+            selected_paths=selected_paths,
+            on_row_clicked=self._on_left_row_clicked,
+            on_row_double_clicked=self._on_left_row_double_clicked,
+            on_toggle_favorite=self._toggle_favorite,
+            star_icon_path=STAR_ICON_PATH,
         )
-        row.set_mouse_double_clicked_fn(
-            lambda _x, _y, button, _m, p=path: self._on_left_row_double_clicked(p) if button == 0 else None
-        )
-        with row:
-            with ui.VStack(spacing=0, height=24):
-                with ui.HStack(spacing=0):
-                    ui.Rectangle(
-                        visible=is_selected,
-                        style={"Rectangle": {"background_color": LEFT_HIGHLIGHT_COLOR}},
-                        width=ui.Fraction(1.0),
-                        height=24,
-                    )
-            with ui.HStack(height=24):
-                ui.Spacer(width=8)
-                with ui.VStack(width=0):
-                    ui.Spacer()
-                    with ui.ZStack(width=20, height=20):
-                        for icon_path in icon_paths:
-                            ui.Image(icon_path, style_type_name_override="TreeView.Image")
-                    ui.Spacer()
-                ui.Spacer(width=4)
-                if is_selected:
-                    ui.Label(
-                        text,
-                        style_type_name_override="TreeView.Item",
-                        style={"color": 0xFFFFFFFF},
-                    )
-                else:
-                    ui.Label(text, style_type_name_override="TreeView.Item")
-                ui.Spacer()
-                # 좌측 목록 우측 끝에 즐겨찾기 토글(별) 버튼을 배치
-                star_click_area = ui.ZStack(width=FAVORITE_COLUMN_WIDTH, height=FAVORITE_ROW_HEIGHT)
-                with star_click_area:
-                    with ui.HStack():
-                        ui.Spacer()
-                        with ui.VStack(width=0):
-                            ui.Spacer()
-                            ui.Image(STAR_ICON_PATH, width=FAVORITE_ICON_SIZE, height=FAVORITE_ICON_SIZE)
-                            ui.Spacer()
-                        ui.Spacer()
-                star_click_area.set_mouse_pressed_fn(
-                    lambda _x, _y, button, _m, p=path: self._toggle_favorite(p) if button == 0 else None
-                )
-                ui.Spacer(width=2)
 
     def _on_left_row_clicked(self, path_str: str):
         """클릭 시 우측 Stage와 동일하게 선택(selection)만 갱신한다."""
