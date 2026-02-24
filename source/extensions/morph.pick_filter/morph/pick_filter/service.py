@@ -36,27 +36,11 @@ class PickFilterService:
     """
     Public API(Facade)
     - 외부 익스텐션/추후 web UI가 이 클래스만 호출하도록 설계
-    - raw/더미 로직(예: 온도 더미 순환)은 Dummy UI에서 구현
     - ❌ 알람/이벤트/버스 발행은 service에 두지 않음 (요구사항 반영)
-    - VP selection disable / focus(frame) / selection / group selection 제공
+    - VP selection disable / frame / selection / pickable / temperature 제공
+    - ✅ Name(leaf) 기반 resolve + selection/pickable API 제공
+      (그룹 정의/정책 데이터는 service가 보유하지 않음)
     """
-
-    # ---------------- group definitions ----------------
-    # group_id -> leaf prim names (현재 요구사항 기반)
-    _GROUPS_BY_LEAF_NAMES: Dict[str, Dict[str, Any]] = {
-        "pcb_steps": {
-            "label": "PCB Steps",
-            "leaf_names": {
-                "N_01_PCB_On_Board",
-                "N_02_PCB_Router",
-                "N_03_Feeder",
-                "N_04_PCB_Assembly",
-                "N_05_Assembly",
-                "N_06_Test",
-                "N_07_Laser_Cutting",
-            },
-        }
-    }
 
     def __init__(self):
         self._core = PickFilterCore()
@@ -105,25 +89,6 @@ class PickFilterService:
 
     def unlock_all(self):
         return self._core.unlock_all()
-
-    def set_pickable_for_group(self, group_id: str, pickable: bool) -> Dict[str, Any]:
-        """
-        그룹 멤버들에 대해 pickable bulk 적용 (semantic API)
-        """
-        members = self.get_group_members(group_id)
-        if not members:
-            return {"group_id": group_id, "updated": 0, "missing": [], "error": "group_empty_or_not_found"}
-
-        # 존재 확인(캐시 기준 best-effort)
-        cached = self.get_items_cached() or self.refresh_cache()
-        stage_paths = {it.get("path") for it in cached if it.get("path")}
-        missing = [p for p in members if p not in stage_paths]
-        targets = [p for p in members if p in stage_paths]
-
-        if targets:
-            self.set_pickable_bulk(targets, bool(pickable))
-
-        return {"group_id": group_id, "updated": len(targets), "missing": missing}
 
     # ---------------- temperature ----------------
     def get_temperature(self, path: str):
@@ -332,52 +297,93 @@ class PickFilterService:
         merged = list(dict.fromkeys(cur + add))
         return self.set_selection(merged, expand_descendants=expand_descendants)
 
-    # ---------------- groups (semantic) ----------------
-    def list_groups(self) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for gid, meta in (self._GROUPS_BY_LEAF_NAMES or {}).items():
-            names = set(meta.get("leaf_names") or [])
-            out.append({"group_id": gid, "label": meta.get("label", gid), "count_hint": len(names)})
-        return out
-
-    def get_group_members(self, group_id: str) -> List[str]:
+    # ---------------- leaf-name based resolve + ops ----------------
+    def _resolve_paths_by_leaf_names(
+        self,
+        leaf_names: List[str],
+        *,
+        use_refresh: bool = False,
+        require_unique: bool = False,
+    ) -> Dict[str, Any]:
         """
-        group_id -> stage path list (캐시 기반 resolve)
-        - leaf name 기준 그룹을 현재 캐시에서 path로 해석
+        leaf name 목록을 stage path 목록으로 resolve (캐시 기반 best-effort)
+        리턴:
+          {
+            "requested_names": [...],
+            "resolved_paths": [...],          # dedup, keep order(by cache scan order)
+            "missing_names": [...],
+            "ambiguous": {name: [paths...]},  # 동일 name이 복수 path에 매칭될 때
+            "ok": bool,                       # require_unique 위반 시 False
+          }
         """
-        meta = (self._GROUPS_BY_LEAF_NAMES or {}).get(group_id)
-        if not meta:
-            return []
+        req_names = [str(n).strip() for n in (leaf_names or []) if str(n).strip()]
+        # dedupe while preserving order
+        req_names = list(dict.fromkeys(req_names))
 
-        names: Set[str] = set(meta.get("leaf_names") or [])
-        if not names:
-            return []
+        items = (self.refresh_cache() if use_refresh else self.get_items_cached()) or (self.refresh_cache() if not use_refresh else [])
+        name_to_paths: Dict[str, List[str]] = {}
 
-        items = self.get_items_cached() or self.refresh_cache()
-        paths: List[str] = []
-        for it in items:
-            n = it.get("name") or ""
-            p = it.get("path") or ""
-            if n in names and p:
-                paths.append(p)
+        for it in (items or []):
+            n = (it.get("name") or "").strip()
+            p = (it.get("path") or "").strip()
+            if not n or not p:
+                continue
+            if n not in name_to_paths:
+                name_to_paths[n] = []
+            name_to_paths[n].append(p)
 
-        return list(dict.fromkeys(paths))
+        missing: List[str] = []
+        ambiguous: Dict[str, List[str]] = {}
+        resolved_paths: List[str] = []
 
-    def select_group(self, group_id: str, mode: str = "replace", expand_descendants: bool = False) -> Dict[str, Any]:
+        for n in req_names:
+            paths = name_to_paths.get(n) or []
+            if not paths:
+                missing.append(n)
+                continue
+            if len(paths) > 1:
+                ambiguous[n] = list(paths)
+            resolved_paths.extend(paths)
+
+        # dedupe resolved paths keep order
+        resolved_paths = list(dict.fromkeys([p for p in resolved_paths if p]))
+
+        ok = True
+        if require_unique and ambiguous:
+            ok = False
+
+        return {
+            "requested_names": req_names,
+            "resolved_paths": resolved_paths,
+            "missing_names": missing,
+            "ambiguous": ambiguous,
+            "ok": bool(ok),
+        }
+
+    def select_by_leaf_names(
+        self,
+        leaf_names: List[str],
+        mode: str = "replace",
+        expand_descendants: bool = False,
+        *,
+        use_refresh: bool = False,
+        require_unique: bool = False,
+    ) -> Dict[str, Any]:
         """
-        group_id에 해당하는 prim들을 selection으로 반영
+        leaf name 목록으로 selection 반영
         mode: "replace" | "append" | "toggle"
         """
         mode = (mode or "replace").strip().lower()
-        members = self.get_group_members(group_id)
+        r = self._resolve_paths_by_leaf_names(leaf_names, use_refresh=use_refresh, require_unique=require_unique)
 
-        if not members:
-            return {"group_id": group_id, "mode": mode, "requested": 0, "selected": 0, "missing": [], "error": "group_empty_or_not_found"}
+        if not r.get("ok", False):
+            r.update({"mode": mode, "selected": 0})
+            return r
 
-        cached = self.get_items_cached() or self.refresh_cache()
-        stage_paths = {it.get("path") for it in cached if it.get("path")}
-        missing = [p for p in members if p not in stage_paths]
-        targets = [p for p in members if p in stage_paths]
+        targets = list(r.get("resolved_paths") or [])
+        if not targets:
+            r.update({"mode": mode, "selected": 0})
+            return r
 
         ok = False
         if mode == "append":
@@ -393,4 +399,60 @@ class PickFilterService:
         else:
             ok = self.set_selection(targets, expand_descendants=expand_descendants)
 
-        return {"group_id": group_id, "mode": mode, "requested": len(members), "selected": len(targets), "missing": missing, "ok": bool(ok)}
+        r.update({"mode": mode, "selected": len(targets), "ok": bool(ok)})
+        return r
+
+    def clear_selection_by_leaf_names(
+        self,
+        leaf_names: List[str],
+        *,
+        use_refresh: bool = False,
+        require_unique: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        leaf name 목록에 해당하는 prim들을 현재 selection에서 제거
+        """
+        r = self._resolve_paths_by_leaf_names(leaf_names, use_refresh=use_refresh, require_unique=require_unique)
+
+        if not r.get("ok", False):
+            r.update({"removed": 0})
+            return r
+
+        targets = set(r.get("resolved_paths") or [])
+        if not targets:
+            r.update({"removed": 0, "ok": True})
+            return r
+
+        cur = self.get_selection()
+        new_sel = [p for p in cur if p not in targets]
+        removed = len(cur) - len(new_sel)
+
+        ok = self.set_selection(new_sel, expand_descendants=False)
+        r.update({"removed": removed, "ok": bool(ok)})
+        return r
+
+    def set_pickable_by_leaf_names(
+        self,
+        leaf_names: List[str],
+        pickable: bool,
+        *,
+        use_refresh: bool = False,
+        require_unique: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        leaf name 목록에 해당하는 prim들에 대해 pickable bulk 적용
+        """
+        r = self._resolve_paths_by_leaf_names(leaf_names, use_refresh=use_refresh, require_unique=require_unique)
+
+        if not r.get("ok", False):
+            r.update({"updated": 0})
+            return r
+
+        targets = list(r.get("resolved_paths") or [])
+        if not targets:
+            r.update({"updated": 0, "ok": True})
+            return r
+
+        self.set_pickable_bulk(targets, bool(pickable))
+        r.update({"updated": len(targets), "ok": True, "pickable": bool(pickable)})
+        return r
