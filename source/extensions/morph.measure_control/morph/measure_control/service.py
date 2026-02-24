@@ -186,6 +186,15 @@ class MeasureControlService:
         if not self.ensure_measure_backend_running():
             return self._fail(f"omni.kit.tool.measure backend is not available ({self._last_message})")
 
+        # Execute Measure Manager "Delete All" before creating a new mesh measurement.
+        try:
+            from omni.kit.tool.measure.manager import MeasurementManager
+
+            MeasurementManager().delete_all()
+        except Exception as ex:
+            # Continue even if cleanup fails.
+            self._log(f"delete_all before measure failed: {ex}")
+
         try:
             from omni.kit.tool.measure.viewport.tools.mesh import _create_bbox_axis_measurements_impl
         except Exception as ex:
