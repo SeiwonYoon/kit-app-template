@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 import asyncio
-from typing import Dict, Any, List, Optional, Callable, Set
+from typing import Dict, Any, List, Optional
 
 import omni.usd
 import omni.kit.app
@@ -18,35 +18,34 @@ except Exception:
 TEMP_ATTR = "hynix:temperature"
 
 # -------------------------------------------------------------------------
-# Temperature change signal (cross-extension)
-# - temp_alarm 같은 다른 익스텐션이 여기에 리스너 등록해서 "즉시" 반영 가능
+# Backward-compat shims (TEMP)
+# - 과거 morph.temp_alarm이 아래 심볼을 import 하던 관성 때문에 로딩이 깨질 수 있음.
+# - 현재 설계에서는 사용하지 않음(no-op).
+# - temp_alarm이 완전히 정리되면 제거 가능.
 # -------------------------------------------------------------------------
-_TEMP_LISTENERS: Set[Callable[[str, float], None]] = set()
-
-
-def register_temperature_listener(fn: Callable[[str, float], None]):
-    _TEMP_LISTENERS.add(fn)
-
-
-def unregister_temperature_listener(fn: Callable[[str, float], None]):
-    if fn in _TEMP_LISTENERS:
-        _TEMP_LISTENERS.remove(fn)
-
-
-def _notify_temperature_changed(path: str, value: float):
-    for fn in list(_TEMP_LISTENERS):
-        try:
-            fn(path, float(value))
-        except Exception:
-            pass
-
-
-class PickFilterService:
+def register_temperature_listener(fn):
     """
-    Pickable 제어 서비스
+    [DEPRECATED / NO-OP]
+    과거 temp_alarm 호환용. 현재 설계에서는 사용하지 않음.
+    """
+    return
+
+
+def unregister_temperature_listener(fn):
+    """
+    [DEPRECATED / NO-OP]
+    과거 temp_alarm 호환용. 현재 설계에서는 사용하지 않음.
+    """
+    return
+
+
+class PickFilterCore:
+    """
+    Pickable/Temperature Core
     - stage_event 폭주로 refresh_cache 연속 호출되는 문제를 디바운스로 완화
     - overrides를 source-of-truth로 사용 (ctx getter 부재 환경 대응)
-    - [추가] prim 온도 어트리뷰트(hynix:temperature) 더미 제어/캐시 노출 + 즉시 신호 발행
+    - prim 온도 어트리뷰트(hynix:temperature) read/write + cache 노출
+      (알람/이벤트/버스 발행은 하지 않음)
     """
 
     def __init__(self):
@@ -148,13 +147,39 @@ class PickFilterService:
 
         self.refresh_cache()
 
+    def set_pickable_bulk(self, paths: List[str], pickable: bool):
+        """
+        bulk 적용 (refresh 1회)
+        """
+        if not self.enabled:
+            return
+        if not paths:
+            return
+
+        ctx = omni.usd.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not ctx or not stage:
+            return
+
+        for p in paths:
+            p = (p or "").strip()
+            if not p:
+                continue
+            try:
+                ctx.set_pickable(p, bool(pickable))
+            except Exception:
+                pass
+            self._overrides[p] = bool(pickable)
+
+        self.refresh_cache()
+
     def lock_all(self):
         self._set_all_pickable(False)
 
     def unlock_all(self):
         self._set_all_pickable(True)
 
-    # ---------------- temperature ops (NEW) ----------------
+    # ---------------- temperature ops ----------------
     def get_temperature(self, path: str) -> Optional[float]:
         ctx = omni.usd.get_context()
         stage = ctx.get_stage() if ctx else None
@@ -165,23 +190,24 @@ class PickFilterService:
             return None
         return self._read_temperature(prim)
 
-    def set_temperature(self, path: str, value: Optional[float]):
+    def set_temperature(self, path: str, value: Optional[float]) -> bool:
         """
         hynix:temperature 를 생성/갱신.
         value=None이면 attribute 제거(삭제) 시도.
+        리턴: 변경 시도 성공 여부(대략적인 성공 여부)
         """
         path = (path or "").strip()
         if not path:
-            return
+            return False
 
         ctx = omni.usd.get_context()
         stage = ctx.get_stage() if ctx else None
         if not stage:
-            return
+            return False
 
         prim = stage.GetPrimAtPath(path)
         if not prim or not prim.IsValid():
-            return
+            return False
 
         if value is None:
             attr = prim.GetAttribute(TEMP_ATTR)
@@ -194,39 +220,18 @@ class PickFilterService:
                     except Exception:
                         pass
             self.refresh_cache()
-            return
+            return True
 
         try:
             attr = prim.GetAttribute(TEMP_ATTR)
             if not attr or not attr.IsValid():
                 attr = prim.CreateAttribute(TEMP_ATTR, Sdf.ValueTypeNames.Float, custom=True)
             attr.Set(float(value))
-
-            # ✅ 즉시 신호 발행 (temp_alarm 등이 즉시 반영 가능)
-            _notify_temperature_changed(path, float(value))
-
         except Exception:
-            pass
+            return False
 
         self.refresh_cache()
-
-    def cycle_temperature_dummy(self, path: str) -> Optional[float]:
-        """
-        더미 순환: None/미설정 -> 25 -> 80 -> 100 -> 120 -> 25 ...
-        """
-        cur = self.get_temperature(path)
-        seq = [25.0, 80.0, 100.0, 120.0]
-        if cur is None:
-            nxt = seq[0]
-        else:
-            try:
-                idx = min(range(len(seq)), key=lambda i: abs(seq[i] - float(cur)))
-                nxt = seq[(idx + 1) % len(seq)]
-            except Exception:
-                nxt = seq[0]
-
-        self.set_temperature(path, nxt)
-        return nxt
+        return True
 
     # ---------------- internals ----------------
     @staticmethod

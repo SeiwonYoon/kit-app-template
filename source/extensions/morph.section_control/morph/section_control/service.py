@@ -7,6 +7,7 @@ import carb
 import carb.events
 import omni.kit.app
 import omni.usd
+import omni.ui as ui
 
 from .core import SectionController
 
@@ -20,7 +21,7 @@ class SectionControlService:
     """
 
     DEBUG_WARMUP_LOG = True
-    WARMUP_FRAMES = 5  # 10이면 눈에 띄게 켜져있을 수 있어서 2~5 추천
+    WARMUP_FRAMES = 3  # 10이면 눈에 띄게 켜져있을 수 있어서 2~5 추천
 
     def __init__(self):
         self.controller = SectionController()
@@ -142,10 +143,130 @@ class SectionControlService:
         return ok_any
 
     # ---------------- warm-up (enable ON 때만) ----------------
+    # ---- stealth window helpers ----
+    _SECTION_WINDOW_NAME_CANDIDATES = (
+        "Section",
+        "Section Window",
+        "Section Tool",
+        "Sectioning",
+        "omni.kit.window.section",
+    )
+
+    def _try_set_window_offscreen_tiny(self, w) -> bool:
+        """
+        omni.ui.Window 객체에 대해,
+        가능한 속성들을 최대한 시도해서 '안 보이게' 만든다.
+
+        ✅ 포인트:
+        - visible/collapsed는 사용해도 됨(너 말대로 OK)
+        - 하지만 enabled=False는 초기화/업데이트 자체를 멈출 수 있어 제거
+        """
+        ok_any = False
+
+        # 1) 위치를 화면 밖으로
+        for attr_pair in (("position_x", "position_y"), ("x", "y")):
+            try:
+                setattr(w, attr_pair[0], -10000)
+                setattr(w, attr_pair[1], -10000)
+                ok_any = True
+                break
+            except Exception:
+                pass
+        if not ok_any:
+            try:
+                w.position = (-10000, -10000)
+                ok_any = True
+            except Exception:
+                pass
+
+        # 2) 크기를 1x1로
+        try:
+            w.width = 1
+            w.height = 1
+            ok_any = True
+        except Exception:
+            pass
+        try:
+            w.size = (1, 1)
+            ok_any = True
+        except Exception:
+            pass
+
+        # 3) 숨김 처리(OK) — 하지만 enabled=False는 제거!
+        for attr, val in (
+            # ("visible", False),
+            # ("collapsed", True),
+            # ("enabled", False),  # ❌ 제거: 첫 enable에서 초기화가 멈출 수 있음
+        ):
+            try:
+                setattr(w, attr, val)
+                ok_any = True
+            except Exception:
+                pass
+
+        return ok_any
+
+    def _find_section_window(self):
+        """
+        Section 창을 찾아 반환.
+        - 후보 이름들로 Workspace.get_window 시도
+        - (가능한 경우) Workspace 내 window 목록을 훑어서 section 관련 이름을 탐색
+        """
+        # 1) 이름 후보로 먼저 탐색
+        for name in self._SECTION_WINDOW_NAME_CANDIDATES:
+            try:
+                w = ui.Workspace.get_window(name)
+                if w:
+                    return w
+            except Exception:
+                pass
+
+        # 2) Workspace가 window 열거 API를 제공하는 경우 탐색 (버전별 상이)
+        try:
+            if hasattr(ui.Workspace, "get_windows"):
+                wins = ui.Workspace.get_windows()
+                for w in wins or []:
+                    try:
+                        title = getattr(w, "title", "") or ""
+                        name = getattr(w, "name", "") or ""
+                        key = (title + " " + name).lower()
+                        if "section" in key:
+                            return w
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return None
+
+    async def _stealth_show_section_window_for_warmup(self, inst):
+        """
+        inst.show_window(True) 직후 호출해서,
+        창을 찾자마자 즉시 오프스크린+1x1로 보내 깜빡임을 최소화한다.
+        """
+        # 같은 프레임 안에 못 잡힐 수 있어서 1~2프레임 정도 짧게 재시도
+        for _ in range(3):
+            w = self._find_section_window()
+            if w:
+                ok = self._try_set_window_offscreen_tiny(w)
+                if ok:
+                    self._log("warmup: section window moved offscreen+tiny")
+                else:
+                    self._log("warmup: found window but could not adjust props (version mismatch)")
+                return
+            await self._wait_for_frames(1)
+
+        self._log("warmup: section window not found (cannot stealth)")
+
     def warmup_section_window(self, force: bool = False):
         """
         최초 enable ON 시 '섹션 윈도우'를 잠깐 show/hide 하여
         내부 위젯/prim 준비를 유도(깜빡임 최소화).
+
+        ✅ B 해결 포인트:
+        - warmup 완료 시점에 enabled 상태면 schedule_apply를 한 번 더 호출해서
+        "첫 ON에서 warmup이 늦게 끝나 apply가 먼저 끝나버리는" 케이스를 커버한다.
+
         - post_update apply loop 에서는 호출하지 않는다.
         """
         stage_id = self._get_stage_id()
@@ -183,6 +304,12 @@ class SectionControlService:
                     self._log(f"warmup: show_window(True) failed: {ex}")
                     return
 
+                # ✅ 깜빡임 최소화: 보이자마자 잡아서 화면 밖 + 1x1로 이동/숨김
+                try:
+                    await self._stealth_show_section_window_for_warmup(inst)
+                except Exception as ex:
+                    self._log(f"warmup: stealth adjust failed: {ex}")
+
                 await self._wait_for_frames(self.WARMUP_FRAMES)
 
                 self._log("warmup: show_window(False)")
@@ -193,6 +320,17 @@ class SectionControlService:
 
                 self._warmed_once_for_stage_id = stage_id
                 self._log("warmup: done")
+
+                # ------------------------------------------------------------------
+                # ✅ B: warmup이 끝난 "그 시점"에 다시 apply 루프를 한 번 더 보장
+                #     (첫 ON에서 warmup 완료가 늦으면, 기존 apply 루프가 이미 끝나버릴 수 있음)
+                # ------------------------------------------------------------------
+                try:
+                    if self.controller and self.controller.get_state().get("enabled"):
+                        self._log("warmup: schedule_apply after warmup_done")
+                        self.schedule_apply("warmup_done", retries=240)
+                except Exception as ex:
+                    self._log(f"warmup: schedule_apply(warmup_done) failed: {ex}")
 
             finally:
                 self._warmup_task = None
