@@ -32,7 +32,10 @@ FAVORITE_ROW_HEIGHT = 24
 FAVORITE_ICON_SIZE = 16
 
 # 좌측 즐겨찾기 목록 선택 하이라이트 기본색(ARGB)
-LEFT_HIGHLIGHT_COLOR = 0xFF424B4D
+LEFT_HIGHLIGHT_COLOR = 0xFF4B4A42
+LEFT_PANEL_OUTER_MARGIN = 2
+LEFT_SELECTION_INSET_X = 2
+LEFT_SELECTION_INSET_Y = 1
 
 
 class FavoriteColumnDelegate(AbstractStageColumnDelegate):
@@ -127,20 +130,25 @@ class MyExtension(omni.ext.IExt):
         with self._window.frame:
             with ui.HStack(spacing=2, height=ui.Fraction(1.0)):
                 # 좌측: 수동 즐겨찾기 목록 영역
-                with ui.VStack(width=ui.Fraction(1), spacing=4):
-                    with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
-                        ui.Spacer(height=37)
-                        with ui.ZStack(height=13):
-                            ui.Rectangle(style_type_name_override="TreeView.Header")
-                            with ui.HStack():
-                                ui.Spacer(width=10)
-                                ui.Label("Name", style_type_name_override="TreeView.Header")
-                        with ui.ScrollingFrame(
-                            style_type_name_override="TreeView.ScrollingFrame",
-                            horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
-                            height=ui.Fraction(1.0),
-                        ):
-                            self._left_list_frame = ui.Frame()
+                with ui.VStack(width=ui.Fraction(1), spacing=0):
+                    ui.Spacer(height=LEFT_PANEL_OUTER_MARGIN)
+                    with ui.HStack(spacing=0, height=ui.Fraction(1.0)):
+                        ui.Spacer(width=LEFT_PANEL_OUTER_MARGIN)
+                        with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
+                            ui.Spacer(height=37)
+                            with ui.ZStack(height=13):
+                                ui.Rectangle(style_type_name_override="TreeView.Header")
+                                with ui.HStack():
+                                    ui.Spacer(width=10)
+                                    ui.Label("Name", style_type_name_override="TreeView.Header")
+                            with ui.ScrollingFrame(
+                                style_type_name_override="TreeView.ScrollingFrame",
+                                horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
+                                height=ui.Fraction(1.0),
+                            ):
+                                self._left_list_frame = ui.Frame()
+                        ui.Spacer(width=LEFT_PANEL_OUTER_MARGIN)
+                    ui.Spacer(height=LEFT_PANEL_OUTER_MARGIN)
 
                 # 우측: StageWidget + Favorite/Visibility/Type 컬럼
                 with ui.VStack(width=ui.Fraction(2), spacing=0):
@@ -280,7 +288,6 @@ class MyExtension(omni.ext.IExt):
         self._left_list_frame.clear()
         with self._left_list_frame:
             with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
-                selected_bg_color = self._get_left_selected_bg_color()
                 if not self._favorites_rows:
                     with ui.HStack(height=20):
                         ui.Spacer(width=8)
@@ -290,10 +297,9 @@ class MyExtension(omni.ext.IExt):
                         self._build_left_row(
                             **row,
                             is_selected=row["path"] in selected_paths,
-                            selected_bg_color=selected_bg_color,
                         )
 
-    def _build_left_row(self, path, name, is_default, icon_paths, is_selected, selected_bg_color):
+    def _build_left_row(self, path, name, is_default, icon_paths, is_selected):
         """좌측 목록 한 줄을 생성하고 클릭/더블클릭 동작을 연결한다."""
         text = f"{name} (defaultPrim)" if is_default else name
         row = ui.ZStack(height=20, width=ui.Fraction(1.0))
@@ -304,19 +310,31 @@ class MyExtension(omni.ext.IExt):
             lambda _x, _y, button, _m, p=path: self._on_left_row_double_clicked(p) if button == 0 else None
         )
         with row:
-            ui.Rectangle(
-                visible=is_selected,
-                background_color=selected_bg_color,
-                width=ui.Fraction(1.0),
-                height=20,
-            )
-            with ui.HStack(height=20):
-                ui.Spacer(width=20)
-                with ui.ZStack(width=20, height=20):
-                    for icon_path in icon_paths:
-                        ui.Image(icon_path, style_type_name_override="TreeView.Image")
+            with ui.VStack(spacing=0, height=24):
+                with ui.HStack(spacing=0):
+                    ui.Rectangle(
+                        visible=is_selected,
+                        style={"Rectangle": {"background_color": LEFT_HIGHLIGHT_COLOR}},
+                        width=ui.Fraction(1.0),
+                        height=24,
+                    )
+            with ui.HStack(height=24):
+                ui.Spacer(width=8)
+                with ui.VStack(width=0):
+                    ui.Spacer()
+                    with ui.ZStack(width=20, height=20):
+                        for icon_path in icon_paths:
+                            ui.Image(icon_path, style_type_name_override="TreeView.Image")
+                    ui.Spacer()
                 ui.Spacer(width=4)
-                ui.Label(text, style_type_name_override="TreeView.Item")
+                if is_selected:
+                    ui.Label(
+                        text,
+                        style_type_name_override="TreeView.Item",
+                        style={"color": 0xFFFFFFFF},
+                    )
+                else:
+                    ui.Label(text, style_type_name_override="TreeView.Item")
                 ui.Spacer()
                 # 좌측 목록 우측 끝에 즐겨찾기 토글(별) 버튼을 배치
                 star_click_area = ui.ZStack(width=FAVORITE_COLUMN_WIDTH, height=FAVORITE_ROW_HEIGHT)
@@ -332,44 +350,6 @@ class MyExtension(omni.ext.IExt):
                     lambda _x, _y, button, _m, p=path: self._toggle_favorite(p) if button == 0 else None
                 )
                 ui.Spacer(width=2)
-
-    def _get_left_selected_bg_color(self):
-        """우측 Stage와 동일한 선택 배경색을 우선 사용한다."""
-        tree = getattr(self._right_stage_widget, "_tree_view", None) if self._right_stage_widget else None
-        if tree:
-            style = getattr(tree, "style", None)
-            if isinstance(style, dict):
-                selected_style = style.get("TreeView:selected")
-                if isinstance(selected_style, dict):
-                    color = selected_style.get("background_color")
-                    if color is not None:
-                        return color
-
-                direct = style.get("background_selected_color")
-                if direct is not None:
-                    return direct
-
-                tree_style = style.get("TreeView")
-                if isinstance(tree_style, dict):
-                    color = tree_style.get("background_selected_color")
-                    if color is not None:
-                        return color
-
-        stage_style = getattr(StageStyles, "STAGE_WIDGET", None)
-        if isinstance(stage_style, dict):
-            selected_style = stage_style.get("TreeView:selected")
-            if isinstance(selected_style, dict):
-                color = selected_style.get("background_color")
-                if color is not None:
-                    return color
-
-            tree_style = stage_style.get("TreeView")
-            if isinstance(tree_style, dict):
-                color = tree_style.get("background_selected_color")
-                if color is not None:
-                    return color
-
-        return LEFT_HIGHLIGHT_COLOR
 
     def _on_left_row_clicked(self, path_str: str):
         """클릭 시 우측 Stage와 동일하게 선택(selection)만 갱신한다."""
