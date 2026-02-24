@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+[package]
+title = "Show Prim Info"
+version = "0.1.0"
+description = "Shows selected USD prim information in a 3D panel next to each object in the viewport."
+category = "Viewer"
+keywords = ["kit", "usd", "prim", "viewport", "info"]
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.usd" = {}
+"omni.kit.viewport.utility" = {}
+
+[settings]
+
+[[python.module]]
+name = "morph.show_info"

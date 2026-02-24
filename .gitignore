@@ -37,3 +37,4 @@ deps/**/user.toml
 # Streaming EventTrace
 *.etli
 *.etl
+/data/
