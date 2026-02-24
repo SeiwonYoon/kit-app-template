@@ -21,7 +21,7 @@ CHARS_PER_LINE = 40
 
 
 def _wrap_line(line: str, max_chars: int = CHARS_PER_LINE) -> List[str]:
-    """Wrap a long line into multiple lines; break at space when possible."""
+    """한 줄을 max_chars를 넘지 않도록 여러 줄로 나눔. 가능하면 공백 위치에서 끊음."""
     if not line or len(line) <= max_chars:
         return [line] if line else []
     result = []
@@ -42,7 +42,7 @@ def _wrap_line(line: str, max_chars: int = CHARS_PER_LINE) -> List[str]:
 
 
 def _format_value(val) -> str:
-    """Format a USD attribute/metadata value for display."""
+    """USD 속성·메타데이터 값을 표시용 문자열로 변환. 길면 잘라서 '...' 붙이고, 줄바꿈은 공백으로 치환."""
     if val is None:
         return "None"
     s = str(val)
@@ -52,7 +52,7 @@ def _format_value(val) -> str:
 
 
 def _flatten_with_wrap(raw_lines: List[str]) -> List[str]:
-    """Take raw lines and wrap long ones so every line fits within CHARS_PER_LINE."""
+    """원본 줄 리스트에서 긴 줄은 _wrap_line으로 나눈 뒤, 한 리스트로 펼쳐 반환."""
     out: List[str] = []
     for line in raw_lines:
         if not line:
@@ -64,10 +64,7 @@ def _flatten_with_wrap(raw_lines: List[str]) -> List[str]:
 
 
 def get_prim_display_lines(prim: Usd.Prim) -> List[str]:
-    """
-    Build a list of lines to show in the 3D panel: name, type, metadata, attributes.
-    Long lines are wrapped to fit the panel width.
-    """
+    """3D 패널에 쓸 텍스트 줄 리스트 생성. 이름·경로·타입·메타데이터·속성 순. 긴 줄은 CHARS_PER_LINE 기준으로 줄바꿈."""
     raw: List[str] = []
 
     if not prim or not prim.IsValid():
@@ -121,7 +118,7 @@ def get_prim_display_lines(prim: Usd.Prim) -> List[str]:
 
 
 def get_prim_world_center(prim: Usd.Prim) -> Optional[Tuple[float, float, float]]:
-    """Return world-space center of the prim (bbox center or xform)."""
+    """prim의 월드 공간 중심 (x, y, z) 반환. BBox 중심 우선, 없으면 Xformable 변환 원점."""
     if not prim or not prim.IsValid():
         return None
     try:

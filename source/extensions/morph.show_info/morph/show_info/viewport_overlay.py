@@ -10,7 +10,7 @@ import omni.kit.app as app
 
 
 def _post_update_once(callback):
-    """Run callback once on the next post_update (post_update_call replacement)."""
+    """다음 post_update 한 번에 callback 실행 후 구독 해제. 메인 스레드에서 패널을 다시 그릴 때 사용."""
     sub_ref = [None]
 
     def _on_event(_event):
@@ -52,9 +52,10 @@ MAX_VISIBLE_LINES = max(1, CONTENT_AREA_HEIGHT_PX // LINE_HEIGHT)
 
 
 class PrimInfoOverlay:
-    """Builds and updates 3D info panels for selected prims in the viewport."""
+    """뷰포트에 선택된 prim 옆 3D 정보 패널을 그리며 갱신하는 오버레이."""
 
     def __init__(self, viewport_window: Any, ext_id: str):
+        """뷰포트 창과 확장 ID로 초기화. build_scene() 호출 전까지 패널은 그려지지 않음."""
         self._viewport_window = viewport_window
         self._ext_id = ext_id
         self._scene_view: Optional[sc.SceneView] = None
@@ -64,13 +65,15 @@ class PrimInfoOverlay:
         self._on_close_cb: Optional[Callable[[str], None]] = None
 
     def set_open_paths(self, paths: List[str]) -> None:
+        """표시할 패널의 prim 경로 목록을 설정. update_panels() 시 이 목록 기준으로 다시 그림."""
         self._open_paths = list(paths)
 
     def set_on_close(self, cb: Callable[[str], None]) -> None:
+        """패널 X 버튼 클릭 시 호출할 콜백 등록. 인자는 닫을 prim 경로 문자열."""
         self._on_close_cb = cb
 
     def build_scene(self) -> None:
-        """Call once at startup with get_frame context. Creates SceneView and panels root."""
+        """뷰포트에 SceneView와 패널 루트 Transform을 한 번만 생성. get_frame 컨텍스트 안에서 호출."""
         with self._viewport_window.get_frame(self._ext_id):
             with ui.ZStack():
                 self._scene_view = sc.SceneView()
@@ -81,7 +84,7 @@ class PrimInfoOverlay:
         self._built = True
 
     def _rebuild_panels(self) -> None:
-        """Rebuild panel content from _open_paths. Call from main/UI thread."""
+        """_open_paths에 있는 각 경로마다 prim 정보를 가져와 3D 패널 하나씩 그림. 메인/UI 스레드에서 호출."""
         if not self._built or not self._panels_root:
             return
         self._panels_root.clear()
@@ -117,7 +120,7 @@ class PrimInfoOverlay:
                 self._build_one_panel(pos, path_str, lines)
 
     def _build_one_panel(self, world_pos: tuple, path_str: str, lines: List[str]) -> None:
-        """Build a single 3D panel at world_pos with text lines and a close X button."""
+        """월드 좌표 world_pos에 텍스트 줄(lines)과 X 닫기 버튼이 있는 3D 패널 하나를 그림. 줄 수·길이 제한으로 영역 밖으로 나가지 않게 함."""
         # 패널 크기를 먼저 고정해 두고, 텍스트는 이 영역 안에만 표시 (벗어남 방지)
         content_area_w = MAX_PANEL_WIDTH_PX - PADDING_H * 2
         max_chars_per_line = max(1, content_area_w // CHAR_WIDTH)
@@ -204,10 +207,11 @@ class PrimInfoOverlay:
                             )
 
     def update_panels(self) -> None:
-        """Schedule a rebuild on the next update (main thread)."""
+        """다음 post_update에서 _rebuild_panels를 한 번 실행하도록 예약. 현재 _open_paths 기준으로 패널을 다시 그림."""
         _post_update_once(self._rebuild_panels)
 
     def destroy(self) -> None:
+        """뷰포트에서 SceneView 제거 후 오버레이 상태 초기화. 확장 비활성화 시 호출."""
         if self._scene_view and self._viewport_window:
             try:
                 self._viewport_window.viewport_api.remove_scene_view(self._scene_view)

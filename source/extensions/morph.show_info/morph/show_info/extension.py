@@ -30,7 +30,8 @@ _POLL_FRAME_INTERVAL = 30  # 약 0.5초
 
 
 def _post_update_once(callback):
-    """Run callback once on the next post_update (post_update_call replacement)."""
+    """다음 post_update 한 번에 callback을 실행한 뒤 구독 해제. (post_update_call 대체용)
+    뷰포트가 아직 없을 때 다음 프레임에 재시도하거나, UI 스레드에서 패널을 갱신할 때 사용."""
     sub_ref = [None]
 
     def _on_event(_event):
@@ -52,12 +53,13 @@ _extension_instance: Optional["Extension"] = None
 
 
 def get_instance() -> Optional["Extension"]:
-    """싱글톤: 현재 로드된 확장 인스턴스. 비활성 시 None."""
+    """싱글톤: 현재 로드된 확장 인스턴스를 반환. 다른 확장·웹 핸들러에서 공개 API 호출 시 사용. 비활성 시 None."""
     return _extension_instance
 
 
 class Extension(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:
+        """확장 활성화 시 호출. 선택 이벤트 구독, 뷰포트 오버레이 연결, 싱글톤 등록."""
         global _extension_instance
         _extension_instance = self
 
@@ -113,7 +115,7 @@ class Extension(omni.ext.IExt):
         self._try_attach_overlay()
 
     def _on_post_update(self, event) -> None:
-        """매 프레임 호출. N프레임마다 선택 상태를 읽어 패널 갱신 (이벤트 미동작 시 대체)."""
+        """매 프레임 호출. N프레임마다 현재 선택 경로를 읽어 이벤트로 선택 변경가 안 오는 환경에서도 패널을 갱신하고, X 클릭 직후 무시 구간에서는 선택을 _open_paths로 되돌림."""
         if time.time() < self._ignore_selection_until:
             try:
                 ou.get_context().get_selection().set_selected_prim_paths(self._open_paths, True)
@@ -140,11 +142,11 @@ class Extension(omni.ext.IExt):
             self._apply_selection(paths)
 
     def _on_stage_event(self, event) -> None:
-        """스테이지 이벤트(선택 변경 등) 시 호출."""
+        """스테이지 이벤트 스트림에서 온 이벤트(선택 변경 등)를 선택 변경 핸들러로 넘김."""
         self._on_selection_changed(event)
 
     def _try_attach_overlay(self) -> None:
-        """뷰포트 창이 준비되면 오버레이를 한 번만 등록."""
+        """활성 뷰포트 창을 찾아 PrimInfoOverlay를 생성·연결. 창이 없으면 다음 프레임에 재시도(최대 _VIEWPORT_RETRY_FRAMES)."""
         viewport_window = get_active_viewport_window()
         if viewport_window:
             if self._overlay is None:
@@ -164,7 +166,7 @@ class Extension(omni.ext.IExt):
             carb.log_warn("[morph.show_info] 뷰포트 창을 찾지 못함 (재시도 한도 도달)")
 
     def _add_selection_to_open_paths(self, paths) -> None:
-        """Add currently selected prim paths to open panels (no duplicates). 드래그로 여러 개 선택 시 패널 1개만."""
+        """현재 선택된 prim 경로를 열린 패널 목록(_open_paths)에 추가. 중복 제외. 드래그로 여러 개 선택 시 첫 번째만 추가해 패널 1개만 표시."""
         path_strs = [str(p) for p in (paths or []) if p is not None]
         if len(path_strs) > 1:
             path_strs = path_strs[:1]  # 다중 선택 시 첫 번째 프림만 패널로 표시
@@ -173,7 +175,7 @@ class Extension(omni.ext.IExt):
                 self._open_paths.append(p)
 
     def _on_close_panel(self, path_str: str) -> None:
-        """Remove one panel from open list and refresh (called when user clicks X)."""
+        """패널 X 버튼 클릭 시 호출. 해당 경로를 _open_paths에서 제거하고 선택·오버레이 갱신. X 클릭 직후 0.2초간 선택 이벤트 무시로 뒤 프림 선택 방지."""
         # X 클릭 직후 0.2초간 선택 변경 무시 — 뷰포트가 그 위치 프림을 선택해도 _open_paths로 되돌림
         self._ignore_selection_until = time.time() + 0.2
 
@@ -189,7 +191,7 @@ class Extension(omni.ext.IExt):
             self._overlay.update_panels()
 
     def _apply_selection(self, paths) -> None:
-        """Ensure overlay attached and refresh panels from _open_paths."""
+        """오버레이가 없으면 연결 시도 후, _open_paths 기준으로 오버레이에 열린 경로를 넘기고 3D 패널을 다시 그림."""
         if self._overlay is None:
             _post_update_once(self._try_attach_overlay)
         if self._overlay:
@@ -197,7 +199,7 @@ class Extension(omni.ext.IExt):
             self._overlay.update_panels()
 
     def _on_selection_changed(self, event) -> None:
-        """SELECTION_CHANGED 이벤트 시 호출."""
+        """뷰포트 선택 변경 시 호출. 무시 구간이면 선택을 _open_paths로 되돌리고, 아니면 현재 선택을 _open_paths에 반영한 뒤 패널 갱신."""
         if time.time() < self._ignore_selection_until:
             try:
                 ou.get_context().get_selection().set_selected_prim_paths(self._open_paths, True)
@@ -221,6 +223,7 @@ class Extension(omni.ext.IExt):
         self._apply_selection(paths)
 
     def on_shutdown(self) -> None:
+        """확장 비활성화 시 호출. 싱글톤 해제, 선택·스테이지·post_update 구독 해제, 오버레이 제거."""
         global _extension_instance
         _extension_instance = None
 
