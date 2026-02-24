@@ -13,6 +13,7 @@ from .usdLoader_handler import UsdLoaderHandler
 from .sectionControl_handler import SectionControlHandler
 from .pickFilter_handler import PickFilterHandler
 from .manualNav_handler import ManualNavHandler
+from .measureControl_handler import MeasureControlHandler
 
 # 여기에 새 핸들러를 추가하세요
 HANDLERS = [
@@ -20,6 +21,7 @@ HANDLERS = [
     SectionControlHandler,
     PickFilterHandler,
     ManualNavHandler,
+    MeasureControlHandler,
 ]
 
 __all__ = ["BaseHandler", "UsdLoaderHandler", "HANDLERS"]
