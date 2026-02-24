@@ -3,6 +3,8 @@
 
 from pathlib import Path
 import asyncio
+import json
+import os
 
 import carb
 import carb.eventdispatcher
@@ -36,6 +38,7 @@ LEFT_HIGHLIGHT_COLOR = 0xFF4B4A42
 LEFT_PANEL_OUTER_MARGIN = 2
 LEFT_SELECTION_INSET_X = 2
 LEFT_SELECTION_INSET_Y = 1
+FAVORITES_JSON_NAME = "favorites_search_prim.json"
 
 
 class FavoriteColumnDelegate(AbstractStageColumnDelegate):
@@ -112,6 +115,7 @@ class MyExtension(omni.ext.IExt):
         self._favorite_delegate_sub = None
         self._favorite_paths = []
         self._favorites_rows = []
+        self._favorites_json_path = self._get_favorites_json_path()
 
         _FAVORITES_PATHS.clear()
         _TOGGLE_FAVORITE_FN = self._toggle_favorite
@@ -135,8 +139,14 @@ class MyExtension(omni.ext.IExt):
                     with ui.HStack(spacing=0, height=ui.Fraction(1.0)):
                         ui.Spacer(width=LEFT_PANEL_OUTER_MARGIN)
                         with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
-                            ui.Spacer(height=37)
-                            with ui.ZStack(height=13):
+                            with ui.HStack(height=24, spacing=4):
+                                load_btn = ui.Button("Load", width=54, clicked_fn=lambda: self._on_click_load_favorites())
+                                load_btn.tooltip = f"Load favorites from:\n{self._favorites_json_path}"
+                                clear_btn = ui.Button("AllClear", width=72, clicked_fn=lambda: self._on_click_all_clear())
+                                clear_btn.tooltip = "Clear all favorites and save immediately."
+                                ui.Spacer()
+                            ui.Spacer(height=7)
+                            with ui.ZStack(height=7):
                                 ui.Rectangle(style_type_name_override="TreeView.Header")
                                 with ui.HStack():
                                     ui.Spacer(width=10)
@@ -175,6 +185,8 @@ class MyExtension(omni.ext.IExt):
             )
         ]
 
+        # 앱 시작 시 저장된 즐겨찾기 목록 자동 복원
+        self._load_favorites_from_json()
         self._on_stage_opened()
 
     def _on_stage_opened(self):
@@ -206,6 +218,66 @@ class MyExtension(omni.ext.IExt):
             _FAVORITES_PATHS.add(path_str)
             self._favorite_paths.append(path_str)
 
+        self._save_favorites_to_json()
+        self._sync_favorites_rows(self._usd_context.get_stage())
+        self._rebuild_left_name_list()
+        self._refresh_right_favorite_column()
+
+    def _get_favorites_json_path(self) -> Path:
+        """실행 중인 app/version 기준의 로컬 JSON 저장 경로를 만든다."""
+        settings = carb.settings.get_settings()
+        app_name = settings.get_as_string("/app/name") or "unknown_app"
+        app_version = settings.get_as_string("/app/version") or "unknown_version"
+        local_app_data = os.getenv("LOCALAPPDATA")
+        if local_app_data:
+            base_dir = Path(local_app_data) / "ov" / "data" / "Kit"
+        else:
+            base_dir = Path.home() / "AppData" / "Local" / "ov" / "data" / "Kit"
+        return base_dir / app_name / app_version / FAVORITES_JSON_NAME
+
+    def _save_favorites_to_json(self):
+        """현재 즐겨찾기 목록을 로컬 JSON 파일에 저장한다."""
+        try:
+            self._favorites_json_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"favorite_paths": self._favorite_paths}
+            self._favorites_json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            carb.log_warn(f"[morph.favorites_search_prim] Failed to save favorites: {e}")
+
+    def _load_favorites_from_json(self):
+        """로컬 JSON 파일에서 즐겨찾기 목록을 읽어온다."""
+        try:
+            if not self._favorites_json_path.exists():
+                return
+            data = json.loads(self._favorites_json_path.read_text(encoding="utf-8"))
+            paths = data.get("favorite_paths", [])
+            if not isinstance(paths, list):
+                return
+            # 문자열 경로만 허용하고 중복 제거(순서 유지)
+            normalized = []
+            seen = set()
+            for p in paths:
+                if isinstance(p, str) and p and p not in seen:
+                    normalized.append(p)
+                    seen.add(p)
+            self._favorite_paths = normalized
+            _FAVORITES_PATHS.clear()
+            _FAVORITES_PATHS.update(normalized)
+        except Exception as e:
+            carb.log_warn(f"[morph.favorites_search_prim] Failed to load favorites: {e}")
+
+    def _on_click_load_favorites(self):
+        """Load 버튼: JSON 파일에서 다시 읽고 UI를 갱신한다."""
+        self._load_favorites_from_json()
+        self._sync_favorites_rows(self._usd_context.get_stage())
+        self._rebuild_left_name_list()
+        self._refresh_right_favorite_column()
+
+    def _on_click_all_clear(self):
+        """AllClear 버튼: 즐겨찾기를 전체 삭제하고 바로 저장한다."""
+        self._favorite_paths = []
+        _FAVORITES_PATHS.clear()
+        self._save_favorites_to_json()
         self._sync_favorites_rows(self._usd_context.get_stage())
         self._rebuild_left_name_list()
         self._refresh_right_favorite_column()
