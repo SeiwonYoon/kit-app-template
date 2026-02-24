@@ -64,7 +64,6 @@ class SectionControlHandler(BaseHandler):
         axis =    p['axis']
         flip =    p['flip']
         offset =  p['offset']
-        print(f"_on_set_all payload: enabled={enabled}, axis={axis}, flip={flip}, offset={offset}")
         result = service.set_all(enabled, axis, flip, offset)
         print(f"set_all result: {result}")
 
