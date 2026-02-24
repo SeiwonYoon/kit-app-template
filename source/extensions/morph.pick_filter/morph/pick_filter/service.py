@@ -40,6 +40,10 @@ class PickFilterService:
     - VP selection disable / frame / selection / pickable / temperature 제공
     - ✅ Name(leaf) 기반 resolve + selection/pickable API 제공
       (그룹 정의/정책 데이터는 service가 보유하지 않음)
+
+    [추가] Mesh 활성/비활성(visibility) API 제공
+      - get_mesh_enabled / set_mesh_enabled / toggle_mesh_enabled / bulk
+      - leaf-name 기반 set/get/toggle 유사 패턴 제공
     """
 
     def __init__(self):
@@ -100,6 +104,138 @@ class PickFilterService:
         - ✅ 알람/이벤트/버스 발행 없음(요구사항 반영)
         """
         return self._core.set_temperature(path, value)
+
+    # ---------------- mesh visibility ----------------
+    def get_mesh_enabled(self, path: str) -> Optional[bool]:
+        """
+        prim visibility 기반 mesh enabled 상태
+        - True/False/None(Imageable 아님 등)
+        """
+        return self._core.get_mesh_enabled(path)
+
+    def set_mesh_enabled(self, path: str, enabled: bool, include_descendants: bool = False) -> bool:
+        """
+        prim visibility ON/OFF
+        include_descendants=True면 하위 prim까지 동일 적용
+        """
+        return bool(self._core.set_mesh_enabled(path, enabled, include_descendants=include_descendants))
+
+    def toggle_mesh_enabled(self, path: str, include_descendants: bool = False) -> Optional[bool]:
+        """
+        현재 상태를 반전시킴
+        리턴: 토글 후 최종 상태(True/False) 또는 None(토글 불가)
+        """
+        return self._core.toggle_mesh_enabled(path, include_descendants=include_descendants)
+
+    def set_mesh_enabled_bulk(self, paths: List[str], enabled: bool) -> bool:
+        """
+        bulk 적용 (refresh 1회)
+        """
+        return bool(self._core.set_mesh_enabled_bulk(paths, enabled))
+
+    def set_mesh_enabled_by_leaf_names(
+        self,
+        leaf_names: List[str],
+        enabled: bool,
+        include_descendants: bool = False,
+        *,
+        use_refresh: bool = False,
+        require_unique: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        leaf name 목록에 해당하는 prim들에 대해 mesh enabled bulk 적용
+        include_descendants=True면, resolve된 각 path의 하위 prim까지 같이 적용
+        """
+        r = self._resolve_paths_by_leaf_names(leaf_names, use_refresh=use_refresh, require_unique=require_unique)
+
+        if not r.get("ok", False):
+            r.update({"updated": 0})
+            return r
+
+        targets = list(r.get("resolved_paths") or [])
+        if not targets:
+            r.update({"updated": 0, "ok": True})
+            return r
+
+        if include_descendants:
+            # include_descendants는 core의 단일 API를 반복 호출하는 방식으로 안전하게 처리
+            updated = 0
+            for p in targets:
+                if self.set_mesh_enabled(p, bool(enabled), include_descendants=True):
+                    updated += 1
+            r.update({"updated": updated, "ok": True, "enabled": bool(enabled), "include_descendants": True})
+            return r
+
+        ok_any = self.set_mesh_enabled_bulk(targets, bool(enabled))
+        r.update({"updated": len(targets), "ok": bool(ok_any) or True, "enabled": bool(enabled), "include_descendants": False})
+        return r
+
+    def toggle_mesh_by_leaf_names(
+        self,
+        leaf_names: List[str],
+        include_descendants: bool = False,
+        *,
+        use_refresh: bool = False,
+        require_unique: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        leaf name 목록으로 mesh enabled 토글.
+        - 각 prim을 개별 토글(현재 상태가 서로 다를 수 있으므로 bulk toggle은 미제공)
+        리턴에 toggled_paths, final_states를 함께 제공.
+        """
+        r = self._resolve_paths_by_leaf_names(leaf_names, use_refresh=use_refresh, require_unique=require_unique)
+
+        if not r.get("ok", False):
+            r.update({"toggled": 0, "toggled_paths": [], "final_states": {}})
+            return r
+
+        targets = list(r.get("resolved_paths") or [])
+        if not targets:
+            r.update({"toggled": 0, "ok": True, "toggled_paths": [], "final_states": {}})
+            return r
+
+        toggled_paths: List[str] = []
+        final_states: Dict[str, Any] = {}
+
+        for p in targets:
+            st = self.toggle_mesh_enabled(p, include_descendants=include_descendants)
+            if st is None:
+                final_states[p] = None
+                continue
+            toggled_paths.append(p)
+            final_states[p] = bool(st)
+
+        r.update(
+            {
+                "toggled": len(toggled_paths),
+                "toggled_paths": toggled_paths,
+                "final_states": final_states,
+                "ok": True,
+                "include_descendants": bool(include_descendants),
+            }
+        )
+        return r
+
+    def get_mesh_enabled_by_leaf_names(
+        self,
+        leaf_names: List[str],
+        *,
+        use_refresh: bool = False,
+        require_unique: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        leaf name 목록에 해당하는 prim들의 mesh enabled 상태 조회.
+        - 상태는 path->Optional[bool]로 반환
+        """
+        r = self._resolve_paths_by_leaf_names(leaf_names, use_refresh=use_refresh, require_unique=require_unique)
+
+        targets = list(r.get("resolved_paths") or [])
+        states: Dict[str, Any] = {}
+        for p in targets:
+            states[p] = self.get_mesh_enabled(p)
+
+        r.update({"states": states, "count": len(targets), "ok": bool(r.get("ok", True))})
+        return r
 
     # ---------------- viewport selection enable/disable ----------------
     def get_viewport_selection_enabled(self) -> Optional[bool]:
