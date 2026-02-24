@@ -13,7 +13,8 @@ class ManualNavService:
         return {"enabled": False, "reason": reason}
 
     def get_state(self) -> dict:
-        return {"enabled": self._teleport.is_active()}
+        _active = self._teleport.get_active()
+        return {"enabled": _active}
 
 
 def get_service():
