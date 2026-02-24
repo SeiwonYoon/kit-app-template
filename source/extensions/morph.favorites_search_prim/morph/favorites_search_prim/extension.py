@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+﻿# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 from pathlib import Path
@@ -20,22 +20,23 @@ from omni.kit.widget.stage import (
 )
 from omni.kit.widget.stage.stage_style import Styles as StageStyles
 
+# 즐겨찾기 경로 집합/콜백은 커스텀 컬럼(delegate)과 확장 본체가 공유한다.
 _FAVORITES_PATHS = set()
 _TOGGLE_FAVORITE_FN = None
 STAR_ICON_PATH = ""
 STAR_EMPTY_ICON_PATH = ""
 
-# Favorite 아이콘/컬럼 크기 상수
+# Favorite 컬럼 아이콘 배치 상수
 FAVORITE_COLUMN_WIDTH = 24
 FAVORITE_ROW_HEIGHT = 24
 FAVORITE_ICON_SIZE = 16
-# 좌측 즐겨찾기 행 선택 하이라이트 색상(ARGB)
-# 기본값: 0xFF424B4D  (RGB: 42 4B 4D)
+
+# 좌측 즐겨찾기 목록 선택 하이라이트 기본색(ARGB)
 LEFT_HIGHLIGHT_COLOR = 0xFF424B4D
 
 
 class FavoriteColumnDelegate(AbstractStageColumnDelegate):
-    """Stage 행의 가장 왼쪽에 표시되는 즐겨찾기(별) 컬럼."""
+    """우측 Stage 트리의 Favorite(별) 컬럼을 그리는 delegate."""
 
     @property
     def initial_width(self):
@@ -47,7 +48,7 @@ class FavoriteColumnDelegate(AbstractStageColumnDelegate):
 
     @property
     def order(self):
-        # Name 컬럼보다 더 왼쪽에 배치
+        # Name 컬럼보다 왼쪽에 오도록 작은 순서를 사용
         return -200000
 
     @property
@@ -62,7 +63,7 @@ class FavoriteColumnDelegate(AbstractStageColumnDelegate):
         path_str = str(stage_item.path)
         icon_path = STAR_ICON_PATH if path_str in _FAVORITES_PATHS else STAR_EMPTY_ICON_PATH
 
-        # 클릭 영역 + 중앙 정렬 이미지 구성(클리핑 방지)
+        # 별 아이콘이 셀 중앙에 오도록 클릭 영역을 감싼다.
         click_area = ui.ZStack(width=FAVORITE_COLUMN_WIDTH, height=FAVORITE_ROW_HEIGHT)
         with click_area:
             with ui.HStack():
@@ -86,10 +87,10 @@ def some_public_function(x: int):
 
 
 class MyExtension(omni.ext.IExt):
-    """좌측 즐겨찾기 목록 + 우측 Stage 위젯 분할 UI를 관리."""
+    """좌측 즐겨찾기 목록 + 우측 StageWidget 1:2 분할 UI를 관리한다."""
 
     def on_startup(self, _ext_id):
-        """UI 생성, 커스텀 컬럼 등록, Stage 이벤트 구독을 수행."""
+        """윈도우/위젯 생성, Favorite 컬럼 등록, Stage 이벤트 구독."""
         print("[morph.favorites_search_prim] Extension startup")
         global STAR_ICON_PATH, STAR_EMPTY_ICON_PATH, _TOGGLE_FAVORITE_FN
 
@@ -108,6 +109,7 @@ class MyExtension(omni.ext.IExt):
         self._favorite_delegate_sub = None
         self._favorite_paths = []
         self._favorites_rows = []
+
         _FAVORITES_PATHS.clear()
         _TOGGLE_FAVORITE_FN = self._toggle_favorite
 
@@ -124,7 +126,7 @@ class MyExtension(omni.ext.IExt):
 
         with self._window.frame:
             with ui.HStack(spacing=2, height=ui.Fraction(1.0)):
-                # 좌측: 즐겨찾기 수동 목록
+                # 좌측: 수동 즐겨찾기 목록 영역
                 with ui.VStack(width=ui.Fraction(1), spacing=4):
                     with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
                         ui.Spacer(height=37)
@@ -140,7 +142,7 @@ class MyExtension(omni.ext.IExt):
                         ):
                             self._left_list_frame = ui.Frame()
 
-                # 우측: StageWidget + 즐겨찾기 컬럼
+                # 우측: StageWidget + Favorite/Visibility/Type 컬럼
                 with ui.VStack(width=ui.Fraction(2), spacing=0):
                     self._right_stage_widget = StageWidget(
                         None,
@@ -151,7 +153,7 @@ class MyExtension(omni.ext.IExt):
         self._right_selection = DefaultSelectionWatch(usd_context=self._usd_context)
         self._right_stage_widget.set_selection_watch(self._right_selection)
 
-        # Stage 열림/닫힘 동기화
+        # Stage 열림/닫힘/선택 변경 이벤트 구독
         self._stage_subscription = [
             carb.eventdispatcher.get_eventdispatcher().observe_event(
                 observer_name="morph.favorites_search_prim",
@@ -164,9 +166,11 @@ class MyExtension(omni.ext.IExt):
                 (omni.usd.StageEventType.SELECTION_CHANGED, lambda _: self._on_stage_selection_changed()),
             )
         ]
+
         self._on_stage_opened()
 
     def _on_stage_opened(self):
+        """Stage가 열리면 양쪽 목록을 현재 상태로 동기화한다."""
         stage = self._usd_context.get_stage()
         self._sync_favorites_rows(stage)
         self._rebuild_left_name_list()
@@ -175,17 +179,18 @@ class MyExtension(omni.ext.IExt):
             self._refresh_right_favorite_column()
 
     def _on_stage_closing(self):
+        """Stage가 닫힐 때 목록/뷰를 비운다."""
         self._sync_favorites_rows(None)
         self._rebuild_left_name_list()
         if self._right_stage_widget:
             self._right_stage_widget.open_stage(None)
 
     def _on_stage_selection_changed(self):
-        """선택이 바뀌면 좌측 즐겨찾기의 선택 하이라이트도 갱신."""
+        """우측 선택이 바뀌면 좌측 목록 하이라이트를 갱신한다."""
         self._rebuild_left_name_list()
 
     def _toggle_favorite(self, path_str: str):
-        """prim path 기준 즐겨찾기 토글."""
+        """경로 기준으로 즐겨찾기 추가/삭제를 토글한다."""
         if path_str in _FAVORITES_PATHS:
             _FAVORITES_PATHS.remove(path_str)
             self._favorite_paths = [p for p in self._favorite_paths if p != path_str]
@@ -198,7 +203,7 @@ class MyExtension(omni.ext.IExt):
         self._refresh_right_favorite_column()
 
     def _sync_favorites_rows(self, stage):
-        """현재 Stage 기준으로 좌측 표시용 행 데이터 구성."""
+        """현재 Stage 기준으로 좌측 즐겨찾기 표시용 row 데이터를 재구성한다."""
         rows = []
         if stage:
             for path_str in self._favorite_paths:
@@ -216,7 +221,7 @@ class MyExtension(omni.ext.IExt):
         self._favorites_rows = rows
 
     def _resolve_stage_icon_path(self, prim):
-        """우측 Stage Name 컬럼과 동일한 규칙으로 대표 아이콘 선택."""
+        """우측 Stage의 Name 컬럼과 동일한 규칙으로 아이콘을 선택한다."""
         icons = StageIcons()
         node_type = prim.GetTypeName()
 
@@ -236,7 +241,7 @@ class MyExtension(omni.ext.IExt):
         return icons.get(node_type, "Prim")
 
     def _refresh_right_favorite_column(self):
-        """별 상태가 즉시 반영되도록 우측 트리 강제 갱신."""
+        """별 상태 변경 후 우측 트리 위젯을 강제로 다시 그린다."""
         if not self._right_stage_widget:
             return
         tree = getattr(self._right_stage_widget, "_tree_view", None)
@@ -247,17 +252,19 @@ class MyExtension(omni.ext.IExt):
             flat.dirty_widgets()
 
     def _rebuild_left_name_list(self):
-        """좌측 즐겨찾기 목록을 다시 렌더링."""
+        """좌측 즐겨찾기 목록 UI를 새로 렌더링한다."""
         if not self._left_list_frame:
             return
 
         selected_paths = set()
         if self._usd_context and self._usd_context.get_selection():
-            selected_paths = set(self._usd_context.get_selection().get_selected_prim_paths())
+            # Sdf.Path/str 혼용 대비를 위해 문자열로 통일
+            selected_paths = {str(p) for p in self._usd_context.get_selection().get_selected_prim_paths()}
 
         self._left_list_frame.clear()
         with self._left_list_frame:
             with ui.VStack(spacing=0, style=StageStyles.STAGE_WIDGET):
+                selected_bg_color = self._get_left_selected_bg_color()
                 if not self._favorites_rows:
                     with ui.HStack(height=20):
                         ui.Spacer(width=8)
@@ -267,12 +274,13 @@ class MyExtension(omni.ext.IExt):
                         self._build_left_row(
                             **row,
                             is_selected=row["path"] in selected_paths,
+                            selected_bg_color=selected_bg_color,
                         )
 
-    def _build_left_row(self, path, name, is_default, icon_path, is_selected):
-        """좌측 1행 렌더 + 클릭/더블클릭 동작 연결."""
+    def _build_left_row(self, path, name, is_default, icon_path, is_selected, selected_bg_color):
+        """좌측 목록 한 줄을 생성하고 클릭/더블클릭 동작을 연결한다."""
         text = f"{name} (defaultPrim)" if is_default else name
-        row = ui.ZStack(height=20)
+        row = ui.ZStack(height=20, width=ui.Fraction(1.0))
         row.set_mouse_pressed_fn(
             lambda _x, _y, button, _m, p=path: self._on_left_row_clicked(p) if button == 0 else None
         )
@@ -280,8 +288,12 @@ class MyExtension(omni.ext.IExt):
             lambda _x, _y, button, _m, p=path: self._on_left_row_double_clicked(p) if button == 0 else None
         )
         with row:
-            # Stage TreeView selected 색상과 유사한 하이라이트
-            ui.Rectangle(visible=is_selected, background_color=LEFT_HIGHLIGHT_COLOR)
+            ui.Rectangle(
+                visible=is_selected,
+                background_color=selected_bg_color,
+                width=ui.Fraction(1.0),
+                height=20,
+            )
             with ui.HStack(height=20):
                 ui.Spacer(width=20)
                 with ui.ZStack(width=20, height=20):
@@ -289,19 +301,57 @@ class MyExtension(omni.ext.IExt):
                 ui.Spacer(width=4)
                 ui.Label(text, style_type_name_override="TreeView.Item")
 
+    def _get_left_selected_bg_color(self):
+        """우측 Stage와 동일한 선택 배경색을 우선 사용한다."""
+        tree = getattr(self._right_stage_widget, "_tree_view", None) if self._right_stage_widget else None
+        if tree:
+            style = getattr(tree, "style", None)
+            if isinstance(style, dict):
+                selected_style = style.get("TreeView:selected")
+                if isinstance(selected_style, dict):
+                    color = selected_style.get("background_color")
+                    if color is not None:
+                        return color
+
+                direct = style.get("background_selected_color")
+                if direct is not None:
+                    return direct
+
+                tree_style = style.get("TreeView")
+                if isinstance(tree_style, dict):
+                    color = tree_style.get("background_selected_color")
+                    if color is not None:
+                        return color
+
+        stage_style = getattr(StageStyles, "STAGE_WIDGET", None)
+        if isinstance(stage_style, dict):
+            selected_style = stage_style.get("TreeView:selected")
+            if isinstance(selected_style, dict):
+                color = selected_style.get("background_color")
+                if color is not None:
+                    return color
+
+            tree_style = stage_style.get("TreeView")
+            if isinstance(tree_style, dict):
+                color = tree_style.get("background_selected_color")
+                if color is not None:
+                    return color
+
+        return LEFT_HIGHLIGHT_COLOR
+
     def _on_left_row_clicked(self, path_str: str):
-        """클릭: 우측 Stage와 동일하게 selection 갱신."""
+        """클릭 시 우측 Stage와 동일하게 선택(selection)만 갱신한다."""
         selection = self._usd_context.get_selection() if self._usd_context else None
         if selection:
             selection.set_selected_prim_paths([path_str], True)
 
     def _on_left_row_double_clicked(self, path_str: str):
-        """더블클릭: selection + viewport focus(frame)."""
+        """더블클릭 시 선택 후 뷰포트를 해당 Prim으로 포커싱한다."""
         self._on_left_row_clicked(path_str)
         self._focus_prim(path_str)
 
     def _focus_prim(self, path_str: str):
-        """활성 뷰포트 카메라를 대상 prim으로 프레이밍."""
+        """활성 뷰포트 카메라를 지정 Prim으로 프레임한다."""
         if not path_str:
             return
 
@@ -324,18 +374,22 @@ class MyExtension(omni.ext.IExt):
         asyncio.ensure_future(_do_focus())
 
     def on_shutdown(self):
-        """구독/위젯/전역 콜백 정리."""
+        """구독/위젯/참조를 정리하여 확장을 안전하게 종료한다."""
         global _TOGGLE_FAVORITE_FN
+
         if self._right_selection:
             self._right_selection.destroy()
             self._right_selection = None
+
         if self._right_stage_widget:
             self._right_stage_widget.destroy()
             self._right_stage_widget = None
+
         self._favorite_delegate_sub = None
         self._left_list_frame = None
         self._stage_subscription = None
         self._usd_context = None
         _TOGGLE_FAVORITE_FN = None
         self._window = None
+
         print("[morph.favorites_search_prim] Extension shutdown")
