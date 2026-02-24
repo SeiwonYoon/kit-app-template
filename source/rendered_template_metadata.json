@@ -47,6 +47,29 @@
         }
     },
     "Extension": {
+        "basic_python_extension": {
+            "morph.force_ko_locale": {
+                "basic_python_extension": {
+                    "extension_name": "morph.force_ko_locale",
+                    "extension_display_name": "Force_KO_Locale",
+                    "version": "0.1.0"
+                }
+            },
+            "morph.measure_control": {
+                "basic_python_extension": {
+                    "extension_name": "morph.measure_control",
+                    "extension_display_name": "Measure Control",
+                    "version": "0.1.0"
+                }
+            },
+            "morph.temp_alarm": {
+                "basic_python_extension": {
+                    "extension_name": "morph.temp_alarm",
+                    "extension_display_name": "Temperature Alarm Outline",
+                    "version": "0.1.0"
+                }
+            }
+        },
         "basic_python_ui_extension": {
             "morph.multi_viewport": {
                 "basic_python_ui_extension": {
@@ -80,22 +103,6 @@
                 "basic_python_ui_extension": {
                     "extension_name": "morph.favorites_seach_prim",
                     "extension_display_name": "Favorites Search Prim",
-                    "version": "0.1.0"
-                }
-            }
-        },
-        "basic_python_extension": {
-            "morph.temp_alarm": {
-                "basic_python_extension": {
-                    "extension_name": "morph.temp_alarm",
-                    "extension_display_name": "Temperature Alarm Outline",
-                    "version": "0.1.0"
-                }
-            },
-            "morph.force_ko_locale": {
-                "basic_python_extension": {
-                    "extension_name": "morph.force_ko_locale",
-                    "extension_display_name": "Force_KO_Locale",
                     "version": "0.1.0"
                 }
             }

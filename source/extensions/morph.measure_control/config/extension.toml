@@ -1,0 +1,37 @@
+[package]
+title = "measure control"
+version = "0.1.0"
+description = "Measure control extension scaffold with service/controller/ui split."
+category = "Example"
+changelog = "docs/CHANGELOG.md"
+icon = "data/icon.png"
+keywords = ["kit", "extension", "python", "ui"]
+preview_image = "data/preview.png"
+readme  = "docs/README.md"
+repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.kit.tool.measure" = {}
+
+[settings]
+
+[[python.module]]
+name = "morph.measure_control"
+
+[documentation]
+pages = [
+    "docs/Overview.md",
+    "docs/CHANGELOG.md",
+]
+
+[[test]]
+dependencies = [
+    "omni.kit.test",
+    "omni.kit.ui_test"
+]
+
+args = [
+]
