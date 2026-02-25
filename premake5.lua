@@ -16,6 +16,7 @@ repo_build.prebuild_copy {
 
 -- Apps: for each app generate batch files and a project based on kit files (define only existing kits)
 define_app("moprh.base.kit")
+define_app("morph.prim_info_viewer.kit")
 define_app("morph.editor.kit")
 define_app("morph.editor_streaming.kit")
 define_app("my_company.my_usd_viewer.kit")
