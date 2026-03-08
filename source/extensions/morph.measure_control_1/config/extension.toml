@@ -1,0 +1,47 @@
+[package]
+title = "measure control"
+version = "0.1.0"
+description = "Measure control extension scaffold with service/controller/ui split."
+category = "Example"
+changelog = "docs/CHANGELOG.md"
+icon = "data/icon.png"
+keywords = ["kit", "extension", "python", "ui"]
+preview_image = "data/preview.png"
+readme  = "docs/README.md"
+repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.kit.tool.measure" = {}
+"omni.kit.window.filepicker" = {}
+"omni.kit.viewport.utility" = {}
+"omni.kit.pipapi" = {}
+
+[settings]
+
+# 확장 로드 전에 psutil과 ansys-mapdl-core를 Kit Python 환경에 pip 설치합니다.
+# (requirements는 모듈 이름으로도 쓰이므로 버전 지정 불가. psutil 6+는 extension.py에서 call_pip로 설치)
+[python.pipapi]
+requirements = ["psutil", "ansys-mapdl-core"]
+modules = ["psutil", "ansys.mapdl.core"]
+use_online_index = true
+
+[[python.module]]
+name = "morph.measure_control_1"
+
+[documentation]
+pages = [
+    "docs/Overview.md",
+    "docs/CHANGELOG.md",
+]
+
+[[test]]
+dependencies = [
+    "omni.kit.test",
+    "omni.kit.ui_test"
+]
+
+args = [
+]

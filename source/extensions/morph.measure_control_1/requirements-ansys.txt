@@ -1,0 +1,15 @@
+# Optional: for ANSYS MAPDL structural simulation (pressure -> deformation).
+# Package name for pip:
+ansys-mapdl-core
+
+# --- 자동 설치 (권장) ---
+# 확장 로드 시 omni.kit.pipapi가 이 패키지를 Kit Python 환경에 자동 설치 시도합니다.
+# (extension.toml의 [python.pipapi] 설정 사용, 네트워크 필요)
+
+# --- 수동 설치 (자동 설치가 실패할 때) ---
+# Kit 앱이 사용하는 Python에 직접 설치하려면, Kit이 설치된 Python 경로를 사용하세요.
+# 예: 빌드 결과물 기준
+#   _build\windows-x86_64\release\python.exe -m pip install ansys-mapdl-core
+# 또는 Omniverse Launcher로 설치한 앱의 Python:
+#   <Omniverse 설치 경로>\python.exe -m pip install ansys-mapdl-core
+# 설치 후 앱을 다시 실행하면 확장에서 PyAnsys를 사용할 수 있습니다.
