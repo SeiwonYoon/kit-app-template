@@ -57,6 +57,10 @@ PRESSURE_BEND_RANGE = 100.0          # 100 초과분을 이걸로 나눠서 0~1 
 PRESSURE_SCALE_Y_MAX = 0.8           # 최대 휨일 때 Y 스케일 (작아짐)
 PRESSURE_SCALE_X_MAX = 1.1           # 최대 휨일 때 X 스케일 (커짐)
 
+# [온도 → 이동 애니메이션] 50도 이상일 때 3초 동안 x축 5 이동
+TEMP_ANIMATION_THRESHOLD = 50.0
+TEMP_ANIMATION_DEFAULT = [{"duration": 3.0, "delta": (5.0, 0.0, 0.0)}]
+
 
 # =============================================================================
 # [스테이지·오브젝트 만들기 — 일반 기능]
@@ -313,6 +317,7 @@ class Extension(omni.ext.IExt):
         self._ext_id = ext_id
         self._window = None
         self._object_list_frame = None
+        self._temp_animation_triggered = set()  # 온도 50도 이상 시 한 번만 재생한 prim
         # [PyAnsys] ansys-mapdl-core(및 psutil) 설치. psutil 5.x 호환은 ansys_simulation에서 net_connections 패치로 처리.
         try:
             import omni.kit.pipapi
@@ -334,7 +339,11 @@ class Extension(omni.ext.IExt):
         ANSYS를 끄고(_ansys_manager.shutdown()), 창을 없애고, 목록을 비워요.
         """
         global _ansys_manager
+        from .translate_animation import stop_prim_translate_animation
+        for path in list(self._tracked_paths):
+            stop_prim_translate_animation(path)
         self._tracked_paths.clear()
+        self._temp_animation_triggered.clear()
         if _ansys_manager is not None:
             _ansys_manager.shutdown()
             _ansys_manager = None
@@ -512,14 +521,23 @@ class Extension(omni.ext.IExt):
                     ui.FloatField(model=temp_model)
 
                     def on_temp_changed(model=None):
-                        """[쉽게] '온도' 칸 값을 바꾸면 prim의 temperature에 저장하고 apply_simulation_rules 호출 → 색이 바뀌어요. PyAnsys는 온도로 색만 바꾸고 해석에는 지금은 안 써요."""
+                        """[쉽게] '온도' 칸 값을 바꾸면 prim의 temperature에 저장하고 apply_simulation_rules 호출 → 색이 바뀌어요. 50도 이상이면 3초 동안 x축 5 이동 애니메이션을 한 번 재생해요."""
                         stage = _get_stage()
                         p = stage.GetPrimAtPath(prim_path) if stage else None
                         if p and p.IsValid():
+                            new_temp = temp_model.get_value_as_float()
                             a = p.GetAttribute(ATTR_TEMPERATURE)
                             if a:
-                                a.Set(temp_model.get_value_as_float())
+                                a.Set(new_temp)
                                 apply_simulation_rules(p)
+                            # 온도 50도 이상일 때 해당 객체 3초 동안 x축 5 이동 애니메이션 (한 번만)
+                            if new_temp >= TEMP_ANIMATION_THRESHOLD:
+                                if prim_path not in self._temp_animation_triggered:
+                                    self._temp_animation_triggered.add(prim_path)
+                                    from .translate_animation import run_prim_translate_animation
+                                    run_prim_translate_animation(prim_path, TEMP_ANIMATION_DEFAULT, loop=False)
+                            else:
+                                self._temp_animation_triggered.discard(prim_path)
 
                     temp_model.add_value_changed_fn(on_temp_changed)
 
