@@ -2,17 +2,15 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-[이 확장이 하는 일 — 쉽게]
-1. 창 하나를 띄워요. "큐브 만들기", "구 만들기", "USD 파일 불러오기" 버튼이 있어요.
-2. 만든 오브젝트마다 "위치, 크기, 온도, 압력"을 적을 수 있는 칸이 나와요.
-3. 온도에 따라 색이 바뀌어요 (차가우면 파랑, 보통이면 회색, 뜨거우면 빨강).
-4. 압력을 넣으면 오브젝트가 "휘어" 보여요.
-   - PyAnsys(ANSYS)를 쓸 수 있으면: ANSYS가 진짜 구조 해석을 해서 나온 변위만큼 휘어 보이게 해요.
-   - ANSYS를 못 쓰면: 압력이 100 넘을 때만, 간단한 공식으로 휘어 보이게 해요.
+[measure_control_1 — USD 로드 및 prim 제어]
+1. 확장 시작 시 하나의 USD를 로드합니다. path가 외부 경로면 그 경로에서, resource 내부 경로면 resource 폴더에서 로드합니다.
+2. 로드된 USD 안의 모든 prim이 UI 창에 드롭다운으로 나열되고, 각 prim별로 X/Y/Z 좌표 표시·수정으로 이동할 수 있습니다.
+3. 각 객체마다 move_0(1초 동안 x축 3 이동), move_1(포물선 곡선 이동) 버튼이 있습니다.
 """
 
 import asyncio
-from typing import Optional
+import os
+from typing import Optional, List
 
 import omni.ext
 import omni.ui as ui
@@ -57,15 +55,16 @@ PRESSURE_BEND_RANGE = 100.0          # 100 초과분을 이걸로 나눠서 0~1 
 PRESSURE_SCALE_Y_MAX = 0.8           # 최대 휨일 때 Y 스케일 (작아짐)
 PRESSURE_SCALE_X_MAX = 1.1           # 최대 휨일 때 X 스케일 (커짐)
 
-# [온도 → 이동 애니메이션] 50도 이상일 때 3초 동안 x축 5 이동
-TEMP_ANIMATION_THRESHOLD = 50.0
-TEMP_ANIMATION_DEFAULT = [{"duration": 3.0, "delta": (5.0, 0.0, 0.0)}]
+# [시작 시 USD 로드] 동일 함수 load_usd_by_path(stage, path, ext_id) 로 처리.
+# - path가 None/빈 문자열: 로드하지 않음.
+# - 외부 path (절대 경로 또는 carb 토큰): 해당 경로의 USD 로드. 예: "C:/data/scene.usd", "${root}/data/sample.usd"
+# - 내부 path (resource): resource 폴더 안의 USD 로드. 예: "resource/scene.usd", "scene.usd"
+# 현재 resource에 usd가 없으므로 외부 경로를 넣어 두면 시작 시 그 경로로 로드됩니다.
+STARTUP_USD_PATH: Optional[str] = None  # 필요 시 예: "C:/path/to/your.scene.usd" 또는 "resource/내파일.usd"
 
 
 # =============================================================================
-# [스테이지·오브젝트 만들기 — 일반 기능]
-# 아래 함수들은 "3D 세상(스테이지)"에 오브젝트를 만들고, 속성을 붙이는 일만 해요.
-# PyAnsys는 여기서는 안 써요. PyAnsys는 "압력/온도 값이 바뀌었을 때 휨 계산"할 때만 써요.
+# [스테이지·USD 로드 — 공통]
 # =============================================================================
 
 def _get_stage():
@@ -89,72 +88,15 @@ def _ensure_world_prim(stage):
 
 
 def _next_index(stage, prefix):
-    """
-    [쉽게] "Cube_0, Cube_1, ..." 처럼 이름을 붙일 때, 아직 안 쓰인 번호를 찾아요.
-    예: Cube_0이 이미 있으면 1을 돌려줘서 Cube_1을 만들 수 있어요.
-    """
+    """/World/{prefix}_0, _1, ... 중 비어 있는 인덱스를 반환합니다."""
     i = 0
     while stage.GetPrimAtPath(f"/World/{prefix}_{i}").IsValid():
         i += 1
     return i
 
 
-def create_cube(stage):
-    """
-    [쉽게] 3D 세상에 "정육면체" 하나를 만들어요. 경로는 /World/Cube_0, Cube_1, ... 처럼 붙어요.
-    만들면서 temperature, pressure, baseScale 속성도 같이 붙여요 (나중에 규칙에서 씀).
-    """
-    if not stage:
-        return None
-    _ensure_world_prim(stage)
-    idx = _next_index(stage, "Cube")
-    path_str = f"/World/Cube_{idx}"
-    cube = UsdGeom.Cube.Define(stage, path_str)
-    if not cube:
-        return None
-    prim = cube.GetPrim()
-    _ensure_custom_attributes(prim)
-    return path_str
-
-
-def create_sphere(stage):
-    """
-    [쉽게] 3D 세상에 "구" 하나를 만들어요. 경로는 /World/Sphere_0, Sphere_1, ...
-    역시 temperature, pressure, baseScale 속성을 붙여요.
-    """
-    if not stage:
-        return None
-    _ensure_world_prim(stage)
-    idx = _next_index(stage, "Sphere")
-    path_str = f"/World/Sphere_{idx}"
-    sphere = UsdGeom.Sphere.Define(stage, path_str)
-    if not sphere:
-        return None
-    prim = sphere.GetPrim()
-    _ensure_custom_attributes(prim)
-    return path_str
-
-
-def _ensure_custom_attributes(prim):
-    """
-    [쉽게] 이 오브젝트에 "온도, 압력, 기준 크기" 칸이 없으면 만들어요.
-    UI에서 적는 값이 여기 만든 속성에 저장되고, 시뮬레이션 규칙(색·휨)이 여기서 값을 읽어요.
-    """
-    if not prim or not prim.IsValid():
-        return
-    if not prim.HasAttribute(ATTR_TEMPERATURE):
-        prim.CreateAttribute(ATTR_TEMPERATURE, Sdf.ValueTypeNames.Float).Set(DEFAULT_TEMP)
-    if not prim.HasAttribute(ATTR_PRESSURE):
-        prim.CreateAttribute(ATTR_PRESSURE, Sdf.ValueTypeNames.Float).Set(DEFAULT_PRESSURE)
-    if not prim.HasAttribute(ATTR_BASE_SCALE):
-        prim.CreateAttribute(ATTR_BASE_SCALE, Sdf.ValueTypeNames.Vector3d).Set(Gf.Vec3d(1, 1, 1))
-
-
 def load_usd(stage, usd_file_path):
-    """
-    [쉽게] 사용자가 고른 USD 파일을 "참조"로 불러와서 /World/Loaded_0, Loaded_1, ... 아래에 넣어요.
-    파일 안에 있는 3D 씬이 그대로 보이고, 이 prim에도 temperature, pressure, baseScale을 붙여요.
-    """
+    """USD 파일을 참조로 /World/Loaded_0, Loaded_1, ... 에 넣습니다."""
     if not stage or not usd_file_path:
         return None
     _ensure_world_prim(stage)
@@ -165,9 +107,122 @@ def load_usd(stage, usd_file_path):
         return None
     prim.GetReferences().AddReference(usd_file_path)
     prim = stage.GetPrimAtPath(path_str)
-    if prim.IsValid():
-        _ensure_custom_attributes(prim)
-    return path_str
+    return path_str if prim.IsValid() else None
+
+
+def get_resource_dir(ext_id: Optional[str] = None) -> Optional[str]:
+    """
+    최상단 resource 폴더 경로를 반환합니다.
+    먼저 프로젝트 루트(${root})/resource 를 찾고, 없으면 확장 data 폴더를 씁니다.
+    """
+    try:
+        import carb
+        tokens = carb.tokens.get_tokens_interface()
+        root = tokens.resolve("${root}")
+        if root:
+            resource = os.path.join(root, "resource")
+            if os.path.isdir(resource):
+                return resource
+        if ext_id:
+            em = omni.kit.app.get_app().get_extension_manager()
+            ext_path = em.get_extension_path(ext_id)
+            if ext_path:
+                for sub in ("resource", "data", "data/resource"):
+                    candidate = os.path.join(ext_path, sub)
+                    if os.path.isdir(candidate):
+                        return candidate
+    except Exception:
+        pass
+    return None
+
+
+def list_usd_in_dir(dir_path: str) -> List[str]:
+    """디렉터리 안의 .usd, .usda 파일 경로 리스트를 반환합니다."""
+    if not dir_path or not os.path.isdir(dir_path):
+        return []
+    out = []
+    for name in sorted(os.listdir(dir_path)):
+        low = name.lower()
+        if low.endswith(".usd") or low.endswith(".usda"):
+            out.append(os.path.join(dir_path, name))
+    return out
+
+
+def collect_all_prim_paths(stage, root_prim_path: str) -> List[str]:
+    """
+    로드된 USD 루트 아래의 모든 prim(Xform/Gprim/Scope) 경로를 수집합니다.
+    UI에서 각 prim을 드롭다운으로 표시할 때 사용합니다.
+    """
+    root = stage.GetPrimAtPath(root_prim_path)
+    if not root or not root.IsValid():
+        return []
+    paths = [root_prim_path]
+
+    def visit(prim, base_path: str) -> None:
+        for child in prim.GetChildren():
+            child_path = base_path + "/" + child.GetName()
+            if child.IsA(UsdGeom.Xform) or child.IsA(UsdGeom.Gprim) or child.GetTypeName() == "Scope":
+                paths.append(child_path)
+            visit(child, child_path)
+
+    visit(root, root_prim_path)
+    return paths
+
+
+def _is_internal_path(path: str) -> bool:
+    """path가 resource 내부 경로인지 판별 (resource/ 로 시작하거나 절대경로가 아님)."""
+    if not path or not path.strip():
+        return False
+    p = path.strip().replace("\\", "/")
+    if p.startswith("resource/") or p.startswith("resource"):
+        return True
+    if os.path.isabs(p):
+        return False
+    if len(p) > 1 and p[1] == ":":
+        return False
+    return True
+
+
+def load_usd_by_path(stage, path: Optional[str], ext_id: str):
+    """
+    하나의 함수로 외부 path / 내부(resource) path 모두 처리합니다.
+    - path가 None이거나 빈 문자열: 로드하지 않음, (None, []) 반환.
+    - path가 내부 경로(resource/파일.usd 또는 파일.usd): get_resource_dir(ext_id) 기준으로 resource 폴더 안의 USD 로드.
+    - path가 외부 경로(절대 경로 등): 해당 경로의 USD 파일을 로드 (show_info 등에서 쓰는 외부 path와 동일한 방식).
+    반환: (root_prim_path, [모든 prim 경로]) — 실패 시 (None, []).
+    """
+    if not path or not path.strip():
+        return None, []
+    path = path.strip().replace("\\", "/")
+    usd_file_path = None
+    if _is_internal_path(path):
+        resource_dir = get_resource_dir(ext_id)
+        if not resource_dir:
+            return None, []
+        name = path.split("/")[-1] if "resource" in path.split("/")[0].lower() else path
+        if name == path and "/" not in path:
+            name = path
+        else:
+            name = path.replace("resource/", "").replace("resource", "").lstrip("/")
+        usd_file_path = os.path.join(resource_dir, name)
+        if not os.path.isfile(usd_file_path):
+            candidates = list_usd_in_dir(resource_dir)
+            usd_file_path = candidates[0] if candidates else None
+    else:
+        try:
+            import carb
+            usd_file_path = carb.tokens.get_tokens_interface().resolve(path)
+            if not usd_file_path or not os.path.isfile(usd_file_path):
+                usd_file_path = path
+        except Exception:
+            usd_file_path = path
+        if not os.path.isfile(usd_file_path):
+            return None, []
+    root_path = load_usd(stage, usd_file_path)
+    if not root_path:
+        return None, []
+    prim_paths = collect_all_prim_paths(stage, root_path)
+    return root_path, prim_paths
 
 
 def apply_simulation_rules(prim):
@@ -271,10 +326,7 @@ def _frame_prim_in_viewport(prim_path: str) -> None:
 
 
 def _get_prim_transform(prim):
-    """
-    [쉽게] 이 오브젝트의 "위치(X,Y,Z)"와 "크기(scale)"를 읽어서 돌려줘요.
-    UI에 "위치·크기" 칸을 띄울 때, 현재 값을 채워 넣기 위해 써요. PyAnsys와는 무관해요.
-    """
+    """prim의 월드 위치(translate)와 스케일을 반환합니다."""
     translate = Gf.Vec3f(0, 0, 0)
     scale = Gf.Vec3d(1, 1, 1)
     if not prim or not prim.IsValid():
@@ -288,6 +340,37 @@ def _get_prim_transform(prim):
         if not prim.HasAttribute(ATTR_BASE_SCALE):
             scale = world.ExtractScale()
     return translate, scale
+
+
+def _get_prim_local_translate(prim) -> Gf.Vec3f:
+    """prim의 로컬 translate(op) 값을 반환합니다. 애니메이션/이동 시 사용."""
+    if not prim or not prim.IsValid():
+        return Gf.Vec3f(0, 0, 0)
+    xform = UsdGeom.Xformable(prim)
+    if not xform:
+        return Gf.Vec3f(0, 0, 0)
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            val = op.Get()
+            return Gf.Vec3f(val[0], val[1], val[2]) if val is not None else Gf.Vec3f(0, 0, 0)
+    return Gf.Vec3f(0, 0, 0)
+
+
+def _set_prim_translate_only(prim, position: Gf.Vec3f) -> None:
+    """prim의 translate op만 설정합니다 (scale 등은 건드리지 않음)."""
+    if not prim or not prim.IsValid():
+        return
+    xform = UsdGeom.Xformable(prim)
+    if not xform:
+        return
+    translate_op = None
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            translate_op = op
+            break
+    if translate_op is None:
+        translate_op = xform.AddTranslateOp()
+    translate_op.Set(Gf.Vec3f(position[0], position[1], position[2]))
 
 
 # =============================================================================
@@ -317,8 +400,6 @@ class Extension(omni.ext.IExt):
         self._ext_id = ext_id
         self._window = None
         self._object_list_frame = None
-        self._temp_animation_triggered = set()  # 온도 50도 이상 시 한 번만 재생한 prim
-        # [PyAnsys] ansys-mapdl-core(및 psutil) 설치. psutil 5.x 호환은 ansys_simulation에서 net_connections 패치로 처리.
         try:
             import omni.kit.pipapi
             omni.kit.pipapi.install("ansys-mapdl-core")
@@ -332,18 +413,37 @@ class Extension(omni.ext.IExt):
             print(f"[measure_control_1] PyAnsys 로드/초기화 실패: {e}")
             _ansys_manager = None
         self._build_window()
+        if STARTUP_USD_PATH:
+            self._schedule_startup_usd_load()
+
+    def _schedule_startup_usd_load(self):
+        """한 프레임 뒤 스테이지를 확보한 뒤 STARTUP_USD_PATH로 USD를 로드합니다."""
+        def do_load():
+            stage = _get_stage()
+            if not stage:
+                return
+            root_path, prim_paths = load_usd_by_path(stage, STARTUP_USD_PATH, self._ext_id)
+            if not root_path:
+                return
+            self._tracked_paths.clear()
+            self._tracked_paths.extend(prim_paths)
+            self._refresh_object_list()
+            _frame_prim_in_viewport(root_path)
+
+        async def next_tick():
+            await omni.kit.app.get_app().next_update_async()
+            do_load()
+
+        asyncio.ensure_future(next_tick())
 
     def on_shutdown(self):
-        """
-        [쉽게] 확장이 "꺼질 때" 불러요.
-        ANSYS를 끄고(_ansys_manager.shutdown()), 창을 없애고, 목록을 비워요.
-        """
         global _ansys_manager
         from .translate_animation import stop_prim_translate_animation
+        from .curve_animation import stop_prim_curve_animation
         for path in list(self._tracked_paths):
             stop_prim_translate_animation(path)
+            stop_prim_curve_animation(path)
         self._tracked_paths.clear()
-        self._temp_animation_triggered.clear()
         if _ansys_manager is not None:
             _ansys_manager.shutdown()
             _ansys_manager = None
@@ -353,7 +453,7 @@ class Extension(omni.ext.IExt):
         self._object_list_frame = None
 
     def _build_window(self):
-        """[쉽게] 'Measure Control Simulation' 창을 만들어요. 위에는 버튼 3개, 아래는 스크롤되는 오브젝트 목록이에요. PyAnsys는 여기서 안 써요."""
+        """USD 로드 시 나오는 prim 목록 + Animation 확장 테스트 영역."""
         self._window = ui.Window(
             title="Measure Control Simulation",
             width=420,
@@ -363,68 +463,19 @@ class Extension(omni.ext.IExt):
         )
         with self._window.frame:
             with ui.VStack(spacing=0, style={"margin": 0, "padding": 0}):
-                # Button row: fixed height so no extra vertical space
-                with ui.HStack(spacing=8, height=50):
-                    ui.Button("Create Cube", height=50, clicked_fn=self._on_create_cube)
-                    ui.Button("Create Sphere", height=50, clicked_fn=self._on_create_sphere)
-                    ui.Button("Load USD", height=50, clicked_fn=self._on_load_usd)
-                # List sticks to top of scroll area; no padding/margin
+                # Animation Clips / Timeline 확장 테스트 (접이식)
+                with ui.CollapsableFrame("Animation 확장 테스트", collapsed=True):
+                    with ui.VStack(spacing=6):
+                        self._anim_status_label = ui.Label("확인 중...", height=0)
+                        ui.Button("Animation·타임라인 상태 새로고침", height=28, clicked_fn=self._on_refresh_animation_status)
+                ui.Spacer(height=4)
                 with ui.ScrollingFrame(style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
                     self._object_list_frame = ui.VStack(height=0, alignment=ui.Alignment.LEFT_TOP)
         self._refresh_object_list()
-
-    def _on_create_cube(self):
-        """[쉽게] 'Create Cube' 버튼을 누르면: 스테이지에 큐브 하나 만들고, 목록에 넣고, 카메라를 그 큐브에 맞춰요. PyAnsys 안 써요."""
-        stage = _get_stage()
-        path = create_cube(stage)
-        if path:
-            self._tracked_paths.append(path)
-            self._refresh_object_list()
-            _frame_prim_in_viewport(path)
-
-    def _on_create_sphere(self):
-        """[쉽게] 'Create Sphere' 버튼을 누르면: 구 하나 만들고, 목록에 넣고, 카메라를 그 구에 맞춰요. PyAnsys 안 써요."""
-        stage = _get_stage()
-        path = create_sphere(stage)
-        if path:
-            self._tracked_paths.append(path)
-            self._refresh_object_list()
-            _frame_prim_in_viewport(path)
-
-    def _on_load_usd(self):
-        """[쉽게] 'Load USD' 버튼을 누르면: 파일 고르는 창을 띄워요. 사용자가 파일을 고르고 적용하면, 그 USD를 /World/Loaded_0 같은 경로에 불러와요. PyAnsys 안 써요."""
-        try:
-            from omni.kit.window.filepicker import FilePickerDialog
-        except ImportError:
-            return
-        stage = _get_stage()
-        if not stage:
-            return
-
-        def on_apply(dialog, path):
-            """파일 선택 후 'Load' 버튼 누르면: load_usd로 불러오고, 목록 갱신, 카메라를 그 오브젝트에 맞춰요."""
-            if path:
-                added = load_usd(stage, path)
-                if added:
-                    self._tracked_paths.append(added)
-                    self._refresh_object_list()
-                    _frame_prim_in_viewport(added)
-
-        try:
-            import carb.tokens
-            start_dir = carb.tokens.get_tokens_interface().resolve("${root}/data")
-        except Exception:
-            start_dir = "."
-        picker = FilePickerDialog(
-            "Load USD from data",
-            allow_multi_selection=False,
-            apply_button_label="Load",
-            click_apply_handler=on_apply,
-        )
-        picker.show(start_dir)
+        self._on_refresh_animation_status()
 
     def _refresh_object_list(self):
-        """[쉽게] 아래쪽 "오브젝트 목록"을 다시 그려요. 이미 삭제된 건 빼고, 남은 건 하나씩 _build_object_panel로 접이식 패널을 만들어요. PyAnsys 안 써요."""
+        """로드된 USD의 prim 목록을 드롭다운(접이식) 패널로 다시 그립니다."""
         if self._object_list_frame is None:
             return
         self._object_list_frame.clear()
@@ -438,121 +489,96 @@ class Extension(omni.ext.IExt):
 
     def _build_object_panel(self, parent, prim_path):
         """
-        [쉽게] 오브젝트 하나당 "접이식 칸" 하나를 만들어요. 제목은 오브젝트 이름(Cube_0, Sphere_0 등).
-        안에는 "위치 X/Y/Z", "크기 X/Y/Z", "온도", "압력" 입력 칸이 있어요.
-        사용자가 값을 바꾸면 → 그 값이 prim에 저장되고 → apply_simulation_rules(prim)이 불려요.
-        그 안에서 온도면 색이 바뀌고, 압력이면 (PyAnsys 쓸 수 있으면) ANSYS 해석 후 휨이 적용돼요.
+        로드된 USD의 prim 하나당 접이식 칸 하나. X/Y/Z 좌표 표시·수정, move_0(1초 동안 x+3), move_1(포물선 이동).
         """
         stage = _get_stage()
         prim = stage.GetPrimAtPath(prim_path) if stage else None
         if not prim or not prim.IsValid():
             return
         name = prim.GetName()
-        translate, scale = _get_prim_transform(prim)
-        temp_attr = prim.GetAttribute(ATTR_TEMPERATURE)
-        pressure_attr = prim.GetAttribute(ATTR_PRESSURE)
-        temp_val = float(temp_attr.Get()) if temp_attr else DEFAULT_TEMP
-        pressure_val = float(pressure_attr.Get()) if pressure_attr else DEFAULT_PRESSURE
-
-        # [UI 모델] 입력 칸의 "현재 값"을 담는 곳이에요. X,Y,Z 세 개씩 있어서 한 번에 읽어서 prim에 넣을 수 있어요.
+        # 로컬 translate로 표시·편집 (수정 시 즉시 이동)
+        local = _get_prim_local_translate(prim)
         pos_models = [
-            ui.SimpleFloatModel(translate[0]),
-            ui.SimpleFloatModel(translate[1]),
-            ui.SimpleFloatModel(translate[2]),
-        ]
-        scale_models = [
-            ui.SimpleFloatModel(scale[0]),
-            ui.SimpleFloatModel(scale[1]),
-            ui.SimpleFloatModel(scale[2]),
+            ui.SimpleFloatModel(local[0]),
+            ui.SimpleFloatModel(local[1]),
+            ui.SimpleFloatModel(local[2]),
         ]
 
-        def update_prim_xform(model=None):
-            """
-            [쉽게] 사용자가 "위치"나 "크기" 칸에서 숫자를 바꾸면 이 함수가 불려요.
-            칸에 적힌 값을 읽어서 prim의 위치·크기에 넣고, apply_simulation_rules(p)를 불러요.
-            그 안에서 압력이 있으면 PyAnsys로 휨을 계산할 수도 있어요.
-            """
+        def update_prim_position(model=None):
             stage = _get_stage()
             p = stage.GetPrimAtPath(prim_path) if stage else None
-            if not p or not p.IsValid():
-                return
-            xform = UsdGeom.Xformable(p)
-            if not xform:
-                return
-            # UI에 적힌 "크기"를 baseScale에 저장해요. 나중에 압력 휨(또는 PyAnsys 결과) 계산할 때 기준이 돼요.
-            base_scale = Gf.Vec3d(
-                scale_models[0].get_value_as_float(),
-                scale_models[1].get_value_as_float(),
-                scale_models[2].get_value_as_float(),
-            )
-            if p.HasAttribute(ATTR_BASE_SCALE):
-                p.GetAttribute(ATTR_BASE_SCALE).Set(base_scale)
-            xform.ClearXformOpOrder()
-            t = xform.AddTranslateOp()
-            t.Set(Gf.Vec3f(pos_models[0].get_value_as_float(), pos_models[1].get_value_as_float(), pos_models[2].get_value_as_float()))
-            s = xform.AddScaleOp()
-            s.Set(base_scale)
-            # 여기서 규칙 적용. ANSYS 켜져 있으면 run_simulation → apply_result_to_prim 로 휨이 들어가요.
-            apply_simulation_rules(p)
+            if p and p.IsValid():
+                _set_prim_translate_only(p, Gf.Vec3f(
+                    pos_models[0].get_value_as_float(),
+                    pos_models[1].get_value_as_float(),
+                    pos_models[2].get_value_as_float(),
+                ))
 
         with parent:
             with ui.CollapsableFrame(name, collapsed=False):
                 with ui.VStack(spacing=6):
-                    ui.Label("Position", height=0)
+                    ui.Label("Position (X, Y, Z)", height=0)
                     with ui.HStack():
                         for i, label in enumerate(["X", "Y", "Z"]):
                             ui.Label(label, width=24)
                             ui.FloatField(model=pos_models[i])
                     for m in pos_models:
-                        m.add_value_changed_fn(update_prim_xform)
+                        m.add_value_changed_fn(update_prim_position)
 
-                    ui.Spacer(height=2)
-                    ui.Label("Scale", height=0)
-                    with ui.HStack():
-                        for i, label in enumerate(["X", "Y", "Z"]):
-                            ui.Label(label, width=24)
-                            ui.FloatField(model=scale_models[i])
-                    for m in scale_models:
-                        m.add_value_changed_fn(update_prim_xform)
+                    ui.Spacer(height=4)
+                    with ui.HStack(spacing=8):
+                        ui.Button("move_0", width=0, clicked_fn=lambda p=prim_path: self._on_move_0(p))
+                        ui.Button("move_1", width=0, clicked_fn=lambda p=prim_path: self._on_move_1(p))
 
-                    ui.Spacer(height=2)
-                    ui.Label("Temperature", height=0)
-                    temp_model = ui.SimpleFloatModel(temp_val)
-                    ui.FloatField(model=temp_model)
+    def _on_move_0(self, prim_path: str):
+        """move_0: 해당 객체를 x축으로 3만큼 1초 동안 이동."""
+        from .translate_animation import run_prim_translate_animation
+        run_prim_translate_animation(prim_path, [{"duration": 1.0, "delta": (3.0, 0.0, 0.0)}], loop=False)
 
-                    def on_temp_changed(model=None):
-                        """[쉽게] '온도' 칸 값을 바꾸면 prim의 temperature에 저장하고 apply_simulation_rules 호출 → 색이 바뀌어요. 50도 이상이면 3초 동안 x축 5 이동 애니메이션을 한 번 재생해요."""
-                        stage = _get_stage()
-                        p = stage.GetPrimAtPath(prim_path) if stage else None
-                        if p and p.IsValid():
-                            new_temp = temp_model.get_value_as_float()
-                            a = p.GetAttribute(ATTR_TEMPERATURE)
-                            if a:
-                                a.Set(new_temp)
-                                apply_simulation_rules(p)
-                            # 온도 50도 이상일 때 해당 객체 3초 동안 x축 5 이동 애니메이션 (한 번만)
-                            if new_temp >= TEMP_ANIMATION_THRESHOLD:
-                                if prim_path not in self._temp_animation_triggered:
-                                    self._temp_animation_triggered.add(prim_path)
-                                    from .translate_animation import run_prim_translate_animation
-                                    run_prim_translate_animation(prim_path, TEMP_ANIMATION_DEFAULT, loop=False)
-                            else:
-                                self._temp_animation_triggered.discard(prim_path)
+    def _on_move_1(self, prim_path: str):
+        """move_1: 해당 객체가 포물선 곡선을 그리며 이동."""
+        stage = _get_stage()
+        prim = stage.GetPrimAtPath(prim_path) if stage else None
+        if not prim or not prim.IsValid():
+            return
+        from .curve_animation import make_parabolic_path, run_prim_curve_animation
+        start = _get_prim_local_translate(prim)
+        start_t = (start[0], start[1], start[2])
+        end_t = (start[0] + 5.0, start[1], start[2] + 2.0)
+        path_points = make_parabolic_path(start=start_t, end=end_t, arc_height=2.0, num_points=24)
+        run_prim_curve_animation(prim_path, path_points, duration_sec=2.0, loop=False)
 
-                    temp_model.add_value_changed_fn(on_temp_changed)
+    def _on_refresh_animation_status(self):
+        """Animation Clips·Timeline 확장 사용 가능 여부와 타임라인 상태를 확인해 UI에 표시합니다."""
+        lines = []
+        # 1) omni.anim.clips 사용 가능 여부 (의존성으로 추가된 확장)
+        try:
+            import omni.anim.clips
+            lines.append("[Animation Clips] omni.anim.clips: 로드됨 (클립 적용 등 사용 가능)")
+        except ImportError:
+            try:
+                em = omni.kit.app.get_app().get_extension_manager()
+                for ext_id in ("omni.anim.clips", "omni.anim.clips.bundle"):
+                    try:
+                        if em.is_extension_enabled(ext_id):
+                            lines.append(f"[Animation Clips] {ext_id}: 활성화됨")
+                            break
+                    except Exception:
+                        pass
+                else:
+                    lines.append("[Animation Clips] omni.anim.clips: 앱에 미포함 (USD Composer 등에서 사용 가능)")
+            except Exception as e:
+                lines.append(f"[Animation Clips] 확인 실패: {e}")
 
-                    ui.Label("Pressure", height=0)
-                    pressure_model = ui.SimpleFloatModel(pressure_val)
-                    ui.FloatField(model=pressure_model)
+        # 2) omni.timeline 사용 가능 여부 및 현재 재생 시간
+        try:
+            import omni.timeline
+            timeline = omni.timeline.get_timeline_interface()
+            t = timeline.get_current_time()
+            tps = timeline.get_time_codes_per_seconds()
+            lines.append(f"[Timeline] 현재 시간: {t:.2f} sec (tps={tps})")
+        except Exception as e:
+            lines.append(f"[Timeline] 확인 실패: {e}")
 
-                    def on_pressure_changed(model=None):
-                        """[쉽게] '압력' 칸 값을 바꾸면 prim의 pressure에 저장하고 apply_simulation_rules 호출 → 여기서 PyAnsys가 켜져 있으면 run_simulation으로 해석하고 휨이 적용돼요. 안 켜져 있으면 100 넘을 때만 단순 공식으로 휨 적용."""
-                        stage = _get_stage()
-                        p = stage.GetPrimAtPath(prim_path) if stage else None
-                        if p and p.IsValid():
-                            a = p.GetAttribute(ATTR_PRESSURE)
-                            if a:
-                                a.Set(pressure_model.get_value_as_float())
-                                apply_simulation_rules(p)
-
-                    pressure_model.add_value_changed_fn(on_pressure_changed)
+        if self._anim_status_label:
+            self._anim_status_label.text = "\n".join(lines) if lines else "확인할 수 없음"

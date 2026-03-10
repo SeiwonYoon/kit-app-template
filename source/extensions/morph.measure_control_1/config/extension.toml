@@ -18,6 +18,10 @@ repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
 "omni.kit.window.filepicker" = {}
 "omni.kit.viewport.utility" = {}
 "omni.kit.pipapi" = {}
+# Animation Clips: 클립 형태로 객체 애니메이션 적용 (USD 스켈레톤 등). 앱에 포함된 경우 사용 가능.
+"omni.anim.clips" = {}
+# Timeline: 키프레임·재생 제어. 확장 테스트에서 재생/시간 확인용.
+"omni.timeline" = {}
 
 [settings]
 

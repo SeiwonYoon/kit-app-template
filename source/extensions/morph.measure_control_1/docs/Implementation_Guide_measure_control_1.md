@@ -791,6 +791,134 @@ ansys-mapdl-core
 
 ---
 
+## 9단계: Animation Clips·Timeline 확장 테스트 추가
+
+이 단계는 **애니메이션 클립 테스트가 없는 상태**에서, 의존성 추가와 UI·확인 로직만 따라 하면 테스트 기능을 붙일 수 있도록 정리한 것입니다.
+(이미 구현되어 있다면 해당 부분을 참고용으로만 활용하면 됩니다.)
+
+### 9-1. extension.toml에 Animation 의존성 추가
+
+`config/extension.toml`의 `[dependencies]` 블록에 아래 두 줄을 **기존 의존성 아래** 추가합니다.
+
+```toml
+[dependencies]
+# ... 기존 omni.kit.uiapp, omni.ui 등 ...
+
+# Animation Clips: 클립 형태로 객체 애니메이션 적용 (USD 스켈레톤 등). 앱에 포함된 경우 사용 가능.
+"omni.anim.clips" = {}
+# Timeline: 키프레임·재생 제어. 확장 테스트에서 재생/시간 확인용.
+"omni.timeline" = {}
+```
+
+- **참고**: 앱에 `omni.anim.clips` 또는 `omni.timeline`이 없으면 확장 로드 시 의존성 오류가 날 수 있습니다. 그런 앱에서는 위 두 줄을 제거하면 measure_control_1만 로드됩니다.
+
+### 9-2. _build_window에 Animation 확장 테스트 UI 넣기
+
+`extension.py`의 `Extension` 클래스 안에 있는 `_build_window` 메서드를 수정합니다.
+
+**수정 전**: 창 프레임 안에 `ScrollingFrame`과 `_object_list_frame`만 있는 구조라고 가정합니다.
+
+**수정 후**: `with self._window.frame:` 안의 `ui.VStack` **맨 위**에, 스크롤 영역 **위에** 다음을 넣습니다.
+
+1. 접이식 프레임 **"Animation 확장 테스트"** (기본 접힌 상태)
+2. 그 안에 상태를 표시할 **Label** 하나 (속성으로 `self._anim_status_label`에 담음)
+3. **"Animation·타임라인 상태 새로고침"** 버튼 하나 (클릭 시 `self._on_refresh_animation_status` 호출)
+4. 창을 연 직후 한 번 `_on_refresh_animation_status()` 호출
+
+예시는 아래와 같습니다. 기존 `_build_window` 내용을 다음처럼 **바꾸거나**, 같은 위치에 해당 블록만 **추가**하면 됩니다.
+
+```python
+def _build_window(self):
+    """USD 로드 시 나오는 prim 목록 + Animation 확장 테스트 영역."""
+    self._window = ui.Window(
+        title="Measure Control Simulation",
+        width=420,
+        height=400,
+        padding_x=0,
+        padding_y=0,
+    )
+    with self._window.frame:
+        with ui.VStack(spacing=0, style={"margin": 0, "padding": 0}):
+            # Animation Clips / Timeline 확장 테스트 (접이식)
+            with ui.CollapsableFrame("Animation 확장 테스트", collapsed=True):
+                with ui.VStack(spacing=6):
+                    self._anim_status_label = ui.Label("확인 중...", height=0)
+                    ui.Button("Animation·타임라인 상태 새로고침", height=28, clicked_fn=self._on_refresh_animation_status)
+            ui.Spacer(height=4)
+            with ui.ScrollingFrame(style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
+                self._object_list_frame = ui.VStack(height=0, alignment=ui.Alignment.LEFT_TOP)
+    self._refresh_object_list()
+    self._on_refresh_animation_status()
+```
+
+- `self._anim_status_label`: 나중에 `_on_refresh_animation_status`에서 텍스트를 갱신할 때 사용합니다.
+- `_on_refresh_animation_status`는 다음 9-3에서 정의합니다.
+
+### 9-3. _on_refresh_animation_status 메서드 추가
+
+`Extension` 클래스 안에 **새 메서드** `_on_refresh_animation_status`를 추가합니다.
+(다른 메서드들, 예: `_on_move_0` / `_on_move_1` 뒤에 두면 됩니다.)
+
+이 메서드에서 다음을 수행합니다.
+
+1. **Animation Clips**: `import omni.anim.clips` 시도
+   - 성공하면 `"[Animation Clips] omni.anim.clips: 로드됨 (클립 적용 등 사용 가능)"`
+   - 실패하면 확장 매니저로 `omni.anim.clips` / `omni.anim.clips.bundle` 활성화 여부 확인 후, 없으면 `"앱에 미포함 (USD Composer 등에서 사용 가능)"` 등으로 표시
+2. **Timeline**: `omni.timeline.get_timeline_interface()`로 현재 재생 시간(초)과 tps를 읽어 한 줄로 표시
+3. 위에서 만든 문자열들을 줄바꿈으로 이어서 `self._anim_status_label.text`에 넣음
+
+아래 코드를 그대로 복사해 `Extension` 클래스 안에 넣으면 됩니다.
+
+```python
+def _on_refresh_animation_status(self):
+    """Animation Clips·Timeline 확장 사용 가능 여부와 타임라인 상태를 확인해 UI에 표시합니다."""
+    lines = []
+    # 1) omni.anim.clips 사용 가능 여부 (의존성으로 추가된 확장)
+    try:
+        import omni.anim.clips
+        lines.append("[Animation Clips] omni.anim.clips: 로드됨 (클립 적용 등 사용 가능)")
+    except ImportError:
+        try:
+            em = omni.kit.app.get_app().get_extension_manager()
+            for ext_id in ("omni.anim.clips", "omni.anim.clips.bundle"):
+                try:
+                    if em.is_extension_enabled(ext_id):
+                        lines.append(f"[Animation Clips] {ext_id}: 활성화됨")
+                        break
+                except Exception:
+                    pass
+            else:
+                lines.append("[Animation Clips] omni.anim.clips: 앱에 미포함 (USD Composer 등에서 사용 가능)")
+        except Exception as e:
+            lines.append(f"[Animation Clips] 확인 실패: {e}")
+
+    # 2) omni.timeline 사용 가능 여부 및 현재 재생 시간
+    try:
+        import omni.timeline
+        timeline = omni.timeline.get_timeline_interface()
+        t = timeline.get_current_time()
+        tps = timeline.get_time_codes_per_seconds()
+        lines.append(f"[Timeline] 현재 시간: {t:.2f} sec (tps={tps})")
+    except Exception as e:
+        lines.append(f"[Timeline] 확인 실패: {e}")
+
+    if self._anim_status_label:
+        self._anim_status_label.text = "\n".join(lines) if lines else "확인할 수 없음"
+```
+
+### 9-4. 동작 확인
+
+1. 앱을 빌드·실행하고 measure_control_1 확장이 로드되는지 확인합니다.
+2. "Measure Control Simulation" 창에서 **"Animation 확장 테스트"** 접이식을 펼칩니다.
+3. **"Animation·타임라인 상태 새로고침"** 버튼을 눌러 봅니다.
+4. 라벨에 다음이 나오는지 확인합니다.
+   - **Animation Clips**: `로드됨` / `활성화됨` 또는 `앱에 미포함` / `확인 실패`
+   - **Timeline**: `현재 시간: ... sec (tps=...)` 또는 `확인 실패`
+
+의존성이 포함된 앱(예: USD Composer)에서는 Animation Clips·Timeline이 모두 표시되고, 포함되지 않은 앱에서는 위와 같이 미포함/실패 메시지로 테스트 가능 여부를 확인할 수 있습니다.
+
+---
+
 ## 요약 체크리스트
 
 | 단계 | 내용 |
@@ -803,8 +931,9 @@ ansys-mapdl-core
 | 6 | ansys_simulation.py: AnsysSimulationManager, psutil 패치, get_default_ansys_path/exec_file, run_simulation, apply_result_to_prim, shutdown |
 | 7 | requirements-ansys.txt (선택) |
 | 8 | 빌드·실행·동작 확인 |
+| 9 | Animation Clips·Timeline 의존성 추가, _build_window에 테스트 UI, _on_refresh_animation_status 추가 및 동작 확인 |
 
-이 순서대로 적용하면 **처음 버튼 3개부터 현재 구현(온도/압력 규칙, PyAnsys 연동, psutil·MAPDL 호환)**까지 문서만 보고 동일하게 구현할 수 있습니다.
+이 순서대로 적용하면 **처음 버튼 3개부터 현재 구현(온도/압력 규칙, PyAnsys 연동, psutil·MAPDL 호환, Animation 확장 테스트)**까지 문서만 보고 동일하게 구현할 수 있습니다.
 
 ---
 
@@ -814,8 +943,13 @@ ansys-mapdl-core
   이 가이드의 2~5단계를 모두 반영한 최종 코드는 프로젝트의
   `morph/measure_control_1/extension.py` 에 있습니다.
   복사·붙여넣기로 한 번에 적용하려면 해당 파일을 참고하세요.
+  **9단계(Animation 확장 테스트)**는 동일 파일의 `_build_window`와 `_on_refresh_animation_status`를 참고하면 됩니다.
 
 - **ansys_simulation.py**
   PyAnsys 연동 전체 코드는
   `morph/measure_control_1/ansys_simulation.py` 에 있습니다.
   주석이 더 많은 버전이 필요하면 해당 파일을 참고하세요.
+
+- **config/extension.toml**
+  9단계에서 추가하는 Animation 의존성(`omni.anim.clips`, `omni.timeline`)은
+  `config/extension.toml`의 `[dependencies]`에 있습니다.
