@@ -1,0 +1,27 @@
+[package]
+title = "TBS Control"
+version = "0.1.0"
+description = "TBS 개발계획: USD 로드, 장비 prim 제어창, 가상 이벤트로 애니메이션 테스트."
+category = "Example"
+changelog = "docs/CHANGELOG.md"
+keywords = ["kit", "extension", "tbs", "usd", "animation"]
+readme = "docs/README.md"
+repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.kit.viewport.utility" = {}
+
+[settings]
+
+[[python.module]]
+name = "morph.tbs_control"
+
+[documentation]
+pages = ["docs/Overview.md", "docs/CHANGELOG.md"]
+
+[[test]]
+dependencies = ["omni.kit.test", "omni.kit.ui_test"]
+args = []

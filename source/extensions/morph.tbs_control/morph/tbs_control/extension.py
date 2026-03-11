@@ -1,0 +1,662 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+"""
+TBS Control 확장: my_company.usd_loader와 동일한 방식으로 USD 로드(open_stage), 장비 prim 제어창, 가상 이벤트 애니메이션.
+
+- USD 로드: usd_loader 참고 — 경로 입력, stat_async 검증 후 open_stage(path) 호출.
+- 제어 창: '목록 새로고침'으로 현재 스테이지에서 prim 수집 후 드롭다운 표시. 객체 정보, X/Y/Z, button_0/button_1.
+"""
+
+import asyncio
+import json
+import time
+from typing import List, Optional
+
+import omni.client
+import omni.ext
+import omni.kit.app as app
+import omni.ui as ui
+import omni.usd as ou
+from carb.eventdispatcher import get_eventdispatcher
+from omni.kit.viewport.utility import get_active_viewport_window
+from pxr import Gf, Usd, UsdGeom
+
+from .prim_info import get_prim_display_name, safe_str
+from .translate_animation import (
+    run_prim_translate_animation,
+    stop_prim_translate_animation,
+)
+from .curve_animation import (
+    make_parabolic_path,
+    run_prim_curve_animation,
+    stop_prim_curve_animation,
+)
+from .viewport_overlay import PrimInfoOverlay
+
+# usd_loader와 동일 기본 URL
+DEFAULT_USD_URL = (
+    "https://restme.morph.kr/~jh.park2/DirTest/"
+    "PhysicalAI_SceneAssembly_Start/SceneAssembly.usd"
+)
+
+# prim이 많을 때 창에 전부 넣으면 UI/GPU 버퍼 과다로 경고·멈춤 발생. 표시 개수 상한.
+MAX_PRIMS_DISPLAY = 80
+# 우선 표시할 prim 이름 접두사 (다른 USD에서는 비우거나 다른 규칙으로 변경 가능)
+DEFAULT_PRIORITY_NAME_PREFIX = "Mesh_"
+
+# 가상 제너레이터: JSON 샘플 (Mesh_226, Mesh_567 → x+100 1초, y+100 1초, 2초에 원위치)
+SAMPLE_GENERATOR_JSON = """{
+  "objects": ["Mesh_308", "Mesh_561", "WalkwayEndA_01"],
+  "animation": {
+    "segments": [
+      {"duration": 1.0, "delta": [100, 0, 0]},
+      {"duration": 1.0, "delta": [0, 100, 0]},
+      {"duration": 2.0, "delta": [-100, -100, 0]}
+    ]
+  }
+}"""
+
+# 3D 정보 패널 오버레이: 뷰포트 연결 재시도 횟수
+_VIEWPORT_RETRY_FRAMES = 180
+# 뷰포트 선택 폴링 주기 (SELECTION_CHANGED 이벤트가 없는 환경 대비)
+_POLL_FRAME_INTERVAL = 30
+
+
+def _post_update_once(callback):
+    """다음 post_update에서 callback 한 번 실행 후 구독 해제."""
+    sub_ref = [None]
+
+    def _on_event(_event):
+        try:
+            callback()
+        finally:
+            if sub_ref[0] is not None:
+                sub_ref[0].unsubscribe()
+                sub_ref[0] = None
+
+    stream = app.get_app().get_post_update_event_stream()
+    sub_ref[0] = stream.create_subscription_to_pop(
+        _on_event, name="morph.tbs_control:PostUpdateOnce"
+    )
+    return sub_ref[0]
+
+
+def _get_stage():
+    ctx = ou.get_context()
+    return ctx.get_stage() if ctx else None
+
+
+def _is_utf8_safe(s: str) -> bool:
+    if not s:
+        return True
+    try:
+        s.encode("utf-8")
+        return True
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return False
+
+
+def _collect_prim_paths_safe(stage: Usd.Stage) -> List[str]:
+    """open_stage 후 스테이지 전체에서 prim 경로 수집. UTF-8 안전 경로만. 예외 나는 prim/자식은 모두 건너뜀."""
+    paths: List[str] = []
+
+    def visit(prim: Usd.Prim) -> None:
+        try:
+            path = str(prim.GetPath())
+        except Exception:
+            return
+        if path == "/":
+            try:
+                for ch in prim.GetChildren():
+                    visit(ch)
+            except Exception:
+                pass
+            return
+        try:
+            if not _is_utf8_safe(path):
+                for ch in prim.GetChildren():
+                    visit(ch)
+                return
+            if prim.IsA(UsdGeom.Xform) or prim.IsA(UsdGeom.Gprim) or prim.GetTypeName() == "Scope":
+                paths.append(path)
+            for ch in prim.GetChildren():
+                visit(ch)
+        except Exception:
+            pass
+
+    try:
+        root = stage.GetPseudoRoot()
+        if root:
+            visit(root)
+    except Exception:
+        pass
+    return paths
+
+
+def _find_prim_path_by_name(stage: Usd.Stage, name: str) -> Optional[str]:
+    """스테이지에서 prim 이름(GetName())이 일치하는 첫 번째 prim 경로 반환. 없으면 None."""
+    name_s = name.strip()
+    if not name_s:
+        return None
+
+    def visit(prim: Usd.Prim) -> Optional[str]:
+        if prim.GetPath().pathString == "/":
+            for ch in prim.GetChildren():
+                found = visit(ch)
+                if found:
+                    return found
+            return None
+        try:
+            if safe_str(prim.GetName()) == name_s:
+                return str(prim.GetPath())
+        except Exception:
+            pass
+        for ch in prim.GetChildren():
+            found = visit(ch)
+            if found:
+                return found
+        return None
+
+    try:
+        root = stage.GetPseudoRoot()
+        return visit(root) if root else None
+    except Exception:
+        return None
+
+
+def _get_prim_local_translate(prim: Usd.Prim) -> Gf.Vec3f:
+    if not prim or not prim.IsValid():
+        return Gf.Vec3f(0, 0, 0)
+    xform = UsdGeom.Xformable(prim)
+    if not xform:
+        return Gf.Vec3f(0, 0, 0)
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            val = op.Get()
+            return Gf.Vec3f(val[0], val[1], val[2]) if val is not None else Gf.Vec3f(0, 0, 0)
+    return Gf.Vec3f(0, 0, 0)
+
+
+def _set_prim_translate_only(prim: Usd.Prim, position: Gf.Vec3f) -> None:
+    if not prim or not prim.IsValid():
+        return
+    xform = UsdGeom.Xformable(prim)
+    if not xform:
+        return
+    translate_op = None
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            translate_op = op
+            break
+    if translate_op is None:
+        translate_op = xform.AddTranslateOp()
+    translate_op.Set(Gf.Vec3f(position[0], position[1], position[2]))
+
+
+def _frame_prim_in_viewport(prim_path: str) -> None:
+    try:
+        from omni.kit.viewport.utility import frame_viewport_prims, get_active_viewport
+    except ImportError:
+        return
+
+    async def _do_frame():
+        await omni.kit.app.get_app().next_update_async()
+        viewport_api = get_active_viewport()
+        if not viewport_api:
+            try:
+                from omni.kit.viewport.utility import get_active_viewport_window
+                win = get_active_viewport_window()
+                viewport_api = win.viewport_api if win else None
+            except Exception:
+                pass
+        if viewport_api:
+            frame_viewport_prims(viewport_api, prims=[prim_path])
+
+    asyncio.ensure_future(_do_frame())
+
+
+class Extension(omni.ext.IExt):
+    def on_startup(self, ext_id: str) -> None:
+        self._ext_id = ext_id
+        self._tracked_paths: List[str] = []
+        self._open_paths: List[str] = []  # 3D 정보 패널로 표시 중인 prim 경로 (show_info와 동일)
+        self._overlay: Optional[PrimInfoOverlay] = None
+        self._overlay_retry_count = 0
+        self._selection_sub = None
+        self._stage_stream_sub = None
+        self._post_update_sub = None
+        self._last_paths: tuple = ()
+        self._ignore_selection_until = 0.0  # X 클릭 직후 0.2초간 뷰포트 선택 이벤트 무시
+        self._poll_frame = 0
+        self._priority_prefix_model = ui.SimpleStringModel(DEFAULT_PRIORITY_NAME_PREFIX)
+        self._load_window = None
+        self._control_window = None
+        self._object_list_frame = None
+        self._build_load_window()
+        self._build_control_window()
+        self._try_attach_overlay()
+
+        ctx = ou.get_context()
+        ed = get_eventdispatcher()
+        try:
+            event_name = ctx.stage_event_name(ou.StageEventType.SELECTION_CHANGED)
+            self._selection_sub = ed.observe_event(
+                observer_name="morph.tbs_control:SelectionChanged",
+                event_name=event_name,
+                on_event=self._on_selection_changed,
+            )
+        except Exception:
+            pass
+        try:
+            self._stage_stream_sub = ctx.get_stage_event_stream().create_subscription_to_pop(
+                self._on_stage_event,
+                name="morph.tbs_control:StageEvents",
+            )
+        except Exception:
+            pass
+        try:
+            self._post_update_sub = app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+                self._on_post_update,
+                name="morph.tbs_control:PostUpdate",
+            )
+        except Exception:
+            pass
+
+    def on_shutdown(self) -> None:
+        if self._selection_sub is not None and hasattr(self._selection_sub, "release"):
+            self._selection_sub.release()
+            self._selection_sub = None
+        if self._stage_stream_sub is not None:
+            try:
+                self._stage_stream_sub.unsubscribe()
+            except Exception:
+                pass
+            self._stage_stream_sub = None
+        if self._post_update_sub is not None:
+            try:
+                self._post_update_sub.unsubscribe()
+            except Exception:
+                pass
+            self._post_update_sub = None
+        for path in list(self._tracked_paths):
+            stop_prim_translate_animation(path)
+            stop_prim_curve_animation(path)
+        self._tracked_paths.clear()
+        self._open_paths.clear()
+        if self._overlay:
+            self._overlay.destroy()
+            self._overlay = None
+        if self._load_window is not None:
+            self._load_window.destroy()
+            self._load_window = None
+        if self._control_window is not None:
+            self._control_window.destroy()
+            self._control_window = None
+        self._object_list_frame = None
+
+    def _try_attach_overlay(self) -> None:
+        """활성 뷰포트에 3D 정보 오버레이 연결 (show_info와 동일). 뷰포트가 없으면 다음 프레임에 재시도."""
+        viewport_window = get_active_viewport_window()
+        if viewport_window:
+            if self._overlay is None:
+                self._overlay = PrimInfoOverlay(viewport_window, self._ext_id)
+                self._overlay.set_on_close(self._on_close_info_panel)
+                self._overlay.set_open_paths(self._open_paths)
+                self._overlay.build_scene()
+                self._overlay.update_panels()
+            return
+        self._overlay_retry_count += 1
+        if self._overlay_retry_count < _VIEWPORT_RETRY_FRAMES:
+            _post_update_once(self._try_attach_overlay)
+
+    def _on_close_info_panel(self, path_str: str) -> None:
+        """3D 패널 X 버튼 클릭 시 해당 경로 제거, 뷰포트 선택을 _open_paths로 복원, 패널 갱신 (show_info와 동일)."""
+        self._ignore_selection_until = time.time() + 0.2
+        if path_str in self._open_paths:
+            self._open_paths.remove(path_str)
+        try:
+            sel = ou.get_context().get_selection()
+            sel.set_selected_prim_paths(self._open_paths, True)
+        except Exception:
+            pass
+        self._last_paths = tuple(self._open_paths)
+        if self._overlay:
+            self._overlay.set_open_paths(self._open_paths)
+            self._overlay.update_panels()
+
+    def _on_post_update(self, _event) -> None:
+        """매 프레임: X 클릭 직후에는 선택을 _open_paths로 유지, 그 외에는 N프레임마다 뷰포트 선택 반영."""
+        if time.time() < self._ignore_selection_until:
+            try:
+                ou.get_context().get_selection().set_selected_prim_paths(self._open_paths, True)
+            except Exception:
+                pass
+            self._last_paths = tuple(self._open_paths)
+            if self._overlay:
+                self._overlay.set_open_paths(self._open_paths)
+                self._overlay.update_panels()
+            return
+        self._poll_frame += 1
+        if self._poll_frame % _POLL_FRAME_INTERVAL != 0:
+            return
+        try:
+            paths = tuple(ou.get_context().get_selection().get_selected_prim_paths() or [])
+        except Exception:
+            paths = ()
+        if paths != self._last_paths:
+            self._last_paths = paths
+            self._add_selection_to_open_paths(paths)
+            self._apply_selection()
+
+    def _on_stage_event(self, event) -> None:
+        """스테이지 이벤트(선택 변경 등) 시 선택 변경 핸들러 호출."""
+        self._on_selection_changed(event)
+
+    def _add_selection_to_open_paths(self, paths) -> None:
+        """뷰포트에서 선택된 prim 경로를 _open_paths에 추가 (다중 선택 시 첫 번째만, show_info와 동일)."""
+        path_strs = [str(p) for p in (paths or []) if p is not None]
+        if len(path_strs) > 1:
+            path_strs = path_strs[:1]
+        for p in path_strs:
+            if p and p not in self._open_paths:
+                self._open_paths.append(p)
+
+    def _on_selection_changed(self, _event) -> None:
+        """뷰포트에서 객체 클릭 시 선택 경로를 _open_paths에 반영하고 3D 패널 갱신."""
+        if time.time() < self._ignore_selection_until:
+            try:
+                ou.get_context().get_selection().set_selected_prim_paths(self._open_paths, True)
+            except Exception:
+                pass
+            self._last_paths = tuple(self._open_paths)
+            if self._overlay:
+                self._overlay.set_open_paths(self._open_paths)
+                self._overlay.update_panels()
+            return
+        try:
+            paths = ou.get_context().get_selection().get_selected_prim_paths()
+        except Exception:
+            paths = []
+        self._last_paths = tuple(paths or [])
+        self._add_selection_to_open_paths(paths or [])
+        self._apply_selection()
+
+    def _apply_selection(self) -> None:
+        """_open_paths 기준으로 오버레이에 3D 패널 갱신."""
+        if self._overlay is None:
+            _post_update_once(self._try_attach_overlay)
+        if self._overlay:
+            self._overlay.set_open_paths(self._open_paths)
+            self._overlay.update_panels()
+
+    def _show_prim_info_in_viewport(self, prim_path: str) -> None:
+        """해당 prim을 3D 정보 패널 목록에 추가하고 뷰포트에 패널 표시 (show_info와 동일 방식)."""
+        if prim_path not in self._open_paths:
+            self._open_paths.append(prim_path)
+        try:
+            sel = ou.get_context().get_selection()
+            sel.set_selected_prim_paths([prim_path], True)
+        except Exception:
+            pass
+        if self._overlay is None:
+            def _attach_and_update():
+                self._try_attach_overlay()
+                if self._overlay:
+                    self._overlay.set_open_paths(self._open_paths)
+                    self._overlay.update_panels()
+            _post_update_once(_attach_and_update)
+        else:
+            self._overlay.set_open_paths(self._open_paths)
+            self._overlay.update_panels()
+
+    def _build_load_window(self) -> None:
+        """my_company.usd_loader와 동일: 경로 입력, stat_async 검증 후 open_stage(path)."""
+        self._load_window = ui.Window("USD Load", width=450, height=130)
+        with self._load_window.frame:
+            with ui.VStack(padding=10, spacing=10):
+                self._path_model = ui.SimpleStringModel(DEFAULT_USD_URL)
+                ui.StringField(model=self._path_model)
+                self._load_status_label = ui.Label("", style={"color": 0xFF888888})
+                ui.Button(
+                    "Load",
+                    clicked_fn=lambda: asyncio.ensure_future(self._on_load_usd()),
+                )
+
+    def _build_control_window(self) -> None:
+        self._control_window = ui.Window("TBS 제어창", width=460, height=560)
+        with self._control_window.frame:
+            with ui.VStack(spacing=0):
+                ui.Button(
+                    "가상 시그널 재생 (JSON 샘플)",
+                    height=28,
+                    clicked_fn=self._on_play_generator_sample,
+                )
+                ui.Spacer(height=6)
+                ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=0)
+                ui.StringField(model=self._priority_prefix_model, height=22)
+                ui.Spacer(height=4)
+                ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=0)
+                ui.Button("목록 새로고침", height=28, clicked_fn=self._on_refresh_prim_list)
+                ui.Spacer(height=4)
+                with ui.ScrollingFrame(style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
+                    self._object_list_frame = ui.VStack(height=0, alignment=ui.Alignment.LEFT_TOP)
+        self._refresh_object_list()
+
+    def _on_play_generator_sample(self) -> None:
+        """JSON 샘플을 읽어 가상 시그널대로 Mesh_226, Mesh_567 등 객체에 애니메이션 재생."""
+        self._run_generator_from_json(SAMPLE_GENERATOR_JSON)
+
+    def _run_generator_from_json(self, json_str: str) -> None:
+        """
+        JSON 형식 가상 시그널 해석 후 해당 객체들에 세그먼트 애니메이션 적용.
+        형식: {"objects": ["Mesh_226", "Mesh_567"], "animation": {"segments": [{"duration": 1.0, "delta": [100,0,0]}, ...]}}
+        """
+        stage = _get_stage()
+        if not stage:
+            return
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            return
+        objects = data.get("objects")
+        animation = data.get("animation")
+        if not objects or not isinstance(objects, list) or not animation:
+            return
+        segments_data = animation.get("segments")
+        if not segments_data or not isinstance(segments_data, list):
+            return
+        segments = []
+        for seg in segments_data:
+            d = seg.get("delta")
+            duration = float(seg.get("duration", 0))
+            if d is None or duration <= 0:
+                continue
+            if isinstance(d, (list, tuple)) and len(d) >= 3:
+                delta = (float(d[0]), float(d[1]), float(d[2]))
+            else:
+                continue
+            segments.append({"duration": duration, "delta": delta})
+        if not segments:
+            return
+        for name in objects:
+            if not isinstance(name, str):
+                continue
+            path = _find_prim_path_by_name(stage, name)
+            if not path:
+                continue
+            stop_prim_translate_animation(path)
+            stop_prim_curve_animation(path)
+            run_prim_translate_animation(path, segments, loop=False)
+
+    async def _on_load_usd(self) -> None:
+        """my_company.usd_loader와 동일: stat_async(path) 검증 후 open_stage(path) 만 호출."""
+        path = self._path_model.get_value_as_string().strip()
+        self._load_status_label.text = ""
+
+        if not path or not path.lower().endswith((".usd", ".usda", ".usdc")):
+            self._load_status_label.text = "Error: Invalid URL or File extension."
+            return
+
+        try:
+            result, _ = await asyncio.wait_for(
+                omni.client.stat_async(path), timeout=1.5
+            )
+            if result != omni.client.Result.OK:
+                self._load_status_label.text = "Error: This URL does not exist."
+                return
+        except Exception:
+            self._load_status_label.text = "Error: Connection timeout (Wrong Domain)."
+            return
+
+        self._load_status_label.text = "로드 중..."
+        omni.usd.get_context().open_stage(path)
+        self._load_status_label.text = "로드 완료. TBS 제어창에서 '목록 새로고침'을 눌러 주세요."
+
+    def _on_refresh_prim_list(self) -> None:
+        """현재 스테이지에서 prim 경로를 수집하고 제어창 목록만 갱신. (뷰포트 frame 호출 없음 → 대형 씬에서 GPU 버퍼 과다 사용 방지)"""
+        stage = _get_stage()
+        if not stage:
+            if self._load_status_label:
+                self._load_status_label.text = "스테이지가 없습니다. USD를 먼저 로드하세요."
+            return
+        self._tracked_paths = _collect_prim_paths_safe(stage)
+        self._refresh_object_list()
+
+    def _refresh_object_list(self) -> None:
+        if self._object_list_frame is None:
+            return
+        self._object_list_frame.clear()
+        stage = _get_stage()
+        if not stage:
+            with self._object_list_frame:
+                ui.Label("USD를 먼저 로드하세요.")
+            return
+
+        def _valid_path(p: str) -> bool:
+            try:
+                return stage.GetPrimAtPath(p).IsValid()
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                return False
+
+        valid_paths = [p for p in self._tracked_paths if _valid_path(p)]
+        total = len(valid_paths)
+        priority_prefix = (
+            self._priority_prefix_model.get_value_as_string().strip()
+            if getattr(self, "_priority_prefix_model", None)
+            else ""
+        )
+
+        if priority_prefix:
+            priority_paths: List[str] = []
+            rest_paths: List[str] = []
+            for p in valid_paths:
+                try:
+                    prim = stage.GetPrimAtPath(p)
+                    if not prim or not prim.IsValid():
+                        rest_paths.append(p)
+                        continue
+                    name = safe_str(prim.GetName())
+                    if name.startswith(priority_prefix):
+                        priority_paths.append(p)
+                    else:
+                        rest_paths.append(p)
+                except Exception:
+                    rest_paths.append(p)
+            need = max(0, MAX_PRIMS_DISPLAY - len(priority_paths))
+            display_paths = priority_paths[:MAX_PRIMS_DISPLAY] + rest_paths[:need]
+        else:
+            display_paths = valid_paths[:MAX_PRIMS_DISPLAY]
+
+        with self._object_list_frame:
+            if total > MAX_PRIMS_DISPLAY:
+                ui.Label(
+                    f"총 {total}개 prim 중 {len(display_paths)}개만 표시됩니다. (창/GPU 부담 방지)",
+                    height=0,
+                )
+                ui.Spacer(height=4)
+            if priority_prefix:
+                n_priority = min(len(priority_paths), MAX_PRIMS_DISPLAY)
+                n_rest = len(display_paths) - n_priority
+                ui.Label(
+                    f"접두사 '{priority_prefix}' 우선: {n_priority}개, 나머지 순서대로 {n_rest}개",
+                    height=0,
+                )
+                ui.Spacer(height=4)
+            for idx, prim_path in enumerate(display_paths):
+                self._build_object_panel(self._object_list_frame, prim_path, idx + 1)
+
+    def _build_object_panel(self, parent: ui.VStack, prim_path: str, index: int) -> None:
+        """드롭다운 한 칸: displayName/title/name으로 제목 표시, Position X/Y/Z, button_0/1."""
+        try:
+            stage = _get_stage()
+            prim = stage.GetPrimAtPath(prim_path) if stage else None
+            if not prim or not prim.IsValid():
+                return
+            title = get_prim_display_name(prim, index)
+            local = _get_prim_local_translate(prim)
+            pos_models = [
+                ui.SimpleFloatModel(local[0]),
+                ui.SimpleFloatModel(local[1]),
+                ui.SimpleFloatModel(local[2]),
+            ]
+
+            def update_prim_position():
+                s = _get_stage()
+                p = s.GetPrimAtPath(prim_path) if s else None
+                if p and p.IsValid():
+                    _set_prim_translate_only(p, Gf.Vec3f(
+                        pos_models[0].get_value_as_float(),
+                        pos_models[1].get_value_as_float(),
+                        pos_models[2].get_value_as_float(),
+                    ))
+
+            with parent:
+                with ui.CollapsableFrame(title, collapsed=False):
+                    with ui.VStack(spacing=6):
+                        ui.Label("Position (X, Y, Z)", height=0)
+                        with ui.HStack():
+                            for i, label in enumerate(["X", "Y", "Z"]):
+                                ui.Label(label, width=24)
+                                ui.FloatField(model=pos_models[i])
+                        for m in pos_models:
+                            m.add_value_changed_fn(lambda _: update_prim_position())
+                        ui.Spacer(height=4)
+                        ui.Button(
+                            "3D 정보 보기",
+                            height=24,
+                            clicked_fn=lambda p=prim_path: self._show_prim_info_in_viewport(p),
+                        )
+                        ui.Spacer(height=4)
+                        with ui.HStack(spacing=8):
+                            ui.Button("button_0", width=0, clicked_fn=lambda p=prim_path: self._on_button_0(p))
+                            ui.Button("button_1", width=0, clicked_fn=lambda p=prim_path: self._on_button_1(p))
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return
+
+    def _on_button_0(self, prim_path: str) -> None:
+        """x축 100 → z축 100 순차 이동 (1초씩). 같은 객체 기존 애니메이션은 즉시 중단 후 현재 위치부터."""
+        stop_prim_translate_animation(prim_path)
+        stop_prim_curve_animation(prim_path)
+        run_prim_translate_animation(
+            prim_path,
+            [
+                {"duration": 1.0, "delta": (100.0, 0.0, 0.0)},
+                {"duration": 1.0, "delta": (0.0, 0.0, 100.0)},
+            ],
+            loop=False,
+        )
+
+    def _on_button_1(self, prim_path: str) -> None:
+        """x축 100만큼 포물선 곡선 이동 (1초). 같은 객체 기존 애니메이션 즉시 중단 후 현재 위치부터."""
+        stop_prim_translate_animation(prim_path)
+        stop_prim_curve_animation(prim_path)
+        stage = _get_stage()
+        prim = stage.GetPrimAtPath(prim_path) if stage else None
+        if not prim or not prim.IsValid():
+            return
+        start = _get_prim_local_translate(prim)
+        start_t = (start[0], start[1], start[2])
+        end_t = (start[0] + 100.0, start[1], start[2])
+        path_points = make_parabolic_path(start=start_t, end=end_t, arc_height=30.0, num_points=24)
+        run_prim_curve_animation(prim_path, path_points, duration_sec=1.0, loop=False)
