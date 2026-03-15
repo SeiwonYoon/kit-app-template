@@ -9,8 +9,8 @@ TBS Control 확장: my_company.usd_loader와 동일한 방식으로 USD 로드(o
 """
 
 import asyncio
-import json
 import time
+from pathlib import Path
 from typing import List, Optional
 
 import omni.client
@@ -33,6 +33,8 @@ from .curve_animation import (
     stop_prim_curve_animation,
 )
 from .viewport_overlay import PrimInfoOverlay
+from .signal_parser import parse_signal
+from . import usd_animation_control
 
 # usd_loader와 동일 기본 URL
 DEFAULT_USD_URL = (
@@ -59,6 +61,55 @@ SAMPLE_GENERATOR_JSON = """{
 
 # 3D 정보 패널 오버레이: 뷰포트 연결 재시도 횟수
 _VIEWPORT_RETRY_FRAMES = 180
+
+
+def _get_resource_folder_path() -> Optional[Path]:
+    """launch 실행 최상단 경로(${root}) 아래의 resource 폴더. carb.tokens → __file__ 상위 → cwd."""
+    try:
+        import carb
+        tokens = carb.tokens.get_tokens_interface()
+        if tokens:
+            root = tokens.resolve("${root}")
+            if root:
+                resource_dir = Path(root) / "resource"
+                if resource_dir.is_dir():
+                    return resource_dir
+    except Exception:
+        pass
+    try:
+        current = Path(__file__).resolve()
+        for _ in range(10):
+            current = current.parent
+            if not current:
+                break
+            resource_dir = current / "resource"
+            if resource_dir.is_dir():
+                return resource_dir
+    except Exception:
+        pass
+    try:
+        cwd_resource = Path.cwd() / "resource"
+        if cwd_resource.is_dir():
+            return cwd_resource
+    except Exception:
+        pass
+    return None
+
+
+def _get_resource_usd_list() -> List[tuple]:
+    """resource 폴더 내 .usd, .usda, .usdc 목록. [(이름, 절대경로), ...]"""
+    resource_dir = _get_resource_folder_path()
+    if not resource_dir:
+        return []
+    exts = (".usd", ".usda", ".usdc")
+    result: List[tuple] = []
+    try:
+        for p in sorted(resource_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in exts:
+                result.append((p.name, str(p)))
+    except Exception:
+        pass
+    return result
 # 뷰포트 선택 폴링 주기 (SELECTION_CHANGED 이벤트가 없는 환경 대비)
 _POLL_FRAME_INTERVAL = 30
 
@@ -135,34 +186,51 @@ def _collect_prim_paths_safe(stage: Usd.Stage) -> List[str]:
 
 
 def _find_prim_path_by_name(stage: Usd.Stage, name: str) -> Optional[str]:
-    """스테이지에서 prim 이름(GetName())이 일치하는 첫 번째 prim 경로 반환. 없으면 None."""
+    """이름 또는 경로가 일치하는 첫 번째 prim 경로 반환."""
+    paths = _find_all_prim_paths_by_name(stage, name)
+    return paths[0] if paths else None
+
+
+def _find_all_prim_paths_by_name(stage: Usd.Stage, name: str) -> List[str]:
+    """해당 이름(GetName()) 또는 경로와 일치하는 모든 prim 경로. 동일 이름 여러 개 시 전부."""
+    result: List[str] = []
     name_s = name.strip()
     if not name_s:
-        return None
+        return result
+    try:
+        if name_s.startswith("/"):
+            prim = stage.GetPrimAtPath(name_s)
+            if prim and prim.IsValid():
+                result.append(name_s)
+                return result
+        else:
+            prim = stage.GetPrimAtPath("/" + name_s)
+            if prim and prim.IsValid():
+                result.append("/" + name_s)
+                return result
+    except Exception:
+        pass
 
-    def visit(prim: Usd.Prim) -> Optional[str]:
+    def visit(prim: Usd.Prim) -> None:
         if prim.GetPath().pathString == "/":
             for ch in prim.GetChildren():
-                found = visit(ch)
-                if found:
-                    return found
-            return None
+                visit(ch)
+            return
         try:
             if safe_str(prim.GetName()) == name_s:
-                return str(prim.GetPath())
+                result.append(str(prim.GetPath()))
         except Exception:
             pass
         for ch in prim.GetChildren():
-            found = visit(ch)
-            if found:
-                return found
-        return None
+            visit(ch)
 
     try:
         root = stage.GetPseudoRoot()
-        return visit(root) if root else None
+        if root:
+            visit(root)
     except Exception:
-        return None
+        pass
+    return result
 
 
 def _get_prim_local_translate(prim: Usd.Prim) -> Gf.Vec3f:
@@ -230,6 +298,9 @@ class Extension(omni.ext.IExt):
         self._ignore_selection_until = 0.0  # X 클릭 직후 0.2초간 뷰포트 선택 이벤트 무시
         self._poll_frame = 0
         self._priority_prefix_model = ui.SimpleStringModel(DEFAULT_PRIORITY_NAME_PREFIX)
+        self._usd_anim_start_frame = ui.SimpleIntModel(200)
+        self._usd_anim_end_frame = ui.SimpleIntModel(300)
+        self._usd_anim_loop = ui.SimpleBoolModel(False)
         self._load_window = None
         self._control_window = None
         self._object_list_frame = None
@@ -287,6 +358,7 @@ class Extension(omni.ext.IExt):
         if self._overlay:
             self._overlay.destroy()
             self._overlay = None
+        usd_animation_control.stop_usd_animation()
         if self._load_window is not None:
             self._load_window.destroy()
             self._load_window = None
@@ -354,13 +426,11 @@ class Extension(omni.ext.IExt):
         self._on_selection_changed(event)
 
     def _add_selection_to_open_paths(self, paths) -> None:
-        """뷰포트에서 선택된 prim 경로를 _open_paths에 추가 (다중 선택 시 첫 번째만, show_info와 동일)."""
-        path_strs = [str(p) for p in (paths or []) if p is not None]
-        if len(path_strs) > 1:
-            path_strs = path_strs[:1]
-        for p in path_strs:
-            if p and p not in self._open_paths:
-                self._open_paths.append(p)
+        """뷰포트에서 객체 클릭 시 기존 패널은 모두 지우고, 선택한 객체 1개만 3D 패널에 표시."""
+        path_strs = [str(p) for p in (paths or []) if p is not None and str(p).strip()]
+        if path_strs:
+            self._open_paths.clear()
+            self._open_paths.append(path_strs[0])
 
     def _on_selection_changed(self, _event) -> None:
         """뷰포트에서 객체 클릭 시 선택 경로를 _open_paths에 반영하고 3D 패널 갱신."""
@@ -391,9 +461,9 @@ class Extension(omni.ext.IExt):
             self._overlay.update_panels()
 
     def _show_prim_info_in_viewport(self, prim_path: str) -> None:
-        """해당 prim을 3D 정보 패널 목록에 추가하고 뷰포트에 패널 표시 (show_info와 동일 방식)."""
-        if prim_path not in self._open_paths:
-            self._open_paths.append(prim_path)
+        """기존 3D 패널은 모두 지우고, 해당 prim 1개만 3D 패널에 표시."""
+        self._open_paths.clear()
+        self._open_paths.append(prim_path)
         try:
             sel = ou.get_context().get_selection()
             sel.set_selected_prim_paths([prim_path], True)
@@ -411,10 +481,18 @@ class Extension(omni.ext.IExt):
             self._overlay.update_panels()
 
     def _build_load_window(self) -> None:
-        """my_company.usd_loader와 동일: 경로 입력, stat_async 검증 후 open_stage(path)."""
-        self._load_window = ui.Window("USD Load", width=450, height=130)
+        """경로 입력 + resource 폴더 샘플(선택안함 포함), stat_async 검증 후 open_stage(path)."""
+        self._load_window = ui.Window("USD Load", width=480, height=200)
+        resource_items = _get_resource_usd_list()
+        self._resource_names = ["선택안함"] + [name for name, _ in resource_items]
+        self._resource_paths = [""] + [path for _, path in resource_items]
         with self._load_window.frame:
-            with ui.VStack(padding=10, spacing=10):
+            with ui.VStack(padding=10, spacing=8):
+                ui.Label("resource 폴더 샘플 (선택안함 = 아래 경로로 로드)", height=0)
+                self._resource_combo = ui.ComboBox(0, *self._resource_names)
+                self._resource_combo.model.add_item_changed_fn(self._on_resource_combo_changed)
+                ui.Spacer(height=4)
+                ui.Label("경로 (직접 입력 또는 위에서 선택)", height=0)
                 self._path_model = ui.SimpleStringModel(DEFAULT_USD_URL)
                 ui.StringField(model=self._path_model)
                 self._load_status_label = ui.Label("", style={"color": 0xFF888888})
@@ -423,10 +501,53 @@ class Extension(omni.ext.IExt):
                     clicked_fn=lambda: asyncio.ensure_future(self._on_load_usd()),
                 )
 
+    def _on_resource_combo_changed(self, model, *args) -> None:
+        """resource 콤보 선택 시: 선택안함(0)이면 경로 필드 유지, 그 외에는 해당 USD 경로로 설정."""
+        try:
+            index = model.get_item_value_model().as_int
+            if 0 <= index < len(self._resource_paths) and index != 0:
+                self._path_model.set_value_as_string(self._resource_paths[index])
+        except Exception:
+            pass
+
+    def _get_load_path(self) -> str:
+        """Load 시 사용할 경로. 선택안함(인덱스 0)이면 경로 필드 값, 그 외에는 콤보에서 선택한 resource 경로."""
+        path = (self._path_model.get_value_as_string() or "").strip()
+        if getattr(self, "_resource_paths", None) and getattr(self, "_resource_combo", None):
+            try:
+                index = self._resource_combo.model.get_item_value_model().as_int
+                if 0 <= index < len(self._resource_paths):
+                    if index == 0:
+                        return path
+                    return self._resource_paths[index] or path
+            except Exception:
+                pass
+        return path
+
     def _build_control_window(self) -> None:
-        self._control_window = ui.Window("TBS 제어창", width=460, height=560)
+        self._control_window = ui.Window("TBS 제어창", width=460, height=640)
         with self._control_window.frame:
             with ui.VStack(spacing=0):
+                ui.Label("USD 파일 애니메이션 (타임라인)", height=0)
+                with ui.HStack(spacing=8, height=30):
+                    ui.Label("시작 프레임", width=70, height=30)
+                    ui.IntField(model=self._usd_anim_start_frame, width=60, height=30)
+                    ui.Label("끝 프레임", width=70, height=30)
+                    ui.IntField(model=self._usd_anim_end_frame, width=60, height=30)
+                with ui.HStack(spacing=8, height=20):
+                    ui.CheckBox(model=self._usd_anim_loop)
+                    ui.Label("루프", height=0)
+                ui.Button(
+                    "USD 파일 애니메이션 재생",
+                    height=28,
+                    clicked_fn=self._on_play_usd_animation,
+                )
+                ui.Button(
+                    "USD 애니메이션 정지",
+                    height=24,
+                    clicked_fn=lambda: usd_animation_control.stop_usd_animation(),
+                )
+                ui.Spacer(height=6)
                 ui.Button(
                     "가상 시그널 재생 (JSON 샘플)",
                     height=28,
@@ -443,55 +564,50 @@ class Extension(omni.ext.IExt):
                     self._object_list_frame = ui.VStack(height=0, alignment=ui.Alignment.LEFT_TOP)
         self._refresh_object_list()
 
-    def _on_play_generator_sample(self) -> None:
-        """JSON 샘플을 읽어 가상 시그널대로 Mesh_226, Mesh_567 등 객체에 애니메이션 재생."""
-        self._run_generator_from_json(SAMPLE_GENERATOR_JSON)
+    def _on_play_usd_animation(self) -> None:
+        """저장된 USD 내 타임라인 애니메이션을 지정 프레임 구간(기본 200~300)으로 재생. 루프 옵션 적용."""
+        start = self._usd_anim_start_frame.get_value_as_int()
+        end = self._usd_anim_end_frame.get_value_as_int()
+        loop = self._usd_anim_loop.get_value_as_bool()
+        usd_animation_control.play_usd_animation(start_frame=start, end_frame=end, loop=loop)
 
-    def _run_generator_from_json(self, json_str: str) -> None:
-        """
-        JSON 형식 가상 시그널 해석 후 해당 객체들에 세그먼트 애니메이션 적용.
-        형식: {"objects": ["Mesh_226", "Mesh_567"], "animation": {"segments": [{"duration": 1.0, "delta": [100,0,0]}, ...]}}
-        """
+    def _on_play_generator_sample(self) -> None:
+        """JSON 샘플을 읽어 파서로 파싱 후 가상 시그널 애니메이션 재생."""
+        parsed = parse_signal(SAMPLE_GENERATOR_JSON, "json")
+        if parsed:
+            self._run_generator_from_parsed(parsed)
+
+    def receive_signal_data(self, data: str, format: str = "json") -> bool:
+        """장비로부터 수신한 시그널 데이터를 파싱하여 애니메이션 자동 실행. JSON/XML."""
+        parsed = parse_signal(data, format)
+        if not parsed:
+            return False
+        self._run_generator_from_parsed(parsed)
+        return True
+
+    def _run_generator_from_parsed(self, parsed: dict) -> None:
+        """파서가 반환한 공통 구조 {"objects": [...], "segments": [...]}로 세그먼트 애니메이션 적용. 동일 이름 전부 적용."""
         stage = _get_stage()
         if not stage:
             return
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError:
-            return
-        objects = data.get("objects")
-        animation = data.get("animation")
-        if not objects or not isinstance(objects, list) or not animation:
-            return
-        segments_data = animation.get("segments")
-        if not segments_data or not isinstance(segments_data, list):
-            return
-        segments = []
-        for seg in segments_data:
-            d = seg.get("delta")
-            duration = float(seg.get("duration", 0))
-            if d is None or duration <= 0:
-                continue
-            if isinstance(d, (list, tuple)) and len(d) >= 3:
-                delta = (float(d[0]), float(d[1]), float(d[2]))
-            else:
-                continue
-            segments.append({"duration": duration, "delta": delta})
-        if not segments:
+        objects = parsed.get("objects") or []
+        segments = parsed.get("segments") or []
+        if not objects or not segments:
             return
         for name in objects:
             if not isinstance(name, str):
                 continue
-            path = _find_prim_path_by_name(stage, name)
-            if not path:
-                continue
-            stop_prim_translate_animation(path)
-            stop_prim_curve_animation(path)
-            run_prim_translate_animation(path, segments, loop=False)
+            paths = _find_all_prim_paths_by_name(stage, name)
+            for path in paths:
+                if not path:
+                    continue
+                stop_prim_translate_animation(path)
+                stop_prim_curve_animation(path)
+                run_prim_translate_animation(path, segments, loop=False)
 
     async def _on_load_usd(self) -> None:
-        """my_company.usd_loader와 동일: stat_async(path) 검증 후 open_stage(path) 만 호출."""
-        path = self._path_model.get_value_as_string().strip()
+        """stat_async(path) 검증 후 open_stage(path). 경로는 resource 콤보 선택 우선, 없으면 입력 필드."""
+        path = self._get_load_path()
         self._load_status_label.text = ""
 
         if not path or not path.lower().endswith((".usd", ".usda", ".usdc")):

@@ -40,7 +40,7 @@ def _post_update_once(callback):
 
 
 # Panel layout (show_info와 동일)
-PANEL_OFFSET_SCREEN_PX = 24
+PANEL_OFFSET_SCREEN_PX = 400
 FONT_SIZE_TITLE = 14
 FONT_SIZE_BODY = 11
 BG_COLOR = (0.12, 0.12, 0.14, 0.92)

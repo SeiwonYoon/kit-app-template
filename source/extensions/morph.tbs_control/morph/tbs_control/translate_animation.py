@@ -91,14 +91,21 @@ def stop_prim_translate_animation(prim_path: str) -> bool:
     if prim_path in _animations:
         del _animations[prim_path]
         if not _animations and _update_sub is not None:
+            try:
+                _update_sub.unsubscribe()
+            except Exception:
+                pass
             _update_sub = None
         return True
     return False
 
 
 def _on_update(e) -> None:
-    dt = e.payload.get("dt", 0.0)
-    if dt <= 0 or not _animations:
+    payload = getattr(e, "payload", None) or {}
+    dt = payload.get("dt", 0.0)
+    if dt <= 0:
+        dt = 1.0 / 60.0
+    if not _animations:
         return
     stage = ou.get_context().get_stage() if ou.get_context() else None
     if not stage:
@@ -160,4 +167,8 @@ def _on_update(e) -> None:
         _animations.pop(prim_path, None)
     global _update_sub
     if not _animations and _update_sub is not None:
+        try:
+            _update_sub.unsubscribe()
+        except Exception:
+            pass
         _update_sub = None
