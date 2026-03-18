@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+"""
+prim_utils.py — 스테이지/prim 조회 및 변환 유틸 (경로 수집, 이름 검색, 위치 get/set, 프레임).
+
+기능:
+- get_stage(): 현재 Usd.Stage 반환.
+- is_utf8_safe(s): UTF-8 인코딩 가능 여부.
+- collect_prim_paths_safe(stage): 스테이지 전체에서 Xform/Gprim/Scope prim 경로 수집 (UTF-8 안전).
+- find_prim_path_by_name(stage, name): 이름/경로 일치 첫 번째 경로.
+- find_all_prim_paths_by_name(stage, name): 이름 일치 모든 경로.
+- get_prim_local_translate(prim): prim의 로컬 translate (첫 번째 translate op).
+- set_prim_translate_only(prim, position): XformCommonAPI 우선으로 translate만 설정.
+- frame_prim_in_viewport(prim_path): 뷰포트에서 해당 prim으로 프레임.
+
+사용처: control_window(목록 새로고침, 객체 패널, 버튼 핸들러), load_window(로드 후 갱신).
+"""
+
+from typing import List, Optional
+
+import omni.usd as ou
+from pxr import Gf, Usd, UsdGeom
+
+from .prim_info import safe_str
+
+
+def get_stage():
+    ctx = ou.get_context()
+    return ctx.get_stage() if ctx else None
+
+
+def is_utf8_safe(s: str) -> bool:
+    if not s:
+        return True
+    try:
+        s.encode("utf-8")
+        return True
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return False
+
+
+def collect_prim_paths_safe(stage: Usd.Stage) -> List[str]:
+    """open_stage 후 스테이지 전체에서 prim 경로 수집. UTF-8 안전 경로만."""
+    paths: List[str] = []
+
+    def visit(prim: Usd.Prim) -> None:
+        try:
+            path = str(prim.GetPath())
+        except Exception:
+            return
+        if path == "/":
+            try:
+                for ch in prim.GetChildren():
+                    visit(ch)
+            except Exception:
+                pass
+            return
+        try:
+            if not is_utf8_safe(path):
+                for ch in prim.GetChildren():
+                    visit(ch)
+                return
+            if prim.IsA(UsdGeom.Xform) or prim.IsA(UsdGeom.Gprim) or prim.GetTypeName() == "Scope":
+                paths.append(path)
+            for ch in prim.GetChildren():
+                visit(ch)
+        except Exception:
+            pass
+
+    try:
+        root = stage.GetPseudoRoot()
+        if root:
+            visit(root)
+    except Exception:
+        pass
+    return paths
+
+
+def find_prim_path_by_name(stage: Usd.Stage, name: str) -> Optional[str]:
+    paths = find_all_prim_paths_by_name(stage, name)
+    return paths[0] if paths else None
+
+
+def find_all_prim_paths_by_name(stage: Usd.Stage, name: str) -> List[str]:
+    """해당 이름(GetName()) 또는 경로와 일치하는 모든 prim 경로."""
+    result: List[str] = []
+    name_s = name.strip()
+    if not name_s:
+        return result
+    try:
+        if name_s.startswith("/"):
+            prim = stage.GetPrimAtPath(name_s)
+            if prim and prim.IsValid():
+                result.append(name_s)
+                return result
+        else:
+            prim = stage.GetPrimAtPath("/" + name_s)
+            if prim and prim.IsValid():
+                result.append("/" + name_s)
+                return result
+    except Exception:
+        pass
+
+    def visit(prim: Usd.Prim) -> None:
+        if prim.GetPath().pathString == "/":
+            for ch in prim.GetChildren():
+                visit(ch)
+            return
+        try:
+            if safe_str(prim.GetName()) == name_s:
+                result.append(str(prim.GetPath()))
+        except Exception:
+            pass
+        for ch in prim.GetChildren():
+            visit(ch)
+
+    try:
+        root = stage.GetPseudoRoot()
+        if root:
+            visit(root)
+    except Exception:
+        pass
+    return result
+
+
+def get_prim_local_translate(prim: Usd.Prim) -> Gf.Vec3f:
+    if not prim or not prim.IsValid():
+        return Gf.Vec3f(0, 0, 0)
+    xform = UsdGeom.Xformable(prim)
+    if not xform:
+        return Gf.Vec3f(0, 0, 0)
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            val = op.Get()
+            return Gf.Vec3f(val[0], val[1], val[2]) if val is not None else Gf.Vec3f(0, 0, 0)
+    return Gf.Vec3f(0, 0, 0)
+
+
+def set_prim_translate_only(prim: Usd.Prim, position: Gf.Vec3f) -> None:
+    if not prim or not prim.IsValid():
+        return
+    try:
+        api = UsdGeom.XformCommonAPI(prim)
+        if api:
+            api.SetTranslate(Gf.Vec3d(float(position[0]), float(position[1]), float(position[2])))
+            return
+    except Exception:
+        pass
+    xform = UsdGeom.Xformable(prim)
+    if not xform:
+        return
+    translate_op = None
+    for op in xform.GetOrderedXformOps():
+        if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
+            translate_op = op
+            break
+    if translate_op is None:
+        translate_op = xform.AddTranslateOp()
+    translate_op.Set(Gf.Vec3f(position[0], position[1], position[2]))
+
+
+def frame_prim_in_viewport(prim_path: str) -> None:
+    try:
+        from omni.kit.viewport.utility import frame_viewport_prims, get_active_viewport
+    except ImportError:
+        return
+    import asyncio
+    async def _do_frame():
+        await omni.kit.app.get_app().next_update_async()
+        viewport_api = get_active_viewport()
+        if not viewport_api:
+            try:
+                from omni.kit.viewport.utility import get_active_viewport_window
+                win = get_active_viewport_window()
+                viewport_api = win.viewport_api if win else None
+            except Exception:
+                pass
+        if viewport_api:
+            frame_viewport_prims(viewport_api, prims=[prim_path])
+    asyncio.ensure_future(_do_frame())

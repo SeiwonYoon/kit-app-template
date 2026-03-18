@@ -20,7 +20,7 @@ import omni.ui as ui
 import omni.usd as ou
 from carb.eventdispatcher import get_eventdispatcher
 from omni.kit.viewport.utility import get_active_viewport_window
-from pxr import Gf, Usd, UsdGeom
+from pxr import Gf, Usd, UsdGeom, Sdf
 
 from .prim_info import get_prim_display_name, safe_str
 from .translate_animation import (
@@ -32,9 +32,15 @@ from .curve_animation import (
     run_prim_curve_animation,
     stop_prim_curve_animation,
 )
+from .rotate_animation import (
+    run_prim_rotate_animation,
+    stop_prim_rotate_animation,
+)
 from .viewport_overlay import PrimInfoOverlay
 from .signal_parser import parse_signal
 from . import usd_animation_control
+from . import xml_generator
+from .sequence_editor import SequenceEditorWindow
 
 # usd_loader와 동일 기본 URL
 DEFAULT_USD_URL = (
@@ -61,6 +67,43 @@ SAMPLE_GENERATOR_JSON = """{
 
 # 3D 정보 패널 오버레이: 뷰포트 연결 재시도 횟수
 _VIEWPORT_RETRY_FRAMES = 180
+
+
+_SUPPORTED_STAGE_EXTS: Optional[set] = None
+
+
+def _get_supported_stage_extensions() -> set:
+    """
+    현재 Kit 환경에서 open_stage()로 직접 열 수 있는(USD FileFormat 지원) 확장자 집합을 반환.
+    실패 시 보수적 fallback을 사용.
+    """
+    global _SUPPORTED_STAGE_EXTS
+    if _SUPPORTED_STAGE_EXTS is not None:
+        return _SUPPORTED_STAGE_EXTS
+    exts = set()
+    try:
+        for fmt in Sdf.FileFormat.FindAllFileFormats():
+            for e in fmt.GetFileExtensions() or []:
+                if not e:
+                    continue
+                exts.add("." + str(e).lower())
+    except Exception:
+        exts = set()
+    if not exts:
+        exts = {".usd", ".usda", ".usdc", ".usdz", ".sdf", ".sda", ".sdc"}
+    _SUPPORTED_STAGE_EXTS = exts
+    return exts
+
+
+def _path_has_supported_stage_extension(path: str) -> bool:
+    """URL query/fragment 제거 후 확장자 체크."""
+    if not path:
+        return False
+    p = path.strip().lower()
+    if not p:
+        return False
+    p = p.split("#", 1)[0].split("?", 1)[0]
+    return any(p.endswith(ext) for ext in _get_supported_stage_extensions())
 
 
 def _get_resource_folder_path() -> Optional[Path]:
@@ -97,11 +140,11 @@ def _get_resource_folder_path() -> Optional[Path]:
 
 
 def _get_resource_usd_list() -> List[tuple]:
-    """resource 폴더 내 .usd, .usda, .usdc 목록. [(이름, 절대경로), ...]"""
+    """resource 폴더 내 '스테이지로 직접 로드 가능한' 확장자 목록. [(이름, 절대경로), ...]"""
     resource_dir = _get_resource_folder_path()
     if not resource_dir:
         return []
-    exts = (".usd", ".usda", ".usdc")
+    exts = _get_supported_stage_extensions()
     result: List[tuple] = []
     try:
         for p in sorted(resource_dir.iterdir()):
@@ -249,6 +292,14 @@ def _get_prim_local_translate(prim: Usd.Prim) -> Gf.Vec3f:
 def _set_prim_translate_only(prim: Usd.Prim, position: Gf.Vec3f) -> None:
     if not prim or not prim.IsValid():
         return
+    # XformCommonAPI 우선: scale op가 있는 prim에서도 호환되는 xformOpOrder 유지
+    try:
+        api = UsdGeom.XformCommonAPI(prim)
+        if api:
+            api.SetTranslate(Gf.Vec3d(float(position[0]), float(position[1]), float(position[2])))
+            return
+    except Exception:
+        pass
     xform = UsdGeom.Xformable(prim)
     if not xform:
         return
@@ -301,11 +352,19 @@ class Extension(omni.ext.IExt):
         self._usd_anim_start_frame = ui.SimpleIntModel(200)
         self._usd_anim_end_frame = ui.SimpleIntModel(300)
         self._usd_anim_loop = ui.SimpleBoolModel(False)
+        self._usd_anim_range_mode = ui.SimpleIntModel(0)  # 0:수동 1:자동
+        self._usd_anim_auto_range_text = ui.SimpleStringModel("AUTO RANGE: (미확인)")
+        self._xml_seq_model = ui.SimpleIntModel(0)  # 0:a 1:b 2:c 3:d
+        self._xml_from_port_model = ui.SimpleIntModel(1)
+        self._xml_to_port_model = ui.SimpleIntModel(6)
+        self._last_generated_xml: str = ""
         self._load_window = None
         self._control_window = None
         self._object_list_frame = None
+        self._sequence_window = None
         self._build_load_window()
         self._build_control_window()
+        self._build_sequence_window()
         self._try_attach_overlay()
 
         ctx = ou.get_context()
@@ -353,6 +412,7 @@ class Extension(omni.ext.IExt):
         for path in list(self._tracked_paths):
             stop_prim_translate_animation(path)
             stop_prim_curve_animation(path)
+            stop_prim_rotate_animation(path)
         self._tracked_paths.clear()
         self._open_paths.clear()
         if self._overlay:
@@ -366,6 +426,16 @@ class Extension(omni.ext.IExt):
             self._control_window.destroy()
             self._control_window = None
         self._object_list_frame = None
+        if self._sequence_window is not None:
+            try:
+                self._sequence_window.destroy()
+            except Exception:
+                pass
+            self._sequence_window = None
+
+    def _build_sequence_window(self) -> None:
+        """별도 시퀀스 편집기 창 생성 (기존 TBS 제어창과 별개)."""
+        self._sequence_window = SequenceEditorWindow()
 
     def _try_attach_overlay(self) -> None:
         """활성 뷰포트에 3D 정보 오버레이 연결 (show_info와 동일). 뷰포트가 없으면 다음 프레임에 재시도."""
@@ -529,11 +599,26 @@ class Extension(omni.ext.IExt):
         with self._control_window.frame:
             with ui.VStack(spacing=0):
                 ui.Label("USD 파일 애니메이션 (타임라인)", height=0)
-                with ui.HStack(spacing=8, height=30):
+                with ui.HStack(spacing=8, height=28):
+                    ui.Label("범위", width=50, height=28)
+                    # NOTE: 일부 Kit 버전에서는 ComboBox가 height= 인자를 받지 않습니다.
+                    # 높이는 HStack(height=28)로 맞추고 ComboBox에는 height를 넘기지 않습니다.
+                    self._usd_anim_mode_combo = ui.ComboBox(0, "수동", "자동")
+                    self._usd_anim_mode_combo.model.add_item_changed_fn(self._on_usd_anim_mode_changed)
+                    ui.Label("", width=0)  # spacer
+                self._usd_anim_manual_frame_row = ui.HStack(spacing=8, height=30)
+                with self._usd_anim_manual_frame_row:
                     ui.Label("시작 프레임", width=70, height=30)
                     ui.IntField(model=self._usd_anim_start_frame, width=60, height=30)
                     ui.Label("끝 프레임", width=70, height=30)
                     ui.IntField(model=self._usd_anim_end_frame, width=60, height=30)
+                self._usd_anim_auto_range_row = ui.HStack(spacing=8, height=22)
+                with self._usd_anim_auto_range_row:
+                    ui.Label("AUTO", width=50, height=22)
+                    ui.Label("", model=self._usd_anim_auto_range_text, height=22)
+                # 초기 상태: 수동
+                self._usd_anim_manual_frame_row.visible = True
+                self._usd_anim_auto_range_row.visible = False
                 with ui.HStack(spacing=8, height=20):
                     ui.CheckBox(model=self._usd_anim_loop)
                     ui.Label("루프", height=0)
@@ -554,6 +639,40 @@ class Extension(omni.ext.IExt):
                     clicked_fn=self._on_play_generator_sample,
                 )
                 ui.Spacer(height=6)
+
+                # ---------------------------
+                # XML 제너레이터 생성기
+                # ---------------------------
+                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                ui.Spacer(height=6)
+                with ui.Frame(style={"background_color": 0xFF23262B}):
+                    with ui.VStack(padding=8, spacing=6):
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label("XML 제너레이터 생성기", width=150, height=28, style={"color": 0xFFDDDDDD})
+                            # sequence_name: a~d
+                            # NOTE: 일부 Kit 버전에서는 ComboBox가 height= 인자를 받지 않습니다.
+                            self._xml_seq_combo = ui.ComboBox(0, "A", "B", "C", "D")
+                            self._xml_seq_combo.model.add_item_changed_fn(self._on_xml_seq_changed)
+                            ui.Button("OK", width=60, height=28, clicked_fn=self._on_xml_ok_clicked)
+                        # a/b 선택 시에만 포트 입력칸 표시
+                        self._xml_ab_inputs_frame = ui.HStack(spacing=8, height=28)
+                        with self._xml_ab_inputs_frame:
+                            # 초기값은 A(0)로 간주: 입력칸 표시
+                            ui.Label("FROM_PORT_ID", width=110, height=28)
+                            ui.IntField(model=self._xml_from_port_model, width=60, height=28)
+                            ui.Label("TO_PORT_ID", width=90, height=28)
+                            ui.IntField(model=self._xml_to_port_model, width=60, height=28)
+                        # 초기 표시 상태 반영 (기본 A)
+                        self._xml_ab_inputs_frame.visible = True
+                        ui.Button(
+                            "제너레이터 실행(역파싱)",
+                            height=28,
+                            clicked_fn=self._on_xml_run_clicked,
+                        )
+                ui.Spacer(height=6)
+                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                ui.Spacer(height=8)
+
                 ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=0)
                 ui.StringField(model=self._priority_prefix_model, height=22)
                 ui.Spacer(height=4)
@@ -564,12 +683,111 @@ class Extension(omni.ext.IExt):
                     self._object_list_frame = ui.VStack(height=0, alignment=ui.Alignment.LEFT_TOP)
         self._refresh_object_list()
 
+    def _on_usd_anim_mode_changed(self, model, *args) -> None:
+        """USD 애니메이션 재생 범위 모드 변경: 수동(프레임 입력) / 자동(USD 저장 범위)."""
+        try:
+            idx = model.get_item_value_model().as_int
+        except Exception:
+            idx = 0
+        is_auto = idx == 1
+        if self._usd_anim_manual_frame_row:
+            self._usd_anim_manual_frame_row.visible = not is_auto
+        if self._usd_anim_auto_range_row:
+            self._usd_anim_auto_range_row.visible = is_auto
+        if is_auto:
+            rng = usd_animation_control.resolve_saved_animation_frame_range()
+            if rng:
+                self._usd_anim_auto_range_text.set_value(f"AUTO RANGE: {rng[0]} ~ {rng[1]}")
+            else:
+                self._usd_anim_auto_range_text.set_value("AUTO RANGE: (감지 실패)")
+
+    def _on_xml_seq_changed(self, model, *args) -> None:
+        """
+        sequence_name 드롭다운 변경 핸들러.
+        - A/B: from/to port 입력칸 표시
+        - C/D: 입력칸 숨김 (향후 build_body_for_sequence_cd 구현 시 UI 확장 가능)
+        """
+        try:
+            idx = model.get_item_value_model().as_int
+        except Exception:
+            idx = 0
+        show_ab = idx in (0, 1)
+        if self._xml_ab_inputs_frame:
+            self._xml_ab_inputs_frame.visible = show_ab
+
+    def _on_xml_ok_clicked(self) -> None:
+        """현재 선택된 sequence_name과 입력값으로 XML 문자열을 생성하고 print/log로 출력."""
+        try:
+            idx = self._xml_seq_combo.model.get_item_value_model().as_int if self._xml_seq_combo else 0
+        except Exception:
+            idx = 0
+        seq = ["A", "B", "C", "D"][idx] if 0 <= idx <= 3 else "A"
+
+        try:
+            if seq in ("A", "B"):
+                from_port = self._xml_from_port_model.get_value_as_int()
+                to_port = self._xml_to_port_model.get_value_as_int()
+                xml = xml_generator.build_xml_string(seq, from_port_id=from_port, to_port_id=to_port)
+            else:
+                # C/D는 body 구조가 달라질 예정 → xml_generator.build_body_for_sequence_cd()를 수정하면 됨
+                xml = xml_generator.build_xml_string(seq)
+            self._last_generated_xml = xml
+            print(xml, flush=True)  # noqa: T201
+        except Exception as e:
+            print(f"[morph.tbs_control][xml_generator] XML 생성 실패: {e}", flush=True)  # noqa: T201
+
+    def _on_xml_run_clicked(self) -> None:
+        """OK로 저장된 XML을 역파싱하여 속성값들을 추출하고 로그 출력."""
+        xml_text = (self._last_generated_xml or "").strip()
+        if not xml_text:
+            print("[morph.tbs_control][xml_generator] 저장된 XML이 없습니다. 먼저 OK로 XML을 생성하세요.", flush=True)  # noqa: T201
+            return
+        parsed = xml_generator.parse_xml_string(xml_text)
+        if not parsed:
+            print("[morph.tbs_control][xml_generator] XML 역파싱 실패.", flush=True)  # noqa: T201
+            return
+        lines = ["[XML PARSE RESULT]"]
+        for k in (
+            "sequence_name",
+            "destination",
+            "origination",
+            "tid",
+            "facility",
+            "equipment_id",
+            "foup",
+            "from_eqp_id",
+            "from_port_id",
+            "to_eqp_id",
+            "to_port_id",
+        ):
+            lines.append(f"{k} = {parsed.get(k, '')}")
+        msg = "\n".join(lines)
+        print(msg, flush=True)  # noqa: T201
+
     def _on_play_usd_animation(self) -> None:
         """저장된 USD 내 타임라인 애니메이션을 지정 프레임 구간(기본 200~300)으로 재생. 루프 옵션 적용."""
-        start = self._usd_anim_start_frame.get_value_as_int()
-        end = self._usd_anim_end_frame.get_value_as_int()
         loop = self._usd_anim_loop.get_value_as_bool()
-        usd_animation_control.play_usd_animation(start_frame=start, end_frame=end, loop=loop)
+        # 모드: 0 수동, 1 자동
+        try:
+            mode = self._usd_anim_mode_combo.model.get_item_value_model().as_int if getattr(self, "_usd_anim_mode_combo", None) else 0
+        except Exception:
+            mode = 0
+        if mode == 1:
+            rng = usd_animation_control.resolve_saved_animation_frame_range()
+            if not rng:
+                print("[USD ANIM] 자동 범위 감지 실패: Stage/Timeline에서 start/end를 찾지 못했습니다.", flush=True)  # noqa: T201
+                return
+            start, end = int(rng[0]), int(rng[1])
+            self._usd_anim_auto_range_text.set_value(f"AUTO RANGE: {start} ~ {end}")
+        else:
+            start = self._usd_anim_start_frame.get_value_as_int()
+            end = self._usd_anim_end_frame.get_value_as_int()
+        usd_animation_control.play_usd_animation(
+            start_frame=start,
+            end_frame=end,
+            loop=loop,
+            on_completed=(lambda: print(f"[USD ANIM] 완료: {start}~{end}", flush=True)) if not loop else None,
+        )
 
     def _on_play_generator_sample(self) -> None:
         """JSON 샘플을 읽어 파서로 파싱 후 가상 시그널 애니메이션 재생."""
@@ -610,7 +828,7 @@ class Extension(omni.ext.IExt):
         path = self._get_load_path()
         self._load_status_label.text = ""
 
-        if not path or not path.lower().endswith((".usd", ".usda", ".usdc")):
+        if not path or not _path_has_supported_stage_extension(path):
             self._load_status_label.text = "Error: Invalid URL or File extension."
             return
 
@@ -747,6 +965,7 @@ class Extension(omni.ext.IExt):
                         with ui.HStack(spacing=8):
                             ui.Button("button_0", width=0, clicked_fn=lambda p=prim_path: self._on_button_0(p))
                             ui.Button("button_1", width=0, clicked_fn=lambda p=prim_path: self._on_button_1(p))
+                            ui.Button("button_2", width=0, clicked_fn=lambda p=prim_path: self._on_button_2(p))
         except (UnicodeDecodeError, UnicodeEncodeError):
             return
 
@@ -754,6 +973,7 @@ class Extension(omni.ext.IExt):
         """x축 100 → z축 100 순차 이동 (1초씩). 같은 객체 기존 애니메이션은 즉시 중단 후 현재 위치부터."""
         stop_prim_translate_animation(prim_path)
         stop_prim_curve_animation(prim_path)
+        stop_prim_rotate_animation(prim_path)
         run_prim_translate_animation(
             prim_path,
             [
@@ -767,6 +987,7 @@ class Extension(omni.ext.IExt):
         """x축 100만큼 포물선 곡선 이동 (1초). 같은 객체 기존 애니메이션 즉시 중단 후 현재 위치부터."""
         stop_prim_translate_animation(prim_path)
         stop_prim_curve_animation(prim_path)
+        stop_prim_rotate_animation(prim_path)
         stage = _get_stage()
         prim = stage.GetPrimAtPath(prim_path) if stage else None
         if not prim or not prim.IsValid():
@@ -776,3 +997,16 @@ class Extension(omni.ext.IExt):
         end_t = (start[0] + 100.0, start[1], start[2])
         path_points = make_parabolic_path(start=start_t, end=end_t, arc_height=30.0, num_points=24)
         run_prim_curve_animation(prim_path, path_points, duration_sec=1.0, loop=False)
+
+    def _on_button_2(self, prim_path: str) -> None:
+        """예시: 3초 동안 Y축으로 90도 회전. 같은 객체 기존 애니메이션 즉시 중단 후 현재 회전부터."""
+        stop_prim_translate_animation(prim_path)
+        stop_prim_curve_animation(prim_path)
+        stop_prim_rotate_animation(prim_path)
+        run_prim_rotate_animation(
+            prim_path,
+            [
+                {"duration": 3.0, "delta": (0.0, 90.0, 0.0)},
+            ],
+            loop=False,
+        )
