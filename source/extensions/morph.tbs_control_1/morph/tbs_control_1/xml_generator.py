@@ -2,37 +2,83 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-xml_generator.py — XML 제너레이터 (TBS Control).
+xml_generator.py — XML 제너레이터 (TBS Control)
 
-BODY 포함, 태그/속성/속성값 대문자. A/B 시 from_port_id, to_port_id 반영.
-C/D는 build_body_for_sequence_cd 수정 가이드 포함. parse_xml_string으로 역파싱.
+요구사항 반영:
+- `<Envelop>` 태그로 감싸기
+- HEADER/BODY 등 태그/속성/속성값은 대문자 처리(단, Envelop 루트 태그는 요청대로 `Envelop`)
+- 6개 시퀀스:
+  - EAPEIS_PORT_MOVE_TRANSFERING (FROM/TO_PORT_ID)
+  - EAPEIS_PORT_MOVE (FROM/TO_PORT_ID)
+  - EAPEIS_PORT_READYTOLOAD (PORT_ID)
+  - EAPEIS_PORT_ARRIVED (PORT_ID)
+  - EAPEIS_PORT_READYTOUNLOAD (PORT_ID)
+  - EAPEIS_PORT_REMOVED (PORT_ID)
+- 역파싱은 `<Envelop>` 뿐 아니라 과거 포맷(Envelop 없는 경우)도 최대한 호환
+- parse 결과에 action_desc를 포함(역파싱 로그에 상세 설명용)
 """
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 import xml.etree.ElementTree as ET
 
+# ----------------
+# tags / attrs
+# ----------------
+TAG_ENVELOP = "Envelop"  # 요청대로 대문자 고정이 아니라, 예시와 동일 케이스 유지
 TAG_HEADER = "HEADER"
 TAG_FACILITY = "FACILITY"
 TAG_ENVIRONMENT = "ENVIRONMENT"
 TAG_SENDERNODE = "SENDERNODE"
 TAG_BODY = "BODY"
-TAG_DATA = "DATA"
-TAG_EAPEIS_PORT_MOVE = "EAPEIS_PORT_MOVE"
+
+TAG_EAPEIS_PORT_EVENT = "EAPEIS_PORT_EVENT"
+TAG_PROCESS_JOB = "PROCESS_JOB"
+TAG_CARRIER = "CARRIER"
+TAG_LOT = "LOT"
+TAG_WAFER = "WAFER"
+
 TAG_FROM_INFO = "FROM_INFO"
 TAG_TO_INFO = "TO_INFO"
+
 ATTR_DESTINATION = "DESTINATION"
 ATTR_ORIGINATION = "ORIGINATION"
 ATTR_TID = "TID"
 ATTR_FACILITY = "FACILITY"
 ATTR_EQUIPMENT_ID = "EQUIPMENT_ID"
 ATTR_SEQUENCE_NAME = "SEQUENCE_NAME"
+
+ATTR_CONTROL_JOB_ID = "CONTROL_JOB_ID"
 ATTR_FOUP = "FOUP"
+
+ATTR_PROCESS_JOB_ID = "PROCESS_JOB_ID"
+ATTR_BATCH_ID = "BATCH_ID"
+ATTR_BATCH_COUNT = "BATCH_COUNT"
+ATTR_PORT_ID = "PORT_ID"
+
+ATTR_CARRIER_ID = "CARRIER_ID"
+ATTR_LOT_ID = "LOT_ID"
+ATTR_OPERATOR = "OPERATOR"
+ATTR_OPERATION = "OPERATION"
+ATTR_WAFER_ID = "WAFER_ID"
+
 ATTR_FROM_EQP_ID = "FROM_EQP_ID"
 ATTR_FROM_PORT_ID = "FROM_PORT_ID"
 ATTR_TO_EQP_ID = "TO_EQP_ID"
 ATTR_TO_PORT_ID = "TO_PORT_ID"
+
+
+SEQ_MOVE_TRANSFERING = "EAPEIS_PORT_MOVE_TRANSFERING"
+SEQ_MOVE = "EAPEIS_PORT_MOVE"
+SEQ_READYTOLOAD = "EAPEIS_PORT_READYTOLOAD"
+SEQ_ARRIVED = "EAPEIS_PORT_ARRIVED"
+SEQ_READYTOUNLOAD = "EAPEIS_PORT_READYTOUNLOAD"
+SEQ_REMOVED = "EAPEIS_PORT_REMOVED"
+
+FROM_TO_SEQS = {SEQ_MOVE_TRANSFERING, SEQ_MOVE}
+PORT_ID_ONLY_SEQS = {SEQ_READYTOLOAD, SEQ_ARRIVED, SEQ_READYTOUNLOAD, SEQ_REMOVED}
+ALL_SEQS = tuple(sorted(list(FROM_TO_SEQS | PORT_ID_ONLY_SEQS)))
 
 
 def _u(val: str) -> str:
@@ -63,82 +109,202 @@ def build_body_attributes(sequence_name: str) -> Dict[str, str]:
     }
 
 
-def build_body_for_sequence_ab(sequence_name: str, from_port_id: int, to_port_id: int) -> ET.Element:
-    body = ET.Element(TAG_BODY)
-    _set_attrs(body, build_body_attributes(sequence_name))
-    move = ET.SubElement(body, TAG_EAPEIS_PORT_MOVE)
-    _set_attrs(move, {ATTR_FOUP: ""})
-    ET.SubElement(move, TAG_FROM_INFO, {ATTR_FROM_EQP_ID: "", ATTR_FROM_PORT_ID: str(from_port_id)})
-    ET.SubElement(move, TAG_TO_INFO, {ATTR_TO_EQP_ID: "", ATTR_TO_PORT_ID: str(to_port_id)})
-    return body
+def _build_lot_and_wafer() -> ET.Element:
+    lot = ET.Element(TAG_LOT)
+    _set_attrs(
+        lot,
+        {
+            ATTR_LOT_ID: "",
+            ATTR_OPERATOR: "",
+            ATTR_OPERATION: "",
+        },
+    )
+    wafer = ET.SubElement(lot, TAG_WAFER)
+    _set_attrs(wafer, {ATTR_WAFER_ID: ""})
+    return lot
 
 
-def build_body_for_sequence_cd(sequence_name: str) -> ET.Element:
-    body = ET.Element(TAG_BODY)
-    _set_attrs(body, build_body_attributes(sequence_name))
-    return body
+def _build_carrier() -> ET.Element:
+    carrier = ET.Element(TAG_CARRIER)
+    _set_attrs(carrier, {ATTR_CARRIER_ID: ""})
+    carrier.append(_build_lot_and_wafer())
+    return carrier
+
+
+def _build_process_job(
+    port_id: Optional[int],
+) -> ET.Element:
+    pj = ET.Element(TAG_PROCESS_JOB)
+    _set_attrs(
+        pj,
+        {
+            ATTR_PROCESS_JOB_ID: "",
+            ATTR_BATCH_ID: "",
+            ATTR_BATCH_COUNT: "",
+            ATTR_PORT_ID: "" if port_id is None else str(int(port_id)),
+        },
+    )
+    pj.append(_build_carrier())
+    return pj
+
+
+def _sequence_action_desc(
+    seq: str,
+    port_id: str,
+    from_port_id: str,
+    to_port_id: str,
+) -> str:
+    # 사용자 요구사항의 1~6 시나리오를 그대로 로그로 제공
+    if seq == SEQ_READYTOLOAD:
+        return f"1) 장비포트에서 새로운 FOUP를 받을 준비 완료. PORT_ID={port_id} (애니없음)"
+    if seq == SEQ_ARRIVED:
+        return f"2) PORT_ID={port_id} 포트에 FOUP 안착 애니 실행 (PORT 이동)"
+    if seq == SEQ_MOVE_TRANSFERING:
+        return f"3) FROM_PORT_ID={from_port_id} -> TO_PORT_ID={to_port_id} : TBS 인아웃 포트에서 버퍼 포트로 이동 애니"
+    if seq == SEQ_MOVE:
+        return (
+            f"4) FROM_PORT_ID={from_port_id}, TO_PORT_ID={to_port_id} : TBS 포트에서 장비포트로 내리는 애니 실행"
+        )
+    if seq == SEQ_READYTOUNLOAD:
+        return f"5) 장비에서 계측 완료. OHT가 FOUP을 회수하여 PORT_ID={port_id} 포트로 가져가는 애니"
+    if seq == SEQ_REMOVED:
+        return f"6) OHT가 PORT_ID={port_id} 포트에서 FOUP을 회수하면 발생 애니 없음"
+    return "알 수 없는 시퀀스"
 
 
 def build_xml_string(
     sequence_name: str,
+    port_id: Optional[int] = None,
     from_port_id: Optional[int] = None,
     to_port_id: Optional[int] = None,
 ) -> str:
     seq = _u(sequence_name)
     header = build_header()
-    if seq in ("A", "B"):
+
+    body = ET.Element(TAG_BODY)
+    _set_attrs(body, build_body_attributes(seq))
+
+    event = ET.SubElement(body, TAG_EAPEIS_PORT_EVENT)
+    _set_attrs(event, {ATTR_CONTROL_JOB_ID: ""})
+
+    if seq in FROM_TO_SEQS:
         if from_port_id is None or to_port_id is None:
-            raise ValueError("A/B requires from_port_id and to_port_id")
-        body = build_body_for_sequence_ab(seq, int(from_port_id), int(to_port_id))
+            raise ValueError("FROM/TO 시퀀스는 from_port_id, to_port_id가 필요합니다.")
+
+        # 예시 구조에 맞추기 위해 PROCESS_JOB은 FROM 쪽 포트 기반으로 넣고, FROM_INFO/TO_INFO로 TO를 표현
+        event.append(_build_process_job(from_port_id))
+
+        from_info = ET.SubElement(event, TAG_FROM_INFO)
+        _set_attrs(
+            from_info,
+            {
+                ATTR_FROM_EQP_ID: "",
+                ATTR_FROM_PORT_ID: str(int(from_port_id)),
+            },
+        )
+        to_info = ET.SubElement(event, TAG_TO_INFO)
+        _set_attrs(
+            to_info,
+            {
+                ATTR_TO_EQP_ID: "",
+                ATTR_TO_PORT_ID: str(int(to_port_id)),
+            },
+        )
+    elif seq in PORT_ID_ONLY_SEQS:
+        if port_id is None:
+            raise ValueError("PORT_ID 시퀀스는 port_id가 필요합니다.")
+        event.append(_build_process_job(port_id))
     else:
-        body = build_body_for_sequence_cd(seq)
-    root = ET.Element("ROOT")
-    root.append(header)
-    root.append(body)
-    xml_bytes = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        raise ValueError(f"지원하지 않는 sequence_name: {sequence_name}")
+
+    # Envelop 루트로 감싸기
+    envelop = ET.Element(TAG_ENVELOP)
+    envelop.append(header)
+    envelop.append(body)
+
+    xml_bytes = ET.tostring(envelop, encoding="utf-8", xml_declaration=True)
     xml = xml_bytes.decode("utf-8")
-    xml = xml.replace("<ROOT>", "").replace("</ROOT>", "")
     return xml.strip() + "\n"
+
+
+def _strip_xml_declaration(s: str) -> str:
+    s2 = (s or "").strip()
+    if s2.startswith("<?xml"):
+        end = s2.find("?>")
+        if end != -1:
+            s2 = s2[end + 2 :].lstrip()
+    return s2
+
+
+def _extract_values_from_tree(root: ET.Element) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    # return: (port_id, from_port_id, to_port_id)
+    port_id = None
+    from_port_id = None
+    to_port_id = None
+
+    # PROCESS_JOB PORT_ID
+    pj = root.find(f".//{TAG_PROCESS_JOB}")
+    if pj is not None:
+        port_id = pj.get(ATTR_PORT_ID)
+
+    from_info = root.find(f".//{TAG_FROM_INFO}")
+    if from_info is not None:
+        from_port_id = from_info.get(ATTR_FROM_PORT_ID)
+
+    to_info = root.find(f".//{TAG_TO_INFO}")
+    if to_info is not None:
+        to_port_id = to_info.get(ATTR_TO_PORT_ID)
+
+    return port_id, from_port_id, to_port_id
 
 
 def parse_xml_string(xml_text: str) -> Optional[dict]:
     if not xml_text or not xml_text.strip():
         return None
-    s = xml_text.strip()
-    if s.startswith("<?xml"):
-        end = s.find("?>")
-        if end != -1:
-            s = s[end + 2 :].lstrip()
+
+    s = _strip_xml_declaration(xml_text)
     try:
-        wrapped = "<ROOT>" + s + "</ROOT>"
-        root = ET.fromstring(wrapped)
+        # 과거 포맷(HEADER/BODY가 최상위에 나열되고 Envelop가 없는 형태) 호환:
+        # - Envelop가 있으면 그대로 파싱
+        # - 없으면 ROOT로 감싸서 BODY를 찾기 쉽게 함
+        if "<Envelop" in s or "</Envelop>" in s:
+            root = ET.fromstring(s)
+        else:
+            root = ET.fromstring("<ROOT>" + s + "</ROOT>")
     except ET.ParseError:
         return None
-    body = root.find(TAG_BODY)
+
+    body = root.find(f".//{TAG_BODY}")
     if body is None:
         return None
+
+    seq_name = body.get(ATTR_SEQUENCE_NAME, "") or ""
+    port_id, from_port_id, to_port_id = _extract_values_from_tree(root)
+
+    seq_name_u = _u(seq_name)
+    port_id_s = "" if port_id is None else str(port_id)
+    from_port_id_s = "" if from_port_id is None else str(from_port_id)
+    to_port_id_s = "" if to_port_id is None else str(to_port_id)
+
     out: Dict[str, str] = {
-        "sequence_name": body.get(ATTR_SEQUENCE_NAME, ""),
-        "destination": body.get(ATTR_DESTINATION, ""),
-        "origination": body.get(ATTR_ORIGINATION, ""),
-        "tid": body.get(ATTR_TID, ""),
-        "facility": body.get(ATTR_FACILITY, ""),
-        "equipment_id": body.get(ATTR_EQUIPMENT_ID, ""),
+        "sequence_name": seq_name_u,
+        "destination": body.get(ATTR_DESTINATION, "") or "",
+        "origination": body.get(ATTR_ORIGINATION, "") or "",
+        "tid": body.get(ATTR_TID, "") or "",
+        "facility": body.get(ATTR_FACILITY, "") or "",
+        "equipment_id": body.get(ATTR_EQUIPMENT_ID, "") or "",
+        "port_id": port_id_s,
+        "from_port_id": from_port_id_s,
+        "to_port_id": to_port_id_s,
+        # 기존 UI 출력 호환: 값이 없으면 빈 문자열
         "foup": "",
         "from_eqp_id": "",
-        "from_port_id": "",
         "to_eqp_id": "",
-        "to_port_id": "",
+        "action_desc": _sequence_action_desc(
+            seq=seq_name_u,
+            port_id=port_id_s,
+            from_port_id=from_port_id_s,
+            to_port_id=to_port_id_s,
+        ),
     }
-    move = body.find(TAG_EAPEIS_PORT_MOVE)
-    if move is not None:
-        out["foup"] = move.get(ATTR_FOUP, "")
-        from_info = move.find(TAG_FROM_INFO)
-        if from_info is not None:
-            out["from_eqp_id"] = from_info.get(ATTR_FROM_EQP_ID, "")
-            out["from_port_id"] = from_info.get(ATTR_FROM_PORT_ID, "")
-        to_info = move.find(TAG_TO_INFO)
-        if to_info is not None:
-            out["to_eqp_id"] = to_info.get(ATTR_TO_EQP_ID, "")
-            out["to_port_id"] = to_info.get(ATTR_TO_PORT_ID, "")
     return out

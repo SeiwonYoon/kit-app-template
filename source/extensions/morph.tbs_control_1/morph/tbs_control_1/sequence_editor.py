@@ -26,12 +26,28 @@ import omni.usd as ou
 from .sequence_engine import SequenceRunner
 
 
-STEP_TYPES = ["USD_TIMELINE", "MOVE", "ROTATE"]
+CHECKBOX_WHITE_STYLE = {
+    # 체크 표시는 검정색(마크), 배경은 밝게
+    "color": 0xFF000000,
+    "background_color": 0xFFEEEEEE,
+}
+
+INPUT_FIELD_STYLE = {
+    "background_color": 0xFF3B4250,
+    "color": 0xFFFFFFFF,
+}
+
+STEP_TYPES = ["USD_TIMELINE", "MOVE", "ROTATE", "DELAY"]
 
 
 class SequenceEditorWindow:
     def __init__(self, title: str = "TBS 시퀀스 편집기") -> None:
-        self._window = ui.Window(title, width=560, height=720)
+        self._window = ui.Window(title, width=650, height=720)
+        # 창 크기를 사용자가 650보다 작게 줄이지 못하게 고정
+        try:
+            self._window.flags = self._window.flags | ui.WINDOW_FLAGS_NO_RESIZE
+        except Exception:
+            self._window.flags = ui.WINDOW_FLAGS_NO_RESIZE
         self._steps: List[Dict[str, Any]] = []
         self._runner = SequenceRunner(on_sequence_completed=lambda: print("[SEQUENCE] 완료", flush=True))  # noqa: T201
 
@@ -129,59 +145,103 @@ class SequenceEditorWindow:
             self._refresh_steps_ui()
 
     def _build_one_step(self, parent: ui.VStack, idx: int, step: Dict[str, Any]) -> None:
-        # NOTE: 너무 길지 않게 높이 조정 (duration 설정 줄까지만 자연스럽게 보이도록)
-        # omni.ui는 Frame(height=...)가 내용을 자동으로 클리핑하지 않아,
-        # 내부에 고정 높이 ScrollingFrame을 두어 "카드 높이 고정"을 확실히 보장한다.
+        # 스텝 카드 내부 스크롤은 불필요하다고 판단하여 제거.
+        # 대신 카드 높이를 충분히 확보해서 클리핑을 방지한다.
         with parent:
-            with ui.Frame(height=180, style={"background_color": 0xFF1E2024}):
+            with ui.Frame(height=250, style={"background_color": 0xFF1E2024}):
                 with ui.VStack(spacing=6, padding=8):
-                    # Step 타이틀/접기 영역도 색으로 구분
                     with ui.Frame(style={"background_color": 0xFF191C20}):
                         with ui.CollapsableFrame(f"Step {idx+1}: {step.get('type','')}", collapsed=False):
-                            # 카드 내용 영역은 고정 높이 + 내부 스크롤
-                            with ui.ScrollingFrame(height=120):
-                                with ui.VStack(spacing=6, padding=6):
-                                    ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-                                    # 드롭다운/버튼 영역 배경 분리(가독성 개선)
-                                    with ui.Frame(style={"background_color": 0xFF20242A}):
-                                        with ui.HStack(spacing=6, height=28):
-                                            # type selector
-                                            initial_type_idx = (
-                                                STEP_TYPES.index(step.get("type", "MOVE"))
-                                                if step.get("type") in STEP_TYPES
-                                                else 1
-                                            )
+                            with ui.VStack(spacing=6, padding=6):
+                                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                                # 드롭다운/버튼 영역 배경 분리(가독성 개선)
+                                with ui.Frame(style={"background_color": 0xFF20242A}):
+                                    with ui.HStack(spacing=6, height=28):
+                                        # type selector
+                                        initial_type_idx = (
+                                            STEP_TYPES.index(step.get("type", "MOVE"))
+                                            if step.get("type") in STEP_TYPES
+                                            else 1
+                                        )
 
-                                            def _on_type_change(model, *_):
-                                                t = STEP_TYPES[model.get_item_value_model().as_int]
-                                                step.clear()
-                                                step["type"] = t
-                                                # init defaults
-                                                if t == "USD_TIMELINE":
-                                                    step.update({"mode": "MANUAL", "start_frame": 200, "end_frame": 300, "loop": False})
-                                                elif t == "MOVE":
-                                                    step.update({"prim": "", "duration": 1.0, "dx": 100.0, "dy": 0.0, "dz": 0.0})
-                                                else:
-                                                    step.update({"prim": "", "duration": 1.0, "rx": 0.0, "ry": 90.0, "rz": 0.0})
-                                                self._schedule_refresh()
-
-                                            cb = ui.ComboBox(initial_type_idx, *STEP_TYPES)
-                                            cb.model.add_item_changed_fn(_on_type_change)
-                                            ui.Button("위", width=40, height=28, clicked_fn=lambda i=idx: self._move_step(i, -1))
-                                            ui.Button("아래", width=50, height=28, clicked_fn=lambda i=idx: self._move_step(i, 1))
-                                            ui.Button("삭제", width=60, height=28, clicked_fn=lambda i=idx: self._remove_step(i))
-
-                                    # 설정 영역(입력/버튼) 배경을 별도로 분리
-                                    with ui.Frame(style={"background_color": 0xFF262A30}):
-                                        with ui.VStack(spacing=6, padding=8):
-                                            t = (step.get("type") or "").upper()
+                                        def _on_type_change(model, *_):
+                                            t = STEP_TYPES[model.get_item_value_model().as_int]
+                                            step.clear()
+                                            step["type"] = t
+                                            # init defaults
                                             if t == "USD_TIMELINE":
-                                                self._ui_step_usd_timeline(step)
+                                                step.update(
+                                                    {
+                                                        "mode": "MANUAL",
+                                                        "start_frame": 200,
+                                                        "end_frame": 300,
+                                                        "loop": False,
+                                                        "hide_enabled": False,
+                                                        "hide_prims": "",
+                                                    }
+                                                )
+                                            elif t == "MOVE":
+                                                step.update(
+                                                    {
+                                                        "prim": "",
+                                                        "duration": 1.0,
+                                                        "dx": 100.0,
+                                                        "dy": 0.0,
+                                                        "dz": 0.0,
+                                                        "hide_enabled": False,
+                                                        "hide_prims": "",
+                                                    }
+                                                )
                                             elif t == "ROTATE":
-                                                self._ui_step_rotate(step)
-                                            else:
-                                                self._ui_step_move(step)
-                                    ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                                                step.update(
+                                                    {
+                                                        "prim": "",
+                                                        "duration": 1.0,
+                                                        "rx": 0.0,
+                                                        "ry": 90.0,
+                                                        "rz": 0.0,
+                                                        "pivot_enabled": False,
+                                                        "pivot_x": 0.0,
+                                                        "pivot_y": 0.0,
+                                                        "pivot_z": 0.0,
+                                                        "pivot_ax": 0.0,
+                                                        "pivot_ay": 1.0,
+                                                        "pivot_az": 0.0,
+                                                        "rotate_angle_deg": 0.0,
+                                                        "hide_enabled": False,
+                                                        "hide_prims": "",
+                                                    }
+                                                )
+                                            elif t == "DELAY":
+                                                step.update(
+                                                    {
+                                                        "duration": 1.0,
+                                                        "hide_enabled": False,
+                                                        "hide_prims": "",
+                                                    }
+                                                )
+                                            self._schedule_refresh()
+
+                                        cb = ui.ComboBox(initial_type_idx, *STEP_TYPES)
+                                        cb.model.add_item_changed_fn(_on_type_change)
+                                        ui.Button("위", width=40, height=28, clicked_fn=lambda i=idx: self._move_step(i, -1))
+                                        ui.Button("아래", width=50, height=28, clicked_fn=lambda i=idx: self._move_step(i, 1))
+                                        ui.Button("삭제", width=60, height=28, clicked_fn=lambda i=idx: self._remove_step(i))
+
+                                # 설정 영역(입력/버튼) 배경을 별도로 분리
+                                with ui.Frame(style={"background_color": 0xFF262A30}):
+                                    with ui.VStack(spacing=6, padding=8):
+                                        t = (step.get("type") or "").upper()
+                                        if t == "USD_TIMELINE":
+                                            self._ui_step_usd_timeline(step)
+                                        elif t == "ROTATE":
+                                            self._ui_step_rotate(step)
+                                        elif t == "DELAY":
+                                            self._ui_step_delay(step)
+                                        else:
+                                            self._ui_step_move(step)
+                                        self._ui_step_hide_options(step)
+                                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
 
     def _ui_step_usd_timeline(self, step: Dict[str, Any]) -> None:
         mode_items = ["MANUAL", "AUTO"]
@@ -195,7 +255,7 @@ class SequenceEditorWindow:
             cb = ui.ComboBox(initial_mode_idx, *mode_items)
             cb.model.add_item_changed_fn(_on_mode_changed)
             loop_model = ui.SimpleBoolModel(bool(step.get("loop", False)))
-            ui.CheckBox(model=loop_model)
+            ui.CheckBox(model=loop_model, style=CHECKBOX_WHITE_STYLE)
             ui.Label("LOOP", height=0)
 
             def _on_loop(_m):
@@ -219,9 +279,9 @@ class SequenceEditorWindow:
 
             with ui.HStack(spacing=6, height=28):
                 ui.Label("START", width=60)
-                ui.IntField(model=sf, width=80, height=28)
+                ui.IntField(model=sf, width=80, height=28, style=INPUT_FIELD_STYLE)
                 ui.Label("END", width=40)
-                ui.IntField(model=ef, width=80, height=28)
+                ui.IntField(model=ef, width=80, height=28, style=INPUT_FIELD_STYLE)
 
     def _ui_step_move(self, step: Dict[str, Any]) -> None:
         prim_model = ui.SimpleStringModel(str(step.get("prim", "")))
@@ -233,7 +293,7 @@ class SequenceEditorWindow:
 
         with ui.HStack(spacing=6, height=28):
             ui.Label("PRIM", width=60)
-            ui.StringField(model=prim_model, width=340, height=28)
+            ui.StringField(model=prim_model, width=340, height=28, style=INPUT_FIELD_STYLE)
             ui.Button("선택 prim", width=90, height=28, clicked_fn=lambda: self._fill_selected_prim(prim_model))
 
         dur = ui.SimpleFloatModel(float(step.get("duration", 1.0)))
@@ -248,13 +308,22 @@ class SequenceEditorWindow:
 
         with ui.HStack(spacing=6, height=28):
             ui.Label("DUR", width=60)
-            ui.FloatField(model=dur, width=80, height=28)
+            ui.FloatField(model=dur, width=80, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("DX", width=30)
-            ui.FloatField(model=dx, width=70, height=28)
+            ui.FloatField(model=dx, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("DY", width=30)
-            ui.FloatField(model=dy, width=70, height=28)
+            ui.FloatField(model=dy, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("DZ", width=30)
-            ui.FloatField(model=dz, width=70, height=28)
+            ui.FloatField(model=dz, width=70, height=28, style=INPUT_FIELD_STYLE)
+
+    def _ui_step_delay(self, step: Dict[str, Any]) -> None:
+        dur = ui.SimpleFloatModel(float(step.get("duration", 1.0)))
+        dur.add_value_changed_fn(lambda _m: step.__setitem__("duration", float(dur.get_value_as_float())))
+
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("DELAY", width=60)
+            ui.FloatField(model=dur, width=120, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("sec", height=0)
 
     def _ui_step_rotate(self, step: Dict[str, Any]) -> None:
         prim_model = ui.SimpleStringModel(str(step.get("prim", "")))
@@ -262,7 +331,7 @@ class SequenceEditorWindow:
 
         with ui.HStack(spacing=6, height=28):
             ui.Label("PRIM", width=60)
-            ui.StringField(model=prim_model, width=340, height=28)
+            ui.StringField(model=prim_model, width=340, height=28, style=INPUT_FIELD_STYLE)
             ui.Button("선택 prim", width=90, height=28, clicked_fn=lambda: self._fill_selected_prim(prim_model))
 
         dur = ui.SimpleFloatModel(float(step.get("duration", 1.0)))
@@ -277,18 +346,95 @@ class SequenceEditorWindow:
 
         with ui.HStack(spacing=6, height=28):
             ui.Label("DUR", width=60)
-            ui.FloatField(model=dur, width=80, height=28)
+            ui.FloatField(model=dur, width=80, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("RX", width=30)
-            ui.FloatField(model=rx, width=70, height=28)
+            ui.FloatField(model=rx, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("RY", width=30)
-            ui.FloatField(model=ry, width=70, height=28)
+            ui.FloatField(model=ry, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("RZ", width=30)
-            ui.FloatField(model=rz, width=70, height=28)
+            ui.FloatField(model=rz, width=70, height=28, style=INPUT_FIELD_STYLE)
+
+        pivot_enabled = ui.SimpleBoolModel(bool(step.get("pivot_enabled", False)))
+        pivot_x = ui.SimpleFloatModel(float(step.get("pivot_x", 0.0)))
+        pivot_y = ui.SimpleFloatModel(float(step.get("pivot_y", 0.0)))
+        pivot_z = ui.SimpleFloatModel(float(step.get("pivot_z", 0.0)))
+
+        pivot_enabled.add_value_changed_fn(
+            lambda _m: step.__setitem__("pivot_enabled", bool(pivot_enabled.get_value_as_bool()))
+        )
+        pivot_x.add_value_changed_fn(lambda _m: step.__setitem__("pivot_x", float(pivot_x.get_value_as_float())))
+        pivot_y.add_value_changed_fn(lambda _m: step.__setitem__("pivot_y", float(pivot_y.get_value_as_float())))
+        pivot_z.add_value_changed_fn(lambda _m: step.__setitem__("pivot_z", float(pivot_z.get_value_as_float())))
+
+        with ui.HStack(spacing=6, height=28):
+            ui.CheckBox(model=pivot_enabled, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("PIVOT(미사용)", width=90)
+            ui.Label("X", width=20)
+            ui.FloatField(model=pivot_x, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("Y", width=20)
+            ui.FloatField(model=pivot_y, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("Z", width=20)
+            ui.FloatField(model=pivot_z, width=70, height=28, style=INPUT_FIELD_STYLE)
+
+        # 주의: 현재 시퀀서 ROTATE 실행 로직에서는 pivot_* 입력을 사용하지 않고
+        # 각 prim의 로컬(TBS_OFFSET) rotateXYZ op에 rx/ry/rz 델타만 적용합니다.
+        pivot_ax = ui.SimpleFloatModel(float(step.get("pivot_ax", 0.0)))
+        pivot_ay = ui.SimpleFloatModel(float(step.get("pivot_ay", 1.0)))
+        pivot_az = ui.SimpleFloatModel(float(step.get("pivot_az", 0.0)))
+        pivot_ax.add_value_changed_fn(lambda _m: step.__setitem__("pivot_ax", float(pivot_ax.get_value_as_float())))
+        pivot_ay.add_value_changed_fn(lambda _m: step.__setitem__("pivot_ay", float(pivot_ay.get_value_as_float())))
+        pivot_az.add_value_changed_fn(lambda _m: step.__setitem__("pivot_az", float(pivot_az.get_value_as_float())))
+
+        rot_angle = ui.SimpleFloatModel(float(step.get("rotate_angle_deg", 0.0)))
+        rot_angle.add_value_changed_fn(lambda _m: step.__setitem__("rotate_angle_deg", float(rot_angle.get_value_as_float())))
+
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("축(미사용)", width=60)
+            ui.Label("AX", width=22)
+            ui.FloatField(model=pivot_ax, width=62, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("AY", width=22)
+            ui.FloatField(model=pivot_ay, width=62, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("AZ", width=22)
+            ui.FloatField(model=pivot_az, width=62, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("각도(선택)", width=60)
+            ui.FloatField(model=rot_angle, width=100, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("현재 로직에서는 미사용", height=0)
+
+    def _ui_step_hide_options(self, step: Dict[str, Any]) -> None:
+        """
+        각 스텝 하단: 숨길 prim 체크박스 + 경로 입력.
+        - hide_prims: 쉼표로 다중 입력 (하위 prim 포함)
+        """
+        hide_enabled = ui.SimpleBoolModel(bool(step.get("hide_enabled", False)))
+        hide_paths = ui.SimpleStringModel(str(step.get("hide_prims", "")))
+        hide_enabled.add_value_changed_fn(
+            lambda _m: step.__setitem__("hide_enabled", bool(hide_enabled.get_value_as_bool()))
+        )
+        hide_paths.add_value_changed_fn(lambda _m: step.__setitem__("hide_prims", hide_paths.get_value_as_string()))
+
+        with ui.HStack(spacing=6, height=28):
+            ui.CheckBox(model=hide_enabled, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("숨길 prim", width=70)
+            # 남는 폭을 자동 흡수해서 한 줄 유지
+            ui.StringField(model=hide_paths, width=500, height=28, style=INPUT_FIELD_STYLE)
+        ui.Label("숨길 prim 입력: , 구분 (하위 prim 포함)", height=0)
 
     # ---------------- actions ----------------
 
     def _add_step_default(self) -> None:
-        self._steps.append({"type": "MOVE", "prim": "", "duration": 1.0, "dx": 100.0, "dy": 0.0, "dz": 0.0})
+        self._steps.append(
+            {
+                "type": "MOVE",
+                "prim": "",
+                "duration": 1.0,
+                "dx": 100.0,
+                "dy": 0.0,
+                "dz": 0.0,
+                "hide_enabled": False,
+                "hide_prims": "",
+            }
+        )
         self._schedule_refresh()
 
     def _remove_step(self, idx: int) -> None:

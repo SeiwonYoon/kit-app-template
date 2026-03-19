@@ -12,7 +12,7 @@ Sequence Engine (TBS Control)
 지원 step 타입(최소):
 - USD_TIMELINE: USD 저장 애니메이션을 프레임 구간 재생 (수동/자동)
 - MOVE: 코드 기반 직선 이동 (translate_animation)
-- ROTATE: 코드 기반 회전 (rotate_animation)
+- ROTATE: 각 prim의 로컬 회전축(TBS_OFFSET rotateXYZ) 기준 제자리 회전 (rx/ry/rz delta 적용)
 """
 
 from __future__ import annotations
@@ -26,7 +26,12 @@ from pxr import Usd, UsdGeom, Gf
 
 from .prim_info import safe_str
 from .translate_animation import run_prim_translate_animation, stop_prim_translate_animation
-from .rotate_animation import run_prim_rotate_animation, stop_prim_rotate_animation
+from .rotate_animation import (
+    run_prim_rotate_animation,
+    stop_prim_rotate_animation,
+    run_world_pivot_rotate_animation,
+    stop_world_pivot_rotate_animation,
+)
 from . import usd_animation_control
 
 _OFFSET_SUFFIX = "TBS_OFFSET"
@@ -71,36 +76,202 @@ def _matrix_from_scale(v) -> Gf.Matrix4d:
     return m
 
 
-def _compute_rest_matrix_at_time(prim: Usd.Prim, time_code: Usd.TimeCode) -> Gf.Matrix4d:
-    """TBS_OFFSET op 이후의 op들만 곱한 로컬 행렬 (start_frame 시점)."""
-    rest = Gf.Matrix4d(1.0)
+def _xform_op_to_matrix_at_time(op, time_code: Usd.TimeCode) -> Gf.Matrix4d:
+    """단일 xform op -> 4x4 (USD op 순서와 _compose_xform_segment 규칙에 맞춤)."""
+    try:
+        t = op.GetOpType()
+        val = _op_value_at_time(op, time_code)
+        if t == UsdGeom.XformOp.TypeTranslate:
+            return _matrix_from_translate(val)
+        if t == UsdGeom.XformOp.TypeRotateXYZ:
+            return _matrix_from_rotate_xyz(val)
+        if t == UsdGeom.XformOp.TypeScale:
+            return _matrix_from_scale(val)
+    except Exception:
+        pass
+    return Gf.Matrix4d(1.0)
+
+
+def _tbs_op_indices(prim: Usd.Prim) -> List[int]:
+    """이름에 TBS_OFFSET이 들어간 xform op 인덱스(오름차순)."""
+    out: List[int] = []
     try:
         x = UsdGeom.Xformable(prim)
         ops = list(x.GetOrderedXformOps()) if x else []
-        last_tbs_idx = -1
         for i, op in enumerate(ops):
             try:
                 if _OFFSET_SUFFIX in op.GetName():
-                    last_tbs_idx = i
-            except Exception:
-                pass
-        if last_tbs_idx < 0:
-            return rest
-        for op in ops[last_tbs_idx + 1 :]:
-            try:
-                t = op.GetOpType()
-                val = _op_value_at_time(op, time_code)
-                if t == UsdGeom.XformOp.TypeTranslate:
-                    rest = _matrix_from_translate(val) * rest
-                elif t == UsdGeom.XformOp.TypeRotateXYZ:
-                    rest = _matrix_from_rotate_xyz(val) * rest
-                elif t == UsdGeom.XformOp.TypeScale:
-                    rest = _matrix_from_scale(val) * rest
+                    out.append(i)
             except Exception:
                 pass
     except Exception:
         pass
-    return rest
+    return out
+
+
+def _tbs_indices_consecutive(idxs: List[int]) -> bool:
+    if len(idxs) <= 1:
+        return True
+    for a, b in zip(idxs, idxs[1:]):
+        if b != a + 1:
+            return False
+    return True
+
+
+def _compose_xform_segment(prim: Usd.Prim, lo: int, hi: int, time_code: Usd.TimeCode) -> Gf.Matrix4d:
+    """
+    xform op 인덱스 [lo..hi]를 USD 적용 순서대로 합성.
+    최종 행렬 = M_hi * M_{hi-1} * ... * M_lo (열 벡터, 왼쪽 곱).
+    """
+    if lo > hi:
+        return Gf.Matrix4d(1.0)
+    try:
+        x = UsdGeom.Xformable(prim)
+        ops = list(x.GetOrderedXformOps()) if x else []
+        m = Gf.Matrix4d(1.0)
+        for idx in range(lo, hi + 1):
+            if 0 <= idx < len(ops):
+                m = _xform_op_to_matrix_at_time(ops[idx], time_code) * m
+        return m
+    except Exception:
+        return Gf.Matrix4d(1.0)
+
+
+def _compute_rest_matrix_at_time(prim: Usd.Prim, time_code: Usd.TimeCode) -> Gf.Matrix4d:
+    """TBS_OFFSET op 이후의 op들만 곱한 로컬 행렬 (start_frame 시점)."""
+    try:
+        idxs = _tbs_op_indices(prim)
+        if not idxs:
+            return Gf.Matrix4d(1.0)
+        last_tbs = idxs[-1]
+        x = UsdGeom.Xformable(prim)
+        ops = list(x.GetOrderedXformOps()) if x else []
+        n = len(ops)
+        return _compose_xform_segment(prim, last_tbs + 1, n - 1, time_code)
+    except Exception:
+        return Gf.Matrix4d(1.0)
+
+
+def _set_tbs_span_matrix(prim: Usd.Prim, first: int, last: int, M_tbs: Gf.Matrix4d) -> None:
+    """
+    TBS op 구간 [first..last]에 해당하는 합성 행렬이 M_tbs가 되도록 translate/rotateXYZ만 설정.
+    지원: Translate+RotateXYZ 인접 2개(순서 두 가지), 또는 단일 Rotate/Translate.
+    """
+    try:
+        x = UsdGeom.Xformable(prim)
+        ops = list(x.GetOrderedXformOps()) if x else []
+        span = [ops[i] for i in range(first, last + 1) if 0 <= i < len(ops)]
+        if not span:
+            return
+
+        def _set_rot(op, r3: Gf.Matrix3d) -> None:
+            rx, ry, rz = _rotation_matrix_to_euler_xyz_degrees(r3)
+            op.Set(Gf.Vec3f(float(rx), float(ry), float(rz)))
+
+        if len(span) == 1:
+            op = span[0]
+            tt = op.GetOpType()
+            if tt == UsdGeom.XformOp.TypeRotateXYZ:
+                _set_rot(op, M_tbs.ExtractRotationMatrix())
+            elif tt == UsdGeom.XformOp.TypeTranslate:
+                tr = M_tbs.ExtractTranslation()
+                op.Set(Gf.Vec3d(float(tr[0]), float(tr[1]), float(tr[2])))
+            return
+
+        if len(span) == 2:
+            t0, t1 = span[0].GetOpType(), span[1].GetOpType()
+            if t0 == UsdGeom.XformOp.TypeTranslate and t1 == UsdGeom.XformOp.TypeRotateXYZ:
+                # 적용: R * (T * p) -> M_tbs = R * T
+                rm = M_tbs.ExtractRotationMatrix()
+                tw = M_tbs.ExtractTranslation()
+                r_inv = rm.GetInverse()
+                if r_inv is not None:
+                    tl = r_inv * Gf.Vec3d(float(tw[0]), float(tw[1]), float(tw[2]))
+                    span[0].Set(Gf.Vec3d(float(tl[0]), float(tl[1]), float(tl[2])))
+                _set_rot(span[1], rm)
+                return
+            if t0 == UsdGeom.XformOp.TypeRotateXYZ and t1 == UsdGeom.XformOp.TypeTranslate:
+                # M_tbs = T * R
+                rm = M_tbs.ExtractRotationMatrix()
+                tw = M_tbs.ExtractTranslation()
+                _set_rot(span[0], rm)
+                span[1].Set(Gf.Vec3d(float(tw[0]), float(tw[1]), float(tw[2])))
+                return
+
+        # 그 외: span 안의 첫 Translate / 첫 RotateXYZ만 갱신 (흔한 케이스 외 fallback)
+        tr_op = next((o for o in span if o.GetOpType() == UsdGeom.XformOp.TypeTranslate), None)
+        rot_op = next((o for o in span if o.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ), None)
+        if tr_op and rot_op:
+            i_tr, i_ro = span.index(tr_op), span.index(rot_op)
+            if i_tr < i_ro:
+                rm = M_tbs.ExtractRotationMatrix()
+                tw = M_tbs.ExtractTranslation()
+                r_inv = rm.GetInverse()
+                if r_inv is not None:
+                    tl = r_inv * Gf.Vec3d(float(tw[0]), float(tw[1]), float(tw[2]))
+                    tr_op.Set(Gf.Vec3d(float(tl[0]), float(tl[1]), float(tl[2])))
+                _set_rot(rot_op, rm)
+            else:
+                rm = M_tbs.ExtractRotationMatrix()
+                tw = M_tbs.ExtractTranslation()
+                _set_rot(rot_op, rm)
+                tr_op.Set(Gf.Vec3d(float(tw[0]), float(tw[1]), float(tw[2])))
+        elif rot_op:
+            _set_rot(rot_op, M_tbs.ExtractRotationMatrix())
+        elif tr_op:
+            tw2 = M_tbs.ExtractTranslation()
+            tr_op.Set(Gf.Vec3d(float(tw2[0]), float(tw2[1]), float(tw2[2])))
+    except Exception:
+        pass
+
+
+def _apply_tbs_for_target_local_matrix(prim: Usd.Prim, M_local_target: Gf.Matrix4d, time_code: Usd.TimeCode) -> bool:
+    """
+    목표 부모-상대 로컬 행렬 M_local_target에 맞추도록 TBS_OFFSET 구간만 조정.
+
+    M_local = M_after * M_tbs * M_before  이므로
+    M_tbs = inv(M_after) * M_local_target * inv(M_before)
+    """
+    try:
+        idxs = _tbs_op_indices(prim)
+        if not idxs:
+            return False
+        if not _tbs_indices_consecutive(idxs):
+            return False
+        first, last = idxs[0], idxs[-1]
+        x = UsdGeom.Xformable(prim)
+        ops = list(x.GetOrderedXformOps()) if x else []
+        n = len(ops)
+        M_before = _compose_xform_segment(prim, 0, first - 1, time_code) if first > 0 else Gf.Matrix4d(1.0)
+        M_after = _compose_xform_segment(prim, last + 1, n - 1, time_code) if last + 1 < n else Gf.Matrix4d(1.0)
+        inv_a = M_after.GetInverse()
+        inv_b = M_before.GetInverse()
+        if inv_a is None or inv_b is None:
+            return False
+        M_tbs = inv_a * M_local_target * inv_b
+        _set_tbs_span_matrix(prim, first, last, M_tbs)
+        return True
+    except Exception:
+        return False
+
+
+def _apply_world_pivot_frame_for_prim(
+    prim: Usd.Prim,
+    M_world_target: Gf.Matrix4d,
+    M_parent_world_inv: Gf.Matrix4d,
+    time_code: Usd.TimeCode,
+) -> None:
+    """월드 목표 행렬을 부모 기준 로컬로 바꾼 뒤 TBS 오프셋만 역산해 적용."""
+    try:
+        M_local = M_parent_world_inv * M_world_target
+        if not _apply_tbs_for_target_local_matrix(prim, M_local, time_code):
+            tr = M_local.ExtractTranslation()
+            r3 = M_local.ExtractRotationMatrix()
+            rx, ry, rz = _rotation_matrix_to_euler_xyz_degrees(r3)
+            _set_translate(prim, Gf.Vec3f(float(tr[0]), float(tr[1]), float(tr[2])))
+            _set_rotate_xyz(prim, Gf.Vec3f(float(rx), float(ry), float(rz)))
+    except Exception:
+        pass
 
 
 def _rotation_matrix_to_euler_xyz_degrees(rot_m: Gf.Matrix3d) -> Tuple[float, float, float]:
@@ -120,6 +291,136 @@ def _rotation_matrix_to_euler_xyz_degrees(rot_m: Gf.Matrix3d) -> Tuple[float, fl
         return (rx, ry, rz)
     except Exception:
         return (0.0, 0.0, 0.0)
+
+
+def _get_current_time_code() -> Usd.TimeCode:
+    """
+    현재 USD timeline의 current_time을 Usd.TimeCode로 변환.
+    실패 시 Default를 사용.
+    """
+    try:
+        import omni.timeline as ot
+
+        tl = ot.get_timeline_interface()
+        if tl:
+            t_sec = float(tl.get_current_time())
+            return Usd.TimeCode(t_sec)
+    except Exception:
+        pass
+    return Usd.TimeCode.Default()
+
+
+def _world_delta_to_local_delta(
+    prim: Usd.Prim,
+    world_delta: Gf.Vec3d,
+    time_code: Optional[Usd.TimeCode] = None,
+) -> Gf.Vec3d:
+    """
+    MOVE에서 (dx,dy,dz)를 월드 벡터로 가정하고,
+    로컬 translate op(TBS_OFFSET)에 넣을 delta로 변환한다.
+    """
+    try:
+        stage = _get_stage()
+        if not stage:
+            return Gf.Vec3d(world_delta[0], world_delta[1], world_delta[2])
+        tc = time_code if time_code is not None else Usd.TimeCode.Default()
+        xform_cache = UsdGeom.XformCache(tc)
+        m_local_to_world = xform_cache.GetLocalToWorldTransform(prim)
+        if m_local_to_world is None:
+            return Gf.Vec3d(world_delta[0], world_delta[1], world_delta[2])
+        inv_m = m_local_to_world.GetInverse()
+        if inv_m is None:
+            return Gf.Vec3d(world_delta[0], world_delta[1], world_delta[2])
+
+        # translation은 무시하려고 w=0인 벡터로 변환
+        v4 = inv_m.Transform(Gf.Vec4d(world_delta[0], world_delta[1], world_delta[2], 0.0))
+        return Gf.Vec3d(v4[0], v4[1], v4[2])
+    except Exception:
+        return Gf.Vec3d(world_delta[0], world_delta[1], world_delta[2])
+
+
+def _world_delta_to_tbs_offset_translate_delta(
+    prim: Usd.Prim,
+    world_delta: Gf.Vec3d,
+    time_code: Usd.TimeCode,
+    eps: float = 1.0,
+) -> Gf.Vec3d:
+    """
+    translate_animation은 TBS_OFFSET translate op 값만 바꾼다.
+    prim 전체 localToWorld 역행렬로 world_delta를 바꾸면 xformOp order와 맞지 않아 축이 틀어진다.
+
+    TBS_OFFSET translate (tx,ty,tz)에 대해 prim 원점의 월드 위치 변화의 기울기를
+    수치미분으로 구한 뒤:
+      world_delta ≈ (∂p/∂tx)*lx + (∂p/∂ty)*ly + (∂p/∂tz)*lz
+    를 풀어 (lx,ly,lz)를 구한다.
+
+    중요: t_op.Set() 직후에는 XformCache를 재사용하면 안 되므로 샘플마다 새 캐시를 만든다.
+    """
+    if not prim or not prim.IsValid() or abs(eps) < 1e-12:
+        return Gf.Vec3d(world_delta[0], world_delta[1], world_delta[2])
+
+    try:
+        t_op = _get_or_create_offset_translate_op(prim)
+        if not t_op:
+            return _world_delta_to_local_delta(prim, world_delta, time_code=time_code)
+
+        saved_t = t_op.Get()
+        if saved_t is None:
+            saved_t = (0.0, 0.0, 0.0)
+        t0 = Gf.Vec3d(float(saved_t[0]), float(saved_t[1]), float(saved_t[2]))
+
+        def _world_origin() -> Gf.Vec3d:
+            cache = UsdGeom.XformCache(time_code)
+            M = cache.GetLocalToWorldTransform(prim)
+            if M is None:
+                return Gf.Vec3d(0.0, 0.0, 0.0)
+            return Gf.Vec3d(M.ExtractTranslation())
+
+        try:
+            p0 = _world_origin()
+            t_op.Set(Gf.Vec3d(t0[0] + eps, t0[1], t0[2]))
+            px = _world_origin()
+            t_op.Set(Gf.Vec3d(t0[0], t0[1] + eps, t0[2]))
+            py = _world_origin()
+            t_op.Set(Gf.Vec3d(t0[0], t0[1], t0[2] + eps))
+            pz = _world_origin()
+        finally:
+            t_op.Set(t0)
+
+        # 열: ∂p/∂tx, ∂p/∂ty, ∂p/∂tz (월드, 단위 길이당)
+        dX = (px - p0) / eps
+        dY = (py - p0) / eps
+        dZ = (pz - p0) / eps
+
+        J00, J01, J02 = float(dX[0]), float(dY[0]), float(dZ[0])
+        J10, J11, J12 = float(dX[1]), float(dY[1]), float(dZ[1])
+        J20, J21, J22 = float(dX[2]), float(dY[2]), float(dZ[2])
+
+        det = (
+            J00 * (J11 * J22 - J12 * J21)
+            - J01 * (J10 * J22 - J12 * J20)
+            + J02 * (J10 * J21 - J11 * J20)
+        )
+        if abs(det) < 1e-18:
+            return _world_delta_to_local_delta(prim, world_delta, time_code=time_code)
+
+        inv00 = (J11 * J22 - J12 * J21) / det
+        inv01 = (J02 * J21 - J01 * J22) / det
+        inv02 = (J01 * J12 - J02 * J11) / det
+        inv10 = (J12 * J20 - J10 * J22) / det
+        inv11 = (J00 * J22 - J02 * J20) / det
+        inv12 = (J02 * J10 - J00 * J12) / det
+        inv20 = (J10 * J21 - J11 * J20) / det
+        inv21 = (J01 * J20 - J00 * J21) / det
+        inv22 = (J00 * J11 - J01 * J10) / det
+
+        wx, wy, wz = float(world_delta[0]), float(world_delta[1]), float(world_delta[2])
+        lx = inv00 * wx + inv01 * wy + inv02 * wz
+        ly = inv10 * wx + inv11 * wy + inv12 * wz
+        lz = inv20 * wx + inv21 * wy + inv22 * wz
+        return Gf.Vec3d(lx, ly, lz)
+    except Exception:
+        return _world_delta_to_local_delta(prim, world_delta, time_code=time_code)
 
 
 def _apply_world_space_offset_correction(prim_paths: List[str], start_frame: int) -> None:
@@ -271,6 +572,76 @@ def resolve_prim_paths(identifier: str) -> List[str]:
     except Exception:
         pass
     return result
+
+
+def resolve_prim_paths_multi(identifier_text: str) -> List[str]:
+    """','로 구분된 prim 식별자를 모두 해석해 prim path 목록 반환."""
+    out: List[str] = []
+    seen = set()
+    for token in (identifier_text or "").split(","):
+        key = token.strip()
+        if not key:
+            continue
+        for p in resolve_prim_paths(key):
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+    return out
+
+
+def _expand_with_descendants(paths_csv: str) -> List[str]:
+    """입력한 prim 경로(또는 prim name)를 포함해 하위 prim까지 모두 반환."""
+    stage = _get_stage()
+    if not stage:
+        return []
+    roots = resolve_prim_paths_multi(paths_csv)
+    if not roots:
+        return []
+
+    out: List[str] = []
+    seen = set()
+
+    def visit(prim: Usd.Prim) -> None:
+        try:
+            p = str(prim.GetPath())
+        except Exception:
+            return
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+        try:
+            for ch in prim.GetChildren():
+                visit(ch)
+        except Exception:
+            pass
+
+    for rp in roots:
+        try:
+            prim = stage.GetPrimAtPath(rp)
+            if prim and prim.IsValid():
+                visit(prim)
+        except Exception:
+            pass
+    return out
+
+
+def _set_prim_visible(path: str, visible: bool) -> None:
+    stage = _get_stage()
+    if not stage:
+        return
+    prim = stage.GetPrimAtPath(path)
+    if not prim or not prim.IsValid():
+        return
+    try:
+        img = UsdGeom.Imageable(prim)
+        if not img:
+            return
+        if visible:
+            img.MakeVisible()
+        else:
+            img.MakeInvisible()
+    except Exception:
+        pass
 
 
 def _get_translate(prim: Usd.Prim) -> Gf.Vec3f:
@@ -431,6 +802,9 @@ class SequenceRunner:
         self._index = 0
         self._baseline: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
         self._next_tick_sub = None
+        self._pending_delay_sub = None
+        self._pending_unhide_sub = None
+        self._hidden_refcount: Dict[str, int] = {}
 
     def is_running(self) -> bool:
         return self._running
@@ -444,6 +818,22 @@ class SequenceRunner:
             except Exception:
                 pass
             self._next_tick_sub = None
+        if self._pending_unhide_sub is not None:
+            try:
+                self._pending_unhide_sub.unsubscribe()
+            except Exception:
+                pass
+            self._pending_unhide_sub = None
+        if self._pending_delay_sub is not None:
+            try:
+                self._pending_delay_sub.unsubscribe()
+            except Exception:
+                pass
+            self._pending_delay_sub = None
+        try:
+            stop_world_pivot_rotate_animation()
+        except Exception:
+            pass
         # 진행 중인 코드 애니메이션은 안전하게 정리
         try:
             step = self._steps[self._index] if 0 <= self._index < len(self._steps) else None
@@ -452,10 +842,10 @@ class SequenceRunner:
         if isinstance(step, dict):
             t = (step.get("type") or "").upper()
             if t == "MOVE":
-                for p in resolve_prim_paths(str(step.get("prim", ""))):
+                for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
                     stop_prim_translate_animation(p)
             elif t == "ROTATE":
-                for p in resolve_prim_paths(str(step.get("prim", ""))):
+                for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
                     stop_prim_rotate_animation(p)
             elif t == "USD_TIMELINE":
                 usd_animation_control.stop_usd_animation()
@@ -479,6 +869,90 @@ class SequenceRunner:
             usd_animation_control.reset_timeline_to_zero()
         except Exception:
             pass
+
+        # hide 상태도 초기화
+        try:
+            self._clear_all_hides()
+        except Exception:
+            pass
+
+    def _clear_all_hides(self) -> None:
+        """현재 refcount 기준으로 숨김 상태를 모두 해제."""
+        if self._pending_unhide_sub is not None:
+            try:
+                self._pending_unhide_sub.unsubscribe()
+            except Exception:
+                pass
+            self._pending_unhide_sub = None
+
+        for p in list(self._hidden_refcount.keys()):
+            _set_prim_visible(p, True)
+        self._hidden_refcount.clear()
+
+    def _step_hide_paths(self, step: Dict[str, Any]) -> List[str]:
+        if not bool(step.get("hide_enabled", False)):
+            return []
+        return _expand_with_descendants(str(step.get("hide_prims", "")))
+
+    def _apply_hide_for_step(self, step: Dict[str, Any]) -> List[str]:
+        paths = self._step_hide_paths(step)
+        for p in paths:
+            self._hidden_refcount[p] = self._hidden_refcount.get(p, 0) + 1
+            _set_prim_visible(p, False)
+        return paths
+
+    def _schedule_unhide(self, paths: List[str], delay_sec: float = 0.2) -> None:
+        """delay_sec 후 숨김 refcount를 1 감소시키고 0이면 다시 표시."""
+        if not paths:
+            return
+
+        if self._pending_unhide_sub is not None:
+            try:
+                self._pending_unhide_sub.unsubscribe()
+            except Exception:
+                pass
+            self._pending_unhide_sub = None
+
+        elapsed = {"t": 0.0}
+
+        def _on_update(e):
+            payload = getattr(e, "payload", None) or {}
+            dt = payload.get("dt", 0.0)
+            if dt <= 0:
+                dt = 1.0 / 60.0
+            elapsed["t"] += dt
+            if elapsed["t"] < delay_sec:
+                return
+
+            if self._pending_unhide_sub is not None:
+                try:
+                    self._pending_unhide_sub.unsubscribe()
+                except Exception:
+                    pass
+                self._pending_unhide_sub = None
+
+            for p in paths:
+                cnt = self._hidden_refcount.get(p, 0) - 1
+                if cnt <= 0:
+                    self._hidden_refcount.pop(p, None)
+                    _set_prim_visible(p, True)
+                else:
+                    self._hidden_refcount[p] = cnt
+
+        try:
+            self._pending_unhide_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
+                _on_update,
+                name="morph.tbs_control_1.sequence_engine.unhide_delay",
+            )
+        except Exception:
+            # fallback: delay 없이 즉시 복원
+            for p in paths:
+                cnt = self._hidden_refcount.get(p, 0) - 1
+                if cnt <= 0:
+                    self._hidden_refcount.pop(p, None)
+                    _set_prim_visible(p, True)
+                else:
+                    self._hidden_refcount[p] = cnt
 
     def _call_next_frame(self, fn: Callable[[], None]) -> None:
         """update 콜백 재진입을 피하기 위해 다음 프레임(post_update)에 호출."""
@@ -544,22 +1018,20 @@ class SequenceRunner:
         if not stage:
             return
         # 시퀀스에 등장하는 prim들을 수집
-        prim_ids: List[str] = []
         for step in self._steps:
             t = str(step.get("type") or "").upper()
             if t in ("MOVE", "ROTATE"):
-                prim_ids.append(str(step.get("prim") or ""))
-        for prim_id in prim_ids:
-            for path in resolve_prim_paths(prim_id):
-                try:
-                    if not force and path in self._baseline:
-                        continue
-                    prim = stage.GetPrimAtPath(path)
-                    if not prim or not prim.IsValid():
-                        continue
-                    self._baseline[path] = (_get_translate(prim), _get_rotate_xyz(prim))
-                except Exception:
-                    pass
+                prim_id_text = str(step.get("prim") or "")
+                for path in resolve_prim_paths_multi(prim_id_text):
+                    try:
+                        if not force and path in self._baseline:
+                            continue
+                        prim = stage.GetPrimAtPath(path)
+                        if not prim or not prim.IsValid():
+                            continue
+                        self._baseline[path] = (_get_translate(prim), _get_rotate_xyz(prim))
+                    except Exception:
+                        pass
 
     def _restore_baseline(self) -> None:
         """baseline으로 transform을 되돌림. (실행을 항상 초기값부터 재현하기 위함)"""
@@ -592,10 +1064,20 @@ class SequenceRunner:
 
         step = self._steps[self._index] or {}
         t = str(step.get("type") or "").upper()
+        current_hide_paths = self._apply_hide_for_step(step)
 
         def _done():
             if not self._running:
                 return
+            next_idx = self._index + 1
+            is_last = next_idx >= len(self._steps)
+            if not is_last:
+                next_step = self._steps[next_idx] if 0 <= next_idx < len(self._steps) else {}
+                next_hide_set = set(self._step_hide_paths(next_step or {}))
+                to_unhide = [p for p in current_hide_paths if p not in next_hide_set]
+                # 마지막 step이면 복원하지 않아서 숨김 상태 유지
+                if to_unhide:
+                    self._schedule_unhide(to_unhide, delay_sec=0.2)
             # update 이벤트 내부에서 바로 다음 step을 시작하면, 다음 MOVE/ROTATE가 무시되는 등
             # 재진입 문제가 생길 수 있어 next frame으로 넘긴다.
             def _advance():
@@ -634,13 +1116,61 @@ class SequenceRunner:
             )
             return
 
+        if t == "DELAY":
+            delay_sec = float(step.get("duration", 1.0))
+            if delay_sec <= 0:
+                _done()
+                return
+
+            elapsed = {"t": 0.0}
+
+            # 이전 delay 구독이 남아있으면 정리
+            if self._pending_delay_sub is not None:
+                try:
+                    self._pending_delay_sub.unsubscribe()
+                except Exception:
+                    pass
+                self._pending_delay_sub = None
+
+            def _on_update(e):
+                if not self._running:
+                    return
+                payload = getattr(e, "payload", None) or {}
+                dt = payload.get("dt", 0.0)
+                if dt <= 0:
+                    dt = 1.0 / 60.0
+                elapsed["t"] += dt
+                if elapsed["t"] < delay_sec:
+                    return
+
+                # 완료 시 구독 해제 후 다음 step 진행
+                if self._pending_delay_sub is not None:
+                    try:
+                        self._pending_delay_sub.unsubscribe()
+                    except Exception:
+                        pass
+                    self._pending_delay_sub = None
+                _done()
+
+            try:
+                self._pending_delay_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
+                    _on_update,
+                    name="morph.tbs_control_1.sequence_engine.delay",
+                )
+            except Exception:
+                # fallback: 즉시 진행
+                self._pending_delay_sub = None
+                _done()
+            return
+
         if t == "MOVE":
             prim_id = str(step.get("prim") or "")
             duration = float(step.get("duration", 1.0))
             dx = float(step.get("dx", 0.0))
             dy = float(step.get("dy", 0.0))
             dz = float(step.get("dz", 0.0))
-            paths = resolve_prim_paths(prim_id)
+            stage = _get_stage()
+            paths = resolve_prim_paths_multi(prim_id)
             if not paths:
                 _done()
                 return
@@ -653,10 +1183,20 @@ class SequenceRunner:
                     _done()
 
             for p in paths:
+                prim = stage.GetPrimAtPath(p) if stage else None
+                world_delta = Gf.Vec3d(dx, dy, dz)
+                # dx/dy/dz = 월드 이동. TBS_OFFSET translate만 조작하므로
+                # prim 전체 L2W 역변환이 아니라 "offset op → 월드 원점" 자코비안으로 역산.
+                tc = _get_current_time_code()
+                local_delta = (
+                    _world_delta_to_tbs_offset_translate_delta(prim, world_delta, tc)
+                    if prim
+                    else world_delta
+                )
                 stop_prim_translate_animation(p)
                 run_prim_translate_animation(
                     p,
-                    [{"duration": duration, "delta": (dx, dy, dz)}],
+                    [{"duration": duration, "delta": (local_delta[0], local_delta[1], local_delta[2])}],
                     loop=False,
                     on_completed=_one_done,
                 )
@@ -668,10 +1208,15 @@ class SequenceRunner:
             rx = float(step.get("rx", 0.0))
             ry = float(step.get("ry", 0.0))
             rz = float(step.get("rz", 0.0))
-            paths = resolve_prim_paths(prim_id)
+            stage = _get_stage()
+            paths = resolve_prim_paths_multi(prim_id)
             if not paths:
                 _done()
                 return
+            if abs(rx) < 1e-9 and abs(ry) < 1e-9 and abs(rz) < 1e-9:
+                _done()
+                return
+
             remaining = {"n": len(paths)}
 
             def _one_done():
@@ -679,6 +1224,8 @@ class SequenceRunner:
                 if remaining["n"] <= 0:
                     _done()
 
+            # "제자리 회전": prim별 로컬 회전축(rotateXYZ op) 기준으로 rx/ry/rz를 그대로 적용
+            stop_world_pivot_rotate_animation()
             for p in paths:
                 stop_prim_rotate_animation(p)
                 run_prim_rotate_animation(

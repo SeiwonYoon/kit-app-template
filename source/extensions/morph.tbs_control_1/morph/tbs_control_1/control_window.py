@@ -56,6 +56,7 @@ def build_control_window(ext: Any) -> None:
     ext._usd_anim_auto_range_text = ui.SimpleStringModel("AUTO RANGE: (미확인)")
     ext._xml_from_port_model = ui.SimpleIntModel(1)
     ext._xml_to_port_model = ui.SimpleIntModel(6)
+    ext._xml_port_id_model = ui.SimpleIntModel(1)
     ext._last_generated_xml = ""
     ext._priority_prefix_model = ui.SimpleStringModel(DEFAULT_PRIORITY_NAME_PREFIX)
 
@@ -94,7 +95,15 @@ def build_control_window(ext: Any) -> None:
                 with ui.VStack(padding=8, spacing=6):
                     with ui.HStack(spacing=8, height=28):
                         ui.Label("XML 제너레이터 생성기", width=150, height=28, style={"color": 0xFFDDDDDD})
-                        ext._xml_seq_combo = ui.ComboBox(0, "A", "B", "C", "D")
+                        ext._xml_seq_combo = ui.ComboBox(
+                            0,
+                            xml_generator.SEQ_READYTOLOAD,
+                            xml_generator.SEQ_ARRIVED,
+                            xml_generator.SEQ_MOVE_TRANSFERING,
+                            xml_generator.SEQ_MOVE,
+                            xml_generator.SEQ_READYTOUNLOAD,
+                            xml_generator.SEQ_REMOVED,
+                        )
                         ext._xml_seq_combo.model.add_item_changed_fn(lambda m, *a: on_xml_seq_changed(ext))
                         ui.Button("OK", width=60, height=28, clicked_fn=lambda: on_xml_ok_clicked(ext))
                     ext._xml_ab_inputs_frame = ui.HStack(spacing=8, height=28)
@@ -104,6 +113,14 @@ def build_control_window(ext: Any) -> None:
                         ui.Label("TO_PORT_ID", width=90, height=28)
                         ui.IntField(model=ext._xml_to_port_model, width=60, height=28)
                     ext._xml_ab_inputs_frame.visible = True
+
+                    ext._xml_port_inputs_frame = ui.HStack(spacing=8, height=28)
+                    with ext._xml_port_inputs_frame:
+                        ui.Label("PORT_ID", width=110, height=28)
+                        ui.IntField(model=ext._xml_port_id_model, width=60, height=28)
+                    ext._xml_port_inputs_frame.visible = False
+                    # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
+                    on_xml_seq_changed(ext)
                     ui.Button("제너레이터 실행(역파싱)", height=28, clicked_fn=lambda: on_xml_run_clicked(ext))
             ui.Spacer(height=6)
             ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
@@ -140,7 +157,17 @@ def on_xml_seq_changed(ext: Any) -> None:
         idx = ext._xml_seq_combo.model.get_item_value_model().as_int
     except Exception:
         idx = 0
-    ext._xml_ab_inputs_frame.visible = idx in (0, 1)
+    seqs = [
+        xml_generator.SEQ_READYTOLOAD,
+        xml_generator.SEQ_ARRIVED,
+        xml_generator.SEQ_MOVE_TRANSFERING,
+        xml_generator.SEQ_MOVE,
+        xml_generator.SEQ_READYTOUNLOAD,
+        xml_generator.SEQ_REMOVED,
+    ]
+    seq = seqs[idx] if 0 <= idx < len(seqs) else xml_generator.SEQ_READYTOLOAD
+    ext._xml_ab_inputs_frame.visible = seq in xml_generator.FROM_TO_SEQS
+    ext._xml_port_inputs_frame.visible = seq in xml_generator.PORT_ID_ONLY_SEQS
 
 
 def on_xml_ok_clicked(ext: Any) -> None:
@@ -148,14 +175,23 @@ def on_xml_ok_clicked(ext: Any) -> None:
         idx = ext._xml_seq_combo.model.get_item_value_model().as_int
     except Exception:
         idx = 0
-    seq = ["A", "B", "C", "D"][idx] if 0 <= idx <= 3 else "A"
+    seqs = [
+        xml_generator.SEQ_READYTOLOAD,
+        xml_generator.SEQ_ARRIVED,
+        xml_generator.SEQ_MOVE_TRANSFERING,
+        xml_generator.SEQ_MOVE,
+        xml_generator.SEQ_READYTOUNLOAD,
+        xml_generator.SEQ_REMOVED,
+    ]
+    seq = seqs[idx] if 0 <= idx < len(seqs) else xml_generator.SEQ_READYTOLOAD
     try:
-        if seq in ("A", "B"):
+        if seq in xml_generator.FROM_TO_SEQS:
             from_port = ext._xml_from_port_model.get_value_as_int()
             to_port = ext._xml_to_port_model.get_value_as_int()
             xml = xml_generator.build_xml_string(seq, from_port_id=from_port, to_port_id=to_port)
         else:
-            xml = xml_generator.build_xml_string(seq)
+            port_id = ext._xml_port_id_model.get_value_as_int()
+            xml = xml_generator.build_xml_string(seq, port_id=port_id)
         ext._last_generated_xml = xml
         print(xml, flush=True)
     except Exception as e:
@@ -172,8 +208,21 @@ def on_xml_run_clicked(ext: Any) -> None:
         print("[morph.tbs_control_1][xml_generator] XML 역파싱 실패.", flush=True)
         return
     lines = ["[XML PARSE RESULT]"]
-    for k in ("sequence_name", "destination", "origination", "tid", "facility", "equipment_id",
-              "foup", "from_eqp_id", "from_port_id", "to_eqp_id", "to_port_id"):
+    if parsed.get("action_desc"):
+        lines.append("[ACTION]")
+        lines.append(parsed.get("action_desc", ""))
+
+    for k in (
+        "sequence_name",
+        "destination",
+        "origination",
+        "tid",
+        "facility",
+        "equipment_id",
+        "port_id",
+        "from_port_id",
+        "to_port_id",
+    ):
         lines.append(f"{k} = {parsed.get(k, '')}")
     print("\n".join(lines), flush=True)
 

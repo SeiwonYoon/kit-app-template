@@ -16,6 +16,12 @@ from pxr import Gf, UsdGeom, Usd
 _rot_animations: Dict[str, Dict[str, Any]] = {}
 _update_sub = None
 
+# 여러 prim을 동일한 월드 피봇·월드 축 기준으로 도는 애니메이션 유틸.
+# 현재 `sequence_engine`의 ROTATE 기본 동작은 prim별 로컬 회전(rx/ry/rz delta 적용)이므로,
+# 이 "월드 피봇/월드 축" 루틴은 레거시/별도 사용처 용도로 남아있습니다.
+_world_pivot_state: Optional[Dict[str, Any]] = None
+_world_pivot_sub = None
+
 _OFFSET_SUFFIX = "TBS_OFFSET"
 
 
@@ -174,6 +180,188 @@ def run_prim_rotate_animation(
     if _update_sub is None:
         stream = omni.kit.app.get_app().get_update_event_stream()
         _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_1.rotate_animation")
+
+
+def _world_orbit_matrix_4d(pivot_world: Gf.Vec3d, axis_unit: Gf.Vec3d, angle_deg: float) -> Gf.Matrix4d:
+    """월드 점 pivot_world, 단위축 axis_unit, 각도 angle_deg(도)인 궤도 회전 4x4. M' = T*R*T^{-1}."""
+    if abs(angle_deg) < 1e-15:
+        return Gf.Matrix4d(1.0)
+    try:
+        r = Gf.Rotation(axis_unit, float(angle_deg))
+    except Exception:
+        return Gf.Matrix4d(1.0)
+    t_inv = Gf.Matrix4d(1.0)
+    t_inv.SetTranslateOnly(Gf.Vec3d(-pivot_world[0], -pivot_world[1], -pivot_world[2]))
+    t_px = Gf.Matrix4d(1.0)
+    t_px.SetTranslateOnly(pivot_world)
+    r4 = Gf.Matrix4d(1.0)
+    r4.SetRotateOnly(r)
+    return t_px * r4 * t_inv
+
+
+def run_world_pivot_rotate_animation(
+    prim_paths: List[str],
+    pivot_world: Gf.Vec3d,
+    axis_world_unit: Gf.Vec3d,
+    angle_deg: float,
+    duration: float,
+    time_code: Usd.TimeCode,
+    on_completed: Optional[Callable[[], None]] = None,
+) -> None:
+    """
+    모든 prim에 대해 동일한 월드 피봇·월드 축 기준으로 회전.
+    각 프레임: M_w' = T(P) R(axis,θ) T(-P) * M_w0 (스텝 시작 시점 M_w0 고정).
+    로컬 목표 M_loc = inv(M_parent_w0)*M_w' 를 M_after*M_tbs*M_before 역산으로 TBS_OFFSET에만 반영.
+    """
+    global _world_pivot_state, _world_pivot_sub
+    stop_world_pivot_rotate_animation()
+    for p in prim_paths:
+        stop_prim_rotate_animation(p)
+
+    stage = ou.get_context().get_stage() if ou.get_context() else None
+    if not stage or not prim_paths:
+        if on_completed:
+            try:
+                on_completed()
+            except Exception:
+                pass
+        return
+
+    cache = UsdGeom.XformCache(time_code)
+    items: List[Dict[str, Any]] = []
+    for path in prim_paths:
+        prim = stage.GetPrimAtPath(path)
+        if not prim or not prim.IsValid():
+            continue
+        try:
+            M_cw = Gf.Matrix4d(cache.GetLocalToWorldTransform(prim))
+        except Exception:
+            continue
+        parent = prim.GetParent()
+        try:
+            if parent and parent.IsValid():
+                ppath = str(parent.GetPath())
+                if ppath and ppath != "/":
+                    M_pw = Gf.Matrix4d(cache.GetLocalToWorldTransform(parent))
+                    M_pw_inv = M_pw.GetInverse()
+                else:
+                    M_pw_inv = Gf.Matrix4d(1.0)
+            else:
+                M_pw_inv = Gf.Matrix4d(1.0)
+        except Exception:
+            M_pw_inv = Gf.Matrix4d(1.0)
+        items.append({"path": path, "M_cw0": M_cw, "M_pw_inv": M_pw_inv})
+
+    if not items:
+        if on_completed:
+            try:
+                on_completed()
+            except Exception:
+                pass
+        return
+
+    if duration <= 0:
+        from . import sequence_engine as _se
+
+        M_rot = _world_orbit_matrix_4d(pivot_world, axis_world_unit, angle_deg)
+        for it in items:
+            prim = stage.GetPrimAtPath(it["path"])
+            if not prim or not prim.IsValid():
+                continue
+            M_w = M_rot * it["M_cw0"]
+            _se._apply_world_pivot_frame_for_prim(prim, M_w, it["M_pw_inv"], time_code)
+        if on_completed:
+            try:
+                on_completed()
+            except Exception:
+                pass
+        return
+
+    _world_pivot_state = {
+        "items": items,
+        "pivot_world": Gf.Vec3d(pivot_world),
+        "axis_unit": Gf.Vec3d(axis_world_unit),
+        "angle_deg": float(angle_deg),
+        "duration": float(duration),
+        "elapsed": 0.0,
+        "on_completed": on_completed,
+        "time_code": time_code,
+    }
+
+    def _on_wp_update(e) -> None:
+        global _world_pivot_state, _world_pivot_sub
+        st = _world_pivot_state
+        if not st:
+            return
+        payload = getattr(e, "payload", None) or {}
+        dt = float(payload.get("dt", 0.0) or 0.0)
+        if dt <= 0:
+            dt = 1.0 / 60.0
+        st["elapsed"] = float(st["elapsed"]) + dt
+        t = min(1.0, st["elapsed"] / st["duration"]) if st["duration"] > 0 else 1.0
+        theta_deg = t * float(st["angle_deg"])
+        M_rot = _world_orbit_matrix_4d(st["pivot_world"], st["axis_unit"], theta_deg)
+
+        stg = ou.get_context().get_stage() if ou.get_context() else None
+        if not stg:
+            _world_pivot_state = None
+            if _world_pivot_sub is not None:
+                try:
+                    _world_pivot_sub.unsubscribe()
+                except Exception:
+                    pass
+                _world_pivot_sub = None
+            return
+
+        from . import sequence_engine as _se
+
+        tc_wp = st.get("time_code", Usd.TimeCode.Default())
+        for it in st["items"]:
+            prim = stg.GetPrimAtPath(it["path"])
+            if not prim or not prim.IsValid():
+                continue
+            try:
+                M_w = M_rot * it["M_cw0"]
+                _se._apply_world_pivot_frame_for_prim(prim, M_w, it["M_pw_inv"], tc_wp)
+            except Exception:
+                pass
+
+        if t >= 1.0:
+            cb = st.get("on_completed")
+            _world_pivot_state = None
+            if _world_pivot_sub is not None:
+                try:
+                    _world_pivot_sub.unsubscribe()
+                except Exception:
+                    pass
+                _world_pivot_sub = None
+            if cb:
+                try:
+                    cb()
+                except Exception:
+                    pass
+
+    try:
+        stream = omni.kit.app.get_app().get_update_event_stream()
+        _world_pivot_sub = stream.create_subscription_to_pop(_on_wp_update, name="morph.tbs_control_1.world_pivot_rotate")
+    except Exception:
+        _world_pivot_state = None
+        if on_completed:
+            try:
+                on_completed()
+            except Exception:
+                pass
+
+
+def stop_world_pivot_rotate_animation() -> None:
+    global _world_pivot_state, _world_pivot_sub
+    _world_pivot_state = None
+    if _world_pivot_sub is not None:
+        try:
+            _world_pivot_sub.unsubscribe()
+        except Exception:
+            pass
+        _world_pivot_sub = None
 
 
 def stop_prim_rotate_animation(prim_path: str) -> bool:
