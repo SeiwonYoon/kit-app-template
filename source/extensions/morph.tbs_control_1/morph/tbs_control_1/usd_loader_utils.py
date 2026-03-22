@@ -2,15 +2,17 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-usd_loader_utils.py — USD 로드 관련 유틸 (경로 검증, resource 폴더, 지원 확장자).
+usd_loader_utils.py — USD 로드 관련 유틸 (경로 검증, resource 폴더, 지원 확장자)
 
-기능:
-- get_supported_stage_extensions(): open_stage()로 열 수 있는 파일 확장자 집합.
-- path_has_supported_stage_extension(path): URL/경로가 지원 확장자로 끝나는지 검사.
-- get_resource_folder_path(): 프로젝트 최상단 resource 폴더 Path (carb tokens / __file__ / cwd).
-- get_resource_usd_list(): resource 폴더 내 로드 가능한 USD 파일 목록 [(이름, 절대경로), ...].
+【역할】
+- 지원 스테이지 확장자 집합, 경로 검증, resource 폴더 탐색, USD 파일 목록 수집.
 
-사용처: load_window에서 USD Load 창 경로 입력/콤보 및 로드 전 검증에 사용.
+【수정 가이드】
+- 열 수 있는 확장자 추가/변경: get_supported_stage_extensions(), _SUPPORTED_STAGE_EXTS
+- resource 폴더 위치가 바뀌면: get_resource_folder_path()
+- 콤보에 표시할 파일 필터: get_resource_usd_list() 내부
+
+사용처: load_window.py
 """
 
 from pathlib import Path

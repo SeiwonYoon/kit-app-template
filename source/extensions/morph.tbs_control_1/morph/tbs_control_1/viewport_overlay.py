@@ -2,10 +2,16 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-viewport_overlay.py — 3D 오버레이: 선택된 prim 옆에 prim 정보 패널 표시 (show_info와 동일).
+viewport_overlay.py — 뷰포트 3D 정보 패널 (PrimInfoOverlay)
 
-기능: PrimInfoOverlay 클래스로 뷰포트에 3D 정보 패널을 그리며 갱신.
-extension에서 선택 변경 시 set_open_paths/update_panels 호출.
+【역할】
+- scene UI로 prim 옆 텍스트 패널. get_prim_display_lines / 월드 좌표는 prim_info.
+
+【수정 가이드】
+- 패널 크기·색·폰트: 본 파일 스타일 및 CHAR_WIDTH 등 prim_info
+- 패널 위치 오프셋: PrimInfoOverlay 내부 (월드 중심 대비)
+
+사용처: selection_overlay.py
 """
 
 from typing import Any, Callable, List, Optional

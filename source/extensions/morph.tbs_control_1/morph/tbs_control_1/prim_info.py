@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-prim_info.py — USD prim 정보 수집 (show_info 참고).
+prim_info.py — USD prim 표시용 문자열·웹뷰 패널 레이아웃 상수
 
-이 모듈의 역할:
-- 로드한 USD 내 장비 prim의 이름·경로·타입·속성 등을 표시용 문자열로 반환.
-- get_prim_display_name: UI 제목용 (displayName/title/name, UTF-8 안전).
-- safe_str: UTF-8 안전 문자열 변환 (UnicodeDecodeError 방지).
-- get_prim_display_lines: 3D 패널/드롭다운용 줄 단위 텍스트.
-- get_prim_world_center: 뷰포트 오버레이 위치 계산용 월드 중심.
+【역할】
+- prim 이름/속성/줄 단위 텍스트, 월드 중심 좌표 (오버레이·목록 표시).
+
+【수정 가이드】
+- 패널 글자 크기·줄 길이: CHAR_WIDTH, LINE_HEIGHT, CHARS_PER_LINE 등 상수
+- 표시할 속성 종류: get_prim_display_lines 내부
+
+사용처: selection_overlay, viewport_overlay, control_window(간접)
 """
 
 from typing import List, Any, Optional, Tuple

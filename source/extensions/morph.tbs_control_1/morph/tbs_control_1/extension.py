@@ -2,28 +2,30 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-TBS Control 1 확장 — 기능별 모듈 분리 버전.
+TBS Control 1 확장 — 기능별 모듈 분리 버전 (진입점)
 
-extension.py 역할:
-- 기본 UI 구성: USD Load 창, TBS 제어창, 시퀀스 편집기 창을 각 모듈에서 빌드하고 연결.
-- 확장 수명 주기: on_startup에서 상태 초기화 후 빌드/구독, on_shutdown에서 정리.
+【extension.py 역할】
+- Omni 확장 IExt: on_startup / on_shutdown.
+- 창 조립: load_window.build_load_window, control_window.build_control_window, SequenceEditorWindow.
+- 선택 이벤트·스테이지 스트림 구독 (selection_overlay), 뷰포트 오버레이 재시도.
+- 종료 시 모든 애니메이션·타임라인 정지.
+
+【기능을 바꾸려면 어디를 보나】
+- 확장 의존성/표시 이름: 상위 폴더 extension.toml (이 모듈과 별개).
+- USD 로드 창만: load_window.py / usd_loader_utils.py
+- TBS 제어창(타임라인·XML·버튼): control_window.py (+ 필요 시 xml_generator.py 등)
+- 시퀀스 스텝 편집/실행: sequence_editor.py + sequence_engine.py
+- 뷰포트 3D 정보 패널: selection_overlay.py, viewport_overlay.py
+- xform 경고 억제: xform_utils.install_xform_op_order_warning_filter (startup에서 호출)
 
 --------------
-import 구조
+import 구조 (요약)
 --------------
-- load_window: build_load_window, get_load_path, on_load_usd, on_resource_combo_changed
-  → USD Load 창 UI 및 로드 로직. usd_loader_utils(경로/리소스 목록) 사용.
-- control_window: build_control_window, refresh_object_list, on_*(USD/XML/시그널/버튼)
-  → TBS 제어창 UI 및 prim 목록/애니메이션 버튼. prim_utils, prim_info, signal_parser, xml_generator,
-    translate/curve/rotate_animation, usd_animation_control, selection_overlay.show_prim_info_in_viewport 사용.
-- selection_overlay: try_attach_overlay, on_selection_changed, on_post_update, on_close_info_panel,
-  add_selection_to_open_paths, apply_selection, show_prim_info_in_viewport, post_update_once
-  → 뷰포트 선택과 3D 정보 패널 연동. viewport_overlay.PrimInfoOverlay 사용.
-- sequence_editor: SequenceEditorWindow
-  → 별도 "TBS 시퀀스 편집기" 창. sequence_engine.SequenceRunner 사용.
-- 애니메이션 정지용: translate_animation.stop_prim_translate_animation, curve_animation.stop_*,
-  rotate_animation.stop_*, usd_animation_control.stop_usd_animation
-  → on_shutdown에서 모든 트랙 애니메이션 중지.
+- load_window → USD Load
+- control_window → TBS 제어창
+- selection_overlay → 선택·오버레이
+- sequence_editor → 시퀀스 편집기
+- on_shutdown → translate/curve/rotate/usd_animation 정지
 """
 
 from typing import List, Optional
@@ -47,10 +49,12 @@ from .sequence_editor import SequenceEditorWindow
 from .translate_animation import stop_prim_translate_animation
 from . import usd_animation_control
 from .viewport_overlay import PrimInfoOverlay
+from .xform_utils import install_xform_op_order_warning_filter
 
 
 class Extension(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:
+        install_xform_op_order_warning_filter()
         self._ext_id = ext_id
         self._tracked_paths: List[str] = []
         self._open_paths: List[str] = []

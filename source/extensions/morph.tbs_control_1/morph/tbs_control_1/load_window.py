@@ -2,16 +2,19 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-load_window.py — USD Load 창 UI 및 로드 로직.
+load_window.py — USD Load 창 UI 및 로드 로직
 
-기능:
-- build_load_window(ext): "USD Load" ui.Window 생성, 경로 입력/ resource 콤보/ Load 버튼.
-  ext에 _load_window, _path_model, _resource_combo, _resource_paths, _resource_names, _load_status_label 설정.
-- get_load_path(ext): Load 시 사용할 경로 (콤보 선택 시 resource 경로, 아니면 입력 필드 값).
-- on_resource_combo_changed(ext): 콤보 변경 시 경로 필드에 선택한 resource 경로 반영.
-- on_load_usd(ext): async. stat_async 검증 후 open_stage(path). 상태 라벨 갱신.
+【역할】
+- build_load_window(ext): "USD Load" 창 — 경로 문자열, resource 콤보, Load 버튼, 상태 라벨.
+- get_load_path(ext): 실제로 열 경로 (콤보 선택 우선, 아니면 입력 필드).
+- on_load_usd(ext): 비동기 검증 후 open_stage.
 
-사용처: extension.py on_startup에서 build_load_window(self) 호출, Load 버튼에서 on_load_usd(self) 호출.
+【수정 가이드】
+- 기본 샘플 URL: DEFAULT_USD_URL
+- resource 목록 소스: usd_loader_utils.get_resource_usd_list() — 폴더/확장자는 usd_loader_utils.py
+- 로드 버튼 동작·에러 메시지: on_load_usd 내부
+
+사용처: extension.py → build_load_window(self)
 """
 
 import asyncio

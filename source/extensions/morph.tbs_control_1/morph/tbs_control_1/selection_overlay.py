@@ -14,7 +14,12 @@ selection_overlay.py — 뷰포트 선택 연동 및 3D 정보 오버레이 연�
 - apply_selection(ext): _open_paths 기준으로 오버레이 패널 갱신.
 - show_prim_info_in_viewport(ext, prim_path): 기존 패널 제거, 해당 prim 1개만 3D 패널 표시.
 
-사용처: extension.py에서 구독 연결 및 오버레이 attach/갱신 호출.
+【수정 가이드】
+- 뷰포트 재시도 횟수: VIEWPORT_RETRY_FRAMES
+- 선택 폴링: POLL_FRAME_INTERVAL
+- 패널 내용/레이아웃: viewport_overlay.PrimInfoOverlay + prim_info 상수
+
+사용처: extension.py
 """
 
 import time

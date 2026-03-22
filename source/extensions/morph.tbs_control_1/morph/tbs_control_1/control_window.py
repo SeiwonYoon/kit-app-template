@@ -2,15 +2,29 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-control_window.py — TBS 제어창 UI 및 이벤트 핸들러.
+control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 
-기능:
-- build_control_window(ext): "TBS 제어창" ui.Window 생성. USD 타임라인, 가상 시그널, XML 제너레이터,
-  우선 표시 규칙, 목록 새로고침, prim 드롭다운 목록. ext에 모델/프레임 참조 저장.
-- refresh_object_list(ext): 현재 _tracked_paths 기준으로 객체 목록 UI 갱신.
-- on_* 핸들러들: USD 애니메이션 재생/정지, XML OK/실행, 가상 시그널 재생, 목록 새로고침, button_0/1/2.
+【역할】
+- build_control_window(ext): "TBS 제어창" 창. USD 타임라인(수동/자동), 가상 시그널 샘플,
+  XML 제너레이터(6종 시퀀스 콤보·입력 필드), 우선 표시 접두사, prim 목록.
+- refresh_object_list(ext): 드롭다운/목록 갱신.
+- on_play_usd_animation / on_play_generator_sample / on_refresh_prim_list 등 버튼·콤보 핸들러.
 
-사용처: extension.py on_startup에서 build_control_window(self), 버튼/콤보에서 on_*(self) 호출.
+【수정 포인트】
+- USD 재생 UI: build_control_window() 상단 ~ "USD 애니메이션 정지" 버튼 근처.
+- XML 제너레이터 UI: "XML 제너레이터 생성기" Frame 블록.
+  · 콤보 항목 추가/순서 변경: ext._xml_seq_combo = ui.ComboBox(0, ...) 인자 목록.
+  · 하단 입력 전환: on_xml_seq_changed — FROM/TO 보일지(ext._xml_ab_inputs_frame), PORT만 보일지(ext._xml_port_inputs_frame).
+    → xml_generator.FROM_TO_SEQS / PORT_ID_ONLY_SEQS 와 동일한 규칙 유지.
+  · OK/역파싱: on_xml_ok_clicked, on_xml_run_clicked — 내부 seqs 리스트는 콤보 순서와 반드시 일치.
+- 애니메이션 버튼(예: 이동/포물선/회전): 파일 하단 on_* 및 SAMPLE_GENERATOR_JSON.
+
+【XML 6종류와 UI 필드】 (로직·상수는 xml_generator.py)
+- FROM_PORT_ID + TO_PORT_ID: MOVE_TRANSFERING, MOVE
+- PORT_ID만: READYTOLOAD, ARRIVED, READYTOUNLOAD, REMOVED
+새 종류 추가 시: xml_generator 수정 + 이 파일의 ComboBox·seqs 3곳 + 필요 시 IntField/모델 추가.
+
+사용처: extension.py on_startup → build_control_window(self)
 """
 
 from typing import Any, List

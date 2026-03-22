@@ -2,11 +2,17 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-usd_animation_control.py — USD 파일 내장 애니메이션(타임라인) 재생 제어.
+usd_animation_control.py — USD 내장 타임라인(프레임) 재생
 
-기능: curve_editor / timeline으로 USD에 추가한 애니메이션을 프레임 구간 재생,
-루프/1회 제어, on_completed 콜백. resolve_saved_animation_frame_range로 자동 범위 감지.
-reset_timeline_to_zero는 시퀀스 실행 시 0에서 시작 보장용.
+【역할】
+- omni.timeline으로 저장된 애니메이션 구간 재생, 완료 콜백, 프레임 범위 자동 감지.
+
+【수정 가이드】
+- 재생/일시정지/루프 정책: play_usd_animation_range 등
+- 프레임 범위 추정: resolve_saved_animation_frame_range
+- 시퀀스 USD_TIMELINE 스텝: sequence_engine 이 본 모듈 호출
+
+사용처: control_window, sequence_engine
 """
 
 from typing import Optional, Callable

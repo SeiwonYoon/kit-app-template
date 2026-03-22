@@ -2,10 +2,17 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-translate_animation.py — 가변 이동 애니메이션 (prim 구간별 x/y/z 이동).
+translate_animation.py — 직선 이동 애니메이션 (구간별 x/y/z)
 
-기능: TBS 제어창 button_0 등에서 사용. 시퀀서 연속 실행을 위해
-애니메이션 자연 종료 시 on_completed 콜백 지원.
+【역할】
+- TBS_OFFSET 이름의 translate op에 누적. 제어창 버튼·시퀀스 MOVE 스텝에서 호출.
+- stop_prim_translate_animation: extension 종료·중지 시.
+
+【수정 가이드】
+- 보간 곡선·속도: run_prim_translate_animation 내부
+- op 이름 규칙: _OFFSET_SUFFIX (rotate/curve와 공유 개념, 바꾸면 전체 검색 필요)
+
+사용처: control_window, sequence_engine
 """
 
 from typing import List, Dict, Any, Optional, Callable
@@ -14,65 +21,12 @@ import omni.kit.app
 import omni.usd as ou
 from pxr import Gf, UsdGeom, Usd
 
+from .xform_utils import ensure_scale_xform_ops_first
+
 _animations: Dict[str, Dict[str, Any]] = {}
 _update_sub = None
 
 _OFFSET_SUFFIX = "TBS_OFFSET"
-
-
-def _needs_xform_order_fix(prim) -> bool:
-    """scale이 있는 prim에서 translate/rotate가 scale보다 먼저면 경고가 반복될 수 있어 정리 필요."""
-    try:
-        x = UsdGeom.Xformable(prim)
-        ops = list(x.GetOrderedXformOps()) if x else []
-        if not ops:
-            return False
-        idx_scale = None
-        idx_tr = None
-        for i, op in enumerate(ops):
-            t = op.GetOpType()
-            if idx_scale is None and t == UsdGeom.XformOp.TypeScale:
-                idx_scale = i
-            if idx_tr is None and t in (UsdGeom.XformOp.TypeTranslate, UsdGeom.XformOp.TypeRotateXYZ):
-                idx_tr = i
-        return idx_scale is not None and idx_tr is not None and idx_tr < idx_scale
-    except Exception:
-        return False
-
-
-def _try_fix_xform_order(prim) -> None:
-    """현재 TRS 값을 유지한 채 common TRS op로 재기록(가능할 때만)."""
-    try:
-        if not _needs_xform_order_fix(prim):
-            return
-        try:
-            x = UsdGeom.Xformable(prim)
-            ops = list(x.GetOrderedXformOps()) if x else []
-            if ops:
-                scale_ops = [op for op in ops if op.GetOpType() == UsdGeom.XformOp.TypeScale]
-                tbs_ops = []
-                rest_ops = []
-                for op in ops:
-                    try:
-                        if _OFFSET_SUFFIX in op.GetName():
-                            tbs_ops.append(op)
-                        elif op.GetOpType() != UsdGeom.XformOp.TypeScale:
-                            rest_ops.append(op)
-                    except Exception:
-                        if op.GetOpType() != UsdGeom.XformOp.TypeScale:
-                            rest_ops.append(op)
-                new_order = scale_ops + tbs_ops + rest_ops
-                if new_order and ops != new_order:
-                    x.SetXformOpOrder(new_order)
-        except Exception:
-            pass
-        api = UsdGeom.XformCommonAPI(prim)
-        if not api:
-            return
-        t, r, s, p, ro = api.GetXformVectors(Usd.TimeCode.Default())
-        api.SetXformVectors(t, r, s, p, ro, Usd.TimeCode.Default())
-    except Exception:
-        pass
 
 
 def _get_or_create_offset_translate_op(prim):
@@ -112,7 +66,7 @@ def _set_prim_translate(prim, position: Gf.Vec3f) -> None:
     if not prim or not prim.IsValid():
         return
     try:
-        _try_fix_xform_order(prim)
+        ensure_scale_xform_ops_first(prim)
         op = _get_or_create_offset_translate_op(prim)
         if op:
             op.Set(Gf.Vec3f(float(position[0]), float(position[1]), float(position[2])))
@@ -120,6 +74,7 @@ def _set_prim_translate(prim, position: Gf.Vec3f) -> None:
     except Exception:
         pass
     try:
+        ensure_scale_xform_ops_first(prim)
         xform = UsdGeom.Xformable(prim)
         if not xform:
             return

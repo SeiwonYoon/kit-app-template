@@ -2,16 +2,20 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-Sequence Editor UI
+sequence_editor.py — TBS 시퀀스 편집기 UI (별도 창)
 
-기존 TBS 제어창은 유지하고, 별도의 ui.Window에서 step(동작)들을 원하는 순서대로 편집/실행/저장/불러오기.
+【역할】
+- STEP_TYPES(USD_TIMELINE, MOVE, ROTATE, DELAY 등)별로 행 UI를 구성하고, JSON 저장/불러오기.
+- SequenceRunner에 스텝 리스트를 넘검 실행·일시정지·중지.
 
-저장 포맷(간단 JSON):
-[
-  {"type": "USD_TIMELINE", "mode": "MANUAL"|"AUTO", "start_frame": 200, "end_frame": 300, "loop": false},
-  {"type": "ROTATE", "prim": "/World/X" or "Mesh_1", "duration": 1.0, "rx": 0, "ry": 90, "rz": 0},
-  {"type": "MOVE", "prim": "/World/X" or "Mesh_1", "duration": 1.0, "dx": 100, "dy": 0, "dz": 0}
-]
+【수정 가이드】
+- 지원 스텝 종류 추가/이름 변경: STEP_TYPES, _build_step_row*, 시리얼라이즈 필드
+- 실행 로직·병렬 그룹 규칙: sequence_engine.py (SequenceRunner, _execute_step 등)
+- 제어창 XML 6종과 무관 — XML은 control_window + xml_generator 참고
+
+저장 포맷(요약 JSON):
+- run_with_previous: 병렬 그룹 시작
+- step_delay_ms: 다음 그룹 지연(ms), 음수는 앵커 기준 앞당김
 """
 
 from __future__ import annotations
@@ -22,8 +26,9 @@ from typing import Any, Dict, List, Optional
 import omni.kit.app as app
 import omni.ui as ui
 import omni.usd as ou
+from pxr import Gf, Usd, UsdGeom
 
-from .sequence_engine import SequenceRunner
+from .sequence_engine import SequenceRunner, resolve_prim_paths_multi
 
 
 CHECKBOX_WHITE_STYLE = {
@@ -56,6 +61,10 @@ class SequenceEditorWindow:
         self._steps_frame: Optional[ui.VStack] = None
         self._refresh_pending = False
         self._refresh_sub = None
+        # ROTATE 스텝의 루트축 체크박스 모델 (실행 시 step dict와 동기화)
+        self._rotate_user_axis_models: Dict[int, ui.SimpleBoolModel] = {}
+        self._parallel_with_prev_models: Dict[int, ui.SimpleBoolModel] = {}
+        self._step_delay_ms_models: Dict[int, ui.SimpleIntModel] = {}
         self._build()
 
     def destroy(self) -> None:
@@ -111,6 +120,9 @@ class SequenceEditorWindow:
     def _refresh_steps_ui(self) -> None:
         if not self._steps_frame:
             return
+        self._rotate_user_axis_models.clear()
+        self._parallel_with_prev_models.clear()
+        self._step_delay_ms_models.clear()
         self._steps_frame.clear()
         for idx, step in enumerate(self._steps):
             self._build_one_step(self._steps_frame, idx, step)
@@ -148,7 +160,7 @@ class SequenceEditorWindow:
         # 스텝 카드 내부 스크롤은 불필요하다고 판단하여 제거.
         # 대신 카드 높이를 충분히 확보해서 클리핑을 방지한다.
         with parent:
-            with ui.Frame(height=250, style={"background_color": 0xFF1E2024}):
+            with ui.Frame(height=320, style={"background_color": 0xFF1E2024}):
                 with ui.VStack(spacing=6, padding=8):
                     with ui.Frame(style={"background_color": 0xFF191C20}):
                         with ui.CollapsableFrame(f"Step {idx+1}: {step.get('type','')}", collapsed=False):
@@ -178,6 +190,8 @@ class SequenceEditorWindow:
                                                         "loop": False,
                                                         "hide_enabled": False,
                                                         "hide_prims": "",
+                                                        "run_with_previous": False,
+                                                        "step_delay_ms": 0,
                                                     }
                                                 )
                                             elif t == "MOVE":
@@ -190,6 +204,8 @@ class SequenceEditorWindow:
                                                         "dz": 0.0,
                                                         "hide_enabled": False,
                                                         "hide_prims": "",
+                                                        "run_with_previous": False,
+                                                        "step_delay_ms": 0,
                                                     }
                                                 )
                                             elif t == "ROTATE":
@@ -200,16 +216,14 @@ class SequenceEditorWindow:
                                                         "rx": 0.0,
                                                         "ry": 90.0,
                                                         "rz": 0.0,
-                                                        "pivot_enabled": False,
-                                                        "pivot_x": 0.0,
-                                                        "pivot_y": 0.0,
-                                                        "pivot_z": 0.0,
-                                                        "pivot_ax": 0.0,
-                                                        "pivot_ay": 1.0,
-                                                        "pivot_az": 0.0,
-                                                        "rotate_angle_deg": 0.0,
+                                                        "user_axis_rotate": False,
+                                                        "pivot_wx": 0.0,
+                                                        "pivot_wy": 0.0,
+                                                        "pivot_wz": 0.0,
                                                         "hide_enabled": False,
                                                         "hide_prims": "",
+                                                        "run_with_previous": False,
+                                                        "step_delay_ms": 0,
                                                     }
                                                 )
                                             elif t == "DELAY":
@@ -218,6 +232,8 @@ class SequenceEditorWindow:
                                                         "duration": 1.0,
                                                         "hide_enabled": False,
                                                         "hide_prims": "",
+                                                        "run_with_previous": False,
+                                                        "step_delay_ms": 0,
                                                     }
                                                 )
                                             self._schedule_refresh()
@@ -235,11 +251,12 @@ class SequenceEditorWindow:
                                         if t == "USD_TIMELINE":
                                             self._ui_step_usd_timeline(step)
                                         elif t == "ROTATE":
-                                            self._ui_step_rotate(step)
+                                            self._ui_step_rotate(step, idx)
                                         elif t == "DELAY":
                                             self._ui_step_delay(step)
                                         else:
                                             self._ui_step_move(step)
+                                        self._ui_step_timing(step, idx)
                                         self._ui_step_hide_options(step)
                                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
 
@@ -325,7 +342,9 @@ class SequenceEditorWindow:
             ui.FloatField(model=dur, width=120, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("sec", height=0)
 
-    def _ui_step_rotate(self, step: Dict[str, Any]) -> None:
+    def _ui_step_rotate(self, step: Dict[str, Any], step_idx: int) -> None:
+        if "user_axis_rotate" not in step and "world_pivot_rotate" in step:
+            step["user_axis_rotate"] = bool(step.get("world_pivot_rotate"))
         prim_model = ui.SimpleStringModel(str(step.get("prim", "")))
         prim_model.add_value_changed_fn(lambda _m: step.__setitem__("prim", prim_model.get_value_as_string()))
 
@@ -354,52 +373,95 @@ class SequenceEditorWindow:
             ui.Label("RZ", width=30)
             ui.FloatField(model=rz, width=70, height=28, style=INPUT_FIELD_STYLE)
 
-        pivot_enabled = ui.SimpleBoolModel(bool(step.get("pivot_enabled", False)))
-        pivot_x = ui.SimpleFloatModel(float(step.get("pivot_x", 0.0)))
-        pivot_y = ui.SimpleFloatModel(float(step.get("pivot_y", 0.0)))
-        pivot_z = ui.SimpleFloatModel(float(step.get("pivot_z", 0.0)))
-
-        pivot_enabled.add_value_changed_fn(
-            lambda _m: step.__setitem__("pivot_enabled", bool(pivot_enabled.get_value_as_bool()))
+        user_axis = ui.SimpleBoolModel(
+            bool(step.get("user_axis_rotate", step.get("world_pivot_rotate", False)))
         )
-        pivot_x.add_value_changed_fn(lambda _m: step.__setitem__("pivot_x", float(pivot_x.get_value_as_float())))
-        pivot_y.add_value_changed_fn(lambda _m: step.__setitem__("pivot_y", float(pivot_y.get_value_as_float())))
-        pivot_z.add_value_changed_fn(lambda _m: step.__setitem__("pivot_z", float(pivot_z.get_value_as_float())))
+        pwx = ui.SimpleFloatModel(float(step.get("pivot_wx", 0.0)))
+        pwy = ui.SimpleFloatModel(float(step.get("pivot_wy", 0.0)))
+        pwz = ui.SimpleFloatModel(float(step.get("pivot_wz", 0.0)))
+
+        def _sync_user_axis_flag(_m=None) -> None:
+            step["user_axis_rotate"] = bool(user_axis.get_value_as_bool())
+            step.pop("world_pivot_rotate", None)
+
+        user_axis.add_value_changed_fn(lambda _m: _sync_user_axis_flag())
+        pwx.add_value_changed_fn(lambda _m: step.__setitem__("pivot_wx", float(pwx.get_value_as_float())))
+        pwy.add_value_changed_fn(lambda _m: step.__setitem__("pivot_wy", float(pwy.get_value_as_float())))
+        pwz.add_value_changed_fn(lambda _m: step.__setitem__("pivot_wz", float(pwz.get_value_as_float())))
+
+        # 모델 → step (체크 직후 실행 버튼을 눌렀을 때 value_changed 누락 대비)
+        _sync_user_axis_flag()
+        self._rotate_user_axis_models[step_idx] = user_axis
 
         with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=pivot_enabled, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("PIVOT(미사용)", width=90)
-            ui.Label("X", width=20)
-            ui.FloatField(model=pivot_x, width=70, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("Y", width=20)
-            ui.FloatField(model=pivot_y, width=70, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("Z", width=20)
-            ui.FloatField(model=pivot_z, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.CheckBox(model=user_axis, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("루트 축 회전 + 회전 중심(월드)", width=200)
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("중심 PX", width=56)
+            ui.FloatField(model=pwx, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("PY", width=28)
+            ui.FloatField(model=pwy, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("PZ", width=28)
+            ui.FloatField(model=pwz, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Button(
+                "Prim→중심",
+                width=90,
+                height=28,
+                clicked_fn=lambda: self._fill_rotate_pivot_world_from_prim(step, pwx, pwy, pwz),
+            )
 
-        # 주의: 현재 시퀀서 ROTATE 실행 로직에서는 pivot_* 입력을 사용하지 않고
-        # 각 prim의 로컬(TBS_OFFSET) rotateXYZ op에 rx/ry/rz 델타만 적용합니다.
-        pivot_ax = ui.SimpleFloatModel(float(step.get("pivot_ax", 0.0)))
-        pivot_ay = ui.SimpleFloatModel(float(step.get("pivot_ay", 1.0)))
-        pivot_az = ui.SimpleFloatModel(float(step.get("pivot_az", 0.0)))
-        pivot_ax.add_value_changed_fn(lambda _m: step.__setitem__("pivot_ax", float(pivot_ax.get_value_as_float())))
-        pivot_ay.add_value_changed_fn(lambda _m: step.__setitem__("pivot_ay", float(pivot_ay.get_value_as_float())))
-        pivot_az.add_value_changed_fn(lambda _m: step.__setitem__("pivot_az", float(pivot_az.get_value_as_float())))
+        ui.Label(
+            "체크 해제: prim 로컬(TBS_OFFSET) 축 기준 제자리 회전 — 예전과 동일. "
+            "체크: 스테이지 루트(월드) 고정 Euler + PX,PY,PZ 회전 중심(월드).",
+            height=0,
+            word_wrap=True,
+        )
 
-        rot_angle = ui.SimpleFloatModel(float(step.get("rotate_angle_deg", 0.0)))
-        rot_angle.add_value_changed_fn(lambda _m: step.__setitem__("rotate_angle_deg", float(rot_angle.get_value_as_float())))
+    def _ui_step_timing(self, step: Dict[str, Any], step_idx: int) -> None:
+        """
+        병렬 실행 체크 + 지연(ms). 첫 스텝은 동시 실행 불가.
+        - 그룹 첫 줄(동시 실행 OFF): step_delay_ms = 이전 앵커 종료 후 ms(다음 그룹 시작). 음수 가능.
+        - 동시 실행 ON: step_delay_ms = 그룹 리더 시작 후 ms만큼 뒤에 이 스텝 시작(0이면 리더와 동시).
+        """
+        if "run_with_previous" not in step:
+            step["run_with_previous"] = False
+        if "step_delay_ms" not in step:
+            step["step_delay_ms"] = 0
+
+        parallel = ui.SimpleBoolModel(bool(step.get("run_with_previous", False)))
+        delay_ms = ui.SimpleIntModel(int(step.get("step_delay_ms", 0)))
+
+        def _on_parallel(_m=None) -> None:
+            step["run_with_previous"] = bool(parallel.get_value_as_bool())
+
+        def _on_delay(_m=None) -> None:
+            step["step_delay_ms"] = int(delay_ms.get_value_as_int())
+
+        parallel.add_value_changed_fn(_on_parallel)
+        delay_ms.add_value_changed_fn(_on_delay)
+        _on_parallel()
+        _on_delay()
+
+        self._parallel_with_prev_models[step_idx] = parallel
+        self._step_delay_ms_models[step_idx] = delay_ms
 
         with ui.HStack(spacing=6, height=28):
-            ui.Label("축(미사용)", width=60)
-            ui.Label("AX", width=22)
-            ui.FloatField(model=pivot_ax, width=62, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("AY", width=22)
-            ui.FloatField(model=pivot_ay, width=62, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("AZ", width=22)
-            ui.FloatField(model=pivot_az, width=62, height=28, style=INPUT_FIELD_STYLE)
+            if step_idx == 0:
+                ui.Label("—", width=22)
+                ui.Label("첫 스텝은 동시 실행 없음", width=200)
+            else:
+                ui.CheckBox(model=parallel, style=CHECKBOX_WHITE_STYLE)
+                ui.Label("이전 스텝과 동시 실행", width=200)
         with ui.HStack(spacing=6, height=28):
-            ui.Label("각도(선택)", width=60)
-            ui.FloatField(model=rot_angle, width=100, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("현재 로직에서는 미사용", height=0)
+            ui.Label("지연(ms)", width=60)
+            ui.IntField(model=delay_ms, width=100, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("1000=1초", width=56)
+        ui.Label(
+            "※ 그룹 첫 줄: 이전 앵커 끝난 뒤 ms(음수면 앵커 종료 전에 다음 그룹 시작). "
+            "※ 동시 실행 체크 시: 리더 시작 후 ms 뒤 이 스텝 시작.",
+            height=0,
+            word_wrap=True,
+        )
 
     def _ui_step_hide_options(self, step: Dict[str, Any]) -> None:
         """
@@ -433,6 +495,8 @@ class SequenceEditorWindow:
                 "dz": 0.0,
                 "hide_enabled": False,
                 "hide_prims": "",
+                "run_with_previous": False,
+                "step_delay_ms": 0,
             }
         )
         self._schedule_refresh()
@@ -464,8 +528,41 @@ class SequenceEditorWindow:
             print(f"[SEQUENCE] JSON load 실패: {e}", flush=True)  # noqa: T201
 
     def _run_steps(self) -> None:
+        self._flush_rotate_step_flags_to_dict()
+        self._flush_timing_models_to_dict()
         self._runner.run(self._steps)
         print(f"[SEQUENCE] 실행: {len(self._steps)} steps", flush=True)  # noqa: T201
+
+    def _flush_rotate_step_flags_to_dict(self) -> None:
+        """체크박스 모델 → step (value_changed 없이 바로 실행 버튼을 누른 경우 포함)."""
+        for idx, step in enumerate(self._steps):
+            if not isinstance(step, dict):
+                continue
+            if (step.get("type") or "").upper() != "ROTATE":
+                continue
+            m = self._rotate_user_axis_models.get(idx)
+            if m is not None:
+                step["user_axis_rotate"] = bool(m.get_value_as_bool())
+                step.pop("world_pivot_rotate", None)
+            elif "user_axis_rotate" not in step and (
+                step.get("world_pivot_rotate") is True or step.get("user_pivot_rotate") is True
+            ):
+                step["user_axis_rotate"] = True
+
+    def _flush_timing_models_to_dict(self) -> None:
+        """동시 실행·지연(ms) 모델 → step (실행 직전 동기화)."""
+        for idx, step in enumerate(self._steps):
+            if not isinstance(step, dict):
+                continue
+            if idx == 0:
+                step["run_with_previous"] = False
+            else:
+                pm = self._parallel_with_prev_models.get(idx)
+                if pm is not None:
+                    step["run_with_previous"] = bool(pm.get_value_as_bool())
+            dm = self._step_delay_ms_models.get(idx)
+            if dm is not None:
+                step["step_delay_ms"] = int(dm.get_value_as_int())
 
     def _stop(self) -> None:
         self._runner.stop()
@@ -494,5 +591,36 @@ class SequenceEditorWindow:
             paths = sel.get_selected_prim_paths() or []
             if paths:
                 model.set_value(str(paths[0]))
+        except Exception:
+            pass
+
+    def _fill_rotate_pivot_world_from_prim(
+        self,
+        step: Dict[str, Any],
+        pwx: ui.SimpleFloatModel,
+        pwy: ui.SimpleFloatModel,
+        pwz: ui.SimpleFloatModel,
+    ) -> None:
+        """ROTATE 월드 모드: 첫 번째 대상 prim의 로컬 원점 월드 위치(translation)를 pivot_w*에 채움."""
+        try:
+            paths = resolve_prim_paths_multi(str(step.get("prim") or ""))
+            if not paths:
+                return
+            stage = ou.get_context().get_stage()
+            if not stage:
+                return
+            prim = stage.GetPrimAtPath(paths[0])
+            if not prim or not prim.IsValid():
+                return
+            cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+            M = Gf.Matrix4d(cache.GetLocalToWorldTransform(prim))
+            tr = M.ExtractTranslation()
+            x, y, z = float(tr[0]), float(tr[1]), float(tr[2])
+            pwx.set_value(x)
+            pwy.set_value(y)
+            pwz.set_value(z)
+            step["pivot_wx"] = x
+            step["pivot_wy"] = y
+            step["pivot_wz"] = z
         except Exception:
             pass

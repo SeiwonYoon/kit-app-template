@@ -2,19 +2,24 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-prim_utils.py — 스테이지/prim 조회 및 변환 유틸 (경로 수집, 이름 검색, 위치 get/set, 프레임).
+prim_utils.py — 스테이지/prim 조회 및 변환 유틸 (경로 수집, 이름 검색, 위치 get/set, 프레임)
 
-기능:
+【역할】
 - get_stage(): 현재 Usd.Stage 반환.
 - is_utf8_safe(s): UTF-8 인코딩 가능 여부.
 - collect_prim_paths_safe(stage): 스테이지 전체에서 Xform/Gprim/Scope prim 경로 수집 (UTF-8 안전).
 - find_prim_path_by_name(stage, name): 이름/경로 일치 첫 번째 경로.
 - find_all_prim_paths_by_name(stage, name): 이름 일치 모든 경로.
 - get_prim_local_translate(prim): prim의 로컬 translate (첫 번째 translate op).
-- set_prim_translate_only(prim, position): XformCommonAPI 우선으로 translate만 설정.
+- set_prim_translate_only(prim, position): 첫 translate op에만 설정 (CommonAPI 미사용).
 - frame_prim_in_viewport(prim_path): 뷰포트에서 해당 prim으로 프레임.
 
-사용처: control_window(목록 새로고침, 객체 패널, 버튼 핸들러), load_window(로드 후 갱신).
+【수정 가이드】
+- 목록에 포함할 prim 타입: collect_prim_paths_safe 의 IsA 조건
+- 이름 검색 규칙: find_prim_path_by_name / find_all_prim_paths_by_name
+- translate 적용 방식: set_prim_translate_only (TBS_OFFSET op 이름은 xform_utils와 연동)
+
+사용처: control_window, load_window
 """
 
 from typing import List, Optional
@@ -23,6 +28,7 @@ import omni.usd as ou
 from pxr import Gf, Usd, UsdGeom
 
 from .prim_info import safe_str
+from .xform_utils import ensure_scale_xform_ops_first
 
 
 def get_stage():
@@ -138,15 +144,10 @@ def get_prim_local_translate(prim: Usd.Prim) -> Gf.Vec3f:
 
 
 def set_prim_translate_only(prim: Usd.Prim, position: Gf.Vec3f) -> None:
+    """첫 번째 translate op에 값 설정. XformCommonAPI 미사용(에셋 T,R,S 순서에서 경고 방지)."""
     if not prim or not prim.IsValid():
         return
-    try:
-        api = UsdGeom.XformCommonAPI(prim)
-        if api:
-            api.SetTranslate(Gf.Vec3d(float(position[0]), float(position[1]), float(position[2])))
-            return
-    except Exception:
-        pass
+    ensure_scale_xform_ops_first(prim)
     xform = UsdGeom.Xformable(prim)
     if not xform:
         return
@@ -157,7 +158,10 @@ def set_prim_translate_only(prim: Usd.Prim, position: Gf.Vec3f) -> None:
             break
     if translate_op is None:
         translate_op = xform.AddTranslateOp()
-    translate_op.Set(Gf.Vec3f(position[0], position[1], position[2]))
+    try:
+        translate_op.Set(Gf.Vec3f(float(position[0]), float(position[1]), float(position[2])))
+    except Exception:
+        pass
 
 
 def frame_prim_in_viewport(prim_path: str) -> None:

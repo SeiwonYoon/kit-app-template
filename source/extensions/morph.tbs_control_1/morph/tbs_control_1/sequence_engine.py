@@ -6,17 +6,27 @@ Sequence Engine (TBS Control)
 
 목표:
 - 사용자가 정의한 step 리스트를 순서대로 실행 (USD 타임라인 + 코드 기반 이동/회전)
+- run_with_previous 로 병렬 그룹. 앵커=그룹 맨 아래 스텝. 다음 그룹 첫 줄의 step_delay_ms/1000 초는 이전 앵커 종료 후(음수면 앞당김).
+- 동시 실행인 스텝의 step_delay_ms 는 그룹 리더 시작 후 오프셋(ms), 0이면 리더와 동시 시작.
 - step 완료 콜백을 기반으로 다음 step 실행 (체이닝)
 - JSON으로 저장/로드 가능한 step 스키마 제공
 
 지원 step 타입(최소):
 - USD_TIMELINE: USD 저장 애니메이션을 프레임 구간 재생 (수동/자동)
 - MOVE: 코드 기반 직선 이동 (translate_animation)
-- ROTATE: 각 prim의 로컬 회전축(TBS_OFFSET rotateXYZ) 기준 제자리 회전 (rx/ry/rz delta 적용)
+- ROTATE: (1) user_axis_rotate 미체크: prim 로컬 TBS_OFFSET rotateXYZ에 rx/ry/rz 델타(도) — 제자리 회전(기존 동작).
+          (2) 체크: 스테이지 루트(월드) 고정 Euler + pivot_wx/y/z(월드) 공통 중심. rx/ry/rz(도), 애니는 t 선형 보간.
+
+【수정 가이드】
+- 새 step 타입: dict 스키마 + SequenceRunner._execute_step 분기 + translate/rotate/usd_animation 모듈
+- 그룹/지연/앵커 동작: group_end, duration, execute_group, schedule 관련 로직
+- UI 필드 추가: sequence_editor.py 와 스키마 키를 반드시 맞출 것
 """
 
 from __future__ import annotations
 
+import math
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -29,12 +39,44 @@ from .translate_animation import run_prim_translate_animation, stop_prim_transla
 from .rotate_animation import (
     run_prim_rotate_animation,
     stop_prim_rotate_animation,
-    run_world_pivot_rotate_animation,
+    run_world_euler_pivot_rotate_animation,
     stop_world_pivot_rotate_animation,
 )
 from . import usd_animation_control
+from .xform_utils import ensure_scale_xform_ops_first
 
 _OFFSET_SUFFIX = "TBS_OFFSET"
+
+
+def _group_end_index(steps: List[Dict[str, Any]], start_idx: int) -> int:
+    """start_idx부터 run_with_previous 가 연속인 구간의 마지막 인덱스(앵커 = UI 최하단)."""
+    g_end = start_idx
+    while g_end + 1 < len(steps) and bool((steps[g_end + 1] or {}).get("run_with_previous", False)):
+        g_end += 1
+    return g_end
+
+
+def _step_duration_sec(step: Dict[str, Any]) -> float:
+    """스텝의 재생 길이(초). USD 타임라인은 프레임 구간을 타임라인 TPS로 환산."""
+    t = str((step or {}).get("type") or "").upper()
+    if t in ("MOVE", "ROTATE"):
+        return max(1e-6, float((step or {}).get("duration", 1.0)))
+    if t == "DELAY":
+        return max(1e-6, float((step or {}).get("duration", 1.0)))
+    if t == "USD_TIMELINE":
+        mode = str((step or {}).get("mode", "MANUAL")).upper()
+        if mode == "AUTO":
+            rng = usd_animation_control.resolve_saved_animation_frame_range()
+            if not rng:
+                return 1e-6
+            start_f, end_f = int(rng[0]), int(rng[1])
+        else:
+            start_f = int((step or {}).get("start_frame", 0))
+            end_f = int((step or {}).get("end_frame", 0))
+        if end_f <= start_f:
+            return 1e-6
+        return max(usd_animation_control.frame_to_time(float(end_f - start_f)), 1e-6)
+    return 1e-6
 
 
 def _op_value_at_time(op, time_code: Usd.TimeCode):
@@ -53,17 +95,29 @@ def _matrix_from_translate(v) -> Gf.Matrix4d:
 
 
 def _matrix_from_rotate_xyz(v) -> Gf.Matrix4d:
-    """Euler XYZ (degrees) -> 4x4 rotation matrix."""
+    """
+    Euler XYZ (degrees) -> 4x4 rotation matrix.
+
+    UsdGeomXformOp::GetOpTransform(TypeRotateXYZ) 와 동일:
+    xRot * yRot * zRot (각각 GfMatrix3d(GfRotation(축, 각도))).
+    Gf.Rotation 을 하나로 합성하는 방식은 USD 행렬 곱과 달라질 수 있음.
+    """
     m = Gf.Matrix4d(1.0)
     if v is not None and hasattr(v, "__len__") and len(v) >= 3:
         try:
-            # Gf.Rotation(axis, angle): angle in degrees
-            r = (
-                Gf.Rotation(Gf.Vec3d(1, 0, 0), float(v[0]))
-                * Gf.Rotation(Gf.Vec3d(0, 1, 0), float(v[1]))
-                * Gf.Rotation(Gf.Vec3d(0, 0, 1), float(v[2]))
-            )
-            m.SetRotateOnly(r)
+            mx = Gf.Matrix3d(Gf.Rotation(Gf.Vec3d(1, 0, 0), float(v[0])))
+            my = Gf.Matrix3d(Gf.Rotation(Gf.Vec3d(0, 1, 0), float(v[1])))
+            mz = Gf.Matrix3d(Gf.Rotation(Gf.Vec3d(0, 0, 1), float(v[2])))
+            r3 = mx * my * mz
+            try:
+                m.SetRotateOnly(Gf.Rotation(r3))
+            except Exception:
+                try:
+                    m.SetRotateOnly(r3)
+                except Exception:
+                    for i in range(3):
+                        for j in range(3):
+                            m[i][j] = r3[i][j]
         except Exception:
             pass
     return m
@@ -233,6 +287,7 @@ def _apply_tbs_for_target_local_matrix(prim: Usd.Prim, M_local_target: Gf.Matrix
     M_tbs = inv(M_after) * M_local_target * inv(M_before)
     """
     try:
+        ensure_scale_xform_ops_first(prim)
         idxs = _tbs_op_indices(prim)
         if not idxs:
             return False
@@ -263,6 +318,7 @@ def _apply_world_pivot_frame_for_prim(
 ) -> None:
     """월드 목표 행렬을 부모 기준 로컬로 바꾼 뒤 TBS 오프셋만 역산해 적용."""
     try:
+        ensure_scale_xform_ops_first(prim)
         M_local = M_parent_world_inv * M_world_target
         if not _apply_tbs_for_target_local_matrix(prim, M_local, time_code):
             tr = M_local.ExtractTranslation()
@@ -662,42 +718,7 @@ def _set_translate(prim: Usd.Prim, v: Gf.Vec3f) -> None:
     if not prim or not prim.IsValid():
         return
     try:
-        # scale이 있는 prim에서 translate/rotate가 먼저 적용되는 경우 경고가 반복될 수 있어,
-        # 가능한 환경에서는 common TRS로 한 번 정리(동일 값으로 재기록)한다.
-        try:
-            x = UsdGeom.Xformable(prim)
-            ops = list(x.GetOrderedXformOps()) if x else []
-            if ops:
-                scale_ops = [op for op in ops if op.GetOpType() == UsdGeom.XformOp.TypeScale]
-                tbs_ops = []
-                rest_ops = []
-                for op in ops:
-                    try:
-                        if _OFFSET_SUFFIX in op.GetName():
-                            tbs_ops.append(op)
-                        elif op.GetOpType() != UsdGeom.XformOp.TypeScale:
-                            rest_ops.append(op)
-                    except Exception:
-                        if op.GetOpType() != UsdGeom.XformOp.TypeScale:
-                            rest_ops.append(op)
-                new_order = scale_ops + tbs_ops + rest_ops
-                if new_order and ops != new_order:
-                    x.SetXformOpOrder(new_order)
-            idx_scale = None
-            idx_tr = None
-            for i, op in enumerate(ops):
-                t = op.GetOpType()
-                if idx_scale is None and t == UsdGeom.XformOp.TypeScale:
-                    idx_scale = i
-                if idx_tr is None and t in (UsdGeom.XformOp.TypeTranslate, UsdGeom.XformOp.TypeRotateXYZ):
-                    idx_tr = i
-            if idx_scale is not None and idx_tr is not None and idx_tr < idx_scale:
-                api0 = UsdGeom.XformCommonAPI(prim)
-                if api0:
-                    t0, r0, s0, p0, ro0 = api0.GetXformVectors(Usd.TimeCode.Default())
-                    api0.SetXformVectors(t0, r0, s0, p0, ro0, Usd.TimeCode.Default())
-        except Exception:
-            pass
+        ensure_scale_xform_ops_first(prim)
         op = _get_or_create_offset_translate_op(prim)
         if op:
             op.Set(Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])))
@@ -734,40 +755,7 @@ def _set_rotate_xyz(prim: Usd.Prim, v: Gf.Vec3f) -> None:
     if not prim or not prim.IsValid():
         return
     try:
-        try:
-            x = UsdGeom.Xformable(prim)
-            ops = list(x.GetOrderedXformOps()) if x else []
-            if ops:
-                scale_ops = [op for op in ops if op.GetOpType() == UsdGeom.XformOp.TypeScale]
-                tbs_ops = []
-                rest_ops = []
-                for op in ops:
-                    try:
-                        if _OFFSET_SUFFIX in op.GetName():
-                            tbs_ops.append(op)
-                        elif op.GetOpType() != UsdGeom.XformOp.TypeScale:
-                            rest_ops.append(op)
-                    except Exception:
-                        if op.GetOpType() != UsdGeom.XformOp.TypeScale:
-                            rest_ops.append(op)
-                new_order = scale_ops + tbs_ops + rest_ops
-                if new_order and ops != new_order:
-                    x.SetXformOpOrder(new_order)
-            idx_scale = None
-            idx_tr = None
-            for i, op in enumerate(ops):
-                t = op.GetOpType()
-                if idx_scale is None and t == UsdGeom.XformOp.TypeScale:
-                    idx_scale = i
-                if idx_tr is None and t in (UsdGeom.XformOp.TypeTranslate, UsdGeom.XformOp.TypeRotateXYZ):
-                    idx_tr = i
-            if idx_scale is not None and idx_tr is not None and idx_tr < idx_scale:
-                api0 = UsdGeom.XformCommonAPI(prim)
-                if api0:
-                    t0, r0, s0, p0, ro0 = api0.GetXformVectors(Usd.TimeCode.Default())
-                    api0.SetXformVectors(t0, r0, s0, p0, ro0, Usd.TimeCode.Default())
-        except Exception:
-            pass
+        ensure_scale_xform_ops_first(prim)
         op = _get_or_create_offset_rotate_op(prim)
         if op:
             op.Set(Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])))
@@ -790,8 +778,7 @@ def _set_rotate_xyz(prim: Usd.Prim, v: Gf.Vec3f) -> None:
 @dataclass
 class SequenceRunner:
     """
-    단일 시퀀스를 순차 실행하는 러너.
-    - 병렬 실행은 여기서 하지 않음(필요하면 별도 정책으로 확장)
+    시퀀스 실행: 병렬 그룹(run_with_previous) + 앵커(그룹 맨 아래 스텝) 기준으로 다음 그룹 스케줄.
     """
 
     on_sequence_completed: Optional[Callable[[], None]] = None
@@ -799,15 +786,33 @@ class SequenceRunner:
     def __post_init__(self) -> None:
         self._running = False
         self._steps: List[Dict[str, Any]] = []
-        self._index = 0
         self._baseline: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
         self._next_tick_sub = None
-        self._pending_delay_sub = None
+        self._pending_delay_sub = None  # 레거시 단일 DELAY용(병렬 시 _delay_subs 사용)
+        self._delay_subs: List[Any] = []
         self._pending_unhide_sub = None
         self._hidden_refcount: Dict[str, int] = {}
+        self._group_timer_sub = None
+        self._intra_group_subs: List[Any] = []
+        self._group_t0 = 0.0
+        self._prev_group_hide_paths: List[str] = []
+        self._current_group: Optional[Tuple[int, int]] = None
 
     def is_running(self) -> bool:
         return self._running
+
+    def _stop_step_animations(self, step: Dict[str, Any]) -> None:
+        if not isinstance(step, dict):
+            return
+        t = str(step.get("type") or "").upper()
+        if t == "MOVE":
+            for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
+                stop_prim_translate_animation(p)
+        elif t == "ROTATE":
+            for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
+                stop_prim_rotate_animation(p)
+        elif t == "USD_TIMELINE":
+            usd_animation_control.stop_usd_animation()
 
     def pause(self) -> None:
         """진행 중인 애니메이션만 멈춘다. (위치/타임라인은 초기화하지 않음)"""
@@ -830,25 +835,37 @@ class SequenceRunner:
             except Exception:
                 pass
             self._pending_delay_sub = None
+        for ds in list(self._delay_subs):
+            try:
+                ds.unsubscribe()
+            except Exception:
+                pass
+        self._delay_subs.clear()
+        if self._group_timer_sub is not None:
+            try:
+                self._group_timer_sub.unsubscribe()
+            except Exception:
+                pass
+            self._group_timer_sub = None
+        for s in list(self._intra_group_subs):
+            try:
+                s.unsubscribe()
+            except Exception:
+                pass
+        self._intra_group_subs.clear()
         try:
             stop_world_pivot_rotate_animation()
         except Exception:
             pass
-        # 진행 중인 코드 애니메이션은 안전하게 정리
+        # 진행 중인 코드 애니메이션은 안전하게 정리 (현재 그룹 전체)
         try:
-            step = self._steps[self._index] if 0 <= self._index < len(self._steps) else None
+            if self._current_group:
+                a, b = self._current_group
+                for idx in range(a, b + 1):
+                    if 0 <= idx < len(self._steps):
+                        self._stop_step_animations(self._steps[idx])
         except Exception:
-            step = None
-        if isinstance(step, dict):
-            t = (step.get("type") or "").upper()
-            if t == "MOVE":
-                for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
-                    stop_prim_translate_animation(p)
-            elif t == "ROTATE":
-                for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
-                    stop_prim_rotate_animation(p)
-            elif t == "USD_TIMELINE":
-                usd_animation_control.stop_usd_animation()
+            pass
 
     def stop(self) -> None:
         """완전 중지: 객체 위치/회전 상태 + 타임라인을 실행 전(초기) 상태로 초기화한다."""
@@ -987,7 +1004,8 @@ class SequenceRunner:
         """시퀀스 실행 시작."""
         self.stop()
         self._steps = list(steps or [])
-        self._index = 0
+        self._current_group = None
+        self._prev_group_hide_paths = []
         # 실행 버튼을 누르면 타임라인은 항상 0에서 시작
         try:
             usd_animation_control.stop_usd_animation()
@@ -1001,8 +1019,7 @@ class SequenceRunner:
             # 다만 스텝 편집으로 새 prim이 등장할 수 있으니, baseline에 없는 prim만 보강 캡처한다.
             self._capture_baseline(force=False)
             self._restore_baseline()
-            self._running = True
-            self._run_current_step()
+            self._begin_sequence()
 
         self._call_next_frame(_start)
 
@@ -1049,47 +1066,225 @@ class SequenceRunner:
 
     # ---------------- internal ----------------
 
-    def _run_current_step(self) -> None:
+    def _complete_sequence(self) -> None:
         if not self._running:
             return
-        if self._index >= len(self._steps):
-            self._running = False
-            cb = self.on_sequence_completed
-            if cb:
-                try:
-                    cb()
-                except Exception:
-                    pass
+        self._running = False
+        self._current_group = None
+        if self._group_timer_sub is not None:
+            try:
+                self._group_timer_sub.unsubscribe()
+            except Exception:
+                pass
+            self._group_timer_sub = None
+        cb = self.on_sequence_completed
+        if cb:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _clear_intra_group_timers(self) -> None:
+        for s in list(self._intra_group_subs):
+            try:
+                s.unsubscribe()
+            except Exception:
+                pass
+        self._intra_group_subs.clear()
+
+    def _schedule_intra_group_at(self, target_monotonic: float, fn: Callable[[], None]) -> None:
+        """병렬 그룹 내 후속 스텝 시작용(다음 그룹 타이머와 독립)."""
+        if target_monotonic <= time.monotonic():
+            self._call_next_frame(fn)
             return
 
-        step = self._steps[self._index] or {}
-        t = str(step.get("type") or "").upper()
-        current_hide_paths = self._apply_hide_for_step(step)
+        sub_holder: List[Any] = [None]
 
-        def _done():
+        def _on_update(e):
             if not self._running:
                 return
-            next_idx = self._index + 1
-            is_last = next_idx >= len(self._steps)
-            if not is_last:
-                next_step = self._steps[next_idx] if 0 <= next_idx < len(self._steps) else {}
-                next_hide_set = set(self._step_hide_paths(next_step or {}))
-                to_unhide = [p for p in current_hide_paths if p not in next_hide_set]
-                # 마지막 step이면 복원하지 않아서 숨김 상태 유지
-                if to_unhide:
-                    self._schedule_unhide(to_unhide, delay_sec=0.2)
-            # update 이벤트 내부에서 바로 다음 step을 시작하면, 다음 MOVE/ROTATE가 무시되는 등
-            # 재진입 문제가 생길 수 있어 next frame으로 넘긴다.
-            def _advance():
-                if not self._running:
-                    return
-                self._index += 1
-                self._run_current_step()
+            if time.monotonic() < target_monotonic:
+                return
+            sub = sub_holder[0]
+            sub_holder[0] = None
+            if sub is not None:
+                try:
+                    sub.unsubscribe()
+                except Exception:
+                    pass
+                try:
+                    self._intra_group_subs.remove(sub)
+                except Exception:
+                    pass
+            self._call_next_frame(fn)
 
-            self._call_next_frame(_advance)
+        try:
+            sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
+                _on_update,
+                name="morph.tbs_control_1.sequence_engine.intra_group",
+            )
+            sub_holder[0] = sub
+            self._intra_group_subs.append(sub)
+        except Exception:
+            self._call_next_frame(fn)
+
+    def _schedule_at(self, target_monotonic: float, fn: Callable[[], None]) -> None:
+        """monotonic() 기준 시각까지 대기 후 fn (post_update로 한 프레임 지연)."""
+        if self._group_timer_sub is not None:
+            try:
+                self._group_timer_sub.unsubscribe()
+            except Exception:
+                pass
+            self._group_timer_sub = None
+        now = time.monotonic()
+        if target_monotonic <= now:
+
+            def _immediate(_e=None):
+                if self._group_timer_sub is not None:
+                    try:
+                        self._group_timer_sub.unsubscribe()
+                    except Exception:
+                        pass
+                    self._group_timer_sub = None
+                self._call_next_frame(fn)
+
+            try:
+                self._group_timer_sub = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+                    _immediate,
+                    name="morph.tbs_control_1.sequence_engine.group_timer_immediate",
+                )
+            except Exception:
+                self._call_next_frame(fn)
+            return
+
+        def _on_update(e):
+            if not self._running:
+                return
+            if time.monotonic() < target_monotonic:
+                return
+            if self._group_timer_sub is not None:
+                try:
+                    self._group_timer_sub.unsubscribe()
+                except Exception:
+                    pass
+                self._group_timer_sub = None
+            self._call_next_frame(fn)
+
+        try:
+            self._group_timer_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
+                _on_update,
+                name="morph.tbs_control_1.sequence_engine.group_timer",
+            )
+        except Exception:
+            self._call_next_frame(fn)
+
+    def _begin_sequence(self) -> None:
+        self._running = True
+        self._prev_group_hide_paths = []
+        self._current_group = None
+        if not self._steps:
+            self._complete_sequence()
+            return
+        d0 = int(self._steps[0].get("step_delay_ms", 0)) / 1000.0
+        if d0 <= 0:
+            self._execute_group_and_schedule_next(0)
+        else:
+            self._schedule_at(time.monotonic() + d0, lambda: self._execute_group_and_schedule_next(0))
+
+    def _run_from_index(self, idx: int) -> None:
+        """이전 그룹의 타이머에서 호출: 다음 그룹 시작(추가 선행 지연 없음)."""
+        if not self._running:
+            return
+        if idx >= len(self._steps):
+            self._complete_sequence()
+            return
+        self._execute_group_and_schedule_next(idx)
+
+    def _execute_group_and_schedule_next(self, a: int) -> None:
+        if not self._running:
+            return
+        b = _group_end_index(self._steps, a)
+        self._execute_group(a, b)
+        next_idx = b + 1
+        if next_idx >= len(self._steps):
+            # 마지막 그룹에서 팔로워가 지연 시작이면 _complete_sequence 가 먼저 호출되면
+            # _running=False 가 되어 intra 타이머가 막힘 → 완료를 최대 지연만큼 미룸.
+            self._defer_complete_sequence_if_needed(a, b)
+            return
+        anchor_dur = _step_duration_sec(self._steps[b])
+        delay_ms_next = int(self._steps[next_idx].get("step_delay_ms", 0))
+        delay_sec_next = delay_ms_next / 1000.0
+        t0 = self._group_t0
+        if b > a:
+            anchor_rel = int(self._steps[b].get("step_delay_ms", 0)) / 1000.0
+            t_anchor_start = t0 + max(0.0, anchor_rel)
+        else:
+            t_anchor_start = t0
+        anchor_end = t_anchor_start + anchor_dur
+        next_start = max(t0, anchor_end + delay_sec_next)
+
+        def _go() -> None:
+            self._run_from_index(next_idx)
+
+        self._schedule_at(next_start, _go)
+
+    def _defer_complete_sequence_if_needed(self, a: int, b: int) -> None:
+        """마지막 그룹: 팔로워 step_delay_ms 가 있으면 그 시작이 스케줄된 뒤에 시퀀스 종료."""
+        if not self._running:
+            return
+        t0 = self._group_t0
+        max_off = 0.0
+        for i in range(a + 1, b + 1):
+            max_off = max(max_off, max(0.0, int((self._steps[i] or {}).get("step_delay_ms", 0)) / 1000.0))
+        if max_off <= 1e-9:
+            self._complete_sequence()
+            return
+        # intra 타이머 → _call_next_frame 체인 여유
+        self._schedule_at(t0 + max_off + 0.05, lambda: self._complete_sequence())
+
+    def _execute_group(self, a: int, b: int) -> None:
+        """구간 [a..b]: 리더(a) 즉시 시작, run_with_previous 인 스텝은 step_delay_ms 만큼 리더 시작 후 지연 시작. 앵커=b."""
+        if not self._running:
+            return
+        self._clear_intra_group_timers()
+        t0 = time.monotonic()
+        self._group_t0 = t0
+        self._current_group = (a, b)
+        next_union = set()
+        for i in range(a, b + 1):
+            next_union.update(self._step_hide_paths(self._steps[i] or {}))
+        to_unhide = [p for p in self._prev_group_hide_paths if p not in next_union]
+        if to_unhide:
+            self._schedule_unhide(to_unhide, delay_sec=0.2)
+        merged_hide: List[str] = []
+        for i in range(a, b + 1):
+            merged_hide.extend(self._apply_hide_for_step(self._steps[i] or {}))
+        self._prev_group_hide_paths = list(merged_hide)
+
+        noop = lambda: None
+        self._start_step(a, on_completed=noop)
+        for i in range(a + 1, b + 1):
+            off_sec = int((self._steps[i] or {}).get("step_delay_ms", 0)) / 1000.0
+            off_sec = max(0.0, off_sec)
+            target = t0 + off_sec
+            if target <= time.monotonic():
+                self._start_step(i, on_completed=noop)
+            else:
+                self._schedule_intra_group_at(target, lambda idx=i: self._start_step(idx, lambda: None))
+
+    def _start_step(self, idx: int, on_completed: Callable[[], None]) -> None:
+        """hide 는 _execute_group 에서 이미 적용. 여기서는 애니메이션만 시작."""
+        step = self._steps[idx] or {}
+        t = str(step.get("type") or "").upper()
+
+        def _done() -> None:
+            try:
+                on_completed()
+            except Exception:
+                pass
 
         if t == "USD_TIMELINE":
-            mode = str(step.get("mode") or "MANUAL").upper()  # MANUAL|AUTO
+            mode = str(step.get("mode") or "MANUAL").upper()
             loop = bool(step.get("loop", False))
             if mode == "AUTO":
                 rng = usd_animation_control.resolve_saved_animation_frame_range()
@@ -1103,7 +1298,6 @@ class SequenceRunner:
                 if end <= start:
                     _done()
                     return
-            # B안: MOVE/ROTATE로 움직인 prim들이 타임라인 시작 시에도 같은 월드 위치를 유지하도록 오프셋 보정
             try:
                 _apply_world_space_offset_correction(list(self._baseline.keys()), start)
             except Exception:
@@ -1121,16 +1315,8 @@ class SequenceRunner:
             if delay_sec <= 0:
                 _done()
                 return
-
             elapsed = {"t": 0.0}
-
-            # 이전 delay 구독이 남아있으면 정리
-            if self._pending_delay_sub is not None:
-                try:
-                    self._pending_delay_sub.unsubscribe()
-                except Exception:
-                    pass
-                self._pending_delay_sub = None
+            sub_ref = [None]
 
             def _on_update(e):
                 if not self._running:
@@ -1142,24 +1328,26 @@ class SequenceRunner:
                 elapsed["t"] += dt
                 if elapsed["t"] < delay_sec:
                     return
-
-                # 완료 시 구독 해제 후 다음 step 진행
-                if self._pending_delay_sub is not None:
+                sub = sub_ref[0]
+                sub_ref[0] = None
+                if sub is not None:
                     try:
-                        self._pending_delay_sub.unsubscribe()
+                        sub.unsubscribe()
                     except Exception:
                         pass
-                    self._pending_delay_sub = None
+                    try:
+                        self._delay_subs.remove(sub)
+                    except Exception:
+                        pass
                 _done()
 
             try:
-                self._pending_delay_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
+                sub_ref[0] = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
                     _on_update,
-                    name="morph.tbs_control_1.sequence_engine.delay",
+                    name="morph.tbs_control_1.sequence_engine.delay_parallel",
                 )
+                self._delay_subs.append(sub_ref[0])
             except Exception:
-                # fallback: 즉시 진행
-                self._pending_delay_sub = None
                 _done()
             return
 
@@ -1174,7 +1362,6 @@ class SequenceRunner:
             if not paths:
                 _done()
                 return
-            # 여러 prim에 적용 시 마지막 prim 완료를 기준으로 다음으로 넘어감
             remaining = {"n": len(paths)}
 
             def _one_done():
@@ -1185,8 +1372,6 @@ class SequenceRunner:
             for p in paths:
                 prim = stage.GetPrimAtPath(p) if stage else None
                 world_delta = Gf.Vec3d(dx, dy, dz)
-                # dx/dy/dz = 월드 이동. TBS_OFFSET translate만 조작하므로
-                # prim 전체 L2W 역변환이 아니라 "offset op → 월드 원점" 자코비안으로 역산.
                 tc = _get_current_time_code()
                 local_delta = (
                     _world_delta_to_tbs_offset_translate_delta(prim, world_delta, tc)
@@ -1208,13 +1393,42 @@ class SequenceRunner:
             rx = float(step.get("rx", 0.0))
             ry = float(step.get("ry", 0.0))
             rz = float(step.get("rz", 0.0))
-            stage = _get_stage()
+            use_world_pivot = (
+                bool(step.get("user_axis_rotate", False))
+                or bool(step.get("user_pivot_rotate", False))
+                or bool(step.get("world_pivot_rotate", False))
+            )
+            pwx = float(step.get("pivot_wx", 0.0))
+            pwy = float(step.get("pivot_wy", 0.0))
+            pwz = float(step.get("pivot_wz", 0.0))
             paths = resolve_prim_paths_multi(prim_id)
             if not paths:
                 _done()
                 return
             if abs(rx) < 1e-9 and abs(ry) < 1e-9 and abs(rz) < 1e-9:
                 _done()
+                return
+
+            stop_world_pivot_rotate_animation()
+            for p in paths:
+                stop_prim_rotate_animation(p)
+
+            if use_world_pivot:
+                tc_rot = Usd.TimeCode.Default()
+
+                def _world_euler_done():
+                    _done()
+
+                run_world_euler_pivot_rotate_animation(
+                    paths,
+                    Gf.Vec3d(pwx, pwy, pwz),
+                    rx,
+                    ry,
+                    rz,
+                    duration,
+                    tc_rot,
+                    on_completed=_world_euler_done,
+                )
                 return
 
             remaining = {"n": len(paths)}
@@ -1224,10 +1438,7 @@ class SequenceRunner:
                 if remaining["n"] <= 0:
                     _done()
 
-            # "제자리 회전": prim별 로컬 회전축(rotateXYZ op) 기준으로 rx/ry/rz를 그대로 적용
-            stop_world_pivot_rotate_animation()
             for p in paths:
-                stop_prim_rotate_animation(p)
                 run_prim_rotate_animation(
                     p,
                     [{"duration": duration, "delta": (rx, ry, rz)}],
@@ -1236,5 +1447,4 @@ class SequenceRunner:
                 )
             return
 
-        # 알 수 없는 step은 스킵
         _done()

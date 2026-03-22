@@ -2,20 +2,35 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-xml_generator.py — XML 제너레이터 (TBS Control)
+xml_generator.py — EAPEIS 포트 이벤트용 XML 생성·역파싱 (TBS Control)
 
-요구사항 반영:
-- `<Envelop>` 태그로 감싸기
-- HEADER/BODY 등 태그/속성/속성값은 대문자 처리(단, Envelop 루트 태그는 요청대로 `Envelop`)
-- 6개 시퀀스:
-  - EAPEIS_PORT_MOVE_TRANSFERING (FROM/TO_PORT_ID)
-  - EAPEIS_PORT_MOVE (FROM/TO_PORT_ID)
-  - EAPEIS_PORT_READYTOLOAD (PORT_ID)
-  - EAPEIS_PORT_ARRIVED (PORT_ID)
-  - EAPEIS_PORT_READYTOUNLOAD (PORT_ID)
-  - EAPEIS_PORT_REMOVED (PORT_ID)
-- 역파싱은 `<Envelop>` 뿐 아니라 과거 포맷(Envelop 없는 경우)도 최대한 호환
-- parse 결과에 action_desc를 포함(역파싱 로그에 상세 설명용)
+【이 파일의 역할】
+- build_xml_string(): SEQUENCE_NAME과 포트 인자로 `<Envelop>...</Envelop>` XML 문자열 생성.
+- parse_xml_string(): 위 XML을 dict로 역파싱(제어창 로그·디버그용). action_desc 포함.
+- 태그/속성 상수(TAG_*, ATTR_*), 시퀀스 이름 상수(SEQ_*), 집합 FROM_TO_SEQS / PORT_ID_ONLY_SEQS.
+
+【시퀀스 6종과 필요한 인자】
+- FROM/TO 필요 (FROM_TO_SEQS): SEQ_MOVE_TRANSFERING, SEQ_MOVE
+  → build_xml_string(seq, from_port_id=, to_port_id=) — PROCESS_JOB은 FROM 포트 기준, FROM_INFO/TO_INFO에 포트 ID.
+- PORT_ID만 필요 (PORT_ID_ONLY_SEQS): SEQ_READYTOLOAD, SEQ_ARRIVED, SEQ_READYTOUNLOAD, SEQ_REMOVED
+  → build_xml_string(seq, port_id=) — PROCESS_JOB의 ATTR_PORT_ID에 반영.
+
+【새 시퀀스 종류를 추가하려면】
+1) 이 파일 상단에 상수 추가: SEQ_NEW = "EAPEIS_PORT_..."
+2) ALL_SEQS / FROM_TO_SEQS 또는 PORT_ID_ONLY_SEQS 중 하나에 분류(또는 새 집합 + build_xml_string 분기).
+3) build_xml_string() 내부 if seq in FROM_TO_SEQS / elif seq in PORT_ID_ONLY_SEQS 에서 실제 XML 트리 생성 로직 추가.
+4) _sequence_action_desc()에 로그용 설명 문자열 추가.
+5) parse_xml_string 역호환: BODY의 SEQUENCE_NAME과 _extract_values_from_tree로 읽히는 속성이면 추가 속성만 dict에 넣으면 됨.
+
+【제어창 UI와 연동 (control_window.py)】
+- 콤보 항목·순서: build_control_window() 안 ComboBox 인자 목록.
+- 입력 필드 전환: on_xml_seq_changed() — FROM_TO면 FROM/TO 행, PORT만이면 PORT_ID 행 표시.
+- OK 버튼: on_xml_ok_clicked() — 위와 동일한 seqs 리스트 순서를 유지해야 인덱스가 맞음.
+→ 시퀀스를 추가하면 세 곳(ComboBox, on_xml_seq_changed의 seqs, on_xml_ok_clicked의 seqs)을 동일하게 맞출 것.
+
+【요구사항 반영】
+- `<Envelop>` 루트, HEADER/BODY 대문자, Envelop 케이스 유지
+- 역파싱: Envelop 없는 과거 포맷도 ROOT로 감싸 호환
 """
 
 from __future__ import annotations

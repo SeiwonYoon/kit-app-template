@@ -2,10 +2,17 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-signal_parser.py — 시그널 파서: JSON/XML 형식의 가상 시그널을 파싱하여 동일한 구조의 dict로 반환.
+signal_parser.py — 가상 시그널(JSON/XML) 파싱 → {objects, segments} dict
 
-기능: control_window에서 import. 장비로부터 수신한 데이터 파싱 및 가상 시그널 재생에 사용.
-parse_signal(data, format="json"|"xml") → {"objects": [...], "segments": [...]}
+【역할】
+- control_window의 "가상 시그널 재생" 등에서 JSON/XML 문자열을 파싱하여 애니메이션 세그먼트 구조로 변환.
+
+【수정 가이드】
+- JSON 스키마 변경: parse_signal_json, _normalize_parsed
+- XML 태그/속성 변경: parse_signal_xml (object/segment 요소)
+- 통합 진입점: parse_signal()
+
+사용처: control_window.py (SAMPLE_GENERATOR_JSON 형식과 맞춰야 함)
 """
 
 import json
