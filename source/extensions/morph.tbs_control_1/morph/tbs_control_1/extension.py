@@ -36,7 +36,7 @@ import omni.ui as ui
 import omni.usd as ou
 from carb.eventdispatcher import get_eventdispatcher
 
-from .control_window import build_control_window, refresh_object_list
+from .control_window import build_control_window, on_sim_stop_clicked, refresh_object_list
 from .curve_animation import stop_prim_curve_animation
 from .load_window import build_load_window
 from .rotate_animation import stop_prim_rotate_animation
@@ -103,6 +103,10 @@ class Extension(omni.ext.IExt):
             pass
 
     def on_shutdown(self) -> None:
+        try:
+            on_sim_stop_clicked(self)
+        except Exception:
+            pass
         if self._selection_sub is not None and hasattr(self._selection_sub, "release"):
             self._selection_sub.release()
             self._selection_sub = None

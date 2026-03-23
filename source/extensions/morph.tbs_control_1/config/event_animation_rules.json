@@ -1,0 +1,46 @@
+[
+  {
+    "name": "bp1_to_bp2_when_bp2_empty",
+    "priority": 10,
+    "when": {
+      "sequence": "EAPEIS_PORT_MOVE_TRANSFERING",
+      "from_port": "BP1",
+      "to_port": "BP2",
+      "ports_occupancy": {
+        "BP2": "EMPTY"
+      }
+    },
+    "use": {
+      "json": "data/sim_sequences/move_bp1_bp2.json",
+      "runner": "sequence_editor",
+      "description": "BP1에서 BP2로 이송"
+    }
+  },
+  {
+    "name": "bp_to_ep_default",
+    "priority": 100,
+    "when": {
+      "sequence": "EAPEIS_PORT_MOVE_TRANSFERING",
+      "from_port": "BP2",
+      "to_port": "EP1"
+    },
+    "use": {
+      "json": "data/sim_sequences/move_bp2_ep1.json",
+      "runner": "sequence_editor",
+      "description": "버퍼에서 공정포트로 이동"
+    }
+  },
+  {
+    "name": "arrived_ep1_default",
+    "priority": 200,
+    "when": {
+      "sequence": "EAPEIS_PORT_ARRIVED",
+      "port": "EP1"
+    },
+    "use": {
+      "json": "data/sim_sequences/arrived_ep1.json",
+      "runner": "sequence_editor",
+      "description": "EP1 도착 안착"
+    }
+  }
+]

@@ -14,11 +14,16 @@ repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
 "omni.usd" = {}
 "omni.kit.viewport.utility" = {}
 "omni.timeline" = {}
+"omni.kit.pipapi" = {}
 
 [settings]
 
 [[python.module]]
 name = "morph.tbs_control_1"
+
+[python.pipapi]
+requirements = ["simpy"]
+use_online_index = true
 
 [documentation]
 pages = ["docs/Overview.md", "docs/CHANGELOG.md"]
