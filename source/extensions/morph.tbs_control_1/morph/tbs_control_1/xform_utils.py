@@ -13,6 +13,15 @@ xform_utils.py — USD xformOp 순서 정리 및 경고 필터
 - 경고가 다른 모듈명으로 바뀌면: install_xform_op_order_warning_filter 내부 경로 목록
 
 translate·rotate 가 scale 보다 앞에 있으면 Omni 바인딩에서 xformOpOrder 경고가 난다.
+
+【유지보수 시나리오】
+1) 특정 에셋에서 xform 경고가 계속 발생
+   - ensure_scale_xform_ops_first의 scale 삽입/재정렬 로직 점검
+   - 단일 transform matrix op 예외 처리 유지 확인
+2) 로그 필터가 동작하지 않는 Kit 버전
+   - install_xform_op_order_warning_filter의 logger 경로/patch 대상 확장
+3) 성능 이슈
+   - 매 프레임 호출 금지, 애니메이션 시작 시점 호출만 유지
 """
 
 from __future__ import annotations

@@ -26,6 +26,22 @@ import 구조 (요약)
 - selection_overlay → 선택·오버레이
 - sequence_editor → 시퀀스 편집기
 - on_shutdown → translate/curve/rotate/usd_animation 정지
+
+--------------
+유지보수 시나리오
+--------------
+1) "새 이벤트 타입(EAPEIS_PORT_XXX) 추가"
+   - xml_generator.py: SEQ_ 상수/빌더/파서 추가
+   - control_window.py: XML 콤보/입력 분기 + SIM_SEQ_ALIAS + rules/map 매핑 확인
+   - simulation_engine.py: _emit_event(seq=...) 호출 지점 추가
+2) "시뮬레이션 공정 로직 변경"
+   - simulation_engine.py: 단계 함수/선택 정책(_find_*) 수정
+   - control_window.py: UI 입력 항목 전달(on_sim_start_clicked)과 로그 표기 동기화
+3) "이벤트별 JSON 애니메이션 연결 변경"
+   - config/event_animation_rules.json(권장) 또는 event_animation_map.json 수정
+   - control_window.py의 handle_sim_event_for_animation에서 매핑/실행 로그 확인
+4) "종료/정리 누락 이슈"
+   - 본 파일 on_shutdown에서 스레드/구독/애니메이션 정리 순서 확인
 """
 
 from typing import List, Optional

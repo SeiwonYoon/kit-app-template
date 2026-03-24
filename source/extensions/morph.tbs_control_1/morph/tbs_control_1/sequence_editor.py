@@ -16,6 +16,23 @@ sequence_editor.py — TBS 시퀀스 편집기 UI (별도 창)
 저장 포맷(요약 JSON):
 - run_with_previous: 병렬 그룹 시작
 - step_delay_ms: 다음 그룹 지연(ms), 음수는 앵커 기준 앞당김
+
+【운영/유지보수 상세 가이드】
+- "현재 위치부터 시작" 옵션:
+  · _start_from_current / _start_from_current_paths / _start_snapshot 메타를 첫 스텝에 저장
+  · 실행 엔진 해석은 sequence_engine.py SequenceRunner.run()
+- MOVE 랜덤 범위:
+  · duration_min/max, dx_min/max, dy_min/max, dz_min/max 키를 사용
+  · 실제 샘플링은 sequence_engine._sample_step_value()
+- 새 step 타입 추가 절차:
+  1) STEP_TYPES에 타입명 추가
+  2) _build_one_step의 타입 분기 + 기본값 초기화 추가
+  3) _ui_step_* UI 생성 함수 추가
+  4) JSON 저장/로드 키를 _update_json_from_steps / _load_steps_from_json 경로에서 유지
+  5) sequence_engine._start_step 분기 구현
+- JSON을 시뮬레이션에서 재사용할 때:
+  · 본 파일은 편집/저장 담당, 실제 이벤트 매핑 실행은 control_window.py
+  · 파일 경로 등록은 config/event_animation_rules.json 또는 event_animation_map.json
 """
 
 from __future__ import annotations
@@ -43,6 +60,7 @@ INPUT_FIELD_STYLE = {
 }
 
 STEP_TYPES = ["USD_TIMELINE", "MOVE", "ROTATE", "DELAY"]
+_OFFSET_SUFFIX = "TBS_OFFSET"
 
 
 class SequenceEditorWindow:
@@ -57,6 +75,8 @@ class SequenceEditorWindow:
         self._runner = SequenceRunner(on_sequence_completed=lambda: print("[SEQUENCE] 완료", flush=True))  # noqa: T201
 
         self._json_model = ui.SimpleStringModel("[]")
+        self._start_from_current_model = ui.SimpleBoolModel(False)
+        self._start_from_current_paths_model = ui.SimpleStringModel("")
 
         self._steps_frame: Optional[ui.VStack] = None
         self._refresh_pending = False
@@ -95,6 +115,11 @@ class SequenceEditorWindow:
                     ui.Button("중지(초기화)", width=110, height=28, clicked_fn=self._stop)
                     ui.Button("JSON 저장(갱신)", width=120, height=28, clicked_fn=self._update_json_from_steps)
                     ui.Button("JSON 불러오기", width=120, height=28, clicked_fn=self._load_steps_from_json)
+                with ui.HStack(spacing=8, height=28):
+                    ui.CheckBox(model=self._start_from_current_model, style=CHECKBOX_WHITE_STYLE)
+                    ui.Label("현재 위치부터 시작", width=120)
+                    ui.Label("대상 경로(,)", width=85)
+                    ui.StringField(model=self._start_from_current_paths_model, width=360, height=28, style=INPUT_FIELD_STYLE)
 
                 # 상단 버튼은 고정, 아래 영역만 스크롤
                 # NOTE: 일부 Kit 버전에서는 height=0 이 레이아웃에서 0으로 접혀 JSON/Steps가 안 보입니다.
@@ -333,6 +358,45 @@ class SequenceEditorWindow:
             ui.Label("DZ", width=30)
             ui.FloatField(model=dz, width=70, height=28, style=INPUT_FIELD_STYLE)
 
+        # 랜덤 범위(선택 입력): *_min/max가 있으면 실행 시 범위 랜덤
+        # 유지보수 규칙:
+        # - 고정값(duration/dx/dy/dz)은 기본값/호환용으로 유지
+        # - *_min/max가 존재하면 sequence_engine._sample_step_value가 우선 사용
+        dmin = ui.SimpleFloatModel(float(step.get("duration_min", step.get("duration", 1.0))))
+        dmax = ui.SimpleFloatModel(float(step.get("duration_max", step.get("duration", 1.0))))
+        dxmin = ui.SimpleFloatModel(float(step.get("dx_min", step.get("dx", 0.0))))
+        dxmax = ui.SimpleFloatModel(float(step.get("dx_max", step.get("dx", 0.0))))
+        dymin = ui.SimpleFloatModel(float(step.get("dy_min", step.get("dy", 0.0))))
+        dymax = ui.SimpleFloatModel(float(step.get("dy_max", step.get("dy", 0.0))))
+        dzmin = ui.SimpleFloatModel(float(step.get("dz_min", step.get("dz", 0.0))))
+        dzmax = ui.SimpleFloatModel(float(step.get("dz_max", step.get("dz", 0.0))))
+        dmin.add_value_changed_fn(lambda _m: step.__setitem__("duration_min", float(dmin.get_value_as_float())))
+        dmax.add_value_changed_fn(lambda _m: step.__setitem__("duration_max", float(dmax.get_value_as_float())))
+        dxmin.add_value_changed_fn(lambda _m: step.__setitem__("dx_min", float(dxmin.get_value_as_float())))
+        dxmax.add_value_changed_fn(lambda _m: step.__setitem__("dx_max", float(dxmax.get_value_as_float())))
+        dymin.add_value_changed_fn(lambda _m: step.__setitem__("dy_min", float(dymin.get_value_as_float())))
+        dymax.add_value_changed_fn(lambda _m: step.__setitem__("dy_max", float(dymax.get_value_as_float())))
+        dzmin.add_value_changed_fn(lambda _m: step.__setitem__("dz_min", float(dzmin.get_value_as_float())))
+        dzmax.add_value_changed_fn(lambda _m: step.__setitem__("dz_max", float(dzmax.get_value_as_float())))
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("RND DUR", width=60)
+            ui.FloatField(model=dmin, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("~", width=10)
+            ui.FloatField(model=dmax, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("RND DX", width=52)
+            ui.FloatField(model=dxmin, width=58, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("~", width=10)
+            ui.FloatField(model=dxmax, width=58, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("RND DY", width=60)
+            ui.FloatField(model=dymin, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("~", width=10)
+            ui.FloatField(model=dymax, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("RND DZ", width=52)
+            ui.FloatField(model=dzmin, width=58, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("~", width=10)
+            ui.FloatField(model=dzmax, width=58, height=28, style=INPUT_FIELD_STYLE)
+
     def _ui_step_delay(self, step: Dict[str, Any]) -> None:
         dur = ui.SimpleFloatModel(float(step.get("duration", 1.0)))
         dur.add_value_changed_fn(lambda _m: step.__setitem__("duration", float(dur.get_value_as_float())))
@@ -514,6 +578,9 @@ class SequenceEditorWindow:
 
     def _update_json_from_steps(self) -> None:
         try:
+            # JSON 저장 직전, 런타임 시작옵션(_start_from_current/_paths/_snapshot)을
+            # 항상 첫 스텝 메타에 동기화한다.
+            self._sync_runtime_start_options_to_steps()
             self._json_model.set_value(json.dumps(self._steps, ensure_ascii=False, indent=2))
         except Exception:
             pass
@@ -523,6 +590,8 @@ class SequenceEditorWindow:
             data = json.loads(self._json_model.get_value_as_string() or "[]")
             if isinstance(data, list):
                 self._steps = data
+                # JSON에서 읽은 시작옵션을 UI 체크/텍스트 박스로 역주입
+                self._load_runtime_start_options_from_steps()
                 self._schedule_refresh()
         except Exception as e:
             print(f"[SEQUENCE] JSON load 실패: {e}", flush=True)  # noqa: T201
@@ -530,6 +599,7 @@ class SequenceEditorWindow:
     def _run_steps(self) -> None:
         self._flush_rotate_step_flags_to_dict()
         self._flush_timing_models_to_dict()
+        self._sync_runtime_start_options_to_steps()
         self._runner.run(self._steps)
         print(f"[SEQUENCE] 실행: {len(self._steps)} steps", flush=True)  # noqa: T201
 
@@ -577,12 +647,129 @@ class SequenceEditorWindow:
         try:
             from omni.kit.clipboard import copy as clipboard_copy
 
+            self._sync_runtime_start_options_to_steps()
+            self._json_model.set_value(json.dumps(self._steps, ensure_ascii=False, indent=2))
             txt = self._json_model.get_value_as_string() or ""
             clipboard_copy(txt)
             print("[SEQUENCE] JSON 복사됨", flush=True)  # noqa: T201
         except Exception as e:
             # 클립보드 확장 미탑재 등의 경우: 로그로만 남김
             print(f"[SEQUENCE] JSON 복사 실패: {e}", flush=True)  # noqa: T201
+
+    def _sync_runtime_start_options_to_steps(self) -> None:
+        if not self._steps:
+            return
+        first = self._steps[0]
+        if not isinstance(first, dict):
+            return
+        enabled = bool(self._start_from_current_model.get_value_as_bool())
+        first["_start_from_current"] = enabled
+        path_text = str(self._start_from_current_paths_model.get_value_as_string() or "").strip()
+        first["_start_from_current_paths"] = path_text
+        if enabled:
+            # 실행/저장 시점의 현재 뷰포트 상태를 JSON에 스냅샷으로 고정.
+            # 이후 시뮬레이션에서 재사용해도 동일 시작점을 재현할 수 있다.
+            first["_start_snapshot"] = self._capture_start_snapshot(path_text)
+        else:
+            # 체크 해제 시 스냅샷 메타를 제거해 기존 baseline 시작 동작으로 복귀.
+            first.pop("_start_snapshot", None)
+
+    def _load_runtime_start_options_from_steps(self) -> None:
+        if not self._steps:
+            self._start_from_current_model.set_value(False)
+            self._start_from_current_paths_model.set_value("")
+            return
+        first = self._steps[0]
+        if not isinstance(first, dict):
+            self._start_from_current_model.set_value(False)
+            self._start_from_current_paths_model.set_value("")
+            return
+        self._start_from_current_model.set_value(bool(first.get("_start_from_current", False)))
+        self._start_from_current_paths_model.set_value(str(first.get("_start_from_current_paths", "") or ""))
+
+    def _capture_start_snapshot(self, path_text: str) -> Dict[str, Dict[str, List[float]]]:
+        """
+        현재 뷰포트(스테이지)의 transform을 JSON 메타(_start_snapshot)로 저장한다.
+        - path_text 비어있음: 시퀀스에 등장하는 MOVE/ROTATE 대상 전체
+        - path_text 있음: 입력된 경로들만
+        """
+        stage = ou.get_context().get_stage()
+        if not stage:
+            return {}
+
+        target_paths: List[str] = []
+        if path_text:
+            # 특정 경로 지정 모드: 입력된 경로만 현재 상태를 캡처
+            for p in [x.strip() for x in path_text.split(",") if x.strip()]:
+                target_paths.extend(resolve_prim_paths_multi(p))
+        else:
+            # 전체 모드: 시퀀스에서 실제로 움직이는 대상(MOVE/ROTATE)만 자동 수집
+            for st in self._steps:
+                if not isinstance(st, dict):
+                    continue
+                t = str(st.get("type", "")).upper()
+                if t not in ("MOVE", "ROTATE"):
+                    continue
+                target_paths.extend(resolve_prim_paths_multi(str(st.get("prim", "") or "")))
+        # 중복 제거(순서 유지)
+        seen = set()
+        uniq_paths = []
+        for p in target_paths:
+            if p in seen:
+                continue
+            seen.add(p)
+            uniq_paths.append(p)
+
+        out: Dict[str, Dict[str, List[float]]] = {}
+        for path in uniq_paths:
+            try:
+                prim = stage.GetPrimAtPath(path)
+                if not prim or not prim.IsValid():
+                    continue
+                # 중요: 일반 xform이 아니라 TBS_OFFSET op 값을 캡처해야
+                # sequence_engine/animation 모듈의 실제 적용 좌표계와 일치한다.
+                t = self._get_offset_translate(prim)
+                r = self._get_offset_rotate(prim)
+                out[path] = {"t": t, "r": r}
+            except Exception:
+                continue
+        return out
+
+    def _get_offset_translate(self, prim: Usd.Prim) -> List[float]:
+        try:
+            x = UsdGeom.Xformable(prim)
+            if x:
+                for op in x.GetOrderedXformOps():
+                    name = ""
+                    try:
+                        name = op.GetName()
+                    except Exception:
+                        name = ""
+                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and _OFFSET_SUFFIX in str(name):
+                        v = op.Get()
+                        if v is not None and len(v) >= 3:
+                            return [float(v[0]), float(v[1]), float(v[2])]
+        except Exception:
+            pass
+        return [0.0, 0.0, 0.0]
+
+    def _get_offset_rotate(self, prim: Usd.Prim) -> List[float]:
+        try:
+            x = UsdGeom.Xformable(prim)
+            if x:
+                for op in x.GetOrderedXformOps():
+                    name = ""
+                    try:
+                        name = op.GetName()
+                    except Exception:
+                        name = ""
+                    if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ and _OFFSET_SUFFIX in str(name):
+                        v = op.Get()
+                        if v is not None and len(v) >= 3:
+                            return [float(v[0]), float(v[1]), float(v[2])]
+        except Exception:
+            pass
+        return [0.0, 0.0, 0.0]
 
     def _fill_selected_prim(self, model: ui.SimpleStringModel) -> None:
         """현재 뷰포트 선택 prim 경로를 PRIM 필드에 채움."""

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import time
+import random
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -48,6 +49,20 @@ from .xform_utils import ensure_scale_xform_ops_first
 _OFFSET_SUFFIX = "TBS_OFFSET"
 
 
+def _sample_step_value(step: Dict[str, Any], key: str) -> float:
+    """
+    key, key_min/key_max 를 지원.
+    범위가 없으면 고정값 key 사용.
+    """
+    if f"{key}_min" in step or f"{key}_max" in step:
+        lo = float(step.get(f"{key}_min", step.get(key, 0.0)))
+        hi = float(step.get(f"{key}_max", step.get(key, 0.0)))
+        if lo > hi:
+            lo, hi = hi, lo
+        return random.uniform(lo, hi)
+    return float(step.get(key, 0.0))
+
+
 def _group_end_index(steps: List[Dict[str, Any]], start_idx: int) -> int:
     """start_idx부터 run_with_previous 가 연속인 구간의 마지막 인덱스(앵커 = UI 최하단)."""
     g_end = start_idx
@@ -60,6 +75,12 @@ def _step_duration_sec(step: Dict[str, Any]) -> float:
     """스텝의 재생 길이(초). USD 타임라인은 프레임 구간을 타임라인 TPS로 환산."""
     t = str((step or {}).get("type") or "").upper()
     if t in ("MOVE", "ROTATE"):
+        rt = (step or {}).get("_runtime_duration", None)
+        if rt is not None:
+            return max(1e-6, float(rt))
+        if t == "MOVE":
+            if "duration_max" in (step or {}):
+                return max(1e-6, float((step or {}).get("duration_max", (step or {}).get("duration", 1.0))))
         return max(1e-6, float((step or {}).get("duration", 1.0)))
     if t == "DELAY":
         return max(1e-6, float((step or {}).get("duration", 1.0)))
@@ -797,6 +818,9 @@ class SequenceRunner:
         self._group_t0 = 0.0
         self._prev_group_hide_paths: List[str] = []
         self._current_group: Optional[Tuple[int, int]] = None
+        self._start_from_current: bool = False
+        self._start_from_current_paths: List[str] = []
+        self._start_snapshot: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
 
     def is_running(self) -> bool:
         return self._running
@@ -1002,8 +1026,31 @@ class SequenceRunner:
 
     def run(self, steps: List[Dict[str, Any]]) -> None:
         """시퀀스 실행 시작."""
-        self.stop()
-        self._steps = list(steps or [])
+        incoming_steps = list(steps or [])
+        first = incoming_steps[0] if incoming_steps else {}
+        start_from_current = bool((first or {}).get("_start_from_current", False))
+        raw_paths = str((first or {}).get("_start_from_current_paths", "")).strip()
+        # "현재 위치부터 시작" 모드에서는 run 시작 전에 baseline 복원을 하면 안 된다.
+        # 기존 self.stop()은 baseline을 복원하므로, 이 모드에서는 pause+정리만 수행한다.
+        if start_from_current:
+            self.pause()
+            try:
+                self._clear_all_hides()
+            except Exception:
+                pass
+            try:
+                usd_animation_control.stop_usd_animation()
+                usd_animation_control.reset_timeline_to_zero()
+            except Exception:
+                pass
+        else:
+            self.stop()
+
+        self._steps = incoming_steps
+        self._start_from_current = start_from_current
+        self._start_from_current_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
+        # JSON에 저장된 시작 스냅샷(prim_path -> t/r)을 런타임 형식으로 파싱.
+        self._start_snapshot = self._parse_start_snapshot((first or {}).get("_start_snapshot", {}))
         self._current_group = None
         self._prev_group_hide_paths = []
         # 실행 버튼을 누르면 타임라인은 항상 0에서 시작
@@ -1018,7 +1065,19 @@ class SequenceRunner:
             # baseline은 '최초 상태'를 보존해야 하므로 매 실행마다 덮어쓰지 않는다.
             # 다만 스텝 편집으로 새 prim이 등장할 수 있으니, baseline에 없는 prim만 보강 캡처한다.
             self._capture_baseline(force=False)
-            self._restore_baseline()
+            if self._start_snapshot:
+                # 최우선: 명시 스냅샷이 있으면 먼저 적용해서 시작 기준을 고정한다.
+                self._apply_start_snapshot(self._start_snapshot)
+            if not self._start_from_current:
+                self._restore_baseline()
+            elif self._start_from_current_paths:
+                # 특정 경로만 현재 위치 유지: 그 외 경로는 baseline 복원.
+                keep_current = set(self._start_from_current_paths)
+                self._restore_baseline(exclude_paths=keep_current)
+            elif self._start_snapshot:
+                # 스냅샷이 있는 경우, 스냅샷에 없는 객체만 baseline으로 복원
+                keep_current = set(self._start_snapshot.keys())
+                self._restore_baseline(exclude_paths=keep_current)
             self._begin_sequence()
 
         self._call_next_frame(_start)
@@ -1050,12 +1109,48 @@ class SequenceRunner:
                     except Exception:
                         pass
 
-    def _restore_baseline(self) -> None:
+    def _restore_baseline(self, exclude_paths: Optional[set] = None) -> None:
         """baseline으로 transform을 되돌림. (실행을 항상 초기값부터 재현하기 위함)"""
         stage = _get_stage()
         if not stage:
             return
+        # exclude_paths는 "현재 위치부터 시작" 부분 적용을 위한 선택적 복원 예외 목록.
         for path, (t, r) in list(self._baseline.items()):
+            if exclude_paths and path in exclude_paths:
+                continue
+            try:
+                prim = stage.GetPrimAtPath(path)
+                if prim and prim.IsValid():
+                    _set_translate(prim, t)
+                    _set_rotate_xyz(prim, r)
+            except Exception:
+                pass
+
+    def _parse_start_snapshot(self, raw: Any) -> Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]]:
+        out: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
+        if not isinstance(raw, dict):
+            return out
+        for path, rec in raw.items():
+            if not isinstance(path, str) or not isinstance(rec, dict):
+                continue
+            t = rec.get("t")
+            r = rec.get("r")
+            if not (isinstance(t, (list, tuple)) and isinstance(r, (list, tuple)) and len(t) >= 3 and len(r) >= 3):
+                continue
+            try:
+                out[path] = (
+                    Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])),
+                    Gf.Vec3f(float(r[0]), float(r[1]), float(r[2])),
+                )
+            except Exception:
+                continue
+        return out
+
+    def _apply_start_snapshot(self, snapshot: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]]) -> None:
+        stage = _get_stage()
+        if not stage:
+            return
+        for path, (t, r) in snapshot.items():
             try:
                 prim = stage.GetPrimAtPath(path)
                 if prim and prim.IsValid():
@@ -1182,10 +1277,16 @@ class SequenceRunner:
         self._running = True
         self._prev_group_hide_paths = []
         self._current_group = None
+        try:
+            mode = "current" if self._start_from_current else "baseline"
+            print(f"[SEQUENCE] start mode={mode} paths={len(self._start_from_current_paths)} snapshot={len(self._start_snapshot)}", flush=True)  # noqa: T201
+        except Exception:
+            pass
         if not self._steps:
             self._complete_sequence()
             return
         d0 = int(self._steps[0].get("step_delay_ms", 0)) / 1000.0
+        # 첫 스텝(step_delay_ms)은 "시퀀스 시작 전 초기 대기"로 해석한다.
         if d0 <= 0:
             self._execute_group_and_schedule_next(0)
         else:
@@ -1216,11 +1317,13 @@ class SequenceRunner:
         delay_sec_next = delay_ms_next / 1000.0
         t0 = self._group_t0
         if b > a:
+            # 병렬 그룹 앵커(b)가 리더보다 늦게 시작할 수 있으므로 시작 오프셋을 반영한다.
             anchor_rel = int(self._steps[b].get("step_delay_ms", 0)) / 1000.0
             t_anchor_start = t0 + max(0.0, anchor_rel)
         else:
             t_anchor_start = t0
         anchor_end = t_anchor_start + anchor_dur
+        # 음수 delay를 쓰더라도 현재 구현은 그룹 시작(t0)보다 앞당기지 않는다.
         next_start = max(t0, anchor_end + delay_sec_next)
 
         def _go() -> None:
@@ -1276,6 +1379,13 @@ class SequenceRunner:
         """hide 는 _execute_group 에서 이미 적용. 여기서는 애니메이션만 시작."""
         step = self._steps[idx] or {}
         t = str(step.get("type") or "").upper()
+        if t == "MOVE":
+            # MOVE 랜덤 범위 샘플링은 "실행 시점"에 1회 고정한다.
+            # 이후 duration/dx/dy/dz는 _runtime_* 값을 사용해 로그/스케줄과 일치시킨다.
+            step["_runtime_duration"] = _sample_step_value(step, "duration")
+            step["_runtime_dx"] = _sample_step_value(step, "dx")
+            step["_runtime_dy"] = _sample_step_value(step, "dy")
+            step["_runtime_dz"] = _sample_step_value(step, "dz")
 
         def _done() -> None:
             try:
@@ -1299,6 +1409,7 @@ class SequenceRunner:
                     _done()
                     return
             try:
+                # 코드 이동/회전으로 누적된 오프셋을 USD 시작프레임 기준으로 보정.
                 _apply_world_space_offset_correction(list(self._baseline.keys()), start)
             except Exception:
                 pass
@@ -1353,13 +1464,14 @@ class SequenceRunner:
 
         if t == "MOVE":
             prim_id = str(step.get("prim") or "")
-            duration = float(step.get("duration", 1.0))
-            dx = float(step.get("dx", 0.0))
-            dy = float(step.get("dy", 0.0))
-            dz = float(step.get("dz", 0.0))
+            duration = float(step.get("_runtime_duration", step.get("duration", 1.0)))
+            dx = float(step.get("_runtime_dx", step.get("dx", 0.0)))
+            dy = float(step.get("_runtime_dy", step.get("dy", 0.0)))
+            dz = float(step.get("_runtime_dz", step.get("dz", 0.0)))
             stage = _get_stage()
             paths = resolve_prim_paths_multi(prim_id)
             if not paths:
+                # prim 경로 해석 실패는 하드 에러로 중단하지 않고 step만 스킵한다.
                 _done()
                 return
             remaining = {"n": len(paths)}

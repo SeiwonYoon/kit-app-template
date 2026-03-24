@@ -13,6 +13,17 @@ translate_animation.py — 직선 이동 애니메이션 (구간별 x/y/z)
 - op 이름 규칙: _OFFSET_SUFFIX (rotate/curve와 공유 개념, 바꾸면 전체 검색 필요)
 
 사용처: control_window, sequence_engine
+
+【유지보수 시나리오】
+1) MOVE가 순간이동/끊김처럼 보일 때
+   - _on_update 보간(t) 계산 확인
+   - segment duration/delta 누적 방식 확인
+2) 실행 후 원위치/좌표 튐 문제
+   - _OFFSET_SUFFIX op만 읽고 쓰는지 확인(_get_or_create_offset_translate_op)
+   - sequence_engine baseline 복원 로직과 충돌 여부 확인
+3) 새 파라미터(easing 등) 추가
+   - run_prim_translate_animation의 segment schema 확장
+   - sequence_engine MOVE 스텝 생성/실행 키와 동기화
 """
 
 from typing import List, Dict, Any, Optional, Callable

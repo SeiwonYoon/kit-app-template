@@ -20,6 +20,15 @@ prim_utils.py — 스테이지/prim 조회 및 변환 유틸 (경로 수집, 이
 - translate 적용 방식: set_prim_translate_only (TBS_OFFSET op 이름은 xform_utils와 연동)
 
 사용처: control_window, load_window
+
+【유지보수 시나리오】
+1) prim 목록에 특정 타입이 빠지는 경우
+   - collect_prim_paths_safe의 IsA 필터 수정
+2) 이름 검색 중복/오탐 이슈
+   - find_all_prim_paths_by_name 비교 규칙(name/path exact match) 조정
+3) 위치 이동이 기존 애니메이션과 충돌
+   - set_prim_translate_only 호출 경로 확인
+   - sequence_engine/translate_animation의 TBS_OFFSET 정책과 충돌 여부 점검
 """
 
 from typing import List, Optional

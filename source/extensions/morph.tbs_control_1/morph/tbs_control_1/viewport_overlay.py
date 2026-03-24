@@ -12,6 +12,16 @@ viewport_overlay.py — 뷰포트 3D 정보 패널 (PrimInfoOverlay)
 - 패널 위치 오프셋: PrimInfoOverlay 내부 (월드 중심 대비)
 
 사용처: selection_overlay.py
+
+【유지보수 시나리오】
+1) 패널이 화면 밖/겹침 문제
+   - PANEL_OFFSET_SCREEN_PX, MAX_PANEL_WIDTH/HEIGHT 조정
+   - world->screen 변환 실패 시 fallback 처리 확인
+2) 표시 텍스트 항목 변경
+   - prim_info.get_prim_display_lines에서 항목 추가/삭제
+   - 본 파일은 렌더링(레이아웃)만 유지
+3) 닫기 버튼 UX 변경
+   - CLOSE_BUTTON_* 상수 + PrimInfoOverlay._build_panel 내부 이벤트 처리 수정
 """
 
 from typing import Any, Callable, List, Optional

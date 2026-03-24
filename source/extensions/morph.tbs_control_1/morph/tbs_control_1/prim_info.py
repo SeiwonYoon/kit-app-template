@@ -12,6 +12,15 @@ prim_info.py — USD prim 표시용 문자열·웹뷰 패널 레이아웃 상수
 - 표시할 속성 종류: get_prim_display_lines 내부
 
 사용처: selection_overlay, viewport_overlay, control_window(간접)
+
+【유지보수 시나리오】
+1) 패널에 lot/port 상태를 추가로 보여주고 싶을 때
+   - get_prim_display_lines에서 CustomData/Attribute 키를 추가
+2) 텍스트가 너무 길어 패널이 깨질 때
+   - CHARS_PER_LINE, MAX_ATTR_VALUE_LEN 조정
+   - viewport_overlay MAX_* 상수와 함께 튜닝
+3) 한글/비UTF-8 문자열 깨짐
+   - safe_str() 경로 유지(강제 UTF-8 replace)
 """
 
 from typing import List, Any, Optional, Tuple

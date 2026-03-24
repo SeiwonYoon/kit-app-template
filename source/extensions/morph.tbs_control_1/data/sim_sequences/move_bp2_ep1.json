@@ -1,0 +1,58 @@
+[
+    {
+      "type": "MOVE",
+      "prim": "/Root/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/link0",
+      "duration": 9.999999747378752e-05,
+      "dx": 500.0,
+      "dy": 600.0,
+      "dz": 0.0,
+      "hide_enabled": false,
+      "hide_prims": "",
+      "run_with_previous": false,
+      "step_delay_ms": 0
+    },
+    {
+      "type": "ROTATE",
+      "prim": "/Root/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/link0",
+      "duration": 9.999999747378752e-05,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": -90.0,
+      "user_axis_rotate": false,
+      "pivot_wx": 0.0,
+      "pivot_wy": 0.0,
+      "pivot_wz": 0.0,
+      "hide_enabled": false,
+      "hide_prims": "",
+      "run_with_previous": true,
+      "step_delay_ms": 0
+    },
+    {
+      "type": "MOVE",
+      "prim": "/Root/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/link0",
+      "duration": 1.0,
+      "dx": -500.0,
+      "dy": -600.0,
+      "dz": 0.0,
+      "hide_enabled": false,
+      "hide_prims": "",
+      "run_with_previous": false,
+      "step_delay_ms": 0
+    },
+    {
+      "type": "ROTATE",
+      "prim": "/Root/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/link0",
+      "duration": 1.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 90.0,
+      "user_axis_rotate": false,
+      "pivot_wx": 0.0,
+      "pivot_wy": 0.0,
+      "pivot_wz": 0.0,
+      "hide_enabled": false,
+      "hide_prims": "",
+      "run_with_previous": true,
+      "step_delay_ms": 0
+    }
+  ]

@@ -13,6 +13,16 @@ signal_parser.py — 가상 시그널(JSON/XML) 파싱 → {objects, segments} d
 - 통합 진입점: parse_signal()
 
 사용처: control_window.py (SAMPLE_GENERATOR_JSON 형식과 맞춰야 함)
+
+【유지보수 시나리오】
+1) 외부 신호 포맷 변경(JSON/XML)
+   - 본 파일에서 파싱 키를 수정하고, 반환 스키마는 유지({objects, segments})
+2) 새 애니메이션 파라미터 추가(예: easing, axis)
+   - _normalize_parsed와 parse_signal_xml에 키 추가
+   - control_window.run_generator_from_parsed/translate_animation 소비 로직도 동시 수정
+3) 파싱 실패 디버깅
+   - parse_signal() 분기(format) 확인
+   - None 반환 지점(필수 키 누락) 로그 추가 권장
 """
 
 import json

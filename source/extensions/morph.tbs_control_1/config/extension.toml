@@ -22,7 +22,7 @@ repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
 name = "morph.tbs_control_1"
 
 [python.pipapi]
-requirements = ["simpy"]
+requirements = ["simpy", "openpyxl"]
 use_online_index = true
 
 [documentation]

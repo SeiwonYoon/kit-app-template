@@ -20,6 +20,17 @@ selection_overlay.py — 뷰포트 선택 연동 및 3D 정보 오버레이 연�
 - 패널 내용/레이아웃: viewport_overlay.PrimInfoOverlay + prim_info 상수
 
 사용처: extension.py
+
+【유지보수 시나리오】
+1) 선택 동기화가 늦거나 튀는 경우
+   - on_post_update의 _poll_frame 주기/POLL_FRAME_INTERVAL 조정
+   - on_selection_changed와 add_selection_to_open_paths 호출 순서 확인
+2) 패널 닫기/선택 복원 이슈
+   - on_close_info_panel 내부 _open_paths/_last_paths 갱신 로직 확인
+   - viewport_overlay의 on_close 콜백 연결 지점(try_attach_overlay) 확인
+3) 다중 선택 정책 변경(현재는 1개 중심)
+   - add_selection_to_open_paths / show_prim_info_in_viewport 로직 확장
+   - control_window의 prim 선택 동작과 UX 일관성 검토
 """
 
 import time

@@ -12,6 +12,14 @@ rotate_animation.py — 회전 애니메이션 (도 단위, 로컬 offset / 월�
 - 시퀀서와 제어창 동작 일치: sequence_engine의 ROTATE 분기와 인자 키 이름 유지
 
 사용처: control_window, sequence_engine
+
+【유지보수 시나리오】
+1) 월드 피봇 회전 중심이 어긋날 때
+   - run_world_euler_pivot_rotate_animation의 pivot/world 행렬 계산 확인
+2) 로컬 회전과 월드 회전 동작이 다를 때
+   - user_axis_rotate 플래그 전달 경로(sequence_editor -> sequence_engine) 검증
+3) 회전 축 순서(XYZ) 변경 필요 시
+   - 본 파일 보간/적용 순서와 sequence_engine 문서 동시 수정
 """
 
 from typing import List, Dict, Any, Optional, Callable

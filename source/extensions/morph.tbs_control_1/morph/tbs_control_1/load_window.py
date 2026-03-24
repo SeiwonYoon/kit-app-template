@@ -15,6 +15,15 @@ load_window.py — USD Load 창 UI 및 로드 로직
 - 로드 버튼 동작·에러 메시지: on_load_usd 내부
 
 사용처: extension.py → build_load_window(self)
+
+【유지보수 시나리오】
+1) 샘플 자산 목록을 프로젝트 전용으로 고정하고 싶을 때
+   - usd_loader_utils.get_resource_folder_path / get_resource_usd_list 수정
+   - 필요 시 본 파일의 combo 라벨 문구도 함께 수정
+2) 사용자 입력 URL 정책(허용/차단) 변경
+   - on_load_usd에서 path 검증(path_has_supported_stage_extension) 전후에 규칙 추가
+3) 로드 후 추가 초기화 필요 시
+   - on_load_usd의 open_stage 성공 분기에서 control_window 초기화 콜백 연결
 """
 
 import asyncio

@@ -13,6 +13,16 @@ usd_animation_control.py — USD 내장 타임라인(프레임) 재생
 - 시퀀스 USD_TIMELINE 스텝: sequence_engine 이 본 모듈 호출
 
 사용처: control_window, sequence_engine
+
+【유지보수 시나리오】
+1) "USD 타임라인 스텝의 시작/종료 프레임 정책" 변경
+   - 본 파일: play_usd_animation* / resolve_saved_animation_frame_range
+   - sequence_engine.py: USD_TIMELINE 분기(_start_step)와 동기화
+2) "루프/완료 콜백 타이밍" 변경
+   - 본 파일의 _loop_sub/_complete_sub 관리 로직 수정
+   - control_window.py 수동 재생 버튼 동작(on_play_usd_animation) 확인
+3) "프레임 단위 -> 시간 단위" 정책 변경
+   - frame_to_time / time_to_frame 사용부 전역 검색
 """
 
 from typing import Optional, Callable
