@@ -302,6 +302,107 @@ def _normalize_json_path(path_text: str) -> Path:
     return (_extension_root_dir() / p).resolve()
 
 
+def _estimate_step_duration_sec_for_log(step: Dict[str, Any]) -> Optional[float]:
+    """
+    애니메이션 실행이력용 "예상 길이" 계산(보수적).
+    - MOVE/ROTATE: duration_max가 있으면 max, 없으면 duration.
+    - DELAY: duration
+    - USD_TIMELINE: 수동이면 프레임 범위로 추정, AUTO는 환경 의존이라 None.
+    """
+    try:
+        t = str((step or {}).get("type") or "").upper()
+    except Exception:
+        return None
+    try:
+        if t in ("MOVE", "ROTATE"):
+            if "duration_max" in (step or {}):
+                return max(0.0, float((step or {}).get("duration_max", (step or {}).get("duration", 0.0))))
+            return max(0.0, float((step or {}).get("duration", 0.0)))
+        if t == "DELAY":
+            return max(0.0, float((step or {}).get("duration", 0.0)))
+        if t == "USD_TIMELINE":
+            mode = str((step or {}).get("mode", "MANUAL")).upper()
+            if mode == "AUTO":
+                return None
+            start = int((step or {}).get("start_frame", 0))
+            end = int((step or {}).get("end_frame", 0))
+            if end <= start:
+                return 0.0
+            # 대략치: 60fps 가정(Kit 환경별로 다를 수 있어 "예상치"로만 사용)
+            return max(0.0, float(end - start) / 60.0)
+    except Exception:
+        return None
+    return None
+
+
+def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    SequenceRunner의 그룹/지연 규칙을 단순화해서 "예상 총 길이"를 계산한다.
+    - 병렬 그룹: 리더 시작 시각 기준으로 (offset + duration)의 최대값을 그룹 종료로 본다.
+    - 다음 그룹 시작: engine과 동일하게 anchor_end + next.step_delay_ms 를 사용하되,
+      그룹 시작(t0)보다 앞당기지는 않는다.
+    """
+    if not steps:
+        return 0.0
+    # 첫 스텝의 step_delay_ms는 시퀀스 시작 전 지연으로 해석
+    try:
+        t_cursor = max(0.0, int((steps[0] or {}).get("step_delay_ms", 0)) / 1000.0)
+    except Exception:
+        t_cursor = 0.0
+    last_finish = t_cursor
+
+    i = 0
+    while i < len(steps):
+        try:
+            g_end = _group_end_index(steps, i)
+        except Exception:
+            g_end = i
+        t0 = t_cursor
+
+        # 그룹 내 예상 종료(병렬 최대)
+        group_finish = t0
+        for j in range(i, g_end + 1):
+            st = steps[j] if isinstance(steps[j], dict) else {}
+            off = 0.0
+            if j != i:
+                try:
+                    off = max(0.0, int((st or {}).get("step_delay_ms", 0)) / 1000.0)
+                except Exception:
+                    off = 0.0
+            dur = _estimate_step_duration_sec_for_log(st)
+            if dur is None:
+                # 알 수 없는 타입/auto 타임라인이 섞이면 전체 추정도 None 처리
+                return None
+            group_finish = max(group_finish, t0 + off + float(dur))
+        last_finish = max(last_finish, group_finish)
+
+        next_idx = g_end + 1
+        if next_idx >= len(steps):
+            break
+
+        # anchor 종료 시각(앵커 스텝은 그룹 마지막)
+        anchor_step = steps[g_end] if isinstance(steps[g_end], dict) else {}
+        anchor_off = 0.0
+        if g_end > i:
+            try:
+                anchor_off = max(0.0, int((anchor_step or {}).get("step_delay_ms", 0)) / 1000.0)
+            except Exception:
+                anchor_off = 0.0
+        anchor_dur = _estimate_step_duration_sec_for_log(anchor_step)
+        if anchor_dur is None:
+            return None
+        anchor_end = t0 + anchor_off + float(anchor_dur)
+
+        try:
+            delay_next = int((steps[next_idx] or {}).get("step_delay_ms", 0)) / 1000.0
+        except Exception:
+            delay_next = 0.0
+        t_cursor = max(t0, anchor_end + float(delay_next))
+        i = next_idx
+
+    return max(0.0, float(last_finish))
+
+
 def _execute_mapped_sequence_stub(
     ext: Any,
     seq: str,
@@ -334,6 +435,7 @@ def _execute_mapped_sequence_stub(
     base_desc = desc if desc else "동작설명 없음"
     lot_id = str(payload.get("lot_id", "")).strip() or "-"
     action_text = f"{base_desc} ({route} | lot={lot_id})"
+    sim_time = str(payload.get("sim_time", "")).strip()
     if not p.exists():
         _append_anim_history_log(
             ext,
@@ -357,6 +459,10 @@ def _execute_mapped_sequence_stub(
             print(f"[ANIM MAP] JSON 파싱 실패: {p} err={e}", flush=True)
         return
 
+    # 예상 총 길이(초): 엑셀/로그에 같이 남길 수 있게 추정
+    est_total = _estimate_sequence_total_duration_sec_for_log(parsed)
+    est_text = f"{est_total:.2f}s" if isinstance(est_total, (float, int)) else "미확인"
+
     step_types: List[str] = []
     for step in parsed:
         if isinstance(step, dict):
@@ -370,12 +476,99 @@ def _execute_mapped_sequence_stub(
 
     _append_anim_history_log(
         ext,
-        f"[ANIM] 실행준비완료 | event={seq} | action={action_text} | file={p.name} | steps={len(parsed)}({preview}) | runner={runner} | rule={rule_name or '-'}",
+        f"[ANIM] 실행준비완료 | t={sim_time or '-'} | event={seq} | est={est_text} | action={action_text} | file={p.name} | steps={len(parsed)}({preview}) | runner={runner} | rule={rule_name or '-'}",
     )
     # 실제 실행 연결 (JSON이 준비되면 즉시 실행)
     try:
+        # 완료 시점(벽시계) 로깅을 위해 이번 실행 메타를 ext에 저장.
+        # (단일 SequenceRunner 사용 전제: 병렬 실행을 넣으면 구조를 큐 기반으로 바꿔야 함)
+        started_wall = time.monotonic()
+        active = {
+            "t": sim_time,
+            "event": seq,
+            "file": p.name,
+            "path": str(p),
+            "action": action_text,
+            "est": est_text,
+            "_started_wall": started_wall,
+            "runner": runner,
+            "rule": rule_name or "-",
+            "lot_id": lot_id,
+            "from_port_id": from_port,
+            "to_port_id": to_port,
+            "port_id": port,
+        }
+        ext._sim_anim_active = active
+        # 엑셀용 구조화 레코드(행 단위)도 함께 누적
+        recs = getattr(ext, "_sim_anim_history_records", None)
+        if isinstance(recs, list):
+            try:
+                recs.append(
+                    {
+                        "sim_time": sim_time,
+                        "event": seq,
+                        "file": p.name,
+                        "path": str(p),
+                        "runner": runner,
+                        "rule": rule_name or "-",
+                        "lot_id": lot_id,
+                        "from_port_id": from_port,
+                        "to_port_id": to_port,
+                        "port_id": port,
+                        "action": action_text,
+                        "est_sec": float(est_total) if isinstance(est_total, (float, int)) else None,
+                        "wall_sec": None,
+                        "status": "START",
+                        "_started_wall": started_wall,
+                    }
+                )
+            except Exception:
+                pass
+        try:
+            def _on_done():
+                info = getattr(ext, "_sim_anim_active", {}) if hasattr(ext, "_sim_anim_active") else {}
+                try:
+                    wall = max(0.0, time.monotonic() - float(info.get("_started_wall", started_wall)))
+                except Exception:
+                    wall = 0.0
+                # 마지막 START 레코드(동일 file/event/started_wall)를 DONE으로 마킹
+                recs2 = getattr(ext, "_sim_anim_history_records", None)
+                if isinstance(recs2, list):
+                    try:
+                        for r in reversed(recs2):
+                            if not isinstance(r, dict):
+                                continue
+                            if r.get("status") != "START":
+                                continue
+                            if str(r.get("event", "")) != str(info.get("event", "")):
+                                continue
+                            if str(r.get("file", "")) != str(info.get("file", "")):
+                                continue
+                            try:
+                                if float(r.get("_started_wall", -1.0)) != float(info.get("_started_wall", -2.0)):
+                                    continue
+                            except Exception:
+                                continue
+                            r["status"] = "DONE"
+                            r["wall_sec"] = float(wall)
+                            r["_ended_wall"] = time.monotonic()
+                            break
+                    except Exception:
+                        pass
+                _append_anim_history_log(
+                    ext,
+                    f"[ANIM] 실행완료 | t={info.get('t','-')} | event={info.get('event','-')} | wall={wall:.2f}s | est={info.get('est','-')} | action={info.get('action','-')} | file={info.get('file','-')}",
+                )
+        except Exception:
+            _on_done = None
+
+        try:
+            ext._sim_runner.on_sequence_completed = _on_done  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
         ext._sim_runner.run(parsed)
-        _append_anim_history_log(ext, f"[ANIM] 실행시작 | event={seq} | action={action_text} | file={p.name}")
+        _append_anim_history_log(ext, f"[ANIM] 실행시작 | t={sim_time or '-'} | event={seq} | est={est_text} | action={action_text} | file={p.name}")
     except Exception as e:
         _append_anim_history_log(ext, f"[ANIM] 실행실패 | event={seq} | action={action_text} | file={p.name} | err={e}")
 
@@ -451,6 +644,9 @@ def build_control_window(ext: Any) -> None:
     ext._sim_anim_history_label = None
     ext._sim_port_state_label = None
     ext._sim_runner = SequenceRunner()
+    # 엑셀 export용: 애니메이션 실행 레코드(열 분리 저장)
+    ext._sim_anim_history_records = []
+    ext._sim_anim_active = {}
     ext._sim_gate_dialog = None
 
     ext._control_window = ui.Window("TBS 제어창", width=460, height=640)
@@ -1354,6 +1550,7 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
     progress_rows = _rows(getattr(ext, "_sim_progress_label", None).text if getattr(ext, "_sim_progress_label", None) else "")
     history_rows = _rows(getattr(ext, "_sim_history_label", None).text if getattr(ext, "_sim_history_label", None) else "")
     anim_rows = _rows(getattr(ext, "_sim_anim_history_label", None).text if getattr(ext, "_sim_anim_history_label", None) else "")
+    anim_records = getattr(ext, "_sim_anim_history_records", None)
 
     wb = Workbook()
     ws1 = wb.active
@@ -1365,8 +1562,37 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
         ws1.cell(row=idx, column=1, value=row)
     for idx, row in enumerate(history_rows, start=1):
         ws2.cell(row=idx, column=1, value=row)
-    for idx, row in enumerate(anim_rows, start=1):
-        ws3.cell(row=idx, column=1, value=row)
+    # 애니메이션 실행이력은 가능하면 열(column)로 분리 저장
+    if isinstance(anim_records, list) and anim_records:
+        headers = [
+            "sim_time",
+            "event",
+            "file",
+            "runner",
+            "rule",
+            "lot_id",
+            "from_port_id",
+            "to_port_id",
+            "port_id",
+            "est_sec",
+            "wall_sec",
+            "status",
+            "action",
+            "path",
+        ]
+        for c, h in enumerate(headers, start=1):
+            ws3.cell(row=1, column=c, value=h)
+        # 최신이 위로 오도록 역순
+        out = list(reversed(anim_records))
+        for r_idx, rec in enumerate(out, start=2):
+            rec = rec if isinstance(rec, dict) else {}
+            for c, h in enumerate(headers, start=1):
+                v = rec.get(h, "")
+                ws3.cell(row=r_idx, column=c, value=v)
+    else:
+        # fallback: 기존 텍스트 1열 저장
+        for idx, row in enumerate(anim_rows, start=1):
+            ws3.cell(row=idx, column=1, value=row)
 
     wb.save(str(out_path))
     _append_sim_log(ext, f"[SIM EXPORT] 저장 완료: {out_path}")
@@ -1482,6 +1708,9 @@ def on_sim_start_clicked(ext: Any) -> None:
     ext._sim_progress_start_times = {}
     ext._sim_log_queue = queue.SimpleQueue()
     _enqueue_sim_log(ext, "[SIM UI] 실시간 로그 큐 초기화")
+    # 시뮬레이션 1회 실행 단위로 애니 레코드도 초기화
+    ext._sim_anim_history_records = []
+    ext._sim_anim_active = {}
 
     def _on_gate(payload: Dict[str, str]) -> bool:
         if not ext._sim_confirm_each_step_model.get_value_as_bool():

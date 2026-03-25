@@ -42,11 +42,63 @@ from .rotate_animation import (
     stop_prim_rotate_animation,
     run_world_euler_pivot_rotate_animation,
     stop_world_pivot_rotate_animation,
+    run_local_euler_pivot_rotate_animation,
+    run_prim_rotate_lock_world_center_animation,
 )
 from . import usd_animation_control
 from .xform_utils import ensure_scale_xform_ops_first
 
 _OFFSET_SUFFIX = "TBS_OFFSET"
+
+
+def _prim_world_origin(prim: Usd.Prim, tc: Usd.TimeCode) -> Optional[Gf.Vec3d]:
+    """
+    prim의 월드 원점(현재 위치)을 반환.
+
+    NOTE:
+    - "제자리 회전"을 사용자 관점에서 가장 안정적으로 보이게 하려면,
+      BBox 중심보다 prim의 월드 원점을 pivot으로 잡는 편이 덜 흔들린다.
+      (원점과 형상 중심이 다를 때 BBox 중심 pivot은 시각적으로 이동하는 것처럼 보일 수 있음)
+    """
+    try:
+        if not prim or not prim.IsValid():
+            return None
+        cache = UsdGeom.XformCache(tc)
+        M = Gf.Matrix4d(cache.GetLocalToWorldTransform(prim))
+        tr = M.ExtractTranslation()
+        return Gf.Vec3d(float(tr[0]), float(tr[1]), float(tr[2]))
+    except Exception:
+        return None
+
+
+def _prim_world_bbox_center(prim: Usd.Prim, tc: Usd.TimeCode) -> Optional[Gf.Vec3d]:
+    """
+    prim의 월드 BBox(Aligned) 중심점을 반환.
+
+    사용 의도:
+    - 사용자 요구: "객체 중심좌표를 축으로 회전" → 화면에서 객체가 이동하지 않게 보이려면
+      보통 '형상 중심(대략)'을 pivot으로 잡는 것이 더 직관적이다.
+    - prim 원점이 형상 중심과 다를 때, 원점 pivot은 회전 중에 객체가 원을 그리며 이동해 보일 수 있다.
+    """
+    try:
+        if not prim or not prim.IsValid():
+            return None
+        cache = UsdGeom.BBoxCache(
+            tc,
+            includedPurposes=[UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+            useExtentsHint=True,
+        )
+        bbox = cache.ComputeWorldBound(prim)
+        rng = bbox.ComputeAlignedBox()
+        mn = rng.GetMin()
+        mx = rng.GetMax()
+        return Gf.Vec3d(
+            (float(mn[0]) + float(mx[0])) * 0.5,
+            (float(mn[1]) + float(mx[1])) * 0.5,
+            (float(mn[2]) + float(mx[2])) * 0.5,
+        )
+    except Exception:
+        return None
 
 
 def _sample_step_value(step: Dict[str, Any], key: str) -> float:
@@ -193,6 +245,47 @@ def _tbs_indices_consecutive(idxs: List[int]) -> bool:
     return True
 
 
+def _ensure_tbs_offset_ops_consecutive(prim: Usd.Prim) -> None:
+    """
+    TBS_OFFSET op들이 xformOpOrder 상에서 연속이 되도록 재정렬한다.
+
+    왜 필요한가:
+    - 월드 목표행렬을 "TBS_OFFSET 구간만" 역산해 적용하는 로직(_apply_tbs_for_target_local_matrix)은
+      TBS_OFFSET op들이 연속인 구간(first..last)이라는 가정이 있다.
+    - 에셋에 따라 op가 섞여 있으면(비연속) fallback 경로로 빠지며,
+      그 경우 "이동하면서 회전"처럼 보이는 부작용이 생길 수 있다.
+    """
+    try:
+        if not prim or not prim.IsValid():
+            return
+        x = UsdGeom.Xformable(prim)
+        if not x:
+            return
+        ops = list(x.GetOrderedXformOps())
+        if not ops:
+            return
+        idxs = _tbs_op_indices(prim)
+        if not idxs or _tbs_indices_consecutive(idxs):
+            return
+        tbs_ops = []
+        other_ops = []
+        for op in ops:
+            try:
+                nm = op.GetName()
+            except Exception:
+                nm = ""
+            if _OFFSET_SUFFIX in str(nm):
+                tbs_ops.append(op)
+            else:
+                other_ops.append(op)
+        if not tbs_ops:
+            return
+        # 기존 상대 순서 유지: non-TBS 먼저, TBS를 마지막에 연속으로 배치
+        x.SetXformOpOrder(other_ops + tbs_ops)
+    except Exception:
+        return
+
+
 def _compose_xform_segment(prim: Usd.Prim, lo: int, hi: int, time_code: Usd.TimeCode) -> Gf.Matrix4d:
     """
     xform op 인덱스 [lo..hi]를 USD 적용 순서대로 합성.
@@ -309,6 +402,7 @@ def _apply_tbs_for_target_local_matrix(prim: Usd.Prim, M_local_target: Gf.Matrix
     """
     try:
         ensure_scale_xform_ops_first(prim)
+        _ensure_tbs_offset_ops_consecutive(prim)
         idxs = _tbs_op_indices(prim)
         if not idxs:
             return False
@@ -1505,11 +1599,11 @@ class SequenceRunner:
             rx = float(step.get("rx", 0.0))
             ry = float(step.get("ry", 0.0))
             rz = float(step.get("rz", 0.0))
-            use_world_pivot = (
-                bool(step.get("user_axis_rotate", False))
-                or bool(step.get("user_pivot_rotate", False))
-                or bool(step.get("world_pivot_rotate", False))
-            )
+            auto_center = bool(step.get("auto_pivot_world_center", False))
+            # 편집기에서 UI로 제어하는건 auto_pivot_world_center 뿐이다.
+            # 과거 JSON의 user_axis_rotate/world_pivot_rotate 등이 남아있으면
+            # "이동하면서 회전"처럼 보일 수 있으므로, 여기서는 auto_center가 아닐 때는 로컬 회전 경로를 우선한다.
+            use_world_pivot = False
             pwx = float(step.get("pivot_wx", 0.0))
             pwy = float(step.get("pivot_wy", 0.0))
             pwz = float(step.get("pivot_wz", 0.0))
@@ -1523,17 +1617,54 @@ class SequenceRunner:
 
             stop_world_pivot_rotate_animation()
             for p in paths:
+                # 중요: MOVE(translate_animation)와 ROTATE(자동 pivot)은 둘 다 TBS_OFFSET translate를 건드릴 수 있다.
+                # 예상 duration 기반 스케줄링으로 두 스텝이 겹치면 "이동하면서 회전"처럼 보이므로,
+                # ROTATE 시작 시점에 해당 prim의 이동 애니메이션을 확실히 중지해 충돌을 방지한다.
+                try:
+                    stop_prim_translate_animation(p)
+                except Exception:
+                    pass
                 stop_prim_rotate_animation(p)
 
+            # 자동 모드(권장): "프림 로컬 중심점"을 월드로 변환한 pivot_world를 고정한 뒤,
+            # 월드 피봇 회전(orbit matrix)을 적용하면 해당 점이 월드에서 고정되어 "제자리 회전"처럼 보인다.
+            if auto_center and len(paths) == 1:
+                try:
+                    # 가장 강력한 고정: 월드 중심이 흔들리면 translate를 매 프레임 보정한다.
+                    run_prim_rotate_lock_world_center_animation(
+                        paths[0],
+                        rx,
+                        ry,
+                        rz,
+                        duration,
+                        on_completed=lambda: _done(),
+                    )
+                    return
+                except Exception:
+                    pass
+
+            # 자동 중심 회전만 월드 피봇 경로를 사용한다.
+            if auto_center:
+                use_world_pivot = True
+
             if use_world_pivot:
-                tc_rot = Usd.TimeCode.Default()
+                tc_now = _get_current_time_code()
+                tc_rot = tc_now
+                # auto_center=True면 실행 순간의 "월드 BBox 중심"을 pivot으로 고정한다(단일 prim 기준).
+                if auto_center and len(paths) == 1:
+                    stage = _get_stage()
+                    prim = stage.GetPrimAtPath(paths[0]) if stage else None
+                    c = _prim_world_bbox_center(prim, tc_now) if prim else None
+                    pivot_world = c if c is not None else None
+                else:
+                    pivot_world = Gf.Vec3d(pwx, pwy, pwz)
 
                 def _world_euler_done():
                     _done()
 
                 run_world_euler_pivot_rotate_animation(
                     paths,
-                    Gf.Vec3d(pwx, pwy, pwz),
+                    pivot_world,
                     rx,
                     ry,
                     rz,

@@ -81,8 +81,9 @@ class SequenceEditorWindow:
         self._steps_frame: Optional[ui.VStack] = None
         self._refresh_pending = False
         self._refresh_sub = None
-        # ROTATE 스텝의 루트축 체크박스 모델 (실행 시 step dict와 동기화)
-        self._rotate_user_axis_models: Dict[int, ui.SimpleBoolModel] = {}
+        self._json_update_sub = None
+        # ROTATE 스텝: "현재 중심(BBox) 기준 회전" 체크박스 모델
+        self._rotate_auto_pivot_models: Dict[int, ui.SimpleBoolModel] = {}
         self._parallel_with_prev_models: Dict[int, ui.SimpleBoolModel] = {}
         self._step_delay_ms_models: Dict[int, ui.SimpleIntModel] = {}
         self._build()
@@ -102,6 +103,12 @@ class SequenceEditorWindow:
             except Exception:
                 pass
             self._refresh_sub = None
+        if self._json_update_sub is not None:
+            try:
+                self._json_update_sub.unsubscribe()
+            except Exception:
+                pass
+            self._json_update_sub = None
 
     # ---------------- UI ----------------
 
@@ -113,13 +120,7 @@ class SequenceEditorWindow:
                     ui.Button("실행", width=80, height=28, clicked_fn=self._run_steps)
                     ui.Button("일시정지", width=90, height=28, clicked_fn=self._pause)
                     ui.Button("중지(초기화)", width=110, height=28, clicked_fn=self._stop)
-                    ui.Button("JSON 저장(갱신)", width=120, height=28, clicked_fn=self._update_json_from_steps)
-                    ui.Button("JSON 불러오기", width=120, height=28, clicked_fn=self._load_steps_from_json)
-                with ui.HStack(spacing=8, height=28):
-                    ui.CheckBox(model=self._start_from_current_model, style=CHECKBOX_WHITE_STYLE)
-                    ui.Label("현재 위치부터 시작", width=120)
-                    ui.Label("대상 경로(,)", width=85)
-                    ui.StringField(model=self._start_from_current_paths_model, width=360, height=28, style=INPUT_FIELD_STYLE)
+                    ui.Button("현재스탭으로 json 생성", width=160, height=28, clicked_fn=self._update_json_from_steps)
 
                 # 상단 버튼은 고정, 아래 영역만 스크롤
                 # NOTE: 일부 Kit 버전에서는 height=0 이 레이아웃에서 0으로 접혀 JSON/Steps가 안 보입니다.
@@ -145,7 +146,7 @@ class SequenceEditorWindow:
     def _refresh_steps_ui(self) -> None:
         if not self._steps_frame:
             return
-        self._rotate_user_axis_models.clear()
+        self._rotate_auto_pivot_models.clear()
         self._parallel_with_prev_models.clear()
         self._step_delay_ms_models.clear()
         self._steps_frame.clear()
@@ -241,6 +242,8 @@ class SequenceEditorWindow:
                                                         "rx": 0.0,
                                                         "ry": 90.0,
                                                         "rz": 0.0,
+                                                        # 새 옵션: 실행 시점 prim 중심(BBox)을 pivot으로 잡아 제자리 회전처럼 보이게 함
+                                                        "auto_pivot_world_center": False,
                                                         "user_axis_rotate": False,
                                                         "pivot_wx": 0.0,
                                                         "pivot_wy": 0.0,
@@ -272,6 +275,25 @@ class SequenceEditorWindow:
                                 # 설정 영역(입력/버튼) 배경을 별도로 분리
                                 with ui.Frame(style={"background_color": 0xFF262A30}):
                                     with ui.VStack(spacing=6, padding=8):
+                                        # "현재 위치부터 시작" 옵션은 반드시 첫 스텝 내부에만 노출한다.
+                                        # (JSON 저장 시 첫 스텝 메타로 스냅샷이 들어가야 유지보수/재현이 쉬움)
+                                        if idx == 0:
+                                            with ui.HStack(spacing=8, height=28):
+                                                ui.CheckBox(model=self._start_from_current_model, style=CHECKBOX_WHITE_STYLE)
+                                                ui.Label("현재 위치부터 시작", width=120)
+                                                ui.Label("대상 경로(,)", width=85)
+                                                ui.StringField(
+                                                    model=self._start_from_current_paths_model,
+                                                    width=360,
+                                                    height=28,
+                                                    style=INPUT_FIELD_STYLE,
+                                                )
+                                            ui.Label(
+                                                "※ 이 옵션은 Step 1의 메타로 저장됩니다. "
+                                                "체크 후 '현재스탭으로 json 생성'을 누르면 현재 뷰포트 위치가 _start_snapshot으로 기록됩니다.",
+                                                height=0,
+                                                word_wrap=True,
+                                            )
                                         t = (step.get("type") or "").upper()
                                         if t == "USD_TIMELINE":
                                             self._ui_step_usd_timeline(step)
@@ -407,8 +429,26 @@ class SequenceEditorWindow:
             ui.Label("sec", height=0)
 
     def _ui_step_rotate(self, step: Dict[str, Any], step_idx: int) -> None:
-        if "user_axis_rotate" not in step and "world_pivot_rotate" in step:
-            step["user_axis_rotate"] = bool(step.get("world_pivot_rotate"))
+        # ROTATE 확장 옵션(권장):
+        # - auto_pivot_world_center=True: 실행 순간 prim의 월드 BBox 중심을 pivot으로 잡아 "제자리 회전"처럼 보이게 함.
+        if "auto_pivot_world_center" not in step:
+            step["auto_pivot_world_center"] = False
+
+        auto_pivot = ui.SimpleBoolModel(bool(step.get("auto_pivot_world_center", False)))
+        auto_pivot.add_value_changed_fn(
+            lambda _m: step.__setitem__("auto_pivot_world_center", bool(auto_pivot.get_value_as_bool()))
+        )
+        self._rotate_auto_pivot_models[step_idx] = auto_pivot
+
+        with ui.HStack(spacing=6, height=28):
+            ui.CheckBox(model=auto_pivot, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("현재 중심 기준 회전(자동)", width=200)
+        ui.Label(
+            "체크 시: 실행 시점의 prim '월드 BBox 중심'을 pivot으로 잡습니다. "
+            "객체가 어디로 이동해 있어도 제자리(중심)에서 회전하는 것처럼 보이게 하는 것이 목표입니다.",
+            height=0,
+            word_wrap=True,
+        )
         prim_model = ui.SimpleStringModel(str(step.get("prim", "")))
         prim_model.add_value_changed_fn(lambda _m: step.__setitem__("prim", prim_model.get_value_as_string()))
 
@@ -436,50 +476,9 @@ class SequenceEditorWindow:
             ui.FloatField(model=ry, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("RZ", width=30)
             ui.FloatField(model=rz, width=70, height=28, style=INPUT_FIELD_STYLE)
-
-        user_axis = ui.SimpleBoolModel(
-            bool(step.get("user_axis_rotate", step.get("world_pivot_rotate", False)))
-        )
-        pwx = ui.SimpleFloatModel(float(step.get("pivot_wx", 0.0)))
-        pwy = ui.SimpleFloatModel(float(step.get("pivot_wy", 0.0)))
-        pwz = ui.SimpleFloatModel(float(step.get("pivot_wz", 0.0)))
-
-        def _sync_user_axis_flag(_m=None) -> None:
-            step["user_axis_rotate"] = bool(user_axis.get_value_as_bool())
-            step.pop("world_pivot_rotate", None)
-
-        user_axis.add_value_changed_fn(lambda _m: _sync_user_axis_flag())
-        pwx.add_value_changed_fn(lambda _m: step.__setitem__("pivot_wx", float(pwx.get_value_as_float())))
-        pwy.add_value_changed_fn(lambda _m: step.__setitem__("pivot_wy", float(pwy.get_value_as_float())))
-        pwz.add_value_changed_fn(lambda _m: step.__setitem__("pivot_wz", float(pwz.get_value_as_float())))
-
-        # 모델 → step (체크 직후 실행 버튼을 눌렀을 때 value_changed 누락 대비)
-        _sync_user_axis_flag()
-        self._rotate_user_axis_models[step_idx] = user_axis
-
-        with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=user_axis, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("루트 축 회전 + 회전 중심(월드)", width=200)
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("중심 PX", width=56)
-            ui.FloatField(model=pwx, width=70, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("PY", width=28)
-            ui.FloatField(model=pwy, width=70, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("PZ", width=28)
-            ui.FloatField(model=pwz, width=70, height=28, style=INPUT_FIELD_STYLE)
-            ui.Button(
-                "Prim→중심",
-                width=90,
-                height=28,
-                clicked_fn=lambda: self._fill_rotate_pivot_world_from_prim(step, pwx, pwy, pwz),
-            )
-
-        ui.Label(
-            "체크 해제: prim 로컬(TBS_OFFSET) 축 기준 제자리 회전 — 예전과 동일. "
-            "체크: 스테이지 루트(월드) 고정 Euler + PX,PY,PZ 회전 중심(월드).",
-            height=0,
-            word_wrap=True,
-        )
+        # NOTE: "루트 축 회전 + 회전 중심(월드)" 옵션은 UX/정확도 이슈로 편집기 UI에서 제거.
+        # 기존 JSON에 user_axis_rotate/pivot_wx/y/z 키가 남아있어도 그대로 유지(호환)하며,
+        # 필요 시 추후 별도 전용 편집 UI로 재도입할 수 있다.
 
     def _ui_step_timing(self, step: Dict[str, Any], step_idx: int) -> None:
         """
@@ -577,13 +576,58 @@ class SequenceEditorWindow:
             self._schedule_refresh()
 
     def _update_json_from_steps(self) -> None:
+        """
+        JSON 저장(갱신).
+
+        중요: "현재 위치부터 시작"이 켜져 있을 때는 현재 스테이지 transform 평가가
+        update 스트림에서 한 프레임 늦게 반영되는 경우가 있어, 저장 클릭과 같은 프레임에
+        스냅샷을 캡처하면 직전 값(예: 500)이 저장될 수 있다.
+
+        따라서 enabled일 때는 "다음 프레임(post_update)"에 스냅샷을 캡처한 뒤 JSON을 갱신한다.
+        """
         try:
-            # JSON 저장 직전, 런타임 시작옵션(_start_from_current/_paths/_snapshot)을
-            # 항상 첫 스텝 메타에 동기화한다.
-            self._sync_runtime_start_options_to_steps()
-            self._json_model.set_value(json.dumps(self._steps, ensure_ascii=False, indent=2))
+            enabled = bool(self._start_from_current_model.get_value_as_bool())
         except Exception:
-            pass
+            enabled = False
+
+        def _commit() -> None:
+            try:
+                self._sync_runtime_start_options_to_steps()
+                self._json_model.set_value(json.dumps(self._steps, ensure_ascii=False, indent=2))
+            except Exception:
+                pass
+
+        if not enabled:
+            _commit()
+            return
+
+        # enabled=True: 다음 프레임에 캡처 후 저장
+        if self._json_update_sub is not None:
+            try:
+                self._json_update_sub.unsubscribe()
+            except Exception:
+                pass
+            self._json_update_sub = None
+
+        def _do(_e=None):
+            try:
+                _commit()
+            finally:
+                if self._json_update_sub is not None:
+                    try:
+                        self._json_update_sub.unsubscribe()
+                    except Exception:
+                        pass
+                    self._json_update_sub = None
+
+        try:
+            stream = app.get_app().get_post_update_event_stream()
+            self._json_update_sub = stream.create_subscription_to_pop(
+                _do,
+                name="morph.tbs_control_1.sequence_editor.json_update",
+            )
+        except Exception:
+            _commit()
 
     def _load_steps_from_json(self) -> None:
         try:
@@ -610,14 +654,14 @@ class SequenceEditorWindow:
                 continue
             if (step.get("type") or "").upper() != "ROTATE":
                 continue
-            m = self._rotate_user_axis_models.get(idx)
+            m = self._rotate_auto_pivot_models.get(idx)
             if m is not None:
-                step["user_axis_rotate"] = bool(m.get_value_as_bool())
-                step.pop("world_pivot_rotate", None)
-            elif "user_axis_rotate" not in step and (
-                step.get("world_pivot_rotate") is True or step.get("user_pivot_rotate") is True
-            ):
-                step["user_axis_rotate"] = True
+                step["auto_pivot_world_center"] = bool(m.get_value_as_bool())
+            # 편집기 UI에서 더 이상 지원하지 않는 월드 피봇 모드 플래그들은 실행 시 혼선을 만들 수 있어 강제 해제.
+            # (기존 JSON 호환을 위해 키 자체는 남아있을 수 있지만, 실행 관점에서는 OFF가 안전)
+            step["user_axis_rotate"] = False
+            step["world_pivot_rotate"] = False
+            step["user_pivot_rotate"] = False
 
     def _flush_timing_models_to_dict(self) -> None:
         """동시 실행·지연(ms) 모델 → step (실행 직전 동기화)."""
