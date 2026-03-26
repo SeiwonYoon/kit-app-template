@@ -125,6 +125,61 @@ SIM_SEQ_ALIAS = {
     "READYTOUNLOAD": xml_generator.SEQ_READYTOUNLOAD,
     "REMOVED": xml_generator.SEQ_REMOVED,
 }
+# 이벤트별/포트별 JSON 매핑(최상단 일원화)
+# - 운영 중 수정은 이 테이블을 우선 수정한다.
+# - key 규칙:
+#   * ARRIVED/READYTOLOAD/READYTOUNLOAD/REMOVED: "PORT"
+#   * MOVE/MOVE_TRANSFERING: "FROM->TO"
+EVENT_JSON_CASE_MAP: Dict[str, Dict[str, str]] = {
+    xml_generator.SEQ_MOVE: {
+        "OHT->BP1": "data/sim_sequences/move_oht_bp1.json",  # OHT가 BP1 상부로 접근/이동
+        "OHT->EP1": "data/sim_sequences/move_oht_ep1.json",  # OHT가 EP1로 직접 투입 이동
+        "OHT->EP2": "data/sim_sequences/move_oht_ep2.json",  # OHT가 EP2로 직접 투입 이동
+        "OHT->EP3": "data/sim_sequences/move_oht_ep3.json",  # OHT가 EP3로 직접 투입 이동
+    },
+    xml_generator.SEQ_MOVE_TRANSFERING: {
+        "BP1->BP2": "data/sim_sequences/move_bp1_bp2.json",  # BP1 LOT를 BP2 버퍼로 이송
+        "BP1->BP3": "data/sim_sequences/move_bp1_bp3.json",  # BP1 LOT를 BP3 버퍼로 이송
+        "BP1->BP4": "data/sim_sequences/move_bp1_bp4.json",  # BP1 LOT를 BP4 버퍼로 이송
+        "BP2->EP1": "data/sim_sequences/move_bp2_ep1.json",  # BP2 LOT를 EP1 공정포트로 이송
+        "BP2->EP2": "data/sim_sequences/move_bp2_ep2.json",  # BP2 LOT를 EP2 공정포트로 이송
+        "BP2->EP3": "data/sim_sequences/move_bp2_ep3.json",  # BP2 LOT를 EP3 공정포트로 이송
+        "BP3->EP1": "data/sim_sequences/move_bp3_ep1.json",  # BP3 LOT를 EP1 공정포트로 이송
+        "BP3->EP2": "data/sim_sequences/move_bp3_ep2.json",  # BP3 LOT를 EP2 공정포트로 이송
+        "BP3->EP3": "data/sim_sequences/move_bp3_ep3.json",  # BP3 LOT를 EP3 공정포트로 이송
+        "BP4->EP1": "data/sim_sequences/move_bp4_ep1.json",  # BP4 LOT를 EP1 공정포트로 이송
+        "BP4->EP2": "data/sim_sequences/move_bp4_ep2.json",  # BP4 LOT를 EP2 공정포트로 이송
+        "BP4->EP3": "data/sim_sequences/move_bp4_ep3.json",  # BP4 LOT를 EP3 공정포트로 이송
+    },
+    xml_generator.SEQ_ARRIVED: {
+        "BP1": "data/sim_sequences/arrived_bp1.json",  # BP1 포트 안착(도착 완료) 연출
+        "BP2": "data/sim_sequences/arrived_bp2.json",  # BP2 포트 안착(도착 완료) 연출
+        "BP3": "data/sim_sequences/arrived_bp3.json",  # BP3 포트 안착(도착 완료) 연출
+        "BP4": "data/sim_sequences/arrived_bp4.json",  # BP4 포트 안착(도착 완료) 연출
+        "EP1": "data/sim_sequences/arrived_ep1.json",  # EP1 포트 안착(도착 완료) 연출
+        "EP2": "data/sim_sequences/arrived_ep2.json",  # EP2 포트 안착(도착 완료) 연출
+        "EP3": "data/sim_sequences/arrived_ep3.json",  # EP3 포트 안착(도착 완료) 연출
+    },
+    xml_generator.SEQ_READYTOLOAD: {
+        "BP1": "data/sim_sequences/ready_to_load_bp1.json",  # BP1이 새 LOT 수신 가능한 대기 상태
+        "BP2": "data/sim_sequences/ready_to_load_bp2.json",  # BP2가 새 LOT 수신 가능한 대기 상태
+        "BP3": "data/sim_sequences/ready_to_load_bp3.json",  # BP3가 새 LOT 수신 가능한 대기 상태
+        "BP4": "data/sim_sequences/ready_to_load_bp4.json",  # BP4가 새 LOT 수신 가능한 대기 상태
+        "EP1": "data/sim_sequences/ready_to_load_ep1.json",  # EP1이 새 LOT 수신 가능한 대기 상태
+        "EP2": "data/sim_sequences/ready_to_load_ep2.json",  # EP2가 새 LOT 수신 가능한 대기 상태
+        "EP3": "data/sim_sequences/ready_to_load_ep3.json",  # EP3가 새 LOT 수신 가능한 대기 상태
+    },
+    xml_generator.SEQ_READYTOUNLOAD: {
+        "EP1": "data/sim_sequences/ready_to_unload_ep1.json",  # EP1 LOT/Foup 반출 준비 상태
+        "EP2": "data/sim_sequences/ready_to_unload_ep2.json",  # EP2 LOT/Foup 반출 준비 상태
+        "EP3": "data/sim_sequences/ready_to_unload_ep3.json",  # EP3 LOT/Foup 반출 준비 상태
+    },
+    xml_generator.SEQ_REMOVED: {
+        "EP1": "data/sim_sequences/removed_ep1.json",  # EP1에서 LOT/Foup 회수 완료 연출
+        "EP2": "data/sim_sequences/removed_ep2.json",  # EP2에서 LOT/Foup 회수 완료 연출
+        "EP3": "data/sim_sequences/removed_ep3.json",  # EP3에서 LOT/Foup 회수 완료 연출
+    },
+}
 SAMPLE_GENERATOR_JSON = """{
   "objects": ["Mesh_308", "Mesh_561", "WalkwayEndA_01"],
   "animation": {
@@ -252,21 +307,46 @@ def _resolve_rule_entry(seq: str, payload: Dict[str, str]) -> Tuple[Optional[str
     return (None, None, None)
 
 
-def _resolve_event_animation_entry(seq: str, payload: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
+def _resolve_event_case_map_entry(seq: str, payload: Dict[str, str]) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
+    table = EVENT_JSON_CASE_MAP.get(seq, {})
+    if not isinstance(table, dict) or not table:
+        return (None, None, None)
+    p_from = str(payload.get("from_port_id", "") or "").strip().upper()
+    p_to = str(payload.get("to_port_id", "") or "").strip().upper()
+    p_port = str(payload.get("port_id", "") or "").strip().upper()
+    key = f"{p_from}->{p_to}" if p_from and p_to else p_port
+    if not key:
+        return (None, None, None)
+    j = table.get(key)
+    if not isinstance(j, str) or not j.strip():
+        return (None, None, None)
+    meta = {
+        "runner": "sequence_editor",
+        "description": f"top-case-map:{key}",
+    }
+    return (j.strip(), meta, f"top_case_map:{seq}:{key}")
+
+
+def _resolve_event_animation_entry(seq: str, payload: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str], str]:
     """
     반환:
     - json_path_str: 실제 JSON 경로 문자열(없으면 None)
     - meta: runner/description 등 부가정보
     """
+    # 0) 파일 최상단 케이스 매핑(운영 우선)
+    j_case, meta_case, case_name = _resolve_event_case_map_entry(seq, payload or {})
+    if j_case:
+        return (j_case, meta_case, case_name, "top_case_map")
+
     # 1) 상태 기반 rules 우선
     j_rule, meta_rule, rule_name = _resolve_rule_entry(seq, payload or {})
     if j_rule:
-        return (j_rule, meta_rule, rule_name or "(unnamed-rule)")
+        return (j_rule, meta_rule, rule_name or "(unnamed-rule)", "rules")
 
     # 2) 기존 단순 map fallback
     m = _load_event_animation_map()
     if not m:
-        return (None, None, None)
+        return (None, None, None, "")
 
     # 키 우선순위:
     # 1) 정식 seq (EAPEIS_PORT_...)
@@ -287,12 +367,12 @@ def _resolve_event_animation_entry(seq: str, payload: Optional[Dict[str, str]] =
             continue
         v = m.get(key)
         if isinstance(v, str):
-            return (v, {"runner": "sequence_editor", "description": ""}, None)
+            return (v, {"runner": "sequence_editor", "description": ""}, None, "map")
         if isinstance(v, dict):
             j = v.get("json")
             if isinstance(j, str) and j.strip():
-                return (j.strip(), v, None)
-    return (None, None, None)
+                return (j.strip(), v, None, "map")
+    return (None, None, None, "")
 
 
 def _normalize_json_path(path_text: str) -> Path:
@@ -478,99 +558,151 @@ def _execute_mapped_sequence_stub(
         ext,
         f"[ANIM] 실행준비완료 | t={sim_time or '-'} | event={seq} | est={est_text} | action={action_text} | file={p.name} | steps={len(parsed)}({preview}) | runner={runner} | rule={rule_name or '-'}",
     )
-    # 실제 실행 연결 (JSON이 준비되면 즉시 실행)
+    # 실제 실행 연결: 동시에 여러 run() 호출 시 기존 애니가 끊기는 문제를 막기 위해
+    # "시뮬레이션 애니 실행 큐"로 직렬화한다.
     try:
-        # 완료 시점(벽시계) 로깅을 위해 이번 실행 메타를 ext에 저장.
-        # (단일 SequenceRunner 사용 전제: 병렬 실행을 넣으면 구조를 큐 기반으로 바꿔야 함)
-        started_wall = time.monotonic()
-        active = {
-            "t": sim_time,
-            "event": seq,
-            "file": p.name,
-            "path": str(p),
-            "action": action_text,
-            "est": est_text,
-            "_started_wall": started_wall,
-            "runner": runner,
-            "rule": rule_name or "-",
-            "lot_id": lot_id,
-            "from_port_id": from_port,
-            "to_port_id": to_port,
-            "port_id": port,
-        }
-        ext._sim_anim_active = active
-        # 엑셀용 구조화 레코드(행 단위)도 함께 누적
-        recs = getattr(ext, "_sim_anim_history_records", None)
-        if isinstance(recs, list):
+        if not isinstance(getattr(ext, "_sim_anim_pending", None), list):
+            ext._sim_anim_pending = []
+
+        def _start_job(job: Dict[str, Any]) -> None:
+            pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+            started_wall = time.monotonic()
+            active = dict(job)
+            active["_started_wall"] = started_wall
+            ext._sim_anim_active = active
             try:
+                if isinstance(job.get("est_total"), (float, int)) and float(job.get("est_total")) > 0.0:
+                    ext._sim_tick_pause_until_wall = float(started_wall) + float(job.get("est_total"))
+                else:
+                    ext._sim_tick_pause_until_wall = None
+            except Exception:
+                ext._sim_tick_pause_until_wall = None
+
+            recs = getattr(ext, "_sim_anim_history_records", None)
+            if isinstance(recs, list):
                 recs.append(
                     {
-                        "sim_time": sim_time,
-                        "event": seq,
-                        "file": p.name,
-                        "path": str(p),
-                        "runner": runner,
-                        "rule": rule_name or "-",
-                        "lot_id": lot_id,
-                        "from_port_id": from_port,
-                        "to_port_id": to_port,
-                        "port_id": port,
-                        "action": action_text,
-                        "est_sec": float(est_total) if isinstance(est_total, (float, int)) else None,
+                        "sim_time": str(job.get("t", "")),
+                        "event": str(job.get("event", "")),
+                        "file": str(job.get("file", "")),
+                        "path": str(job.get("path", "")),
+                        "runner": str(job.get("runner", "")),
+                        "rule": str(job.get("rule", "")),
+                        "lot_id": str(job.get("lot_id", "")),
+                        "from_port_id": str(job.get("from_port_id", "")),
+                        "to_port_id": str(job.get("to_port_id", "")),
+                        "port_id": str(job.get("port_id", "")),
+                        "action": str(job.get("action", "")),
+                        "est_sec": float(job.get("est_total")) if isinstance(job.get("est_total"), (float, int)) else None,
                         "wall_sec": None,
                         "status": "START",
                         "_started_wall": started_wall,
                     }
                 )
-            except Exception:
-                pass
-        try:
+
             def _on_done():
                 info = getattr(ext, "_sim_anim_active", {}) if hasattr(ext, "_sim_anim_active") else {}
                 try:
                     wall = max(0.0, time.monotonic() - float(info.get("_started_wall", started_wall)))
                 except Exception:
                     wall = 0.0
-                # 마지막 START 레코드(동일 file/event/started_wall)를 DONE으로 마킹
                 recs2 = getattr(ext, "_sim_anim_history_records", None)
                 if isinstance(recs2, list):
-                    try:
-                        for r in reversed(recs2):
-                            if not isinstance(r, dict):
+                    for r in reversed(recs2):
+                        if not isinstance(r, dict):
+                            continue
+                        if r.get("status") != "START":
+                            continue
+                        if str(r.get("event", "")) != str(info.get("event", "")):
+                            continue
+                        if str(r.get("file", "")) != str(info.get("file", "")):
+                            continue
+                        try:
+                            if float(r.get("_started_wall", -1.0)) != float(info.get("_started_wall", -2.0)):
                                 continue
-                            if r.get("status") != "START":
-                                continue
-                            if str(r.get("event", "")) != str(info.get("event", "")):
-                                continue
-                            if str(r.get("file", "")) != str(info.get("file", "")):
-                                continue
-                            try:
-                                if float(r.get("_started_wall", -1.0)) != float(info.get("_started_wall", -2.0)):
-                                    continue
-                            except Exception:
-                                continue
-                            r["status"] = "DONE"
-                            r["wall_sec"] = float(wall)
-                            r["_ended_wall"] = time.monotonic()
-                            break
-                    except Exception:
-                        pass
+                        except Exception:
+                            continue
+                        r["status"] = "DONE"
+                        r["wall_sec"] = float(wall)
+                        r["_ended_wall"] = time.monotonic()
+                        break
                 _append_anim_history_log(
                     ext,
                     f"[ANIM] 실행완료 | t={info.get('t','-')} | event={info.get('event','-')} | wall={wall:.2f}s | est={info.get('est','-')} | action={info.get('action','-')} | file={info.get('file','-')}",
                 )
-        except Exception:
-            _on_done = None
+                pending = getattr(ext, "_sim_anim_pending", [])
+                if isinstance(pending, list) and pending:
+                    nxt = pending.pop(0)
+                    _start_job(nxt)
+                    return
+                if pause_evt is not None:
+                    try:
+                        pause_evt.clear()
+                    except Exception:
+                        pass
+                try:
+                    ext._sim_tick_pause_until_wall = None
+                except Exception:
+                    pass
 
+            try:
+                ext._sim_runner.on_sequence_completed = _on_done  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            if pause_evt is not None:
+                try:
+                    pause_evt.set()
+                except Exception:
+                    pass
+            ext._sim_runner.run(job.get("parsed", []))
+            _append_anim_history_log(
+                ext,
+                f"[ANIM] 실행시작 | t={job.get('t','-')} | event={job.get('event','-')} | est={job.get('est','-')} | action={job.get('action','-')} | file={job.get('file','-')}",
+            )
+
+        job = {
+            "t": sim_time,
+            "event": seq,
+            "file": p.name,
+            "path": str(p),
+            "action": action_text,
+            "est": est_text,
+            "est_total": float(est_total) if isinstance(est_total, (float, int)) else None,
+            "runner": runner,
+            "rule": rule_name or "-",
+            "lot_id": lot_id,
+            "from_port_id": from_port,
+            "to_port_id": to_port,
+            "port_id": port,
+            "parsed": parsed,
+        }
         try:
-            ext._sim_runner.on_sequence_completed = _on_done  # type: ignore[attr-defined]
+            runner_busy = bool(
+                getattr(ext, "_sim_runner", None) is not None
+                and getattr(ext._sim_runner, "is_running", lambda: False)()
+            )
         except Exception:
-            pass
-
-        ext._sim_runner.run(parsed)
-        _append_anim_history_log(ext, f"[ANIM] 실행시작 | t={sim_time or '-'} | event={seq} | est={est_text} | action={action_text} | file={p.name}")
+            runner_busy = False
+        if runner_busy:
+            ext._sim_anim_pending.append(job)
+            _append_anim_history_log(
+                ext,
+                f"[ANIM] 대기큐적재 | event={seq} | est={est_text} | action={action_text} | file={p.name} | queued={len(ext._sim_anim_pending)}",
+            )
+            return
+        _start_job(job)
     except Exception as e:
         _append_anim_history_log(ext, f"[ANIM] 실행실패 | event={seq} | action={action_text} | file={p.name} | err={e}")
+        pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+        if pause_evt is not None:
+            try:
+                pause_evt.clear()
+            except Exception:
+                pass
+        try:
+            ext._sim_tick_pause_until_wall = None
+        except Exception:
+            pass
 
     if verbose:
         print(
@@ -579,6 +711,67 @@ def _execute_mapped_sequence_stub(
             f"from={payload.get('from_port_id','')}, to={payload.get('to_port_id','')})",
             flush=True,
         )
+
+
+def _estimate_anim_duration_for_gate_payload(ext: Any, payload: Dict[str, str]) -> float:
+    """
+    simulation_engine의 on_gate에서 호출되는 "애니메이션 예상 길이" 계산기.
+    - 게이트 시점에 XML 생성/역파싱 → rules/map 매핑 → JSON 파싱 → 총 duration 추정
+    - 실패하면 0.0 반환(=애니 대기 없음)
+    """
+    try:
+        seq_raw = str(payload.get("seq", "") or "").strip()
+        if not seq_raw:
+            return 0.0
+        seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
+        fr = str(payload.get("from_port_id", "") or "")
+        to = str(payload.get("to_port_id", "") or "")
+        port = str(payload.get("port_id", "") or "")
+
+        # 1차: 원본 payload 기준(최소한 map fallback은 항상 시도)
+        mapping_payload = dict(payload or {})
+        mapping_payload["seq"] = seq
+
+        # 2차: XML 표준화가 가능하면 덮어쓴다(우선 적용)
+        try:
+            if seq in xml_generator.FROM_TO_SEQS:
+                xml_text = xml_generator.build_xml_string(
+                    seq,
+                    from_port_id=_parse_port_num(fr, 1),
+                    to_port_id=_parse_port_num(to, 1),
+                )
+            elif seq in xml_generator.PORT_ID_ONLY_SEQS:
+                xml_text = xml_generator.build_xml_string(seq, port_id=_parse_port_num(port, 1))
+            else:
+                xml_text = ""
+            if xml_text:
+                parsed = xml_generator.parse_xml_string(xml_text) or {}
+                seq_for_mapping = str(parsed.get("sequence_name", "") or "").strip().upper() or seq
+                mapping_payload["seq"] = seq_for_mapping
+                mapping_payload["from_port_id"] = _normalize_port_text_from_xml(str(parsed.get("from_port_id", "") or ""), fr)
+                mapping_payload["to_port_id"] = _normalize_port_text_from_xml(str(parsed.get("to_port_id", "") or ""), to)
+                mapping_payload["port_id"] = _normalize_port_text_from_xml(str(parsed.get("port_id", "") or ""), port)
+                seq = seq_for_mapping
+        except Exception:
+            # XML 표준화 실패해도 원본 payload로 rules/map 추정을 계속 시도한다.
+            pass
+
+        # 3) rules/map 매핑
+        mapped_json, _meta, _rule, _src = _resolve_event_animation_entry(seq, mapping_payload)
+        if not mapped_json:
+            return 0.0
+
+        # 4) JSON 파싱 + 총 길이 추정
+        pth = _normalize_json_path(mapped_json)
+        if not pth.exists():
+            return 0.0
+        parsed_steps = json.loads(pth.read_text(encoding="utf-8"))
+        if not isinstance(parsed_steps, list):
+            return 0.0
+        est = _estimate_sequence_total_duration_sec_for_log(parsed_steps)
+        return max(0.0, float(est)) if isinstance(est, (float, int)) else 0.0
+    except Exception:
+        return 0.0
 
 
 def build_control_window(ext: Any) -> None:
@@ -647,6 +840,11 @@ def build_control_window(ext: Any) -> None:
     # 엑셀 export용: 애니메이션 실행 레코드(열 분리 저장)
     ext._sim_anim_history_records = []
     ext._sim_anim_active = {}
+    ext._sim_anim_pending = []
+    # 애니메이션 재생 중 sim tick을 잠시 멈추기 위한 플래그
+    ext._sim_tick_pause_event = threading.Event()
+    # fail-safe: 예상 애니 길이만큼은 최소 pause 유지 (monotonic timestamp)
+    ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
 
     ext._control_window = ui.Window("TBS 제어창", width=460, height=640)
@@ -1364,9 +1562,31 @@ def _on_sim_event(ext: Any, payload: Dict[str, str]) -> None:
 
 
 def _parse_port_num(port_text: str, default_value: int = 1) -> int:
+    """
+    내부 포트 텍스트를 EAPEIS 포트 ID로 변환한다.
+    매핑 규칙:
+    - EP1/2/3 -> 1/2/3
+    - BP1/2/3/4 -> 5/6/7/8
+    """
     txt = (port_text or "").strip().upper()
-    for prefix in ("BP", "EP", "PORT_"):
-        txt = txt.replace(prefix, "")
+    if not txt:
+        return default_value
+    if txt.startswith("EP"):
+        try:
+            n = int(txt.replace("EP", ""))
+            if 1 <= n <= 3:
+                return n
+        except Exception:
+            return default_value
+    if txt.startswith("BP"):
+        try:
+            n = int(txt.replace("BP", ""))
+            if 1 <= n <= 4:
+                return 4 + n
+        except Exception:
+            return default_value
+    if txt.startswith("PORT_"):
+        txt = txt.replace("PORT_", "")
     try:
         return int(txt)
     except Exception:
@@ -1394,12 +1614,27 @@ def _normalize_port_text_from_xml(parsed_val: str, original_text: str) -> str:
     if not p:
         return ""
     o = (original_text or "").strip().upper()
+    try:
+        n = int(p)
+    except Exception:
+        n = None
     if o.startswith("BP"):
+        # XML ID 5~8은 BP1~4에 대응
+        if n is not None and 5 <= n <= 8:
+            return f"BP{n - 4}"
         return f"BP{p}"
     if o.startswith("EP"):
+        # XML ID 1~3은 EP1~3에 대응
+        if n is not None and 1 <= n <= 3:
+            return f"EP{n}"
         return f"EP{p}"
     if o.startswith("OHT"):
         return "OHT"
+    if n is not None:
+        if 1 <= n <= 3:
+            return f"EP{n}"
+        if 5 <= n <= 8:
+            return f"BP{n - 4}"
     return p
 
 
@@ -1469,8 +1704,12 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
 
     # 역파싱된 seq를 기준으로 기존 rules/map(JSON 파일)은 그대로 사용
     # 즉, 규칙 파일은 수정하지 않고도 XML 표준화 파이프라인 위에서 동작한다.
-    mapped_json, mapped_meta, matched_rule = _resolve_event_animation_entry(seq_for_mapping, mapping_payload)
+    mapped_json, mapped_meta, matched_rule, matched_source = _resolve_event_animation_entry(seq_for_mapping, mapping_payload)
     if mapped_json:
+        _append_anim_history_log(
+            ext,
+            f"[ANIM MAP] source={matched_source or '-'} rule={matched_rule or '-'} event={seq_for_mapping} file={Path(str(mapped_json)).name}",
+        )
         _execute_mapped_sequence_stub(ext, seq_for_mapping, mapping_payload, mapped_json, mapped_meta, matched_rule, verbose)
     elif verbose:
         print(
@@ -1545,7 +1784,8 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
 
     def _rows(text: str) -> List[str]:
         lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-        return list(reversed(lines))
+        # 실행 순서(오래된 항목 -> 최신 항목) 그대로 저장
+        return lines
 
     progress_rows = _rows(getattr(ext, "_sim_progress_label", None).text if getattr(ext, "_sim_progress_label", None) else "")
     history_rows = _rows(getattr(ext, "_sim_history_label", None).text if getattr(ext, "_sim_history_label", None) else "")
@@ -1582,8 +1822,8 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
         ]
         for c, h in enumerate(headers, start=1):
             ws3.cell(row=1, column=c, value=h)
-        # 최신이 위로 오도록 역순
-        out = list(reversed(anim_records))
+        # 실행 순서(오래된 항목 -> 최신 항목) 그대로 저장
+        out = list(anim_records)
         for r_idx, rec in enumerate(out, start=2):
             rec = rec if isinstance(rec, dict) else {}
             for c, h in enumerate(headers, start=1):
@@ -1711,10 +1951,14 @@ def on_sim_start_clicked(ext: Any) -> None:
     # 시뮬레이션 1회 실행 단위로 애니 레코드도 초기화
     ext._sim_anim_history_records = []
     ext._sim_anim_active = {}
+    ext._sim_anim_pending = []
 
-    def _on_gate(payload: Dict[str, str]) -> bool:
+    def _on_gate(payload: Dict[str, str]) -> float:
+        # 요구사항: 공정시간보다 애니(JSON) 시간이 길면 다음 공정은 애니 종료까지 대기.
+        # simulation_engine은 이 반환값(초)을 받아서 각 공정 timeout을 max(공정, 애니)로 확장한다.
+        anim_est_sec = _estimate_anim_duration_for_gate_payload(ext, payload or {})
         if not ext._sim_confirm_each_step_model.get_value_as_bool():
-            return True
+            return float(anim_est_sec)
         seq_raw = str(payload.get("seq", ""))
         seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
         lot = str(payload.get("lot_id", ""))
@@ -1722,46 +1966,63 @@ def on_sim_start_clicked(ext: Any) -> None:
         fr = str(payload.get("from_port_id", ""))
         to = str(payload.get("to_port_id", ""))
         port = str(payload.get("port_id", ""))
-        def _parse_port_num(txt: str) -> Optional[int]:
-            s = (txt or "").strip().upper()
-            if not s or s == "OHT":
-                return None
-            s = s.replace("BP", "").replace("EP", "").replace("PORT_", "")
-            try:
-                return int(s)
-            except Exception:
-                return None
         try:
             # 게이트 다이얼로그의 XML도 실제 애니 매핑 파이프라인과 같은 규칙으로 생성한다.
             # (FROM/TO 시퀀스 vs PORT_ID 시퀀스 분기)
             if seq in xml_generator.FROM_TO_SEQS:
-                fnum = _parse_port_num(fr)
-                tnum = _parse_port_num(to)
-                if fnum is None or tnum is None:
-                    xml = f"(XML 미생성: seq={seq}, from/to 포트번호 해석불가)"
-                else:
-                    xml = xml_generator.build_xml_string(seq, from_port_id=fnum, to_port_id=tnum)
+                fnum = _parse_port_num(fr, 1)
+                tnum = _parse_port_num(to, 1)
+                xml = xml_generator.build_xml_string(seq, from_port_id=fnum, to_port_id=tnum)
             elif seq in xml_generator.PORT_ID_ONLY_SEQS:
-                pnum = _parse_port_num(port)
-                if pnum is None:
-                    xml = f"(XML 미생성: seq={seq}, port 포트번호 해석불가)"
-                else:
-                    xml = xml_generator.build_xml_string(seq, port_id=pnum)
+                pnum = _parse_port_num(port, 1)
+                xml = xml_generator.build_xml_string(seq, port_id=pnum)
             else:
                 xml = f"(XML 미생성: 비-XML 공정 seq={seq_raw}->{seq})"
         except Exception:
             xml = f"(XML 생성 실패: seq={seq})"
+
+        # Alert에서 "실행 대상 JSON 파일"과 존재 여부를 함께 안내한다.
+        map_line = "JSON 매핑: 없음"
+        try:
+            mapping_payload = dict(payload or {})
+            seq_for_mapping = seq
+            if isinstance(xml, str) and xml.strip().startswith("<"):
+                parsed = xml_generator.parse_xml_string(xml) or {}
+                parsed_seq = str(parsed.get("sequence_name", "") or "").strip().upper()
+                if parsed_seq:
+                    seq_for_mapping = parsed_seq
+                mapping_payload["seq"] = seq_for_mapping
+                mapping_payload["from_port_id"] = _normalize_port_text_from_xml(str(parsed.get("from_port_id", "") or ""), fr)
+                mapping_payload["to_port_id"] = _normalize_port_text_from_xml(str(parsed.get("to_port_id", "") or ""), to)
+                mapping_payload["port_id"] = _normalize_port_text_from_xml(str(parsed.get("port_id", "") or ""), port)
+            else:
+                mapping_payload["seq"] = seq_for_mapping
+
+            mapped_json, _meta, rule_name, source_name = _resolve_event_animation_entry(seq_for_mapping, mapping_payload)
+            if mapped_json:
+                jp = _normalize_json_path(mapped_json)
+                exists_txt = "존재" if jp.exists() else "없음"
+                map_line = (
+                    f"JSON 매핑: source={source_name or '-'} rule={rule_name or '-'} "
+                    f"file={jp.name} ({exists_txt})"
+                )
+            else:
+                map_line = f"JSON 매핑: 없음 (event={seq_for_mapping})"
+        except Exception as e:
+            map_line = f"JSON 매핑 확인 실패: {e}"
         done_evt = threading.Event()
         message = (
             f"공정: {payload.get('title','-')}\n"
             f"lot={lot} from={fr} to={to} port={port}\n"
-            f"예상시간={est}s\n\n"
+            f"예상시간={est}s\n"
+            f"애니예상={anim_est_sec:.2f}s (JSON 기준)\n\n"
+            f"{map_line}\n\n"
             f"XML:\n{xml}"
         )
         _enqueue_gate_request(ext, {"title": payload.get("title", "공정 확인"), "message": message, "_done_event": done_evt})
         # 시뮬레이션 스레드는 사용자 확인 전까지 여기서 동기 대기한다.
         done_evt.wait()
-        return True
+        return float(anim_est_sec)
 
     engine = TBSSimulationEngine(
         lots=lots,
@@ -1799,6 +2060,31 @@ def on_sim_start_clicked(ext: Any) -> None:
             print("[SIM] tick thread 시작", flush=True)
             last = time.perf_counter()
             while not stop_evt.is_set():
+                # 애니메이션이 재생 중이면 sim tick을 일시정지
+                pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+                if pause_evt is not None and pause_evt.is_set():
+                    # 원칙: JSON 애니메이션이 실제로 진행 중이면(sim 모듈의 활성 상태가 있으면) 절대 tick 재개하지 않는다.
+                    try:
+                        anim_running = bool(
+                            translate_animation.is_translate_animation_running()
+                            or rotate_animation.is_rotate_animation_running()
+                            or curve_animation.is_curve_animation_running()
+                            or (getattr(ext, "_sim_runner", None) is not None and getattr(ext._sim_runner, "is_running", lambda: False)())
+                        )
+                    except Exception:
+                        anim_running = True
+                    if anim_running:
+                        time.sleep(0.02)
+                        continue
+
+                    # fail-safe: 추정 시간이 남아있으면 최소한 그동안은 pause 유지
+                    until_wall = getattr(ext, "_sim_tick_pause_until_wall", None)
+                    if isinstance(until_wall, (float, int)) and time.monotonic() < float(until_wall):
+                        time.sleep(0.02)
+                        continue
+
+                    time.sleep(0.02)
+                    continue
                 sim = getattr(ext, "_sim_engine", None)
                 if sim is None:
                     break
@@ -1837,6 +2123,21 @@ def on_sim_stop_clicked(ext: Any) -> None:
             runner.stop()
         except Exception:
             pass
+    # pause 상태 해제
+    pe = getattr(ext, "_sim_tick_pause_event", None)
+    if pe is not None:
+        try:
+            pe.clear()
+        except Exception:
+            pass
+    try:
+        ext._sim_tick_pause_until_wall = None
+    except Exception:
+        pass
+    try:
+        ext._sim_anim_pending = []
+    except Exception:
+        pass
 
 
 def on_sim_reset_clicked(ext: Any) -> None:

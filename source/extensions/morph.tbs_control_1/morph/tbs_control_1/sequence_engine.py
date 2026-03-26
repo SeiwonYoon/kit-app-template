@@ -44,7 +44,10 @@ from .rotate_animation import (
     stop_world_pivot_rotate_animation,
     run_local_euler_pivot_rotate_animation,
     run_prim_rotate_lock_world_center_animation,
+    stop_all_rotate_animations,
 )
+from .translate_animation import stop_all_translate_animations
+from .curve_animation import stop_all_curve_animations
 from . import usd_animation_control
 from .xform_utils import ensure_scale_xform_ops_first
 
@@ -973,6 +976,20 @@ class SequenceRunner:
         self._intra_group_subs.clear()
         try:
             stop_world_pivot_rotate_animation()
+        except Exception:
+            pass
+        # 어떤 스텝이 진행 중이었는지(타이머/그룹 경합)와 관계없이,
+        # 실제 애니메이션 모듈이 돌고 있으면 무조건 전체 중지해야 "일시정지/정지"가 사용자 기대대로 동작한다.
+        try:
+            stop_all_translate_animations()
+        except Exception:
+            pass
+        try:
+            stop_all_rotate_animations()
+        except Exception:
+            pass
+        try:
+            stop_all_curve_animations()
         except Exception:
             pass
         # 진행 중인 코드 애니메이션은 안전하게 정리 (현재 그룹 전체)

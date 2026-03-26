@@ -40,6 +40,14 @@ _world_pivot_sub = None
 _OFFSET_SUFFIX = "TBS_OFFSET"
 
 
+def is_rotate_animation_running() -> bool:
+    """control_window에서 sim tick pause 판단에 사용."""
+    try:
+        return bool(_rot_animations) or (_world_pivot_state is not None)
+    except Exception:
+        return False
+
+
 def _get_or_create_offset_translate_op(prim):
     x = UsdGeom.Xformable(prim)
     if not x:
@@ -887,6 +895,26 @@ def stop_prim_rotate_animation(prim_path: str) -> bool:
             _update_sub = None
         return True
     return False
+
+
+def stop_all_rotate_animations() -> None:
+    """전체 회전 애니메이션 강제 중지(SequenceRunner 정지/일시정지용)."""
+    global _rot_animations, _update_sub
+    try:
+        _rot_animations.clear()
+    except Exception:
+        _rot_animations = {}
+    if _update_sub is not None:
+        try:
+            _update_sub.unsubscribe()
+        except Exception:
+            pass
+        _update_sub = None
+    # 월드 피봇 회전도 같이 정리
+    try:
+        stop_world_pivot_rotate_animation()
+    except Exception:
+        pass
 
 
 def _on_update(e) -> None:

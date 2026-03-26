@@ -1,46 +1,44 @@
 [
-  {
-    "name": "bp1_to_bp2_when_bp2_empty",
-    "priority": 10,
-    "when": {
-      "sequence": "EAPEIS_PORT_MOVE_TRANSFERING",
-      "from_port": "BP1",
-      "to_port": "BP2",
-      "ports_occupancy": {
-        "BP2": "EMPTY"
-      }
-    },
-    "use": {
-      "json": "data/sim_sequences/move_bp1_bp2.json",
-      "runner": "sequence_editor",
-      "description": "BP1에서 BP2로 이송"
-    }
-  },
-  {
-    "name": "bp_to_ep_default",
-    "priority": 100,
-    "when": {
-      "sequence": "EAPEIS_PORT_MOVE_TRANSFERING",
-      "from_port": "BP2",
-      "to_port": "EP1"
-    },
-    "use": {
-      "json": "data/sim_sequences/move_bp2_ep1.json",
-      "runner": "sequence_editor",
-      "description": "버퍼에서 공정포트로 이동"
-    }
-  },
-  {
-    "name": "arrived_ep1_default",
-    "priority": 200,
-    "when": {
-      "sequence": "EAPEIS_PORT_ARRIVED",
-      "port": "EP1"
-    },
-    "use": {
-      "json": "data/sim_sequences/arrived_ep1.json",
-      "runner": "sequence_editor",
-      "description": "EP1 도착 안착"
-    }
-  }
+  { "name": "move_oht_bp1", "priority": 10, "when": { "sequence": "EAPEIS_PORT_MOVE", "from_port": "OHT", "to_port": "BP1" }, "use": { "json": "data/sim_sequences/move_oht_bp1.json", "runner": "sequence_editor", "description": "OHT->BP1 이동" } },
+  { "name": "move_oht_ep1", "priority": 11, "when": { "sequence": "EAPEIS_PORT_MOVE", "from_port": "OHT", "to_port": "EP1" }, "use": { "json": "data/sim_sequences/move_oht_ep1.json", "runner": "sequence_editor", "description": "OHT->EP1 이동" } },
+  { "name": "move_oht_ep2", "priority": 12, "when": { "sequence": "EAPEIS_PORT_MOVE", "from_port": "OHT", "to_port": "EP2" }, "use": { "json": "data/sim_sequences/move_oht_ep2.json", "runner": "sequence_editor", "description": "OHT->EP2 이동" } },
+  { "name": "move_oht_ep3", "priority": 13, "when": { "sequence": "EAPEIS_PORT_MOVE", "from_port": "OHT", "to_port": "EP3" }, "use": { "json": "data/sim_sequences/move_oht_ep3.json", "runner": "sequence_editor", "description": "OHT->EP3 이동" } },
+
+  { "name": "move_bp1_bp2", "priority": 20, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP1", "to_port": "BP2" }, "use": { "json": "data/sim_sequences/move_bp1_bp2.json", "runner": "sequence_editor", "description": "BP1->BP2 이송" } },
+  { "name": "move_bp1_bp3", "priority": 21, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP1", "to_port": "BP3" }, "use": { "json": "data/sim_sequences/move_bp1_bp3.json", "runner": "sequence_editor", "description": "BP1->BP3 이송" } },
+  { "name": "move_bp1_bp4", "priority": 22, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP1", "to_port": "BP4" }, "use": { "json": "data/sim_sequences/move_bp1_bp4.json", "runner": "sequence_editor", "description": "BP1->BP4 이송" } },
+
+  { "name": "move_bp2_ep1", "priority": 30, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP2", "to_port": "EP1" }, "use": { "json": "data/sim_sequences/move_bp2_ep1.json", "runner": "sequence_editor", "description": "BP2->EP1 이송" } },
+  { "name": "move_bp2_ep2", "priority": 31, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP2", "to_port": "EP2" }, "use": { "json": "data/sim_sequences/move_bp2_ep2.json", "runner": "sequence_editor", "description": "BP2->EP2 이송" } },
+  { "name": "move_bp2_ep3", "priority": 32, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP2", "to_port": "EP3" }, "use": { "json": "data/sim_sequences/move_bp2_ep3.json", "runner": "sequence_editor", "description": "BP2->EP3 이송" } },
+  { "name": "move_bp3_ep1", "priority": 33, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP3", "to_port": "EP1" }, "use": { "json": "data/sim_sequences/move_bp3_ep1.json", "runner": "sequence_editor", "description": "BP3->EP1 이송" } },
+  { "name": "move_bp3_ep2", "priority": 34, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP3", "to_port": "EP2" }, "use": { "json": "data/sim_sequences/move_bp3_ep2.json", "runner": "sequence_editor", "description": "BP3->EP2 이송" } },
+  { "name": "move_bp3_ep3", "priority": 35, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP3", "to_port": "EP3" }, "use": { "json": "data/sim_sequences/move_bp3_ep3.json", "runner": "sequence_editor", "description": "BP3->EP3 이송" } },
+  { "name": "move_bp4_ep1", "priority": 36, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP4", "to_port": "EP1" }, "use": { "json": "data/sim_sequences/move_bp4_ep1.json", "runner": "sequence_editor", "description": "BP4->EP1 이송" } },
+  { "name": "move_bp4_ep2", "priority": 37, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP4", "to_port": "EP2" }, "use": { "json": "data/sim_sequences/move_bp4_ep2.json", "runner": "sequence_editor", "description": "BP4->EP2 이송" } },
+  { "name": "move_bp4_ep3", "priority": 38, "when": { "sequence": "EAPEIS_PORT_MOVE_TRANSFERING", "from_port": "BP4", "to_port": "EP3" }, "use": { "json": "data/sim_sequences/move_bp4_ep3.json", "runner": "sequence_editor", "description": "BP4->EP3 이송" } },
+
+  { "name": "arrived_bp1", "priority": 50, "when": { "sequence": "EAPEIS_PORT_ARRIVED", "port": "BP1" }, "use": { "json": "data/sim_sequences/arrived_bp1.json", "runner": "sequence_editor", "description": "BP1 안착" } },
+  { "name": "arrived_bp2", "priority": 51, "when": { "sequence": "EAPEIS_PORT_ARRIVED", "port": "BP2" }, "use": { "json": "data/sim_sequences/arrived_bp2.json", "runner": "sequence_editor", "description": "BP2 안착" } },
+  { "name": "arrived_bp3", "priority": 52, "when": { "sequence": "EAPEIS_PORT_ARRIVED", "port": "BP3" }, "use": { "json": "data/sim_sequences/arrived_bp3.json", "runner": "sequence_editor", "description": "BP3 안착" } },
+  { "name": "arrived_bp4", "priority": 53, "when": { "sequence": "EAPEIS_PORT_ARRIVED", "port": "BP4" }, "use": { "json": "data/sim_sequences/arrived_bp4.json", "runner": "sequence_editor", "description": "BP4 안착" } },
+  { "name": "arrived_ep1", "priority": 54, "when": { "sequence": "EAPEIS_PORT_ARRIVED", "port": "EP1" }, "use": { "json": "data/sim_sequences/arrived_ep1.json", "runner": "sequence_editor", "description": "EP1 안착" } },
+  { "name": "arrived_ep2", "priority": 55, "when": { "sequence": "EAPEIS_PORT_ARRIVED", "port": "EP2" }, "use": { "json": "data/sim_sequences/arrived_ep2.json", "runner": "sequence_editor", "description": "EP2 안착" } },
+  { "name": "arrived_ep3", "priority": 56, "when": { "sequence": "EAPEIS_PORT_ARRIVED", "port": "EP3" }, "use": { "json": "data/sim_sequences/arrived_ep3.json", "runner": "sequence_editor", "description": "EP3 안착" } },
+
+  { "name": "ready_to_load_bp1", "priority": 70, "when": { "sequence": "EAPEIS_PORT_READYTOLOAD", "port": "BP1" }, "use": { "json": "data/sim_sequences/ready_to_load_bp1.json", "runner": "sequence_editor", "description": "BP1 READY_TO_LOAD" } },
+  { "name": "ready_to_load_bp2", "priority": 71, "when": { "sequence": "EAPEIS_PORT_READYTOLOAD", "port": "BP2" }, "use": { "json": "data/sim_sequences/ready_to_load_bp2.json", "runner": "sequence_editor", "description": "BP2 READY_TO_LOAD" } },
+  { "name": "ready_to_load_bp3", "priority": 72, "when": { "sequence": "EAPEIS_PORT_READYTOLOAD", "port": "BP3" }, "use": { "json": "data/sim_sequences/ready_to_load_bp3.json", "runner": "sequence_editor", "description": "BP3 READY_TO_LOAD" } },
+  { "name": "ready_to_load_bp4", "priority": 73, "when": { "sequence": "EAPEIS_PORT_READYTOLOAD", "port": "BP4" }, "use": { "json": "data/sim_sequences/ready_to_load_bp4.json", "runner": "sequence_editor", "description": "BP4 READY_TO_LOAD" } },
+  { "name": "ready_to_load_ep1", "priority": 74, "when": { "sequence": "EAPEIS_PORT_READYTOLOAD", "port": "EP1" }, "use": { "json": "data/sim_sequences/ready_to_load_ep1.json", "runner": "sequence_editor", "description": "EP1 READY_TO_LOAD" } },
+  { "name": "ready_to_load_ep2", "priority": 75, "when": { "sequence": "EAPEIS_PORT_READYTOLOAD", "port": "EP2" }, "use": { "json": "data/sim_sequences/ready_to_load_ep2.json", "runner": "sequence_editor", "description": "EP2 READY_TO_LOAD" } },
+  { "name": "ready_to_load_ep3", "priority": 76, "when": { "sequence": "EAPEIS_PORT_READYTOLOAD", "port": "EP3" }, "use": { "json": "data/sim_sequences/ready_to_load_ep3.json", "runner": "sequence_editor", "description": "EP3 READY_TO_LOAD" } },
+
+  { "name": "ready_to_unload_ep1", "priority": 80, "when": { "sequence": "EAPEIS_PORT_READYTOUNLOAD", "port": "EP1" }, "use": { "json": "data/sim_sequences/ready_to_unload_ep1.json", "runner": "sequence_editor", "description": "EP1 READY_TO_UNLOAD" } },
+  { "name": "ready_to_unload_ep2", "priority": 81, "when": { "sequence": "EAPEIS_PORT_READYTOUNLOAD", "port": "EP2" }, "use": { "json": "data/sim_sequences/ready_to_unload_ep2.json", "runner": "sequence_editor", "description": "EP2 READY_TO_UNLOAD" } },
+  { "name": "ready_to_unload_ep3", "priority": 82, "when": { "sequence": "EAPEIS_PORT_READYTOUNLOAD", "port": "EP3" }, "use": { "json": "data/sim_sequences/ready_to_unload_ep3.json", "runner": "sequence_editor", "description": "EP3 READY_TO_UNLOAD" } },
+
+  { "name": "removed_ep1", "priority": 90, "when": { "sequence": "EAPEIS_PORT_REMOVED", "port": "EP1" }, "use": { "json": "data/sim_sequences/removed_ep1.json", "runner": "sequence_editor", "description": "EP1 반출 완료" } },
+  { "name": "removed_ep2", "priority": 91, "when": { "sequence": "EAPEIS_PORT_REMOVED", "port": "EP2" }, "use": { "json": "data/sim_sequences/removed_ep2.json", "runner": "sequence_editor", "description": "EP2 반출 완료" } },
+  { "name": "removed_ep3", "priority": 92, "when": { "sequence": "EAPEIS_PORT_REMOVED", "port": "EP3" }, "use": { "json": "data/sim_sequences/removed_ep3.json", "runner": "sequence_editor", "description": "EP3 반출 완료" } }
 ]

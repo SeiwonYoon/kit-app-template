@@ -28,6 +28,14 @@ _update_sub = None
 _OFFSET_SUFFIX = "TBS_OFFSET"
 
 
+def is_curve_animation_running() -> bool:
+    """control_window에서 sim tick pause 판단에 사용."""
+    try:
+        return bool(_curve_animations)
+    except Exception:
+        return False
+
+
 def _get_or_create_offset_translate_op(prim):
     x = UsdGeom.Xformable(prim)
     if not x:
@@ -181,6 +189,21 @@ def stop_prim_curve_animation(prim_path: str) -> bool:
             _update_sub = None
         return True
     return False
+
+
+def stop_all_curve_animations() -> None:
+    """전체 곡선 애니메이션 강제 중지(SequenceRunner 정지/일시정지용)."""
+    global _curve_animations, _update_sub
+    try:
+        _curve_animations.clear()
+    except Exception:
+        _curve_animations = {}
+    if _update_sub is not None:
+        try:
+            _update_sub.unsubscribe()
+        except Exception:
+            pass
+        _update_sub = None
 
 
 def _on_curve_update(e) -> None:

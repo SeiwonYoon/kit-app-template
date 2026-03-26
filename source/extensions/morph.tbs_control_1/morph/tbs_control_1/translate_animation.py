@@ -40,6 +40,14 @@ _update_sub = None
 _OFFSET_SUFFIX = "TBS_OFFSET"
 
 
+def is_translate_animation_running() -> bool:
+    """control_window에서 sim tick pause 판단에 사용."""
+    try:
+        return bool(_animations)
+    except Exception:
+        return False
+
+
 def _get_or_create_offset_translate_op(prim):
     x = UsdGeom.Xformable(prim)
     if not x:
@@ -157,6 +165,21 @@ def stop_prim_translate_animation(prim_path: str) -> bool:
             _update_sub = None
         return True
     return False
+
+
+def stop_all_translate_animations() -> None:
+    """전체 이동 애니메이션 강제 중지(SequenceRunner 정지/일시정지용)."""
+    global _animations, _update_sub
+    try:
+        _animations.clear()
+    except Exception:
+        _animations = {}
+    if _update_sub is not None:
+        try:
+            _update_sub.unsubscribe()
+        except Exception:
+            pass
+        _update_sub = None
 
 
 def _on_update(e) -> None:
