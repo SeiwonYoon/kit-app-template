@@ -12,7 +12,11 @@ Sequence Engine (TBS Control)
 - JSON으로 저장/로드 가능한 step 스키마 제공
 
 지원 step 타입(최소):
-- USD_TIMELINE: USD 저장 애니메이션을 프레임 구간 재생 (수동/자동)
+- USD_TIMELINE: USD 저장 애니메이션을 프레임 구간 재생 (수동/자동).
+  · MOVE/ROTATE 직후 같은 prim에서 타임라인을 켤 때 "원래 자리로 튀었다가" 재생되는 경우,
+    재생 직전 `_apply_world_space_offset_correction`(TBS_OFFSET 보정)이 돈다.
+  · 보정 대상: 기본은 시퀀스에 등장한 MOVE/ROTATE prim(baseline 키) + 선택 필드 `offset_correct_prims`(콤마·공백 구분 이름/경로).
+  · 전제: 해당 Xformable에 `TBS_OFFSET` translate/rotate op가 있고, 타임라인이 건 키가 그 **이후** op 구간(또는 스켈/메시만 키인 경우 부모 보정으로 부족할 수 있음).
 - MOVE: 코드 기반 직선 이동 (translate_animation)
 - ROTATE: (1) user_axis_rotate 미체크: prim 로컬 TBS_OFFSET rotateXYZ에 rx/ry/rz 델타(도) — 제자리 회전(기존 동작).
           (2) 체크: 스테이지 루트(월드) 고정 Euler + pivot_wx/y/z(월드) 공통 중심. rx/ry/rz(도), 애니는 t 선형 보간.
@@ -26,8 +30,9 @@ Sequence Engine (TBS Control)
 from __future__ import annotations
 
 import math
-import time
 import random
+import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -599,8 +604,14 @@ def _world_delta_to_tbs_offset_translate_delta(
 
 def _apply_world_space_offset_correction(prim_paths: List[str], start_frame: int) -> None:
     """
-    B안: USD_TIMELINE 시작 전, MOVE/ROTATE로 움직인 prim의 월드 위치가
-    타임라인 start_frame에서도 그대로 보이도록 TBS_OFFSET을 재계산해 보정.
+    B안: USD_TIMELINE 시작 전, MOVE/ROTATE(또는 수동 지정 prim)의 현재 월드 포즈가
+    타임라인 start_frame을 평가했을 때와 같아지도록 TBS_OFFSET(translate/rotate)을 재계산한다.
+
+    타임라인에 곡선/키가 "녹화 당시 월드 기준"으로 박혀 있으면, 보정 없이는 재생 시작 시
+    원 위치로 되돌아간 뒤 애니가 도는 것처럼 보인다. 이 함수는 그 간극을 TBS_OFFSET으로 흡수한다.
+
+    한계: prim에 TBS_OFFSET op가 없거나, 애니가 TBS_OFFSET **앞쪽** op만 건드리면 실패할 수 있다.
+    Skel/관절만 키가 있고 부모 이동만 MOVE한 경우에는 관절 쪽까지 별도 키 설계가 필요할 수 있다.
     """
     stage = _get_stage()
     if not stage or not prim_paths:
@@ -748,14 +759,21 @@ def resolve_prim_paths(identifier: str) -> List[str]:
     return result
 
 
+def split_prim_identifier_tokens(text: str) -> List[str]:
+    """
+    콤마와 공백(탭·개행 포함)을 동시에 구분자로 쓴다. 연속 구분자는 하나로 본다.
+    prim 경로 문자열 안에 공백이 들어가는 경우는 한 토큰으로 유지할 수 없다(콤마만 사용 권장).
+    """
+    if not text or not str(text).strip():
+        return []
+    return [p for p in re.split(r"[\s,]+", str(text).strip()) if p]
+
+
 def resolve_prim_paths_multi(identifier_text: str) -> List[str]:
-    """','로 구분된 prim 식별자를 모두 해석해 prim path 목록 반환."""
+    """콤마·공백으로 구분된 prim 식별자를 모두 해석해 prim path 목록 반환."""
     out: List[str] = []
     seen = set()
-    for token in (identifier_text or "").split(","):
-        key = token.strip()
-        if not key:
-            continue
+    for key in split_prim_identifier_tokens(identifier_text or ""):
         for p in resolve_prim_paths(key):
             if p and p not in seen:
                 seen.add(p)
@@ -1159,7 +1177,7 @@ class SequenceRunner:
 
         self._steps = incoming_steps
         self._start_from_current = start_from_current
-        self._start_from_current_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
+        self._start_from_current_paths = split_prim_identifier_tokens(raw_paths)
         # JSON에 저장된 시작 스냅샷(prim_path -> t/r)을 런타임 형식으로 파싱.
         self._start_snapshot = self._parse_start_snapshot((first or {}).get("_start_snapshot", {}))
         self._current_group = None
@@ -1521,7 +1539,14 @@ class SequenceRunner:
                     return
             try:
                 # 코드 이동/회전으로 누적된 오프셋을 USD 시작프레임 기준으로 보정.
-                _apply_world_space_offset_correction(list(self._baseline.keys()), start)
+                paths_for_offset: List[str] = list(self._baseline.keys())
+                extra = str(step.get("offset_correct_prims", "") or "").strip()
+                if extra:
+                    for p in resolve_prim_paths_multi(extra):
+                        if p not in paths_for_offset:
+                            paths_for_offset.append(p)
+                if paths_for_offset:
+                    _apply_world_space_offset_correction(paths_for_offset, start)
             except Exception:
                 pass
             usd_animation_control.play_usd_animation(

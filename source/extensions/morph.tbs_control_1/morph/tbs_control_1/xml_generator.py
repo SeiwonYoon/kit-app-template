@@ -11,7 +11,8 @@ xml_generator.py — EAPEIS 포트 이벤트용 XML 생성·역파싱 (TBS Contr
 
 【시퀀스 6종과 필요한 인자】
 - FROM/TO 필요 (FROM_TO_SEQS): SEQ_MOVE_TRANSFERING, SEQ_MOVE
-  → build_xml_string(seq, from_port_id=, to_port_id=) — PROCESS_JOB은 FROM 포트 기준, FROM_INFO/TO_INFO에 포트 ID.
+  → build_xml_string(seq, from_port_id=, to_port_id=) — FROM_INFO/TO_INFO에 FROM/TO ID.
+  → PROCESS_JOB/PORT_ID: SEQ_MOVE는 항상 TO(장비 안착측). MOVE_TRANSFERING은 TO가 EP(1~3)면 TO, 아니면 FROM(버퍼간 이송).
 - PORT_ID만 필요 (PORT_ID_ONLY_SEQS): SEQ_READYTOLOAD, SEQ_ARRIVED, SEQ_READYTOUNLOAD, SEQ_REMOVED
   → build_xml_string(seq, port_id=) — PROCESS_JOB의 ATTR_PORT_ID에 반영.
 
@@ -206,8 +207,17 @@ def build_xml_string(
         if from_port_id is None or to_port_id is None:
             raise ValueError("FROM/TO 시퀀스는 from_port_id, to_port_id가 필요합니다.")
 
-        # 예시 구조에 맞추기 위해 PROCESS_JOB은 FROM 쪽 포트 기반으로 넣고, FROM_INFO/TO_INFO로 TO를 표현
-        event.append(_build_process_job(from_port_id))
+        fi = int(from_port_id)
+        ti = int(to_port_id)
+        # PROCESS_JOB PORT_ID: OHT→EP(MOVE) 등에서 FROM 가상 ID(9)가 아닌 도착 EP(1~3)가 되도록 TO 우선
+        if seq == SEQ_MOVE:
+            pj_port = ti
+        elif 1 <= ti <= 3:
+            pj_port = ti
+        else:
+            pj_port = fi
+
+        event.append(_build_process_job(pj_port))
 
         from_info = ET.SubElement(event, TAG_FROM_INFO)
         _set_attrs(

@@ -36,8 +36,8 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
     - runner / description: 부가 메타
 - 호출 흐름(현재 구현의 주 경로):
   1) simulation_engine._emit_event()에서 payload + ports_occupancy 전달
-  2) on_sim_start_clicked()의 on_event 콜백이 _enqueue_anim_event(...)로 UI 큐에 전달
-  3) _drain_sim_log_queue()에서 handle_sim_event_for_animation(ext, payload) 실행
+  2) on_sim_start_clicked()의 on_event 콜백이 post_sim_anim_event(...) → 큐 SimUiQueueKind.ANIM_EVENT
+  3) _drain_sim_log_queue() → _sim_ui_sink_anim_event → handle_sim_event_for_animation(ext, payload)
   4) handle_sim_event_for_animation():
      - payload를 canonical sequence(EAPEIS_PORT_*)로 정규화
      - xml_generator.build_xml_string(...)로 XML 생성
@@ -58,11 +58,13 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
   2) 파일을 extension 내부 경로(예: data/sim_sequences/*.json)에 배치
   3) rules 또는 map의 use.json 경로에 등록
   4) 시뮬레이션 이벤트 발생 시 자동 매칭/검증 로그 확인
- - 표시모드:
+ - 표시모드(SimLogPanelMode): 콤보 인덱스와 `_drain_sim_log_queue`의 이력 스킵 여부가 연동된다.
   · "둘다": 진행현황 + 이력로그 + 애니메이션 실행이력
   · "진행현황": 진행현황만
   · "이력로그": 스토리/시뮬 이력만
   · "애니메이션실행이력": 애니메이션 매핑/실행 로그만
+ - 시뮬 UI 큐 라우팅: `SimUiQueueKind` + `_dispatch_sim_ui_queue_item` + `_sim_ui_sink_*`.
+   새 공정 텍스트 로그는 `post_sim_history_line(ext, line)`(시뮬 스레드)만 쓰면 이력 창으로 간다.
  - 시뮬레이션 종료 시 `_export_sim_logs_to_xlsx()`가 자동 호출되어
    `data/sim_logs/sim_logs_YYYYmmdd_HHMMSS.xlsx`에 3개 시트(진행현황/이력로그/애니메이션실행이력)를 최신순으로 저장한다.
 
@@ -72,8 +74,10 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 새 종류 추가 시: xml_generator 수정 + 이 파일의 ComboBox·seqs 3곳 + 필요 시 IntField/모델 추가.
 
 사용처: extension.py on_startup → build_control_window(self)
+  · 재호출 시 기존 TBS 제어창은 destroy 후 재생성(확장 리로드 등으로 위젯 이중 생성 방지).
 """
 
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 import random
 import threading
@@ -117,6 +121,36 @@ CHECKBOX_WHITE_STYLE = {
     "color": 0xFF000000,
     "background_color": 0xFFEEEEEE,
 }
+
+
+class SimUiQueueKind(str, Enum):
+    """
+    `_sim_log_queue` 튜플 (kind, payload) 의 kind.
+    payload가 도달하는 UI 영역은 아래 sink와 1:1에 가깝게 대응한다.
+    """
+
+    PROGRESS = "progress"  # → 진행현황 패널 (_update_sim_progress)
+    HISTORY_LINE = "log"  # → 이력 로그 패널 (_append_sim_log). 값 "log"는 기존 큐 호환 유지.
+    ANIM_EVENT = "anim_event"  # → 포트 상태 패널 + 애니 실행/이력 (handle_sim_event_for_animation → _append_anim_history_log)
+    ACTION = "action"  # → 제어 액션 (예: xlsx보내기)
+    GATE = "gate"  # → 공정 확인 창
+
+
+class SimUiControlAction(str, Enum):
+    """SimUiQueueKind.ACTION 의 payload 로 허용되는 값."""
+
+    EXPORT_XLSX = "export_xlsx"
+
+
+class SimLogPanelMode(int, Enum):
+    """표시모드 콤보 인덱스 (`on_sim_log_view_changed` 와 동일)."""
+
+    ALL = 0
+    PROGRESS_ONLY = 1
+    HISTORY_ONLY = 2
+    ANIM_ONLY = 3
+
+
 SIM_SEQ_ALIAS = {
     "READYTOLOAD": xml_generator.SEQ_READYTOLOAD,
     "ARRIVED": xml_generator.SEQ_ARRIVED,
@@ -493,8 +527,8 @@ def _execute_mapped_sequence_stub(
     verbose: bool,
 ) -> None:
     """
-    실제 실행 훅(현재는 준비/검증 로그).
-    추후 여기에서 SequenceRunner 호출로 연결한다.
+    rules/map이 가리키는 JSON을 검증한 뒤 SequenceRunner.run()으로 실제 재생한다.
+    시뮬 tick은 _sim_tick_pause_event / is_running / wall fail-safe로 애니 종료까지 맞춘다.
     """
     p = _normalize_json_path(json_path_text)
     runner = str((meta or {}).get("runner", "sequence_editor"))
@@ -630,6 +664,15 @@ def _execute_mapped_sequence_stub(
                     ext,
                     f"[ANIM] 실행완료 | t={info.get('t','-')} | event={info.get('event','-')} | wall={wall:.2f}s | est={info.get('est','-')} | action={info.get('action','-')} | file={info.get('file','-')}",
                 )
+                # SequenceRunner.run()은 시작 시 stop() → baseline 복원을 한다. baseline이 예전 캡처면
+                # 다음 JSON 실행 전에 씬이 "초기화된 것처럼" 튀어 간다. 완료 직후 현재 자세를 baseline으로
+                # 다시 잡아 두면, 다음 공정 run()의 선행 stop()이 곧 '방금 끝난 포즈'를 유지하게 된다.
+                try:
+                    rnr = getattr(ext, "_sim_runner", None)
+                    if rnr is not None:
+                        rnr.reset_baseline()
+                except Exception:
+                    pass
                 pending = getattr(ext, "_sim_anim_pending", [])
                 if isinstance(pending, list) and pending:
                     nxt = pending.pop(0)
@@ -776,6 +819,11 @@ def _estimate_anim_duration_for_gate_payload(ext: Any, payload: Dict[str, str]) 
 
 def build_control_window(ext: Any) -> None:
     """TBS 제어창을 만들고 ext에 위젯/모델 참조를 저장."""
+    # destroy() 실패 후 참조만 None이 되면 이전 창이 화면에 남고 새 창이 또 생겨 UI가 겹쳐 보인다.
+    # 정상 생명주기는 extension on_shutdown에서 destroy 한 번 — 여기서는 이중 생성만 막는다.
+    if getattr(ext, "_control_window", None) is not None:
+        return
+
     ext._usd_anim_start_frame = ui.SimpleIntModel(200)
     ext._usd_anim_end_frame = ui.SimpleIntModel(300)
     ext._usd_anim_loop = ui.SimpleBoolModel(False)
@@ -786,19 +834,21 @@ def build_control_window(ext: Any) -> None:
     ext._last_generated_xml = ""
     ext._priority_prefix_model = ui.SimpleStringModel(DEFAULT_PRIORITY_NAME_PREFIX)
     ext._sim_lot_count_model = ui.SimpleIntModel(6)
-    ext._sim_metro_min_model = ui.SimpleFloatModel(10.0)
-    ext._sim_metro_max_model = ui.SimpleFloatModel(300.0)
+    ext._sim_lot_spawn_min_model = ui.SimpleFloatModel(15.0)
+    ext._sim_lot_spawn_max_model = ui.SimpleFloatModel(40.0)
+    ext._sim_pickup_evt_min_model = ui.SimpleFloatModel(50.0)
+    ext._sim_pickup_evt_max_model = ui.SimpleFloatModel(70.0)
     ext._sim_speed_model = ui.SimpleFloatModel(1.0)
-    ext._sim_log_interval_model = ui.SimpleFloatModel(5.0)
+    ext._sim_log_interval_model = ui.SimpleFloatModel(0.0)
     ext._sim_confirm_each_step_model = ui.SimpleBoolModel(False)
-    ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(15.0)
-    ext._sim_oht_bp1_max_model = ui.SimpleFloatModel(120.0)
-    ext._sim_bp1_bp_min_model = ui.SimpleFloatModel(3.0)
-    ext._sim_bp1_bp_max_model = ui.SimpleFloatModel(3.0)
-    ext._sim_bp_ep_min_model = ui.SimpleFloatModel(2.0)
-    ext._sim_bp_ep_max_model = ui.SimpleFloatModel(2.0)
-    ext._sim_ep_oht_min_model = ui.SimpleFloatModel(1.0)
-    ext._sim_ep_oht_max_model = ui.SimpleFloatModel(1.0)
+    ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(5.0)
+    ext._sim_oht_bp1_max_model = ui.SimpleFloatModel(10.0)
+    ext._sim_bp1_bp_min_model = ui.SimpleFloatModel(5.0)
+    ext._sim_bp1_bp_max_model = ui.SimpleFloatModel(10.0)
+    ext._sim_bp_ep_min_model = ui.SimpleFloatModel(5.0)
+    ext._sim_bp_ep_max_model = ui.SimpleFloatModel(10.0)
+    ext._sim_ep_oht_min_model = ui.SimpleFloatModel(5.0)
+    ext._sim_ep_oht_max_model = ui.SimpleFloatModel(10.0)
     ext._sim_ep_count_combo = None
     ext._sim_init_bp1_model = ui.SimpleBoolModel(False)
     ext._sim_init_bp2_model = ui.SimpleBoolModel(False)
@@ -847,41 +897,44 @@ def build_control_window(ext: Any) -> None:
     ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
 
-    ext._control_window = ui.Window("TBS 제어창", width=460, height=640)
+    ext._control_window = ui.Window("TBS 제어창", width=800, height=720)
     with ext._control_window.frame:
-        with ui.VStack(spacing=0):
-            ui.Label("USD 파일 애니메이션 (타임라인)", height=0)
-            with ui.HStack(spacing=8, height=28):
-                ui.Label("범위", width=50, height=28)
-                ext._usd_anim_mode_combo = ui.ComboBox(0, "수동", "자동")
-                ext._usd_anim_mode_combo.model.add_item_changed_fn(lambda m, *a: on_usd_anim_mode_changed(ext))
-                ui.Label("", width=0)
-            ext._usd_anim_manual_frame_row = ui.HStack(spacing=8, height=30)
-            with ext._usd_anim_manual_frame_row:
-                ui.Label("시작 프레임", width=70, height=30)
-                ui.IntField(model=ext._usd_anim_start_frame, width=60, height=30)
-                ui.Label("끝 프레임", width=70, height=30)
-                ui.IntField(model=ext._usd_anim_end_frame, width=60, height=30)
-            ext._usd_anim_auto_range_row = ui.HStack(spacing=8, height=22)
-            with ext._usd_anim_auto_range_row:
-                ui.Label("AUTO", width=50, height=22)
-                ui.Label("", model=ext._usd_anim_auto_range_text, height=22)
-            ext._usd_anim_manual_frame_row.visible = True
-            ext._usd_anim_auto_range_row.visible = False
-            with ui.HStack(spacing=8, height=20):
-                ui.CheckBox(model=ext._usd_anim_loop)
-                ui.Label("루프", height=0)
-            ui.Button("USD 파일 애니메이션 재생", height=28, clicked_fn=lambda: on_play_usd_animation(ext))
-            ui.Button("USD 애니메이션 정지", height=24, clicked_fn=usd_animation_control.stop_usd_animation)
-            ui.Spacer(height=6)
-            ui.Button("가상 시그널 재생 (JSON 샘플)", height=28, clicked_fn=lambda: on_play_generator_sample(ext))
-            ui.Spacer(height=6)
-            ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-            ui.Spacer(height=6)
-            with ui.Frame(style={"background_color": 0xFF23262B}):
-                with ui.VStack(padding=8, spacing=6):
-                    with ui.HStack(spacing=8, height=28):
-                        ui.Label("XML 제너레이터 생성기", width=150, height=28, style={"color": 0xFFDDDDDD})
+        with ui.ScrollingFrame(
+            height=ui.Fraction(1.0),
+            style={"ScrollingFrame": {"padding": 4, "margin": 0}},
+        ):
+            with ui.VStack(spacing=0):
+                ui.Label("USD 파일 애니메이션 (타임라인)", height=24)
+                with ui.HStack(spacing=8, height=28):
+                    ui.Label("범위", width=50, height=28)
+                    ext._usd_anim_mode_combo = ui.ComboBox(0, "수동", "자동")
+                    ext._usd_anim_mode_combo.model.add_item_changed_fn(lambda m, *a: on_usd_anim_mode_changed(ext))
+                ext._usd_anim_manual_frame_row = ui.HStack(spacing=8, height=30)
+                with ext._usd_anim_manual_frame_row:
+                    ui.Label("시작 프레임", width=70, height=30)
+                    ui.IntField(model=ext._usd_anim_start_frame, width=60, height=30)
+                    ui.Label("끝 프레임", width=70, height=30)
+                    ui.IntField(model=ext._usd_anim_end_frame, width=60, height=30)
+                ext._usd_anim_auto_range_row = ui.HStack(spacing=8, height=22)
+                with ext._usd_anim_auto_range_row:
+                    ui.Label("AUTO", width=50, height=22)
+                    ui.Label("", model=ext._usd_anim_auto_range_text, height=22)
+                ext._usd_anim_manual_frame_row.visible = True
+                ext._usd_anim_auto_range_row.visible = False
+                with ui.HStack(spacing=8, height=24):
+                    ui.CheckBox(model=ext._usd_anim_loop)
+                    ui.Label("루프", height=22)
+                ui.Button("USD 파일 애니메이션 재생", height=28, clicked_fn=lambda: on_play_usd_animation(ext))
+                ui.Button("USD 애니메이션 정지", height=24, clicked_fn=usd_animation_control.stop_usd_animation)
+                ui.Spacer(height=6)
+                ui.Button("가상 시그널 재생 (JSON 샘플)", height=28, clicked_fn=lambda: on_play_generator_sample(ext))
+                ui.Spacer(height=6)
+                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                ui.Spacer(height=6)
+                with ui.Frame(style={"background_color": 0xFF23262B}):
+                    # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
+                    with ui.VStack(padding=8, spacing=8):
+                        ui.Label("XML 제너레이터 생성기", height=24, style={"color": 0xFFDDDDDD})
                         ext._xml_seq_combo = ui.ComboBox(
                             0,
                             xml_generator.SEQ_READYTOLOAD,
@@ -892,158 +945,170 @@ def build_control_window(ext: Any) -> None:
                             xml_generator.SEQ_REMOVED,
                         )
                         ext._xml_seq_combo.model.add_item_changed_fn(lambda m, *a: on_xml_seq_changed(ext))
-                        ui.Button("OK", width=60, height=28, clicked_fn=lambda: on_xml_ok_clicked(ext))
-                    ext._xml_ab_inputs_frame = ui.HStack(spacing=8, height=28)
-                    with ext._xml_ab_inputs_frame:
-                        ui.Label("FROM_PORT_ID", width=110, height=28)
-                        ui.IntField(model=ext._xml_from_port_model, width=60, height=28)
-                        ui.Label("TO_PORT_ID", width=90, height=28)
-                        ui.IntField(model=ext._xml_to_port_model, width=60, height=28)
-                    ext._xml_ab_inputs_frame.visible = True
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Button("OK", width=72, height=28, clicked_fn=lambda: on_xml_ok_clicked(ext))
+                            ui.Button("제너레이터 실행(역파싱)", height=28, clicked_fn=lambda: on_xml_run_clicked(ext))
+                        ext._xml_ab_inputs_frame = ui.HStack(spacing=8, height=28)
+                        with ext._xml_ab_inputs_frame:
+                            ui.Label("FROM_PORT_ID", width=110, height=28)
+                            ui.IntField(model=ext._xml_from_port_model, width=60, height=28)
+                            ui.Label("TO_PORT_ID", width=90, height=28)
+                            ui.IntField(model=ext._xml_to_port_model, width=60, height=28)
+                        ext._xml_ab_inputs_frame.visible = True
 
-                    ext._xml_port_inputs_frame = ui.HStack(spacing=8, height=28)
-                    with ext._xml_port_inputs_frame:
-                        ui.Label("PORT_ID", width=110, height=28)
-                        ui.IntField(model=ext._xml_port_id_model, width=60, height=28)
-                    ext._xml_port_inputs_frame.visible = False
-                    # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
-                    on_xml_seq_changed(ext)
-                    ui.Button("제너레이터 실행(역파싱)", height=28, clicked_fn=lambda: on_xml_run_clicked(ext))
-            ui.Spacer(height=6)
-            ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-            ui.Spacer(height=6)
-            with ui.Frame(style={"background_color": 0xFF1E2530}):
-                with ui.VStack(padding=8, spacing=6):
-                    ui.Label("시뮬레이션 (simpy)", height=24, style={"color": 0xFFDDDDDD})
-                    with ui.HStack(spacing=8, height=28):
-                        ui.Label("LOT 수", width=80)
-                        ui.IntField(model=ext._sim_lot_count_model, width=80)
-                        ui.Label("EP 개수", width=55)
-                        ext._sim_ep_count_combo = ui.ComboBox(0, "2", "3")
-                        ext._sim_ep_count_combo.model.add_item_changed_fn(lambda m, *a: on_sim_ep_count_changed(ext))
-                        ui.Label("metro(s) MIN", width=90)
-                        ui.FloatField(model=ext._sim_metro_min_model, width=80)
-                        ui.Label("MAX", width=35)
-                        ui.FloatField(model=ext._sim_metro_max_model, width=80)
-                    ui.Label("초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)", height=20)
-                    with ui.HStack(spacing=8, height=26):
-                        ui.Label("BP1", width=30); ui.CheckBox(model=ext._sim_init_bp1_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        ui.Label("BP2", width=30); ui.CheckBox(model=ext._sim_init_bp2_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        ui.Label("BP3", width=30); ui.CheckBox(model=ext._sim_init_bp3_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        ui.Label("BP4", width=30); ui.CheckBox(model=ext._sim_init_bp4_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                    with ui.HStack(spacing=8, height=26):
-                        ui.Label("EP1", width=30); ui.CheckBox(model=ext._sim_init_ep1_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        ui.Label("EP2", width=30); ui.CheckBox(model=ext._sim_init_ep2_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        ext._sim_init_ep3_row = ui.HStack(spacing=8, height=26)
-                        with ext._sim_init_ep3_row:
-                            ui.Label("EP3", width=30); ui.CheckBox(model=ext._sim_init_ep3_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                    try:
-                        ext._sim_init_ep3_model.add_value_changed_fn(lambda m: on_sim_ep_count_changed(ext))
-                    except Exception:
-                        pass
-                    for mdl in (
-                        ext._sim_init_bp1_model,
-                        ext._sim_init_bp2_model,
-                        ext._sim_init_bp3_model,
-                        ext._sim_init_bp4_model,
-                        ext._sim_init_ep1_model,
-                        ext._sim_init_ep2_model,
-                        ext._sim_init_ep3_model,
-                    ):
+                        ext._xml_port_inputs_frame = ui.HStack(spacing=8, height=28)
+                        with ext._xml_port_inputs_frame:
+                            ui.Label("PORT_ID", width=110, height=28)
+                            ui.IntField(model=ext._xml_port_id_model, width=60, height=28)
+                        ext._xml_port_inputs_frame.visible = False
+                        # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
+                        on_xml_seq_changed(ext)
+                ui.Spacer(height=6)
+                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                ui.Spacer(height=6)
+                with ui.Frame(style={"background_color": 0xFF1E2530}):
+                    with ui.VStack(padding=8, spacing=6):
+                        ui.Label("시뮬레이션 (simpy)", height=24, style={"color": 0xFFDDDDDD})
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label("LOT 수", width=80)
+                            ui.IntField(model=ext._sim_lot_count_model, width=80)
+                            ui.Label("EP 개수", width=55)
+                            ext._sim_ep_count_combo = ui.ComboBox(0, "2", "3")
+                            ext._sim_ep_count_combo.model.add_item_changed_fn(lambda m, *a: on_sim_ep_count_changed(ext))
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label("LOT생성간격", width=100)
+                            ui.FloatField(model=ext._sim_lot_spawn_min_model, width=65)
+                            ui.Label("~", width=10)
+                            ui.FloatField(model=ext._sim_lot_spawn_max_model, width=65)
+                            ui.Label("회수간격", width=60)
+                            ui.FloatField(model=ext._sim_pickup_evt_min_model, width=55)
+                            ui.Label("~", width=10)
+                            ui.FloatField(model=ext._sim_pickup_evt_max_model, width=55)
+                        ui.Label("초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)", height=20)
+                        with ui.HStack(spacing=8, height=26):
+                            ui.Label("BP1", width=30); ui.CheckBox(model=ext._sim_init_bp1_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("BP2", width=30); ui.CheckBox(model=ext._sim_init_bp2_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("BP3", width=30); ui.CheckBox(model=ext._sim_init_bp3_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("BP4", width=30); ui.CheckBox(model=ext._sim_init_bp4_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                        with ui.HStack(spacing=8, height=26):
+                            ui.Label("EP1", width=30); ui.CheckBox(model=ext._sim_init_ep1_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("EP2", width=30); ui.CheckBox(model=ext._sim_init_ep2_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ext._sim_init_ep3_row = ui.HStack(spacing=8, height=26)
+                            with ext._sim_init_ep3_row:
+                                ui.Label("EP3", width=30); ui.CheckBox(model=ext._sim_init_ep3_model, width=30, style=CHECKBOX_WHITE_STYLE)
                         try:
-                            mdl.add_value_changed_fn(lambda m: _sync_ep3_port_cell_visibility(ext))
+                            ext._sim_init_ep3_model.add_value_changed_fn(lambda m: on_sim_ep_count_changed(ext))
                         except Exception:
                             pass
-                    on_sim_ep_count_changed(ext)
-                    with ui.HStack(spacing=8, height=28):
-                        ui.Label("OHT->BP1", width=80)
-                        ui.FloatField(model=ext._sim_oht_bp1_min_model, width=70)
-                        ui.Label("~", width=10)
-                        ui.FloatField(model=ext._sim_oht_bp1_max_model, width=70)
-                        ui.Label("BP1->BP", width=60)
-                        ui.FloatField(model=ext._sim_bp1_bp_min_model, width=55)
-                        ui.Label("~", width=10)
-                        ui.FloatField(model=ext._sim_bp1_bp_max_model, width=55)
-                    with ui.HStack(spacing=8, height=28):
-                        ui.Label("BP->EP", width=80)
-                        ui.FloatField(model=ext._sim_bp_ep_min_model, width=70)
-                        ui.Label("~", width=10)
-                        ui.FloatField(model=ext._sim_bp_ep_max_model, width=70)
-                        ui.Label("EP->OHT", width=60)
-                        ui.FloatField(model=ext._sim_ep_oht_min_model, width=55)
-                        ui.Label("~", width=10)
-                        ui.FloatField(model=ext._sim_ep_oht_max_model, width=55)
-                    with ui.HStack(spacing=8, height=28):
-                        ui.Label("시뮬 속도배율", width=100)
-                        ui.FloatField(model=ext._sim_speed_model, width=80)
-                        ui.Label("로그주기(s)", width=70)
-                        ui.FloatField(model=ext._sim_log_interval_model, width=70)
-                        ui.CheckBox(model=ext._sim_confirm_each_step_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        ui.Label("각 공정 확인", width=80)
-                        ui.Button("시작", width=80, clicked_fn=lambda: on_sim_start_clicked(ext))
-                        ui.Button("정지", width=80, clicked_fn=lambda: on_sim_stop_clicked(ext))
-                        ui.Button("리셋", width=80, clicked_fn=lambda: on_sim_reset_clicked(ext))
-                    with ui.HStack(spacing=8, height=24):
-                        ui.Label("표시모드", width=60)
-                        ext._sim_log_view_combo = ui.ComboBox(0, "둘다", "진행현황", "이력로그", "애니메이션실행이력")
-                        ext._sim_log_view_combo.model.add_item_changed_fn(lambda m, *a: on_sim_log_view_changed(ext))
-                        ui.Button("진행현황 복사", width=100, clicked_fn=lambda: on_copy_sim_progress(ext))
-                    ext._sim_port_state_frame = ui.ScrollingFrame(height=120)
-                    with ext._sim_port_state_frame:
-                        with ui.VStack(spacing=4):
-                            ext._sim_port_state_header_label = ui.Label("[포트상태] 대기 중", height=20, style={"color": 0xFFBFE7FF})
-                            with ui.HStack(spacing=4, height=24):
-                                with ui.ZStack(width=90, height=24):
-                                    ext._sim_port_cell_boxes["BP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                    ext._sim_port_cells["BP2"] = ui.Label("BP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                with ui.ZStack(width=90, height=24):
-                                    ext._sim_port_cell_boxes["BP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                    ext._sim_port_cells["BP3"] = ui.Label("BP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                with ui.ZStack(width=90, height=24):
-                                    ext._sim_port_cell_boxes["BP4"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                    ext._sim_port_cells["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                            with ui.HStack(spacing=4, height=24):
-                                with ui.ZStack(width=90, height=24):
-                                    ext._sim_port_cell_boxes["BP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                    ext._sim_port_cells["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                with ui.ZStack(width=90, height=24):
-                                    ext._sim_port_cell_boxes["EP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                    ext._sim_port_cells["EP1"] = ui.Label("EP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                with ui.ZStack(width=90, height=24):
-                                    ext._sim_port_cell_boxes["EP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                    ext._sim_port_cells["EP2"] = ui.Label("EP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                ext._sim_port_ep3_cell_container = ui.ZStack(width=90, height=24)
-                                with ext._sim_port_ep3_cell_container:
-                                    ext._sim_port_cell_boxes["EP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                    ext._sim_port_ep3_cell = ui.Label("EP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                            ext._sim_port_state_label = ui.Label("", word_wrap=False, width=0, height=0, visible=False)
-                    # 포트 상태 UI 구성 이후 EP3 표시조건 즉시 동기화
-                    on_sim_ep_count_changed(ext)
-                    _sync_ep3_port_cell_visibility(ext)
-                    ext._sim_progress_frame = ui.ScrollingFrame(height=90)
-                    with ext._sim_progress_frame:
-                        ext._sim_progress_label = ui.Label("", word_wrap=True, width=0, height=0, style={"color": 0xFFFFFFFF})
-                        ext._sim_progress_label.text = ext._sim_progress_text.as_string
-                    ext._sim_history_frame = ui.ScrollingFrame(height=140)
-                    with ext._sim_history_frame:
-                        ext._sim_history_label = ui.Label("", word_wrap=True, width=0, height=0, style={"color": 0xFFFFFFFF})
-                        ext._sim_history_label.text = ext._sim_history_text.as_string
-                    ext._sim_anim_history_frame = ui.ScrollingFrame(height=120)
-                    with ext._sim_anim_history_frame:
-                        ext._sim_anim_history_label = ui.Label("", word_wrap=True, width=0, height=0, style={"color": 0xFFFFFFFF})
-                        ext._sim_anim_history_label.text = ext._sim_anim_history_text.as_string
-                    on_sim_log_view_changed(ext)
-            ui.Spacer(height=6)
-            ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-            ui.Spacer(height=8)
-            ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=0)
-            ui.StringField(model=ext._priority_prefix_model, height=22)
-            ui.Spacer(height=4)
-            ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=0)
-            ui.Button("목록 새로고침", height=28, clicked_fn=lambda: on_refresh_prim_list(ext))
-            ui.Spacer(height=4)
-            with ui.ScrollingFrame(style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
-                ext._object_list_frame = ui.VStack(height=0, alignment=ui.Alignment.LEFT_TOP)
+                        for mdl in (
+                            ext._sim_init_bp1_model,
+                            ext._sim_init_bp2_model,
+                            ext._sim_init_bp3_model,
+                            ext._sim_init_bp4_model,
+                            ext._sim_init_ep1_model,
+                            ext._sim_init_ep2_model,
+                            ext._sim_init_ep3_model,
+                        ):
+                            try:
+                                mdl.add_value_changed_fn(lambda m: _sync_ep3_port_cell_visibility(ext))
+                            except Exception:
+                                pass
+                        on_sim_ep_count_changed(ext)
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label("OHT→BP/EP", width=100)
+                            ui.FloatField(model=ext._sim_oht_bp1_min_model, width=70)
+                            ui.Label("~", width=10)
+                            ui.FloatField(model=ext._sim_oht_bp1_max_model, width=70)
+                            ui.Label("BP1->BP", width=60)
+                            ui.FloatField(model=ext._sim_bp1_bp_min_model, width=55)
+                            ui.Label("~", width=10)
+                            ui.FloatField(model=ext._sim_bp1_bp_max_model, width=55)
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label("BP->EP", width=80)
+                            ui.FloatField(model=ext._sim_bp_ep_min_model, width=70)
+                            ui.Label("~", width=10)
+                            ui.FloatField(model=ext._sim_bp_ep_max_model, width=70)
+                            ui.Label("EP->OHT", width=60)
+                            ui.FloatField(model=ext._sim_ep_oht_min_model, width=55)
+                            ui.Label("~", width=10)
+                            ui.FloatField(model=ext._sim_ep_oht_max_model, width=55)
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label("시뮬 속도배율", width=100)
+                            ui.FloatField(model=ext._sim_speed_model, width=80)
+                            ui.Label("로그주기(s)", width=70)
+                            ui.FloatField(model=ext._sim_log_interval_model, width=70)
+                            ui.CheckBox(model=ext._sim_confirm_each_step_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("각 공정 확인", width=80)
+                            ui.Button("시작", width=80, clicked_fn=lambda: on_sim_start_clicked(ext))
+                            ui.Button("정지", width=80, clicked_fn=lambda: on_sim_stop_clicked(ext))
+                            ui.Button("리셋", width=80, clicked_fn=lambda: on_sim_reset_clicked(ext))
+                        with ui.HStack(spacing=8, height=24):
+                            ui.Label("표시모드", width=60)
+                            ext._sim_log_view_combo = ui.ComboBox(0, "둘다", "진행현황", "이력로그", "애니메이션실행이력")
+                            ext._sim_log_view_combo.model.add_item_changed_fn(lambda m, *a: on_sim_log_view_changed(ext))
+                            ui.Button("진행현황 복사", width=100, clicked_fn=lambda: on_copy_sim_progress(ext))
+                        ext._sim_port_state_frame = ui.ScrollingFrame(height=120)
+                        with ext._sim_port_state_frame:
+                            with ui.VStack(spacing=4):
+                                ext._sim_port_state_header_label = ui.Label("[포트상태] 대기 중", height=20, style={"color": 0xFFBFE7FF})
+                                with ui.HStack(spacing=4, height=24):
+                                    with ui.ZStack(width=90, height=24):
+                                        ext._sim_port_cell_boxes["BP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                        ext._sim_port_cells["BP2"] = ui.Label("BP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                    with ui.ZStack(width=90, height=24):
+                                        ext._sim_port_cell_boxes["BP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                        ext._sim_port_cells["BP3"] = ui.Label("BP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                    with ui.ZStack(width=90, height=24):
+                                        ext._sim_port_cell_boxes["BP4"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                        ext._sim_port_cells["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                with ui.HStack(spacing=4, height=24):
+                                    with ui.ZStack(width=90, height=24):
+                                        ext._sim_port_cell_boxes["BP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                        ext._sim_port_cells["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                    with ui.ZStack(width=90, height=24):
+                                        ext._sim_port_cell_boxes["EP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                        ext._sim_port_cells["EP1"] = ui.Label("EP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                    with ui.ZStack(width=90, height=24):
+                                        ext._sim_port_cell_boxes["EP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                        ext._sim_port_cells["EP2"] = ui.Label("EP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                    ext._sim_port_ep3_cell_container = ui.ZStack(width=90, height=24)
+                                    with ext._sim_port_ep3_cell_container:
+                                        ext._sim_port_cell_boxes["EP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                        ext._sim_port_ep3_cell = ui.Label("EP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                ext._sim_port_state_label = ui.Label("", word_wrap=False, width=0, height=0, visible=False)
+                        # 포트 상태 UI 구성 이후 EP3 표시조건 즉시 동기화
+                        on_sim_ep_count_changed(ext)
+                        _sync_ep3_port_cell_visibility(ext)
+                        ext._sim_progress_frame = ui.ScrollingFrame(height=90)
+                        with ext._sim_progress_frame:
+                            ext._sim_progress_label = ui.Label(
+                                "", word_wrap=True, height=88, style={"color": 0xFFFFFFFF}
+                            )
+                            ext._sim_progress_label.text = ext._sim_progress_text.as_string
+                        ext._sim_history_frame = ui.ScrollingFrame(height=140)
+                        with ext._sim_history_frame:
+                            ext._sim_history_label = ui.Label(
+                                "", word_wrap=True, height=136, style={"color": 0xFFFFFFFF}
+                            )
+                            ext._sim_history_label.text = ext._sim_history_text.as_string
+                        ext._sim_anim_history_frame = ui.ScrollingFrame(height=120)
+                        with ext._sim_anim_history_frame:
+                            ext._sim_anim_history_label = ui.Label(
+                                "", word_wrap=True, height=116, style={"color": 0xFFFFFFFF}
+                            )
+                            ext._sim_anim_history_label.text = ext._sim_anim_history_text.as_string
+                        on_sim_log_view_changed(ext)
+                ui.Spacer(height=6)
+                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                ui.Spacer(height=8)
+                ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=20)
+                ui.StringField(model=ext._priority_prefix_model, height=22)
+                ui.Spacer(height=4)
+                ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=20)
+                ui.Button("목록 새로고침", height=28, clicked_fn=lambda: on_refresh_prim_list(ext))
+                ui.Spacer(height=4)
+                with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
+                    ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
     refresh_object_list(ext)
 
 
@@ -1139,6 +1204,7 @@ def on_xml_run_clicked(ext: Any) -> None:
 
 
 def _append_sim_log(ext: Any, line: str) -> None:
+    """UI 스레드 전용: 이력 로그 패널(_sim_history_*)에 줄 추가. 시뮬 스레드는 post_sim_history_line 사용."""
     msg = _format_history_line((line or "").strip())
     if not msg:
         return
@@ -1223,6 +1289,7 @@ def _with_history_color_icon(s: str) -> str:
 
 
 def _append_anim_history_log(ext: Any, line: str) -> None:
+    """UI 스레드 전용: 애니메이션 실행이력 패널. (애니 파이프라인 내부에서만 호출)"""
     msg = _format_anim_history_line((line or "").strip())
     if not msg:
         return
@@ -1342,9 +1409,14 @@ def _enqueue_sim_log(ext: Any, line: str) -> None:
     if q is None:
         return
     try:
-        q.put_nowait(("log", (line or "").strip()))
+        q.put_nowait((SimUiQueueKind.HISTORY_LINE, (line or "").strip()))
     except Exception:
         pass
+
+
+def post_sim_history_line(ext: Any, line: str) -> None:
+    """시뮬 워커 스레드에서 호출: 스토리/상태 텍스트를 '이력 로그' 패널로 보낸다."""
+    _enqueue_sim_log(ext, line)
 
 
 def _enqueue_anim_event(ext: Any, payload: Dict[str, str]) -> None:
@@ -1352,9 +1424,14 @@ def _enqueue_anim_event(ext: Any, payload: Dict[str, str]) -> None:
     if q is None:
         return
     try:
-        q.put_nowait(("anim_event", dict(payload or {})))
+        q.put_nowait((SimUiQueueKind.ANIM_EVENT, dict(payload or {})))
     except Exception:
         pass
+
+
+def post_sim_anim_event(ext: Any, payload: Dict[str, str]) -> None:
+    """시뮬 워커 스레드에서 호출: 애니메이션 파이프라인(포트 패널 + 애니 이력)으로 이벤트를 넘긴다."""
+    _enqueue_anim_event(ext, payload)
 
 
 def _enqueue_control_action(ext: Any, action: str) -> None:
@@ -1362,7 +1439,7 @@ def _enqueue_control_action(ext: Any, action: str) -> None:
     if q is None:
         return
     try:
-        q.put_nowait(("action", action))
+        q.put_nowait((SimUiQueueKind.ACTION, action))
     except Exception:
         pass
 
@@ -1372,7 +1449,7 @@ def _enqueue_gate_request(ext: Any, payload: Dict[str, Any]) -> None:
     if q is None:
         return
     try:
-        q.put_nowait(("gate", dict(payload or {})))
+        q.put_nowait((SimUiQueueKind.GATE, dict(payload or {})))
     except Exception:
         pass
 
@@ -1384,12 +1461,28 @@ def _show_sim_gate_dialog(ext: Any, payload: Dict[str, Any]) -> None:
     title = str(payload.get("title", "공정 확인"))
     msg = str(payload.get("message", "다음 공정을 진행할까요?"))
     done = payload.get("_done_event", None)
-    ext._sim_gate_dialog = ui.Window(f"[SIM 확인] {title}", width=560, height=360)
+    g_raw = str(payload.get("gate_seq_raw", "")).strip()
+    g_can = str(payload.get("gate_seq_canonical", "")).strip()
+    g_xml = str(payload.get("gate_xml_sequence_name", "")).strip()
+    win_suffix = f" [{g_raw}]" if g_raw else ""
+    ext._sim_gate_dialog = ui.Window(f"[SIM 확인] {title}{win_suffix}", width=580, height=400)
     with ext._sim_gate_dialog.frame:
         with ui.VStack(spacing=8, padding=10):
-            with ui.ScrollingFrame(height=280):
+            with ui.Frame(style={"background_color": 0xFF2A3140, "border_width": 1, "border_color": 0xFF5A6A80}):
+                with ui.VStack(spacing=4, padding=8):
+                    ui.Label("이벤트 (sequence_name)", height=22, style={"color": 0xFF8EC8FF})
+                    if g_raw and g_can and g_raw == g_can:
+                        seq_line = f"sequence_name: {g_raw}"
+                    elif g_raw or g_can:
+                        seq_line = f"시뮬 seq: {g_raw or '-'}  → 규격/별칭: {g_can or '-'}"
+                    else:
+                        seq_line = "sequence_name: -"
+                    ui.Label(seq_line, word_wrap=True, height=36)
+                    if g_xml:
+                        ui.Label(f"XML SEQUENCE_NAME: {g_xml}", height=22, style={"color": 0xFFC8E0FF})
+            with ui.ScrollingFrame(height=240):
                 with ui.VStack(spacing=4):
-                    ui.Label(msg, word_wrap=True, height=0)
+                    ui.Label(msg, word_wrap=True, height=200)
             with ui.HStack(spacing=8, height=30):
                 ui.Button("확인", width=80, clicked_fn=lambda: _close_sim_gate_dialog(ext, done))
 
@@ -1427,9 +1520,72 @@ def _enqueue_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     if q is None:
         return
     try:
-        q.put_nowait(("progress", dict(payload or {})))
+        q.put_nowait((SimUiQueueKind.PROGRESS, dict(payload or {})))
     except Exception:
         pass
+
+
+def post_sim_progress_update(ext: Any, payload: Dict[str, str]) -> None:
+    """시뮬 워커 스레드에서 호출: 공정 진행률/상태를 '진행현황' 패널로 보낸다."""
+    _enqueue_sim_progress(ext, payload)
+
+
+def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
+    _update_sim_progress(ext, payload if isinstance(payload, dict) else {})
+
+
+def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLogPanelMode) -> None:
+    p = payload if isinstance(payload, dict) else {}
+    occ = p.get("ports_occupancy", {})
+    if not isinstance(occ, dict):
+        occ = {}
+    _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")))
+    verbose = panel_mode != SimLogPanelMode.PROGRESS_ONLY
+    handle_sim_event_for_animation(ext, p, verbose=verbose)
+
+
+def _sim_ui_sink_history_line(ext: Any, line: str, panel_mode: SimLogPanelMode) -> None:
+    if not line:
+        return
+    if panel_mode == SimLogPanelMode.PROGRESS_ONLY:
+        return
+    _append_sim_log(ext, line)
+
+
+def _sim_ui_sink_action(ext: Any, payload: Any) -> None:
+    if str(payload) == SimUiControlAction.EXPORT_XLSX.value:
+        _export_sim_logs_to_xlsx(ext)
+
+
+def _sim_ui_sink_gate(ext: Any, payload: Dict[str, Any]) -> None:
+    _show_sim_gate_dialog(ext, payload if isinstance(payload, dict) else {})
+
+
+def _coerce_sim_ui_queue_kind(kind: Any) -> str:
+    """
+    큐에서 꺼낸 kind가 SimUiQueueKind 멤버일 때 str(kind)는 'SimUiQueueKind.GATE'처럼
+    값이 아니라 멤버 이름이 되어 라우팅이 깨진다. 항상 실제 큐 문자열 값으로 맞춘다.
+    """
+    if isinstance(kind, SimUiQueueKind):
+        return kind.value
+    return str(kind)
+
+
+def _dispatch_sim_ui_queue_item(ext: Any, kind: str, payload: Any, panel_mode: SimLogPanelMode) -> None:
+    if kind == SimUiQueueKind.PROGRESS.value:
+        _sim_ui_sink_progress(ext, payload if isinstance(payload, dict) else {})
+    elif kind == SimUiQueueKind.ANIM_EVENT.value:
+        _sim_ui_sink_anim_event(ext, payload if isinstance(payload, dict) else {}, panel_mode)
+    elif kind == SimUiQueueKind.ACTION.value:
+        _sim_ui_sink_action(ext, payload)
+    elif kind == SimUiQueueKind.GATE.value:
+        _sim_ui_sink_gate(ext, payload if isinstance(payload, dict) else {})
+    elif kind == SimUiQueueKind.HISTORY_LINE.value:
+        line = payload if isinstance(payload, str) else str(payload)
+        _sim_ui_sink_history_line(ext, line, panel_mode)
+    else:
+        line = payload if isinstance(payload, str) else str(payload)
+        _sim_ui_sink_history_line(ext, line, panel_mode)
 
 
 def _drain_sim_log_queue(ext: Any) -> None:
@@ -1441,6 +1597,10 @@ def _drain_sim_log_queue(ext: Any) -> None:
             view_idx = ext._sim_log_view_combo.model.get_item_value_model().as_int
         except Exception:
             view_idx = 0
+        try:
+            panel_mode = SimLogPanelMode(int(view_idx))
+        except Exception:
+            panel_mode = SimLogPanelMode.ALL
         count = 0
         # 중요: UI 프레임 1회당 처리량 상한.
         # 큐가 많아도 렌더링 starvation을 막기 위해 200개까지만 드레인한다.
@@ -1449,26 +1609,10 @@ def _drain_sim_log_queue(ext: Any) -> None:
                 item = q.get_nowait()
             except Exception:
                 break
-            kind, payload = item if isinstance(item, tuple) and len(item) == 2 else ("log", item)
-            if kind == "progress":
-                # 진행현황 1줄 + 완료이력(최신순) 갱신
-                _update_sim_progress(ext, payload if isinstance(payload, dict) else {})
-            elif kind == "anim_event":
-                p = payload if isinstance(payload, dict) else {}
-                # 애니 이벤트는 포트 점유 패널 갱신과 매핑 실행 훅을 같이 탄다.
-                _update_port_occupancy_panel(ext, p.get("ports_occupancy", {}) if isinstance(p.get("ports_occupancy", {}), dict) else {}, str(p.get("sim_time", "")))
-                handle_sim_event_for_animation(ext, p, verbose=(not _is_progress_only_mode(ext)))
-            elif kind == "action":
-                if str(payload) == "export_xlsx":
-                    # 종료 직후 호출: 진행/이력/애니 로그를 1개 xlsx의 3시트로 저장
-                    _export_sim_logs_to_xlsx(ext)
-            elif kind == "gate":
-                _show_sim_gate_dialog(ext, payload if isinstance(payload, dict) else {})
-            else:
-                line = payload if isinstance(payload, str) else str(payload)
-                # 진행현황 전용 모드(1)에서는 이력 로그 누적을 생략
-                if line and view_idx != 1:
-                    _append_sim_log(ext, line)
+            kind, payload = (
+                item if isinstance(item, tuple) and len(item) == 2 else (SimUiQueueKind.HISTORY_LINE.value, item)
+            )
+            _dispatch_sim_ui_queue_item(ext, _coerce_sim_ui_queue_kind(kind), payload, panel_mode)
             count += 1
     except Exception as e:
         # UI 드레인 예외가 발생해도 구독이 끊기지 않도록 보호
@@ -1476,6 +1620,7 @@ def _drain_sim_log_queue(ext: Any) -> None:
 
 
 def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
+    """진행현황 패널 갱신(SimUiQueueKind.PROGRESS → _sim_ui_sink_progress)."""
     label = str(payload.get("label", "")).strip()
     if not label:
         return
@@ -1485,6 +1630,8 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     total = str(payload.get("total", "0.0"))
     sim_time = str(payload.get("sim_time", "0.00"))
     detail = str(payload.get("detail", ""))
+    event_seq = str(payload.get("event_seq") or payload.get("sequence_name") or "").strip()
+    ev_part = f"이벤트={event_seq} | " if event_seq else ""
     history = getattr(ext, "_sim_progress_history", None)
     start_times = getattr(ext, "_sim_progress_start_times", None)
     if history is None or start_times is None:
@@ -1507,7 +1654,7 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
 
     line = (
         f"[t={start_t:.2f}~{end_t:.2f} | {dur_t:.1f}s] "
-        f"{label} | {percent}% ({elapsed}/{total}s) | {status} | {detail}"
+        f"{ev_part}{label} | {percent}% ({elapsed}/{total}s) | {status} | {detail}"
     )
 
     # 최신이 위로 쌓이도록 관리
@@ -1534,15 +1681,6 @@ def _on_sim_event(ext: Any, payload: Dict[str, str]) -> None:
     lot_id = payload.get("lot_id", "")
     sim_time = payload.get("sim_time", "")
 
-    def _parse_port_num(port_text: str, default_value: int = 1) -> int:
-        txt = (port_text or "").strip().upper()
-        for prefix in ("BP", "EP", "PORT_"):
-            txt = txt.replace(prefix, "")
-        try:
-            return int(txt)
-        except Exception:
-            return default_value
-
     try:
         if seq in xml_generator.FROM_TO_SEQS:
             from_port = _parse_port_num(str(payload.get("from_port_id", "1")), 1)
@@ -1565,12 +1703,15 @@ def _parse_port_num(port_text: str, default_value: int = 1) -> int:
     """
     내부 포트 텍스트를 EAPEIS 포트 ID로 변환한다.
     매핑 규칙:
+    - OHT -> 9 (MOVE FROM 가상 포트; EP/BP와 충돌 없음)
     - EP1/2/3 -> 1/2/3
     - BP1/2/3/4 -> 5/6/7/8
     """
     txt = (port_text or "").strip().upper()
     if not txt:
         return default_value
+    if txt.startswith("OHT"):
+        return 9
     if txt.startswith("EP"):
         try:
             n = int(txt.replace("EP", ""))
@@ -1765,7 +1906,7 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
 
 def _is_progress_only_mode(ext: Any) -> bool:
     try:
-        return ext._sim_log_view_combo.model.get_item_value_model().as_int == 1
+        return ext._sim_log_view_combo.model.get_item_value_model().as_int == int(SimLogPanelMode.PROGRESS_ONLY)
     except Exception:
         return False
 
@@ -1895,10 +2036,14 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     on_sim_stop_clicked(ext)
     lot_count = max(1, ext._sim_lot_count_model.get_value_as_int())
-    metro_min = max(0.1, ext._sim_metro_min_model.get_value_as_float())
-    metro_max = max(0.1, ext._sim_metro_max_model.get_value_as_float())
-    if metro_min > metro_max:
-        metro_min, metro_max = metro_max, metro_min
+    spawn_imin = max(0.1, ext._sim_lot_spawn_min_model.get_value_as_float())
+    spawn_imax = max(0.1, ext._sim_lot_spawn_max_model.get_value_as_float())
+    if spawn_imin > spawn_imax:
+        spawn_imin, spawn_imax = spawn_imax, spawn_imin
+    pue_min = max(0.1, ext._sim_pickup_evt_min_model.get_value_as_float())
+    pue_max = max(0.1, ext._sim_pickup_evt_max_model.get_value_as_float())
+    if pue_min > pue_max:
+        pue_min, pue_max = pue_max, pue_min
     timing = SimulationTimingConfig(
         oht_to_bp1_min=max(0.1, ext._sim_oht_bp1_min_model.get_value_as_float()),
         oht_to_bp1_max=max(0.1, ext._sim_oht_bp1_max_model.get_value_as_float()),
@@ -1908,20 +2053,22 @@ def on_sim_start_clicked(ext: Any) -> None:
         bp_to_ep_max=max(0.1, ext._sim_bp_ep_max_model.get_value_as_float()),
         ep_to_oht_min=max(0.1, ext._sim_ep_oht_min_model.get_value_as_float()),
         ep_to_oht_max=max(0.1, ext._sim_ep_oht_max_model.get_value_as_float()),
+        lot_spawn_interval_min=spawn_imin,
+        lot_spawn_interval_max=spawn_imax,
+        pickup_event_interval_min=pue_min,
+        pickup_event_interval_max=pue_max,
     )
     log_interval = max(0.0, ext._sim_log_interval_model.get_value_as_float())
     log_cfg = SimulationLogConfig(
         progress_interval_sec=log_interval,
         input_status_interval_sec=log_interval,
     )
-    init_cfg = SimulationInitConfig(ep_count=ep_count, initial_full_ports=initial_full_ports)
+    init_cfg = SimulationInitConfig(
+        ep_count=ep_count,
+        initial_full_ports=initial_full_ports,
+        max_oht_lots=lot_count,
+    )
     lots: List[Lot] = []
-    # LOT/Foup ID 규칙은 UI/로그/엑셀에서 공통으로 사용하므로 포맷 변경 시 전역 영향 확인 필요.
-    for i in range(lot_count):
-        lot_id = f"LOT_{i+1:03d}"
-        foup_id = f"FOUP_{i+1:03d}"
-        metro = random.uniform(metro_min, metro_max)
-        lots.append(Lot(lot_id=lot_id, foup_id=foup_id, sequence=i + 1, metro_time=metro))
 
     ext._sim_history_text.set_value("[SIM] 초기화")
     ext._sim_progress_text.set_value("[진행현황] 초기화 (시뮬레이션 시작 대기)")
@@ -1981,6 +2128,14 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             xml = f"(XML 생성 실패: seq={seq})"
 
+        xml_sequence_name = ""
+        if isinstance(xml, str) and xml.strip().startswith("<"):
+            try:
+                _pd = xml_generator.parse_xml_string(xml) or {}
+                xml_sequence_name = str(_pd.get("sequence_name", "") or "").strip().upper()
+            except Exception:
+                pass
+
         # Alert에서 "실행 대상 JSON 파일"과 존재 여부를 함께 안내한다.
         map_line = "JSON 매핑: 없음"
         try:
@@ -2013,13 +2168,26 @@ def on_sim_start_clicked(ext: Any) -> None:
         done_evt = threading.Event()
         message = (
             f"공정: {payload.get('title','-')}\n"
+            f"이벤트 sequence_name: 시뮬 seq={seq_raw or '-'}, 규격/별칭={seq or '-'}"
+            + (f", XML SEQUENCE_NAME={xml_sequence_name}" if xml_sequence_name else "")
+            + "\n"
             f"lot={lot} from={fr} to={to} port={port}\n"
             f"예상시간={est}s\n"
             f"애니예상={anim_est_sec:.2f}s (JSON 기준)\n\n"
             f"{map_line}\n\n"
             f"XML:\n{xml}"
         )
-        _enqueue_gate_request(ext, {"title": payload.get("title", "공정 확인"), "message": message, "_done_event": done_evt})
+        _enqueue_gate_request(
+            ext,
+            {
+                "title": payload.get("title", "공정 확인"),
+                "message": message,
+                "_done_event": done_evt,
+                "gate_seq_raw": seq_raw,
+                "gate_seq_canonical": seq,
+                "gate_xml_sequence_name": xml_sequence_name,
+            },
+        )
         # 시뮬레이션 스레드는 사용자 확인 전까지 여기서 동기 대기한다.
         done_evt.wait()
         return float(anim_est_sec)
@@ -2031,9 +2199,9 @@ def on_sim_start_clicked(ext: Any) -> None:
         init_config=init_cfg,
         # 시뮬레이션 스레드에서 발생하는 로그/이벤트는 큐에 넣고 UI 스레드에서만 렌더링한다.
         # (Omni UI 스레드 제약 회피)
-        on_log=lambda line: _enqueue_sim_log(ext, line),
-        on_event=lambda payload: _enqueue_anim_event(ext, payload),
-        on_progress=lambda payload: _enqueue_sim_progress(ext, payload),
+        on_log=lambda line: post_sim_history_line(ext, line),
+        on_event=lambda payload: post_sim_anim_event(ext, payload),
+        on_progress=lambda payload: post_sim_progress_update(ext, payload),
         on_gate=_on_gate,
         print_to_console=(not _is_progress_only_mode(ext)),
     )
@@ -2098,7 +2266,7 @@ def on_sim_start_clicked(ext: Any) -> None:
                     print("[SIM] tick 동작 확인 (first tick)", flush=True)
                 if sim.is_done:
                     print("[SIM] 종료 감지", flush=True)
-                    _enqueue_control_action(ext, "export_xlsx")
+                    _enqueue_control_action(ext, SimUiControlAction.EXPORT_XLSX.value)
                     break
                 time.sleep(0.02)
         except Exception as err:
@@ -2176,18 +2344,21 @@ def on_sim_log_view_changed(ext: Any) -> None:
     try:
         idx = ext._sim_log_view_combo.model.get_item_value_model().as_int
     except Exception:
-        idx = 0
-    # 0:둘다, 1:진행현황, 2:이력로그, 3:애니메이션실행이력
+        idx = int(SimLogPanelMode.ALL)
+    try:
+        mode = SimLogPanelMode(int(idx))
+    except Exception:
+        mode = SimLogPanelMode.ALL
     if getattr(ext, "_sim_progress_frame", None) is not None:
-        ext._sim_progress_frame.visible = idx in (0, 1)
+        ext._sim_progress_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.PROGRESS_ONLY)
     if getattr(ext, "_sim_history_frame", None) is not None:
-        ext._sim_history_frame.visible = idx in (0, 2)
+        ext._sim_history_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.HISTORY_ONLY)
     if getattr(ext, "_sim_anim_history_frame", None) is not None:
-        ext._sim_anim_history_frame.visible = idx in (0, 3)
+        ext._sim_anim_history_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.ANIM_ONLY)
     sim = getattr(ext, "_sim_engine", None)
     if sim is not None and hasattr(sim, "set_console_logging_enabled"):
         # 진행현황 전용 모드에서는 콘솔/이력 로그 최소화
-        sim.set_console_logging_enabled(idx != 1)
+        sim.set_console_logging_enabled(mode != SimLogPanelMode.PROGRESS_ONLY)
 
 
 def on_copy_sim_progress(ext: Any) -> None:

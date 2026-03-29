@@ -67,10 +67,10 @@ class SequenceEditorWindow:
     def __init__(self, title: str = "TBS 시퀀스 편집기") -> None:
         self._window = ui.Window(title, width=650, height=720)
         # 창 크기를 사용자가 650보다 작게 줄이지 못하게 고정
-        try:
-            self._window.flags = self._window.flags | ui.WINDOW_FLAGS_NO_RESIZE
-        except Exception:
-            self._window.flags = ui.WINDOW_FLAGS_NO_RESIZE
+        # try:
+        #     self._window.flags = self._window.flags | ui.WINDOW_FLAGS_NO_RESIZE
+        # except Exception:
+        #     self._window.flags = ui.WINDOW_FLAGS_NO_RESIZE
         self._steps: List[Dict[str, Any]] = []
         self._runner = SequenceRunner(on_sequence_completed=lambda: print("[SEQUENCE] 완료", flush=True))  # noqa: T201
 
@@ -214,6 +214,7 @@ class SequenceEditorWindow:
                                                         "start_frame": 200,
                                                         "end_frame": 300,
                                                         "loop": False,
+                                                        "offset_correct_prims": "",
                                                         "hide_enabled": False,
                                                         "hide_prims": "",
                                                         "run_with_previous": False,
@@ -281,7 +282,7 @@ class SequenceEditorWindow:
                                             with ui.HStack(spacing=8, height=28):
                                                 ui.CheckBox(model=self._start_from_current_model, style=CHECKBOX_WHITE_STYLE)
                                                 ui.Label("현재 위치부터 시작", width=120)
-                                                ui.Label("대상 경로(,)", width=85)
+                                                ui.Label("대상 경로", width=85)
                                                 ui.StringField(
                                                     model=self._start_from_current_paths_model,
                                                     width=360,
@@ -346,6 +347,21 @@ class SequenceEditorWindow:
                 ui.IntField(model=sf, width=80, height=28, style=INPUT_FIELD_STYLE)
                 ui.Label("END", width=40)
                 ui.IntField(model=ef, width=80, height=28, style=INPUT_FIELD_STYLE)
+
+        ocp = ui.SimpleStringModel(str(step.get("offset_correct_prims", "")))
+
+        def _on_ocp(_m):
+            step["offset_correct_prims"] = ocp.get_value_as_string()
+
+        ocp.add_value_changed_fn(_on_ocp)
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("보정PRIM", width=60)
+            ui.StringField(model=ocp, width=420, height=28, style=INPUT_FIELD_STYLE)
+        ui.Label(
+            "MOVE 후 USD 재생 시 '원위치로 튀는' prim 이름/경로(,). 비우면 MOVE/ROTATE에 나온 prim만 보정.",
+            height=36,
+            word_wrap=True,
+        )
 
     def _ui_step_move(self, step: Dict[str, Any]) -> None:
         prim_model = ui.SimpleStringModel(str(step.get("prim", "")))
@@ -529,7 +545,7 @@ class SequenceEditorWindow:
     def _ui_step_hide_options(self, step: Dict[str, Any]) -> None:
         """
         각 스텝 하단: 숨길 prim 체크박스 + 경로 입력.
-        - hide_prims: 쉼표로 다중 입력 (하위 prim 포함)
+        - hide_prims: 콤마·공백으로 다중 입력 (하위 prim 포함)
         """
         hide_enabled = ui.SimpleBoolModel(bool(step.get("hide_enabled", False)))
         hide_paths = ui.SimpleStringModel(str(step.get("hide_prims", "")))
@@ -543,7 +559,7 @@ class SequenceEditorWindow:
             ui.Label("숨길 prim", width=70)
             # 남는 폭을 자동 흡수해서 한 줄 유지
             ui.StringField(model=hide_paths, width=500, height=28, style=INPUT_FIELD_STYLE)
-        ui.Label("숨길 prim 입력: , 구분 (하위 prim 포함)", height=0)
+        ui.Label("숨길 prim 입력: 콤마·공백 구분 (하위 prim 포함)", height=0)
 
     # ---------------- actions ----------------
 
@@ -743,9 +759,8 @@ class SequenceEditorWindow:
 
         target_paths: List[str] = []
         if path_text:
-            # 특정 경로 지정 모드: 입력된 경로만 현재 상태를 캡처
-            for p in [x.strip() for x in path_text.split(",") if x.strip()]:
-                target_paths.extend(resolve_prim_paths_multi(p))
+            # 특정 경로 지정 모드: 입력된 경로만 현재 상태를 캡처 (콤마·공백 구분)
+            target_paths.extend(resolve_prim_paths_multi(path_text))
         else:
             # 전체 모드: 시퀀스에서 실제로 움직이는 대상(MOVE/ROTATE)만 자동 수집
             for st in self._steps:
