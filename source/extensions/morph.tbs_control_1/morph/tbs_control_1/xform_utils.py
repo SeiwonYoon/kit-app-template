@@ -121,6 +121,8 @@ def _patch_carb_log_warn() -> None:
             return
 
         def _wrap(orig):
+            """carb.log_warn 원본을 감싸 Incompatible xformOpOrder 메시지는 무시."""
+
             def _inner(msg, *args, **kwargs):
                 try:
                     if "Incompatible xformOpOrder" in str(msg):
@@ -142,7 +144,10 @@ def _patch_carb_log_warn() -> None:
 
 
 def install_xform_op_order_warning_filter() -> None:
-    """확장 로드 시 한 번 호출."""
+    """
+    확장 on_startup에서 한 번 호출: xformOpOrder/scale 관련 logging.Filter 추가,
+    carb.log_warn 래핑, 일부 omni.usd 로거 임계치 상향으로 스팸 완화.
+    """
     global _LOGGING_FILTER_INSTALLED, _CARB_THRESHOLD_INSTALLED
     _patch_carb_log_warn()
 

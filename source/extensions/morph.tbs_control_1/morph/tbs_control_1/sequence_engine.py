@@ -25,6 +25,14 @@ Sequence Engine (TBS Control)
 - 새 step 타입: dict 스키마 + SequenceRunner._execute_step 분기 + translate/rotate/usd_animation 모듈
 - 그룹/지연/앵커 동작: group_end, duration, execute_group, schedule 관련 로직
 - UI 필드 추가: sequence_editor.py 와 스키마 키를 반드시 맞출 것
+
+【주요 심볼 색인】
+- Prim 경로: resolve_prim_paths, resolve_prim_paths_multi, split_prim_identifier_tokens, _expand_with_descendants
+- 스냅샷·로컬: get_composed_local_matrix_relative_to_parent, capture_composed_local_start_snapshot_for_paths, _local_matrix4d_from_tr, _matrix4d_from_m16_list
+- TBS xform: _tbs_op_indices, _compose_xform_segment, _apply_tbs_for_target_local_matrix, _set_tbs_span_matrix, _rotation_matrix_to_euler_xyz_degrees
+- 오프셋/보정: _get_or_create_offset_translate_op, _get_or_create_offset_rotate_op, _get_translate / _set_translate, _get_rotate_xyz / _set_rotate_xyz, _apply_world_space_offset_correction, _apply_world_pivot_frame_for_prim
+- MOVE/회전: _world_delta_to_local_delta, _world_delta_to_tbs_offset_translate_delta
+- 실행기: SequenceRunner — run/stop/pause, _execute_step, _capture_baseline/_restore_baseline, _parse_start_snapshot/_apply_start_snapshot
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ from .rotate_animation import (
     run_local_euler_pivot_rotate_animation,
     run_prim_rotate_lock_world_center_animation,
     stop_all_rotate_animations,
+    _matrix_from_rotate_xyz_deg,
 )
 from .translate_animation import stop_all_translate_animations
 from .curve_animation import stop_all_curve_animations
@@ -470,6 +479,104 @@ def _rotation_matrix_to_euler_xyz_degrees(rot_m: Gf.Matrix3d) -> Tuple[float, fl
         return (rx, ry, rz)
     except Exception:
         return (0.0, 0.0, 0.0)
+
+
+def get_composed_local_matrix_relative_to_parent(prim: Usd.Prim, time_code: Usd.TimeCode) -> Gf.Matrix4d:
+    """
+    XformCache 기준 부모 대비 로컬 4x4 (일반 translate/rotate 합성 포함).
+    루트 프림은 월드=로컬로 취급.
+    """
+    try:
+        cache = UsdGeom.XformCache(time_code)
+        w = cache.GetLocalToWorldTransform(prim)
+        if w is None:
+            return Gf.Matrix4d(1.0)
+        Mw = Gf.Matrix4d(w)
+        parent = prim.GetParent()
+        if not parent or not parent.IsValid():
+            return Mw
+        pw = cache.GetLocalToWorldTransform(Usd.Prim(parent))
+        if pw is None:
+            return Mw
+        Mp = Gf.Matrix4d(pw)
+        inv = Mp.GetInverse()
+        if inv is None:
+            return Mw
+        return inv * Mw
+    except Exception:
+        return Gf.Matrix4d(1.0)
+
+
+def _local_matrix4d_from_tr(t: Gf.Vec3f, r: Gf.Vec3f) -> Gf.Matrix4d:
+    """부모 기준 로컬: p' = R*p + t — rotate_animation._matrix_from_rotate_xyz_deg 와 동일 Euler 순서."""
+    Mr = _matrix_from_rotate_xyz_deg((float(r[0]), float(r[1]), float(r[2])))
+    Mt = Gf.Matrix4d(1.0)
+    Mt.SetTranslateOnly(Gf.Vec3d(float(t[0]), float(t[1]), float(t[2])))
+    return Mt * Mr
+
+
+def _matrix4d_from_m16_list(vals: Any) -> Optional[Gf.Matrix4d]:
+    if not isinstance(vals, (list, tuple)) or len(vals) < 16:
+        return None
+    try:
+        v = [float(vals[i]) for i in range(16)]
+        return Gf.Matrix4d(
+            v[0],
+            v[1],
+            v[2],
+            v[3],
+            v[4],
+            v[5],
+            v[6],
+            v[7],
+            v[8],
+            v[9],
+            v[10],
+            v[11],
+            v[12],
+            v[13],
+            v[14],
+            v[15],
+        )
+    except Exception:
+        return None
+
+
+def capture_composed_local_start_snapshot_for_paths(
+    stage: Usd.Stage,
+    paths: List[str],
+    time_code: Optional[Usd.TimeCode] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    현재 스테이지에서 각 prim의 부모-상대 합성 로컬 변환을 스냅샷 dict로 만든다.
+    JSON _start_snapshot 용: mode=composed_local, t/r(도) + 정밀 재현용 m16.
+
+    time_code 미지정 시 Usd.TimeCode.Default() 를 쓴다.
+    타임라인 현재 시각(_get_current_time_code)으로 XformCache를 만들면, 그 시점에
+    xform 샘플이 없는 레이어는 0/단위행렬로 평가되어 스냅샷이 전부 0이 되는 문제가 있다.
+    뷰포트·수동 편집 상태는 보통 Default 시간에 의견이 있다.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    tc = time_code if time_code is not None else Usd.TimeCode.Default()
+    for path in paths:
+        try:
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                continue
+            M = get_composed_local_matrix_relative_to_parent(prim, tc)
+            tr = M.ExtractTranslation()
+            r3 = M.ExtractRotationMatrix()
+            rx, ry, rz = _rotation_matrix_to_euler_xyz_degrees(r3)
+            m16 = [float(M[i][j]) for i in range(4) for j in range(4)]
+            out[path] = {
+                "mode": "composed_local",
+                "t": [float(tr[0]), float(tr[1]), float(tr[2])],
+                "r": [float(rx), float(ry), float(rz)],
+                "m16": m16,
+            }
+        except Exception:
+            continue
+    return out
 
 
 def _get_current_time_code() -> Usd.TimeCode:
@@ -935,7 +1042,8 @@ class SequenceRunner:
         self._current_group: Optional[Tuple[int, int]] = None
         self._start_from_current: bool = False
         self._start_from_current_paths: List[str] = []
-        self._start_snapshot: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
+        # path -> {t, r, mode, m16?} — composed_local 는 m16 로 정밀 복원
+        self._start_snapshot: Dict[str, Dict[str, Any]] = {}
 
     def is_running(self) -> bool:
         return self._running
@@ -1255,8 +1363,8 @@ class SequenceRunner:
             except Exception:
                 pass
 
-    def _parse_start_snapshot(self, raw: Any) -> Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]]:
-        out: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
+    def _parse_start_snapshot(self, raw: Any) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
         if not isinstance(raw, dict):
             return out
         for path, rec in raw.items():
@@ -1267,24 +1375,46 @@ class SequenceRunner:
             if not (isinstance(t, (list, tuple)) and isinstance(r, (list, tuple)) and len(t) >= 3 and len(r) >= 3):
                 continue
             try:
-                out[path] = (
-                    Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])),
-                    Gf.Vec3f(float(r[0]), float(r[1]), float(r[2])),
-                )
+                mode_raw = str(rec.get("mode") or "").strip()
+                mode = "composed_local" if mode_raw == "composed_local" else "offset_only"
+                entry: Dict[str, Any] = {
+                    "t": Gf.Vec3f(float(t[0]), float(t[1]), float(t[2])),
+                    "r": Gf.Vec3f(float(r[0]), float(r[1]), float(r[2])),
+                    "mode": mode,
+                }
+                m16 = rec.get("m16")
+                if isinstance(m16, (list, tuple)) and len(m16) >= 16:
+                    entry["m16"] = [float(m16[i]) for i in range(16)]
+                out[path] = entry
             except Exception:
                 continue
         return out
 
-    def _apply_start_snapshot(self, snapshot: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]]) -> None:
+    def _apply_start_snapshot(self, snapshot: Dict[str, Dict[str, Any]]) -> None:
         stage = _get_stage()
         if not stage:
             return
-        for path, (t, r) in snapshot.items():
+        # 캡처(capture_composed_local_start_snapshot_for_paths)와 동일하게 Default 시간으로
+        # TBS 역산·합성을 맞춘다. 타임라인 시각과 섞이면 스냅샷 적용이 0으로 떨어질 수 있다.
+        tc = Usd.TimeCode.Default()
+        for path, rec in snapshot.items():
             try:
                 prim = stage.GetPrimAtPath(path)
-                if prim and prim.IsValid():
-                    _set_translate(prim, t)
-                    _set_rotate_xyz(prim, r)
+                if not prim or not prim.IsValid():
+                    continue
+                t = rec.get("t")
+                r = rec.get("r")
+                mode = str(rec.get("mode") or "offset_only")
+                if not isinstance(t, Gf.Vec3f) or not isinstance(r, Gf.Vec3f):
+                    continue
+                if mode == "composed_local":
+                    M_local = _matrix4d_from_m16_list(rec.get("m16"))
+                    if M_local is None:
+                        M_local = _local_matrix4d_from_tr(t, r)
+                    if _apply_tbs_for_target_local_matrix(prim, M_local, tc):
+                        continue
+                _set_translate(prim, t)
+                _set_rotate_xyz(prim, r)
             except Exception:
                 pass
 

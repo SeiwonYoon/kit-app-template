@@ -69,7 +69,10 @@ from .xform_utils import install_xform_op_order_warning_filter
 
 
 class Extension(omni.ext.IExt):
+    """Omni 확장 진입점: 창 생성·선택/스테이지 구독·종료 시 애니/타임라인 정리."""
+
     def on_startup(self, ext_id: str) -> None:
+        """확장 로드 시: xform 경고 필터, 로드/제어/시퀀스 창, 오버레이, 이벤트 구독."""
         install_xform_op_order_warning_filter()
         self._ext_id = ext_id
         self._tracked_paths: List[str] = []
@@ -119,6 +122,7 @@ class Extension(omni.ext.IExt):
             pass
 
     def on_shutdown(self) -> None:
+        """확장 언로드 시: 시뮬 정지, 구독 해제, translate/curve/rotate/usd 애니 정지, 창 destroy."""
         try:
             on_sim_stop_clicked(self)
         except Exception:

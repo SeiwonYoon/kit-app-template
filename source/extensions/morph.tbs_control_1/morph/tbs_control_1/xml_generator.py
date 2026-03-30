@@ -87,26 +87,31 @@ ATTR_TO_PORT_ID = "TO_PORT_ID"
 
 SEQ_MOVE_TRANSFERING = "EAPEIS_PORT_MOVE_TRANSFERING"
 SEQ_MOVE = "EAPEIS_PORT_MOVE"
+# BP->EP 이동(요청) — 요구사항: BP->EP 이동 시 애니 트리거 전용 시퀀스명
+SEQ_MOVE_REQ = "EISEAP_PORT_MOVE_REQ"
 SEQ_READYTOLOAD = "EAPEIS_PORT_READYTOLOAD"
 SEQ_ARRIVED = "EAPEIS_PORT_ARRIVED"
 SEQ_READYTOUNLOAD = "EAPEIS_PORT_READYTOUNLOAD"
 SEQ_REMOVED = "EAPEIS_PORT_REMOVED"
 
-FROM_TO_SEQS = {SEQ_MOVE_TRANSFERING, SEQ_MOVE}
+FROM_TO_SEQS = {SEQ_MOVE_TRANSFERING, SEQ_MOVE, SEQ_MOVE_REQ}
 PORT_ID_ONLY_SEQS = {SEQ_READYTOLOAD, SEQ_ARRIVED, SEQ_READYTOUNLOAD, SEQ_REMOVED}
 ALL_SEQS = tuple(sorted(list(FROM_TO_SEQS | PORT_ID_ONLY_SEQS)))
 
 
 def _u(val: str) -> str:
+    """XML 속성/태그명용: 문자열을 대문자로 정규화."""
     return (val or "").upper()
 
 
 def _set_attrs(elem: ET.Element, attrs: Dict[str, str]) -> None:
+    """Element에 attrs 딕셔너리를 _u 키·값으로 일괄 세팅."""
     for k, v in (attrs or {}).items():
         elem.set(_u(k), _u(str(v)))
 
 
 def build_header() -> ET.Element:
+    """Envelop용 HEADER: FACILITY, ENVIRONMENT, SENDERNODE 자식만 두는 플레이스홀더."""
     header = ET.Element(TAG_HEADER)
     ET.SubElement(header, TAG_FACILITY)
     ET.SubElement(header, TAG_ENVIRONMENT)
@@ -115,6 +120,7 @@ def build_header() -> ET.Element:
 
 
 def build_body_attributes(sequence_name: str) -> Dict[str, str]:
+    """BODY PROCESS_JOB에 들어갈 기본 속성 딕셔너리(SEQUENCE_NAME 등)."""
     return {
         ATTR_DESTINATION: "",
         ATTR_ORIGINATION: "",
@@ -126,6 +132,7 @@ def build_body_attributes(sequence_name: str) -> Dict[str, str]:
 
 
 def _build_lot_and_wafer() -> ET.Element:
+    """CARRIER 하위 LOT/WAFER 플레이스홀더 노드."""
     lot = ET.Element(TAG_LOT)
     _set_attrs(
         lot,
@@ -141,6 +148,7 @@ def _build_lot_and_wafer() -> ET.Element:
 
 
 def _build_carrier() -> ET.Element:
+    """CARRIER 노드 + 하위 LOT/WAFER 플레이스홀더."""
     carrier = ET.Element(TAG_CARRIER)
     _set_attrs(carrier, {ATTR_CARRIER_ID: ""})
     carrier.append(_build_lot_and_wafer())
@@ -150,6 +158,7 @@ def _build_carrier() -> ET.Element:
 def _build_process_job(
     port_id: Optional[int],
 ) -> ET.Element:
+    """PROCESS_JOB + CARRIER 트리. port_id는 ATTR_PORT_ID에 반영(없으면 빈 문자열)."""
     pj = ET.Element(TAG_PROCESS_JOB)
     _set_attrs(
         pj,
@@ -170,6 +179,7 @@ def _sequence_action_desc(
     from_port_id: str,
     to_port_id: str,
 ) -> str:
+    """시퀀스별 사람이 읽기 쉬운 설명 한 줄(제어창 로그·디버그용)."""
     # 사용자 요구사항의 1~6 시나리오를 그대로 로그로 제공
     if seq == SEQ_READYTOLOAD:
         return f"1) 장비포트에서 새로운 FOUP를 받을 준비 완료. PORT_ID={port_id} (애니없음)"
@@ -181,10 +191,12 @@ def _sequence_action_desc(
         return (
             f"4) FROM_PORT_ID={from_port_id}, TO_PORT_ID={to_port_id} : TBS 포트에서 장비포트로 내리는 애니 실행"
         )
+    if seq == SEQ_MOVE_REQ:
+        return f"4-2) FROM_PORT_ID={from_port_id} -> TO_PORT_ID={to_port_id} : 버퍼(BP)에서 공정포트(EP)로 이동 요청 애니"
     if seq == SEQ_READYTOUNLOAD:
-        return f"5) 장비에서 계측 완료. OHT가 FOUP을 회수하여 PORT_ID={port_id} 포트로 가져가는 애니"
+        return f"5) 회수 요청 큐 적재(애니없음). OHT가 PORT_ID={port_id} 포트에서 FOUP 회수 준비"
     if seq == SEQ_REMOVED:
-        return f"6) OHT가 PORT_ID={port_id} 포트에서 FOUP을 회수하면 발생 애니 없음"
+        return f"6) OHT가 PORT_ID={port_id} 포트에서 FOUP을 회수하는 애니 실행(회수 진행)"
     return "알 수 없는 시퀀스"
 
 
@@ -194,6 +206,7 @@ def build_xml_string(
     from_port_id: Optional[int] = None,
     to_port_id: Optional[int] = None,
 ) -> str:
+    """EAPEIS 포트 이벤트용 XML 문자열 전체 생성. FROM/TO 또는 PORT_ID만 시퀀스에 맞게 전달."""
     seq = _u(sequence_name)
     header = build_header()
 
@@ -253,6 +266,7 @@ def build_xml_string(
 
 
 def _strip_xml_declaration(s: str) -> str:
+    """선행 <?xml ...?> 선언을 제거해 파싱용 본문만 남김."""
     s2 = (s or "").strip()
     if s2.startswith("<?xml"):
         end = s2.find("?>")
@@ -262,6 +276,7 @@ def _strip_xml_declaration(s: str) -> str:
 
 
 def _extract_values_from_tree(root: ET.Element) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """XML 트리에서 PROCESS_JOB PORT_ID, FROM_INFO, TO_INFO 숫자 문자열을 추출. 반환 (port_id, from, to)."""
     # return: (port_id, from_port_id, to_port_id)
     port_id = None
     from_port_id = None
@@ -284,6 +299,7 @@ def _extract_values_from_tree(root: ET.Element) -> Tuple[Optional[str], Optional
 
 
 def parse_xml_string(xml_text: str) -> Optional[dict]:
+    """XML 문자열을 dict로 역파싱(sequence_name, 포트, action_desc 등). 실패 시 None."""
     if not xml_text or not xml_text.strip():
         return None
 

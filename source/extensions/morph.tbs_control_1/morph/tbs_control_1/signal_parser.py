@@ -31,6 +31,7 @@ from typing import Any, List, Optional
 
 
 def parse_signal_json(text: str) -> Optional[dict]:
+    """JSON 문자열을 파싱해 {objects, segments} 형태로 정규화. 실패 시 None."""
     if not text or not text.strip():
         return None
     try:
@@ -41,6 +42,7 @@ def parse_signal_json(text: str) -> Optional[dict]:
 
 
 def parse_signal_xml(text: str) -> Optional[dict]:
+    """XML 루트에서 <object name=...>·<segment duration dx dy dz>를 읽어 {objects, segments}로 변환."""
     if not text or not text.strip():
         return None
     try:
@@ -72,6 +74,7 @@ def parse_signal_xml(text: str) -> Optional[dict]:
 
 
 def _normalize_parsed(data: Any) -> Optional[dict]:
+    """dict(JSON 루트)에서 objects·segments 리스트를 검증·정규화."""
     if not data or not isinstance(data, dict):
         return None
     objects = data.get("objects")
@@ -106,6 +109,7 @@ def _normalize_parsed(data: Any) -> Optional[dict]:
 
 
 def parse_signal(data: str, format: str = "json") -> Optional[dict]:
+    """format에 따라 JSON 또는 XML 파싱 진입. 반환은 {objects, segments} 또는 None."""
     fmt = (format or "json").strip().lower()
     if fmt == "xml":
         return parse_signal_xml(data)

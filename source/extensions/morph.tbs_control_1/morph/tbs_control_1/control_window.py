@@ -24,6 +24,7 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 - 규칙 파일(우선순위):
   1) `config/event_animation_rules.json`  ← 권장(상태 기반)
   2) `config/event_animation_map.json`    ← 기본 fallback(이벤트 단순 매핑)
+- 포트별 LOT prim 가시성: `config/port_lot_prim_paths.json` — `port_lot_visibility.apply_port_lot_prim_visibility` (시뮬 이벤트마다)
 - rules 형식(요약):
   · 리스트 항목: {"name","priority","when","use"}
   · when:
@@ -68,10 +69,84 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
  - 시뮬레이션 종료 시 `_export_sim_logs_to_xlsx()`가 자동 호출되어
    `data/sim_logs/sim_logs_YYYYmmdd_HHMMSS.xlsx`에 3개 시트(진행현황/이력로그/애니메이션실행이력)를 최신순으로 저장한다.
 
-【XML 6종류와 UI 필드】 (로직·상수는 xml_generator.py)
-- FROM_PORT_ID + TO_PORT_ID: MOVE_TRANSFERING, MOVE
+【시뮬레이션 이벤트→애니메이션(JSON) 매핑 요약 (요구사항 반영)】
+주의:
+- 실제 실행 우선순위는 `EVENT_JSON_CASE_MAP` → rules(`config/event_animation_rules.json`) → map(`config/event_animation_map.json`) 순이다.
+- 아래 목록은 코드 내 기본 테이블 `EVENT_JSON_CASE_MAP` 기준이며, payload의 키는 seq + (from_port_id/to_port_id 또는 port_id)이다.
+
+1) 생성/투입(OHT 운반) — 애니는 ARRIVED에서만
+- **이벤트(sequence_name)**: `EAPEIS_PORT_ARRIVED`
+- **조건**: `from_port_id="OHT"`, `to_port_id="BP1|EP1|EP2|EP3"`
+- **JSON**
+  - OHT->BP1: `data/sim_sequences/arrived_bp1.json`
+  - OHT->EP1: `data/sim_sequences/arrived_ep1.json`
+  - OHT->EP2: `data/sim_sequences/arrived_ep2.json`
+  - OHT->EP3: `data/sim_sequences/arrived_ep3.json`
+
+2) BP1 → BP(버퍼) 이동 — 애니 실행
+- **이벤트(sequence_name)**: `EAPEIS_PORT_MOVE_TRANSFERING`
+- **조건**: `from_port_id="BP1"`, `to_port_id="BP2|BP3|BP4"`
+- **JSON**
+  - BP1->BP2: `data/sim_sequences/move_bp1_bp2.json`
+  - BP1->BP3: `data/sim_sequences/move_bp1_bp3.json`
+  - BP1->BP4: `data/sim_sequences/move_bp1_bp4.json`
+
+3) BP → EP(공정포트) 이동 — 애니 실행
+- **이벤트(sequence_name)**: `EISEAP_PORT_MOVE_REQ`
+- **조건**: `from_port_id="BP2|BP3|BP4"`, `to_port_id="EP1|EP2|EP3"`
+- **JSON**
+  - BP2->EP1: `data/sim_sequences/move_bp2_ep1.json`
+  - BP2->EP2: `data/sim_sequences/move_bp2_ep2.json`
+  - BP2->EP3: `data/sim_sequences/move_bp2_ep3.json`
+  - BP3->EP1: `data/sim_sequences/move_bp3_ep1.json`
+  - BP3->EP2: `data/sim_sequences/move_bp3_ep2.json`
+  - BP3->EP3: `data/sim_sequences/move_bp3_ep3.json`
+  - BP4->EP1: `data/sim_sequences/move_bp4_ep1.json`
+  - BP4->EP2: `data/sim_sequences/move_bp4_ep2.json`
+  - BP4->EP3: `data/sim_sequences/move_bp4_ep3.json`
+
+4) 회수 우선 실행 — 애니는 REMOVED에서만
+- **이벤트(sequence_name)**: `EAPEIS_PORT_REMOVED`
+- **조건**: `port_id="EP1|EP2|EP3"`
+- **JSON**
+  - EP1: `data/sim_sequences/removed_ep1.json`
+  - EP2: `data/sim_sequences/removed_ep2.json`
+  - EP3: `data/sim_sequences/removed_ep3.json`
+
+5) 애니 없는 이벤트(상태/큐 의미만)
+- `EAPEIS_PORT_READYTOLOAD` (생성/수신 준비)
+- `EAPEIS_PORT_READYTOUNLOAD` (회수 요청 큐 적재)
+
+【XML 시퀀스와 UI 필드】 (로직·상수는 xml_generator.py)
+- FROM_PORT_ID + TO_PORT_ID: MOVE_TRANSFERING, MOVE, MOVE_REQ
 - PORT_ID만: READYTOLOAD, ARRIVED, READYTOUNLOAD, REMOVED
 새 종류 추가 시: xml_generator 수정 + 이 파일의 ComboBox·seqs 3곳 + 필요 시 IntField/모델 추가.
+
+【주요 함수 색인(빠른 참조)】
+- 경로·규칙 파일: _extension_root_dir(확장 루트), _event_animation_map_path / _event_animation_rules_path(JSON 경로),
+  _load_event_animation_map·_load_event_animation_rules(mtime 캐시·로드)
+- 규칙 매칭: _matches_occupancy_rule(ports_occupancy 조건), _resolve_rule_entry(rules.json 우선순위),
+  _resolve_event_case_map_entry(EVENT_JSON_CASE_MAP), _resolve_event_animation_entry(통합: case→rules→map),
+  _normalize_json_path(상대→절대)
+- 실행: _execute_mapped_sequence_stub(매핑된 JSON 검증·SequenceRunner 실행), _estimate_step_duration_sec_for_log,
+  _estimate_sequence_total_duration_sec_for_log, _estimate_anim_duration_for_gate_payload(게이트 대기 시간 추정)
+- 이벤트 처리: handle_sim_event_for_animation(시뮬 payload→XML→역파싱→룰→JSON 실행), _on_sim_event(로그용 래퍼)
+- 시뮬 UI 큐(스레드→UI): post_sim_history_line, post_sim_anim_event, post_sim_progress_update,
+  _enqueue_sim_log·_enqueue_anim_event·_enqueue_control_action·_enqueue_gate_request·_enqueue_sim_progress,
+  _drain_sim_log_queue(메인 스레드에서 소비), _dispatch_sim_ui_queue_item, _coerce_sim_ui_queue_kind,
+  _sim_ui_sink_progress·_sim_ui_sink_anim_event·_sim_ui_sink_history_line·_sim_ui_sink_action·_sim_ui_sink_gate
+- 게이트: _show_sim_gate_dialog, _close_sim_gate_dialog, on_sim_start_clicked 내부 on_gate 연동
+- 진행·로그 UI: _append_sim_log, _format_history_line·_with_history_color_icon, _append_anim_history_log,
+  _refresh_anim_history_view, _compose_anim_history_with_summary, _render_pending_dots, _format_anim_history_line,
+  _update_sim_progress, _is_progress_only_mode, on_copy_sim_progress
+- 포트 패널: _port_cell_text, _compact_cell_value, _sync_ep3_port_cell_visibility, _set_port_box_style, _update_port_occupancy_panel
+- 시뮬 제어: on_sim_start_clicked·on_sim_stop_clicked·on_sim_reset_clicked, _detach_sim_update,
+  on_sim_log_view_changed, on_sim_ep_count_changed, _export_sim_logs_to_xlsx
+- XML UI: on_xml_seq_changed, on_xml_ok_clicked, on_xml_run_clicked
+- 포트 문자열: _parse_port_num, _port_kind, _normalize_port_text_from_xml
+- Prim 목록: on_refresh_prim_list, refresh_object_list, build_object_panel, on_button_0/1/2
+- 가상 시그널: receive_signal_data, run_generator_from_parsed
+- 창: build_control_window(전체 UI 조립)
 
 사용처: extension.py on_startup → build_control_window(self)
   · 재호출 시 기존 TBS 제어창은 destroy 후 재생성(확장 리로드 등으로 위젯 이중 생성 방지).
@@ -84,6 +159,7 @@ import threading
 import time
 import queue
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -94,6 +170,7 @@ from pxr import Gf
 from . import usd_animation_control
 from . import xml_generator
 from .curve_animation import make_parabolic_path, run_prim_curve_animation, stop_prim_curve_animation
+from .port_lot_visibility import apply_port_lot_prim_visibility
 from .prim_info import get_prim_display_name, safe_str
 from .prim_utils import (
     collect_prim_paths_safe,
@@ -156,57 +233,46 @@ SIM_SEQ_ALIAS = {
     "ARRIVED": xml_generator.SEQ_ARRIVED,
     "MOVE_TRANSFERING": xml_generator.SEQ_MOVE_TRANSFERING,
     "MOVE": xml_generator.SEQ_MOVE,
+    "MOVE_REQ": xml_generator.SEQ_MOVE_REQ,
     "READYTOUNLOAD": xml_generator.SEQ_READYTOUNLOAD,
     "REMOVED": xml_generator.SEQ_REMOVED,
 }
 # 이벤트별/포트별 JSON 매핑(최상단 일원화)
 # - 운영 중 수정은 이 테이블을 우선 수정한다.
 # - key 규칙:
-#   * ARRIVED/READYTOLOAD/READYTOUNLOAD/REMOVED: "PORT"
-#   * MOVE/MOVE_TRANSFERING: "FROM->TO"
+#   * READYTOLOAD/READYTOUNLOAD: 애니 없음(매핑 비워둠)
+#   * ARRIVED: OHT 이동 애니만 실행 → key="FROM->TO" (예: OHT->EP1, OHT->BP1)
+#   * EAPEIS_PORT_MOVE_TRANSFERING: BP1->BPx 이동 애니만 실행 → key="FROM->TO"
+#   * EISEAP_PORT_MOVE_REQ: BPx->EPy 이동 애니만 실행 → key="FROM->TO"
+#   * REMOVED: 회수 우선순위가 되었을 때 회수 애니 실행 → key="PORT" (EP1/2/3)
 EVENT_JSON_CASE_MAP: Dict[str, Dict[str, str]] = {
-    xml_generator.SEQ_MOVE: {
-        "OHT->BP1": "data/sim_sequences/move_oht_bp1.json",  # OHT가 BP1 상부로 접근/이동
-        "OHT->EP1": "data/sim_sequences/move_oht_ep1.json",  # OHT가 EP1로 직접 투입 이동
-        "OHT->EP2": "data/sim_sequences/move_oht_ep2.json",  # OHT가 EP2로 직접 투입 이동
-        "OHT->EP3": "data/sim_sequences/move_oht_ep3.json",  # OHT가 EP3로 직접 투입 이동
-    },
+    # 요구사항: OHT 이동은 ARRIVED에서만(=MOVE 불필요)
     xml_generator.SEQ_MOVE_TRANSFERING: {
         "BP1->BP2": "data/sim_sequences/move_bp1_bp2.json",  # BP1 LOT를 BP2 버퍼로 이송
         "BP1->BP3": "data/sim_sequences/move_bp1_bp3.json",  # BP1 LOT를 BP3 버퍼로 이송
         "BP1->BP4": "data/sim_sequences/move_bp1_bp4.json",  # BP1 LOT를 BP4 버퍼로 이송
-        "BP2->EP1": "data/sim_sequences/move_bp2_ep1.json",  # BP2 LOT를 EP1 공정포트로 이송
-        "BP2->EP2": "data/sim_sequences/move_bp2_ep2.json",  # BP2 LOT를 EP2 공정포트로 이송
-        "BP2->EP3": "data/sim_sequences/move_bp2_ep3.json",  # BP2 LOT를 EP3 공정포트로 이송
-        "BP3->EP1": "data/sim_sequences/move_bp3_ep1.json",  # BP3 LOT를 EP1 공정포트로 이송
-        "BP3->EP2": "data/sim_sequences/move_bp3_ep2.json",  # BP3 LOT를 EP2 공정포트로 이송
-        "BP3->EP3": "data/sim_sequences/move_bp3_ep3.json",  # BP3 LOT를 EP3 공정포트로 이송
-        "BP4->EP1": "data/sim_sequences/move_bp4_ep1.json",  # BP4 LOT를 EP1 공정포트로 이송
-        "BP4->EP2": "data/sim_sequences/move_bp4_ep2.json",  # BP4 LOT를 EP2 공정포트로 이송
-        "BP4->EP3": "data/sim_sequences/move_bp4_ep3.json",  # BP4 LOT를 EP3 공정포트로 이송
     },
     xml_generator.SEQ_ARRIVED: {
-        "BP1": "data/sim_sequences/arrived_bp1.json",  # BP1 포트 안착(도착 완료) 연출
-        "BP2": "data/sim_sequences/arrived_bp2.json",  # BP2 포트 안착(도착 완료) 연출
-        "BP3": "data/sim_sequences/arrived_bp3.json",  # BP3 포트 안착(도착 완료) 연출
-        "BP4": "data/sim_sequences/arrived_bp4.json",  # BP4 포트 안착(도착 완료) 연출
-        "EP1": "data/sim_sequences/arrived_ep1.json",  # EP1 포트 안착(도착 완료) 연출
-        "EP2": "data/sim_sequences/arrived_ep2.json",  # EP2 포트 안착(도착 완료) 연출
-        "EP3": "data/sim_sequences/arrived_ep3.json",  # EP3 포트 안착(도착 완료) 연출
+        # 요구사항: ARRIVED는 "OHT가 옮기는 모든 애니" 트리거. FROM->TO 로 매핑한다.
+        "OHT->BP1": "data/sim_sequences/arrived_bp1.json",
+        "OHT->EP1": "data/sim_sequences/arrived_ep1.json",
+        "OHT->EP2": "data/sim_sequences/arrived_ep2.json",
+        "OHT->EP3": "data/sim_sequences/arrived_ep3.json",
     },
-    xml_generator.SEQ_READYTOLOAD: {
-        "BP1": "data/sim_sequences/ready_to_load_bp1.json",  # BP1이 새 LOT 수신 가능한 대기 상태
-        "BP2": "data/sim_sequences/ready_to_load_bp2.json",  # BP2가 새 LOT 수신 가능한 대기 상태
-        "BP3": "data/sim_sequences/ready_to_load_bp3.json",  # BP3가 새 LOT 수신 가능한 대기 상태
-        "BP4": "data/sim_sequences/ready_to_load_bp4.json",  # BP4가 새 LOT 수신 가능한 대기 상태
-        "EP1": "data/sim_sequences/ready_to_load_ep1.json",  # EP1이 새 LOT 수신 가능한 대기 상태
-        "EP2": "data/sim_sequences/ready_to_load_ep2.json",  # EP2가 새 LOT 수신 가능한 대기 상태
-        "EP3": "data/sim_sequences/ready_to_load_ep3.json",  # EP3가 새 LOT 수신 가능한 대기 상태
-    },
-    xml_generator.SEQ_READYTOUNLOAD: {
-        "EP1": "data/sim_sequences/ready_to_unload_ep1.json",  # EP1 LOT/Foup 반출 준비 상태
-        "EP2": "data/sim_sequences/ready_to_unload_ep2.json",  # EP2 LOT/Foup 반출 준비 상태
-        "EP3": "data/sim_sequences/ready_to_unload_ep3.json",  # EP3 LOT/Foup 반출 준비 상태
+    # 요구사항: READYTOLOAD / READYTOUNLOAD 는 애니 실행 안함(빈 dict 유지)
+    xml_generator.SEQ_READYTOLOAD: {},
+    xml_generator.SEQ_READYTOUNLOAD: {},
+    # 요구사항: BP->EP 이동 애니는 EISEAP_PORT_MOVE_REQ 에서만 실행
+    xml_generator.SEQ_MOVE_REQ: {
+        "BP2->EP1": "data/sim_sequences/move_bp2_ep1.json",
+        "BP2->EP2": "data/sim_sequences/move_bp2_ep2.json",
+        "BP2->EP3": "data/sim_sequences/move_bp2_ep3.json",
+        "BP3->EP1": "data/sim_sequences/move_bp3_ep1.json",
+        "BP3->EP2": "data/sim_sequences/move_bp3_ep2.json",
+        "BP3->EP3": "data/sim_sequences/move_bp3_ep3.json",
+        "BP4->EP1": "data/sim_sequences/move_bp4_ep1.json",
+        "BP4->EP2": "data/sim_sequences/move_bp4_ep2.json",
+        "BP4->EP3": "data/sim_sequences/move_bp4_ep3.json",
     },
     xml_generator.SEQ_REMOVED: {
         "EP1": "data/sim_sequences/removed_ep1.json",  # EP1에서 LOT/Foup 회수 완료 연출
@@ -232,19 +298,23 @@ _EVENT_ANIM_RULES_MTIME: Optional[float] = None
 
 
 def _extension_root_dir() -> Path:
+    """이 파일 기준 확장 루트(.../morph.tbs_control_1). config·data 경로 계산에 사용."""
     # .../source/extensions/morph.tbs_control_1
     return Path(__file__).resolve().parents[2]
 
 
 def _event_animation_map_path() -> Path:
+    """이벤트 seq → JSON 단순 매핑 파일 경로."""
     return _extension_root_dir() / "config" / "event_animation_map.json"
 
 
 def _event_animation_rules_path() -> Path:
+    """상태 기반 애니메이션 규칙(우선순위 리스트) 파일 경로."""
     return _extension_root_dir() / "config" / "event_animation_rules.json"
 
 
 def _load_event_animation_map() -> Dict[str, Any]:
+    """event_animation_map.json을 읽어 dict로 반환. mtime이 같으면 캐시 재사용."""
     global _EVENT_ANIM_MAP_CACHE, _EVENT_ANIM_MAP_MTIME
     p = _event_animation_map_path()
     if not p.exists():
@@ -269,6 +339,7 @@ def _load_event_animation_map() -> Dict[str, Any]:
 
 
 def _load_event_animation_rules() -> List[Dict[str, Any]]:
+    """event_animation_rules.json을 읽어 규칙 리스트로 반환(priority 오름차순 정렬, mtime 캐시)."""
     global _EVENT_ANIM_RULES_CACHE, _EVENT_ANIM_RULES_MTIME
     p = _event_animation_rules_path()
     if not p.exists():
@@ -295,6 +366,7 @@ def _load_event_animation_rules() -> List[Dict[str, Any]]:
 
 
 def _matches_occupancy_rule(rule_occ: Dict[str, Any], occ: Dict[str, Any]) -> bool:
+    """규칙의 ports_occupancy(포트→FULL/EMPTY/LOT_ID)가 현재 occ 스냅샷과 일치하는지."""
     for port, expected in (rule_occ or {}).items():
         p = str(port).strip().upper()
         got = str((occ or {}).get(p, "") or "")
@@ -410,6 +482,7 @@ def _resolve_event_animation_entry(seq: str, payload: Optional[Dict[str, str]] =
 
 
 def _normalize_json_path(path_text: str) -> Path:
+    """시퀀스 JSON 상대 경로를 확장 루트 기준 절대 Path로."""
     p = Path(path_text)
     if p.is_absolute():
         return p
@@ -550,7 +623,40 @@ def _execute_mapped_sequence_stub(
     lot_id = str(payload.get("lot_id", "")).strip() or "-"
     action_text = f"{base_desc} ({route} | lot={lot_id})"
     sim_time = str(payload.get("sim_time", "")).strip()
+    # 스토리-JSON 요약(애니 실행이력 창) 기록: "실행/스킵/실패" 모두 남겨야 누적이 끊기지 않는다.
+    def _push_story_json(status: str) -> None:
+        try:
+            blocks = getattr(ext, "_sim_recent_story_blocks", None)
+            if not isinstance(blocks, list):
+                return
+            lot0 = str(payload.get("lot_id", "") or "").strip()
+            line = f"[애니] event={seq} | json={p.name} | {status}"
+            b0 = None
+            if lot0:
+                for cand in reversed(blocks):
+                    if isinstance(cand, dict) and str(cand.get("lot_id", "") or "").strip() == lot0:
+                        b0 = cand
+                        break
+            if b0 is None and lot0:
+                b0 = {"story": f"🟦 [스토리] (미수집) lot={lot0}", "anims": [], "lot_id": lot0}
+                blocks.append(b0)
+                if len(blocks) > 12:
+                    del blocks[:-12]
+            if isinstance(b0, dict):
+                anims0 = b0.get("anims", [])
+                if not isinstance(anims0, list):
+                    anims0 = []
+                    b0["anims"] = anims0
+                if not anims0 or str(anims0[-1]) != line:
+                    anims0.append(line)
+                    if len(anims0) > 12:
+                        del anims0[:-12]
+            _refresh_anim_history_view(ext)
+        except Exception:
+            pass
+
     if not p.exists():
+        _push_story_json("SKIP (MISSING)")
         _append_anim_history_log(
             ext,
             f"[ANIM] 파일없음 | event={seq} | action={action_text} | need={p.name} | path={p}",
@@ -568,9 +674,22 @@ def _execute_mapped_sequence_stub(
         if not isinstance(parsed, list):
             raise ValueError("시퀀스 JSON 루트는 list여야 합니다.")
     except Exception as e:
+        _push_story_json("SKIP (PARSE_FAIL)")
         _append_anim_history_log(ext, f"[ANIM] JSON 파싱실패 | event={seq} | action={action_text} | file={p.name} | err={e}")
         if verbose:
             print(f"[ANIM MAP] JSON 파싱 실패: {p} err={e}", flush=True)
+        return
+
+    # 시뮬레이션 중에는 "빈 JSON([])"을 실행(run)하면 runner 초기화/복원 경로를 타면서
+    # 포즈/숨김이 튀는 원인이 된다. 빈 시퀀스는 실행하지 않고 스킵한다.
+    if not parsed:
+        _push_story_json("SKIP (EMPTY)")
+        _append_anim_history_log(
+            ext,
+            f"[ANIM] 스킵(EMPTY JSON) | t={sim_time or '-'} | event={seq} | action={action_text} | file={p.name}",
+        )
+        if verbose:
+            print(f"[ANIM MAP] 빈 JSON([]) 스킵: {p} event={seq}", flush=True)
         return
 
     # 예상 총 길이(초): 엑셀/로그에 같이 남길 수 있게 추정
@@ -592,6 +711,7 @@ def _execute_mapped_sequence_stub(
         ext,
         f"[ANIM] 실행준비완료 | t={sim_time or '-'} | event={seq} | est={est_text} | action={action_text} | file={p.name} | steps={len(parsed)}({preview}) | runner={runner} | rule={rule_name or '-'}",
     )
+    _push_story_json("PLAN (READY)")
     # 실제 실행 연결: 동시에 여러 run() 호출 시 기존 애니가 끊기는 문제를 막기 위해
     # "시뮬레이션 애니 실행 큐"로 직렬화한다.
     try:
@@ -664,6 +784,10 @@ def _execute_mapped_sequence_stub(
                     ext,
                     f"[ANIM] 실행완료 | t={info.get('t','-')} | event={info.get('event','-')} | wall={wall:.2f}s | est={info.get('est','-')} | action={info.get('action','-')} | file={info.get('file','-')}",
                 )
+                # 포트상태 점(●) 감소 시점
+                # - ARRIVED(OHT->*) 애니가 "포트 도착"을 의미하므로, 완료 후 생성 토큰 1개 소모
+                # - REMOVED 애니가 "회수 진행"이므로, 완료 후 회수 토큰 1개 소모
+                # (요청으로 제거) 포트상태 좌/우 점 표시 기능 비활성화
                 # SequenceRunner.run()은 시작 시 stop() → baseline 복원을 한다. baseline이 예전 캡처면
                 # 다음 JSON 실행 전에 씬이 "초기화된 것처럼" 튀어 간다. 완료 직후 현재 자세를 baseline으로
                 # 다시 잡아 두면, 다음 공정 run()의 선행 stop()이 곧 '방금 끝난 포즈'를 유지하게 된다.
@@ -675,6 +799,11 @@ def _execute_mapped_sequence_stub(
                     pass
                 pending = getattr(ext, "_sim_anim_pending", [])
                 if isinstance(pending, list) and pending:
+                    # 우선순위 큐: _priority 낮은 job 먼저
+                    try:
+                        pending.sort(key=lambda j: int((j or {}).get("_priority", 10)) if isinstance(j, dict) else 10)
+                    except Exception:
+                        pass
                     nxt = pending.pop(0)
                     _start_job(nxt)
                     return
@@ -719,6 +848,21 @@ def _execute_mapped_sequence_stub(
             "port_id": port,
             "parsed": parsed,
         }
+        # 우선순위: 생성(OHT->EP 직접투입 등) / 회수(REMOVED) 는 현재 애니가 끝나자마자 즉시 실행되어야 한다.
+        # - 선점(interrupt)은 하지 않고, pending 큐의 "앞"에 삽입한다.
+        try:
+            is_pickup = str(seq).strip().upper() == str(xml_generator.SEQ_REMOVED).strip().upper()
+        except Exception:
+            is_pickup = False
+        try:
+            is_spawn = (
+                str(seq).strip().upper() == str(xml_generator.SEQ_ARRIVED).strip().upper()
+                and str(from_port).strip().upper() == "OHT"
+                and str(to_port).strip().upper().startswith("EP")
+            )
+        except Exception:
+            is_spawn = False
+        job["_priority"] = 0 if (is_spawn or is_pickup) else 10
         try:
             runner_busy = bool(
                 getattr(ext, "_sim_runner", None) is not None
@@ -727,7 +871,17 @@ def _execute_mapped_sequence_stub(
         except Exception:
             runner_busy = False
         if runner_busy:
-            ext._sim_anim_pending.append(job)
+            try:
+                pending = getattr(ext, "_sim_anim_pending", None)
+                if not isinstance(pending, list):
+                    pending = []
+                    ext._sim_anim_pending = pending
+                if int(job.get("_priority", 10)) <= 0:
+                    pending.insert(0, job)
+                else:
+                    pending.append(job)
+            except Exception:
+                ext._sim_anim_pending.append(job)
             _append_anim_history_log(
                 ext,
                 f"[ANIM] 대기큐적재 | event={seq} | est={est_text} | action={action_text} | file={p.name} | queued={len(ext._sim_anim_pending)}",
@@ -819,15 +973,27 @@ def _estimate_anim_duration_for_gate_payload(ext: Any, payload: Dict[str, str]) 
 
 def build_control_window(ext: Any) -> None:
     """TBS 제어창을 만들고 ext에 위젯/모델 참조를 저장."""
-    # destroy() 실패 후 참조만 None이 되면 이전 창이 화면에 남고 새 창이 또 생겨 UI가 겹쳐 보인다.
-    # 정상 생명주기는 extension on_shutdown에서 destroy 한 번 — 여기서는 이중 생성만 막는다.
+    # destroy()가 실패하거나(Kit 이벤트/프레임 타이밍), 핫리로드로 ext 인스턴스가 바뀌면
+    # 이전 창이 화면에 남은 채로 새 창이 생성되어 UI가 겹쳐 보일 수 있다.
+    # 1) ext 참조 기준 중복 생성 방지
     if getattr(ext, "_control_window", None) is not None:
         return
+    # 2) 워크스페이스에 남아있는 동명 창이 있으면 선제 제거(핫리로드/비정상 destroy 대비)
+    try:
+        ws = getattr(ui, "Workspace", None)
+        if ws is not None and hasattr(ws, "get_window"):
+            old = ws.get_window("TBS 제어창")
+            if old is not None:
+                try:
+                    old.destroy()
+                except Exception:
+                    try:
+                        old.visible = False
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
-    ext._usd_anim_start_frame = ui.SimpleIntModel(200)
-    ext._usd_anim_end_frame = ui.SimpleIntModel(300)
-    ext._usd_anim_loop = ui.SimpleBoolModel(False)
-    ext._usd_anim_auto_range_text = ui.SimpleStringModel("AUTO RANGE: (미확인)")
     ext._xml_from_port_model = ui.SimpleIntModel(1)
     ext._xml_to_port_model = ui.SimpleIntModel(6)
     ext._xml_port_id_model = ui.SimpleIntModel(1)
@@ -863,6 +1029,11 @@ def build_control_window(ext: Any) -> None:
     ext._sim_progress_text = ui.SimpleStringModel("[진행현황] 없음")
     ext._sim_anim_history_text = ui.SimpleStringModel("[애니메이션 실행이력] 없음")
     ext._sim_port_state_text = ui.SimpleStringModel("[포트상태] 대기 중")
+    # 요약(애니 실행이력 창): "스토리 1개 + 그 이후 연결된 JSON 목록" 블록을 유지
+    # block: {"story": str, "anims": List[str]}
+    ext._sim_recent_story_blocks = []
+    # (요청으로 제거) 생성/회수 대기 토큰 표시 기능 비활성화
+    # (요청으로 제거) 포트상태 좌/우 점 표시 기능은 비활성화
     ext._sim_progress_rows = {}
     ext._sim_progress_history = []
     ext._sim_progress_start_times = {}
@@ -893,6 +1064,8 @@ def build_control_window(ext: Any) -> None:
     ext._sim_anim_pending = []
     # 애니메이션 재생 중 sim tick을 잠시 멈추기 위한 플래그
     ext._sim_tick_pause_event = threading.Event()
+    # 이벤트 확인창(공정확인) 표시 중 sim tick을 잠시 멈추기 위한 플래그
+    ext._sim_gate_pause_event = threading.Event()
     # fail-safe: 예상 애니 길이만큼은 최소 pause 유지 (monotonic timestamp)
     ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
@@ -904,33 +1077,6 @@ def build_control_window(ext: Any) -> None:
             style={"ScrollingFrame": {"padding": 4, "margin": 0}},
         ):
             with ui.VStack(spacing=0):
-                ui.Label("USD 파일 애니메이션 (타임라인)", height=24)
-                with ui.HStack(spacing=8, height=28):
-                    ui.Label("범위", width=50, height=28)
-                    ext._usd_anim_mode_combo = ui.ComboBox(0, "수동", "자동")
-                    ext._usd_anim_mode_combo.model.add_item_changed_fn(lambda m, *a: on_usd_anim_mode_changed(ext))
-                ext._usd_anim_manual_frame_row = ui.HStack(spacing=8, height=30)
-                with ext._usd_anim_manual_frame_row:
-                    ui.Label("시작 프레임", width=70, height=30)
-                    ui.IntField(model=ext._usd_anim_start_frame, width=60, height=30)
-                    ui.Label("끝 프레임", width=70, height=30)
-                    ui.IntField(model=ext._usd_anim_end_frame, width=60, height=30)
-                ext._usd_anim_auto_range_row = ui.HStack(spacing=8, height=22)
-                with ext._usd_anim_auto_range_row:
-                    ui.Label("AUTO", width=50, height=22)
-                    ui.Label("", model=ext._usd_anim_auto_range_text, height=22)
-                ext._usd_anim_manual_frame_row.visible = True
-                ext._usd_anim_auto_range_row.visible = False
-                with ui.HStack(spacing=8, height=24):
-                    ui.CheckBox(model=ext._usd_anim_loop)
-                    ui.Label("루프", height=22)
-                ui.Button("USD 파일 애니메이션 재생", height=28, clicked_fn=lambda: on_play_usd_animation(ext))
-                ui.Button("USD 애니메이션 정지", height=24, clicked_fn=usd_animation_control.stop_usd_animation)
-                ui.Spacer(height=6)
-                ui.Button("가상 시그널 재생 (JSON 샘플)", height=28, clicked_fn=lambda: on_play_generator_sample(ext))
-                ui.Spacer(height=6)
-                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-                ui.Spacer(height=6)
                 with ui.Frame(style={"background_color": 0xFF23262B}):
                     # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
                     with ui.VStack(padding=8, spacing=8):
@@ -941,6 +1087,7 @@ def build_control_window(ext: Any) -> None:
                             xml_generator.SEQ_ARRIVED,
                             xml_generator.SEQ_MOVE_TRANSFERING,
                             xml_generator.SEQ_MOVE,
+                            xml_generator.SEQ_MOVE_REQ,
                             xml_generator.SEQ_READYTOUNLOAD,
                             xml_generator.SEQ_REMOVED,
                         )
@@ -1051,30 +1198,32 @@ def build_control_window(ext: Any) -> None:
                         with ext._sim_port_state_frame:
                             with ui.VStack(spacing=4):
                                 ext._sim_port_state_header_label = ui.Label("[포트상태] 대기 중", height=20, style={"color": 0xFFBFE7FF})
-                                with ui.HStack(spacing=4, height=24):
-                                    with ui.ZStack(width=90, height=24):
-                                        ext._sim_port_cell_boxes["BP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                        ext._sim_port_cells["BP2"] = ui.Label("BP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                    with ui.ZStack(width=90, height=24):
-                                        ext._sim_port_cell_boxes["BP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                        ext._sim_port_cells["BP3"] = ui.Label("BP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                    with ui.ZStack(width=90, height=24):
-                                        ext._sim_port_cell_boxes["BP4"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                        ext._sim_port_cells["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                with ui.HStack(spacing=4, height=24):
-                                    with ui.ZStack(width=90, height=24):
-                                        ext._sim_port_cell_boxes["BP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                        ext._sim_port_cells["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                    with ui.ZStack(width=90, height=24):
-                                        ext._sim_port_cell_boxes["EP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                        ext._sim_port_cells["EP1"] = ui.Label("EP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                    with ui.ZStack(width=90, height=24):
-                                        ext._sim_port_cell_boxes["EP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                        ext._sim_port_cells["EP2"] = ui.Label("EP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                    ext._sim_port_ep3_cell_container = ui.ZStack(width=90, height=24)
-                                    with ext._sim_port_ep3_cell_container:
-                                        ext._sim_port_cell_boxes["EP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                        ext._sim_port_ep3_cell = ui.Label("EP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                # 포트 표
+                                with ui.VStack(spacing=4):
+                                    with ui.HStack(spacing=4, height=24):
+                                        with ui.ZStack(width=90, height=24):
+                                            ext._sim_port_cell_boxes["BP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["BP2"] = ui.Label("BP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                        with ui.ZStack(width=90, height=24):
+                                            ext._sim_port_cell_boxes["BP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["BP3"] = ui.Label("BP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                        with ui.ZStack(width=90, height=24):
+                                            ext._sim_port_cell_boxes["BP4"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                    with ui.HStack(spacing=4, height=24):
+                                        with ui.ZStack(width=90, height=24):
+                                            ext._sim_port_cell_boxes["BP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                        with ui.ZStack(width=90, height=24):
+                                            ext._sim_port_cell_boxes["EP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["EP1"] = ui.Label("EP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                        with ui.ZStack(width=90, height=24):
+                                            ext._sim_port_cell_boxes["EP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["EP2"] = ui.Label("EP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                        ext._sim_port_ep3_cell_container = ui.ZStack(width=90, height=24)
+                                        with ext._sim_port_ep3_cell_container:
+                                            ext._sim_port_cell_boxes["EP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_ep3_cell = ui.Label("EP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
                                 ext._sim_port_state_label = ui.Label("", word_wrap=False, width=0, height=0, visible=False)
                         # 포트 상태 UI 구성 이후 EP3 표시조건 즉시 동기화
                         on_sim_ep_count_changed(ext)
@@ -1110,22 +1259,6 @@ def build_control_window(ext: Any) -> None:
                 with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
                     ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
     refresh_object_list(ext)
-
-
-def on_usd_anim_mode_changed(ext: Any) -> None:
-    try:
-        idx = ext._usd_anim_mode_combo.model.get_item_value_model().as_int
-    except Exception:
-        idx = 0
-    is_auto = idx == 1
-    ext._usd_anim_manual_frame_row.visible = not is_auto
-    ext._usd_anim_auto_range_row.visible = is_auto
-    if is_auto:
-        rng = usd_animation_control.resolve_saved_animation_frame_range()
-        if rng:
-            ext._usd_anim_auto_range_text.set_value(f"AUTO RANGE: {rng[0]} ~ {rng[1]}")
-        else:
-            ext._usd_anim_auto_range_text.set_value("AUTO RANGE: (감지 실패)")
 
 
 def on_xml_seq_changed(ext: Any) -> None:
@@ -1218,6 +1351,23 @@ def _append_sim_log(ext: Any, line: str) -> None:
         ext._sim_history_text.set_value(merged)
     if getattr(ext, "_sim_history_label", None) is not None:
         ext._sim_history_label.text = merged
+    # 요약(애니 실행이력 창): [스토리]를 블록으로 유지
+    try:
+        if "[스토리]" in msg:
+            blocks = getattr(ext, "_sim_recent_story_blocks", None)
+            if isinstance(blocks, list):
+                lot_m = ""
+                try:
+                    m = re.search(r"(LOT_\d+)", msg)
+                    lot_m = m.group(1) if m else ""
+                except Exception:
+                    lot_m = ""
+                blocks.append({"story": msg, "anims": [], "lot_id": lot_m})
+                if len(blocks) > 12:
+                    del blocks[:-12]
+                _refresh_anim_history_view(ext)
+    except Exception:
+        pass
 
 
 def _format_history_line(line: str) -> str:
@@ -1301,7 +1451,62 @@ def _append_anim_history_log(ext: Any, line: str) -> None:
     if getattr(ext, "_sim_anim_history_text", None):
         ext._sim_anim_history_text.set_value(merged)
     if getattr(ext, "_sim_anim_history_label", None) is not None:
-        ext._sim_anim_history_label.text = merged
+        ext._sim_anim_history_label.text = _compose_anim_history_with_summary(ext, merged)
+    # 요약은 _execute_mapped_sequence_stub(실행준비완료)에서만 기록한다. (중복/누락 방지)
+
+
+def _refresh_anim_history_view(ext: Any) -> None:
+    """스토리/요약 갱신 시 애니 이력 라벨도 즉시 재렌더링한다."""
+    try:
+        if getattr(ext, "_sim_anim_history_label", None) is None:
+            return
+        base = ""
+        if getattr(ext, "_sim_anim_history_text", None) is not None:
+            base = str(ext._sim_anim_history_text.as_string or "")
+        ext._sim_anim_history_label.text = _compose_anim_history_with_summary(ext, base)
+    except Exception:
+        pass
+
+
+def _compose_anim_history_with_summary(ext: Any, merged_anim_history: str) -> str:
+    """
+    '마지막 애니메이션 실행이력' 창에서:
+    - 스토리 라인 바로 밑에, 해당 이후로 발생한 JSON 실행을 계속 나열해 보여준다.
+    """
+    base = (merged_anim_history or "").strip()
+    try:
+        blocks = getattr(ext, "_sim_recent_story_blocks", None)
+        if not isinstance(blocks, list) or not blocks:
+            return base
+        tail = blocks[-10:]  # 너무 길어지지 않게 최근만
+        out: List[str] = []
+        out.append("")
+        out.append("[요약] (스토리 아래 JSON 나열)")
+        has_any = False
+        for b in tail:
+            if not isinstance(b, dict):
+                continue
+            story = str(b.get("story", "")).strip()
+            anims = b.get("anims", [])
+            if story:
+                out.append(story)
+                has_any = True
+            if isinstance(anims, list):
+                for a in anims:
+                    at = str(a).strip()
+                    if at:
+                        out.append(f"  └ {at}")
+                        has_any = True
+        if not has_any:
+            return base
+        return (base + "\n" + "\n".join(out)).strip()
+    except Exception:
+        return base
+
+
+def _render_pending_dots(ext: Any) -> None:
+    """(요청으로 제거) 점 표시 기능 비활성화."""
+    return
 
 
 def _port_cell_text(occ: Dict[str, Any], port: str) -> str:
@@ -1423,6 +1628,15 @@ def _enqueue_anim_event(ext: Any, payload: Dict[str, str]) -> None:
     q = getattr(ext, "_sim_log_queue", None)
     if q is None:
         return
+    # 공정확인 체크 시: 이벤트가 큐로 들어오는 순간부터 sim tick을 멈춰야
+    # 생성/회수 타이머도 "확인 전까지" 같이 정지된다.
+    try:
+        if getattr(ext, "_sim_confirm_each_step_model", None) is not None and ext._sim_confirm_each_step_model.get_value_as_bool():
+            gp = getattr(ext, "_sim_gate_pause_event", None)
+            if gp is not None:
+                gp.set()
+    except Exception:
+        pass
     try:
         q.put_nowait((SimUiQueueKind.ANIM_EVENT, dict(payload or {})))
     except Exception:
@@ -1455,9 +1669,10 @@ def _enqueue_gate_request(ext: Any, payload: Dict[str, Any]) -> None:
 
 
 def _show_sim_gate_dialog(ext: Any, payload: Dict[str, Any]) -> None:
-    # 이미 떠있는 확인창이 있으면 교체
+    # 공정확인 모드에서는 "확인 전까지 완전 정지"가 목표이므로,
+    # 확인창이 이미 떠 있으면 새 창으로 교체하지 않고(=pause가 풀리는 부작용 방지) 그냥 대기시킨다.
     if getattr(ext, "_sim_gate_dialog", None) is not None:
-        _close_sim_gate_dialog(ext, None)
+        return
     title = str(payload.get("title", "공정 확인"))
     msg = str(payload.get("message", "다음 공정을 진행할까요?"))
     done = payload.get("_done_event", None)
@@ -1508,6 +1723,13 @@ def _close_sim_gate_dialog(ext: Any, done_event: Any) -> None:
         except Exception:
             pass
     ext._sim_gate_dialog = None
+    # 이벤트 확인창이 닫히면 gate pause 해제 (애니 pause는 별도 이벤트로 유지)
+    try:
+        gp = getattr(ext, "_sim_gate_pause_event", None)
+        if gp is not None:
+            gp.clear()
+    except Exception:
+        pass
     try:
         if done_event is not None:
             done_event.set()
@@ -1539,9 +1761,138 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     occ = p.get("ports_occupancy", {})
     if not isinstance(occ, dict):
         occ = {}
+    try:
+        apply_port_lot_prim_visibility(occ)
+    except Exception:
+        pass
     _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")))
+    # 포트상태 좌/우 점(●) 카운터:
+    # - READYTOLOAD 발생 시(생성 이벤트) 좌측 초록 ● +1
+    # - READYTOUNLOAD 발생 시(회수 요청) 우측 빨강 ● +1
+    # - 실제 감소는 애니 완료 시점(ARRIVED(OHT->*) 완료 / REMOVED 완료)에서 수행
+    # (요청으로 제거) 포트상태 좌/우 점 표시 기능 비활성화
     verbose = panel_mode != SimLogPanelMode.PROGRESS_ONLY
     handle_sim_event_for_animation(ext, p, verbose=verbose)
+
+    # 공정확인 체크 시에만: 이벤트 발생마다 공정확인 창을 표시한다.
+    try:
+        if getattr(ext, "_sim_confirm_each_step_model", None) is None or not ext._sim_confirm_each_step_model.get_value_as_bool():
+            return
+    except Exception:
+        return
+    try:
+        seq_raw = str(p.get("seq", "") or "")
+        seq_can = SIM_SEQ_ALIAS.get(seq_raw.strip(), seq_raw.strip()) if seq_raw else ""
+        lot = str(p.get("lot_id", "") or "")
+        lot_seq = str(p.get("lot_seq", "") or "")
+        foup_id = str(p.get("foup_id", "") or "")
+        fr = str(p.get("from_port_id", "") or "")
+        to = str(p.get("to_port_id", "") or "")
+        port = str(p.get("port_id", "") or "")
+        t = str(p.get("sim_time", "") or "")
+        title = f"EVENT t={t}" if t else "EVENT"
+        base = (
+            f"sequence_name={seq_can or '-'} (raw={seq_raw or '-'})\n"
+            f"lot={lot or '-'}"
+            + (f" (seq={lot_seq})" if lot_seq else "")
+            + (f" foup={foup_id}" if foup_id else "")
+            + "\n"
+            f"from={fr or '-'} to={to or '-'} port={port or '-'}\n"
+        )
+        # 모든 이벤트: action_desc(동작 설명) + XML을 표시한다.
+        # 애니 이벤트: 추가로 매핑 JSON(파일/존재 여부)을 표시한다.
+        extra_lines: List[str] = []
+        xml_text = ""
+        seq_for_mapping = seq_can
+        parsed: Dict[str, Any] = {}
+        try:
+            if seq_can in xml_generator.FROM_TO_SEQS:
+                xml_text = xml_generator.build_xml_string(
+                    seq_can,
+                    from_port_id=_parse_port_num(fr, 1),
+                    to_port_id=_parse_port_num(to, 1),
+                )
+            else:
+                xml_text = xml_generator.build_xml_string(seq_can, port_id=_parse_port_num(port, 1))
+            parsed = xml_generator.parse_xml_string(xml_text) or {}
+            parsed_seq = str(parsed.get("sequence_name", "") or "").strip().upper()
+            if parsed_seq:
+                seq_for_mapping = parsed_seq
+        except Exception:
+            xml_text = ""
+            parsed = {}
+
+        if parsed and str(parsed.get("action_desc", "")).strip():
+            extra_lines.append(f"ACTION: {str(parsed.get('action_desc','')).strip()}")
+        elif seq_for_mapping:
+            extra_lines.append(f"ACTION: (설명 없음) seq={seq_for_mapping}")
+        try:
+            seq_u = str(seq_can or "").strip().upper()
+            is_anim_event = seq_u in (
+                str(xml_generator.SEQ_ARRIVED).strip().upper(),
+                str(xml_generator.SEQ_MOVE_TRANSFERING).strip().upper(),
+                str(xml_generator.SEQ_MOVE_REQ).strip().upper(),
+                str(xml_generator.SEQ_REMOVED).strip().upper(),
+            )
+        except Exception:
+            is_anim_event = False
+        if is_anim_event:
+            try:
+                mapping_payload = dict(p or {})
+                mapping_payload["seq"] = seq_for_mapping
+                if parsed:
+                    mapping_payload["from_port_id"] = _normalize_port_text_from_xml(str(parsed.get("from_port_id", "") or ""), fr)
+                    mapping_payload["to_port_id"] = _normalize_port_text_from_xml(str(parsed.get("to_port_id", "") or ""), to)
+                    mapping_payload["port_id"] = _normalize_port_text_from_xml(str(parsed.get("port_id", "") or ""), port)
+                mapped_json, _meta, rule_name, source_name = _resolve_event_animation_entry(seq_for_mapping, mapping_payload)
+                if mapped_json:
+                    jp = _normalize_json_path(mapped_json)
+                    exists_txt = "존재" if jp.exists() else "없음"
+                    extra_lines.append(
+                        f"JSON 매핑: source={source_name or '-'} rule={rule_name or '-'} file={jp.name} ({exists_txt})"
+                    )
+                else:
+                    extra_lines.append(f"JSON 매핑: 없음 (event={seq_for_mapping})")
+            except Exception as e:
+                extra_lines.append(f"JSON 매핑 확인 실패: {e}")
+        if xml_text:
+            extra_lines.append("")
+            extra_lines.append("XML:")
+            extra_lines.append(xml_text)
+
+        # 타이머(생성/회수) 남은 시간 표시: 공정확인 중에는 sim tick이 멈추므로 남은 시간이 유지된다.
+        try:
+            sim = getattr(ext, "_sim_engine", None)
+            now_t = float(p.get("sim_time", "0.0") or 0.0)
+            spawn_at = getattr(sim, "_next_spawn_at", None) if sim is not None else None
+            pickup_at = getattr(sim, "_next_pickup_at", None) if sim is not None else None
+            lines_t: List[str] = []
+            if isinstance(spawn_at, (int, float)):
+                lines_t.append(f"다음 생성까지: {max(0.0, float(spawn_at) - now_t):.2f}s (sim)")
+            if isinstance(pickup_at, (int, float)):
+                lines_t.append(f"다음 회수티켓까지: {max(0.0, float(pickup_at) - now_t):.2f}s (sim)")
+            if lines_t:
+                extra_lines.append("")
+                extra_lines.append("TIMER:")
+                extra_lines.extend(lines_t)
+        except Exception:
+            pass
+
+        message = base + ("\n" + "\n".join(extra_lines) if extra_lines else "")
+        # 기존 게이트 다이얼로그는 (title/message/_done_event + gate_seq_* 메타)를 표시한다.
+        _enqueue_gate_request(
+            ext,
+            {
+                "title": title,
+                "message": message,
+                "_done_event": threading.Event(),
+                "gate_seq_raw": seq_raw,
+                "gate_seq_canonical": seq_can,
+                "gate_xml_sequence_name": "",
+            },
+        )
+    except Exception:
+        pass
 
 
 def _sim_ui_sink_history_line(ext: Any, line: str, panel_mode: SimLogPanelMode) -> None:
@@ -1614,6 +1965,23 @@ def _drain_sim_log_queue(ext: Any) -> None:
             )
             _dispatch_sim_ui_queue_item(ext, _coerce_sim_ui_queue_kind(kind), payload, panel_mode)
             count += 1
+
+            # 공정확인 체크 + gate pause 상태면, "확인창 1개를 띄울 때까지만" 처리하고 멈춘다.
+            # (gate pause를 너무 이르게 걸어도 UI가 1개 이벤트를 처리해 창을 띄울 수 있어야 한다)
+            try:
+                confirm_each = bool(
+                    getattr(ext, "_sim_confirm_each_step_model", None) is not None
+                    and ext._sim_confirm_each_step_model.get_value_as_bool()
+                )
+            except Exception:
+                confirm_each = False
+            if confirm_each:
+                try:
+                    gp = getattr(ext, "_sim_gate_pause_event", None)
+                    if gp is not None and gp.is_set() and getattr(ext, "_sim_gate_dialog", None) is not None:
+                        break
+                except Exception:
+                    break
     except Exception as e:
         # UI 드레인 예외가 발생해도 구독이 끊기지 않도록 보호
         print(f"[SIM UI] 로그 드레인 예외: {e}", flush=True)
@@ -1803,6 +2171,19 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             f"port={port_txt}({port_kind}) from={from_port_txt}({from_kind}) to={to_port_txt}({to_kind})",
             flush=True,
         )
+
+    # 요구사항: READYTOLOAD / READYTOUNLOAD 는 애니메이션을 절대 실행하지 않는다.
+    # (rules/map에 남아있는 매핑이 있어도 무시)
+    try:
+        if str(seq).strip().upper() in (
+            str(xml_generator.SEQ_READYTOLOAD).strip().upper(),
+            str(xml_generator.SEQ_READYTOUNLOAD).strip().upper(),
+        ):
+            if verbose:
+                print(f"[ANIM HOOK] no-anim event skip: {seq}", flush=True)
+            return
+    except Exception:
+        pass
 
     # 주 실행 경로: 이벤트 -> XML 생성 -> 역파싱 -> 매핑 -> JSON 실행
     # 유지보수 규칙:
@@ -2104,8 +2485,9 @@ def on_sim_start_clicked(ext: Any) -> None:
         # 요구사항: 공정시간보다 애니(JSON) 시간이 길면 다음 공정은 애니 종료까지 대기.
         # simulation_engine은 이 반환값(초)을 받아서 각 공정 timeout을 max(공정, 애니)로 확장한다.
         anim_est_sec = _estimate_anim_duration_for_gate_payload(ext, payload or {})
-        if not ext._sim_confirm_each_step_model.get_value_as_bool():
-            return float(anim_est_sec)
+        # 공정확인 UI는 "이벤트마다 확인창"(_sim_ui_sink_anim_event)에서 일원화한다.
+        # 여기(on_gate)는 시간 추정값만 반환하고, 어떤 경우에도 확인창을 띄우며 블로킹하지 않는다.
+        return float(anim_est_sec)
         seq_raw = str(payload.get("seq", ""))
         seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
         lot = str(payload.get("lot_id", ""))
@@ -2230,6 +2612,19 @@ def on_sim_start_clicked(ext: Any) -> None:
             while not stop_evt.is_set():
                 # 애니메이션이 재생 중이면 sim tick을 일시정지
                 pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+                gate_pause_evt = getattr(ext, "_sim_gate_pause_event", None)
+                try:
+                    confirm_each = bool(getattr(ext, "_sim_confirm_each_step_model", None) is not None and ext._sim_confirm_each_step_model.get_value_as_bool())
+                except Exception:
+                    confirm_each = False
+                if not confirm_each and gate_pause_evt is not None and gate_pause_evt.is_set():
+                    try:
+                        gate_pause_evt.clear()
+                    except Exception:
+                        pass
+                if confirm_each and gate_pause_evt is not None and gate_pause_evt.is_set():
+                    time.sleep(0.02)
+                    continue
                 if pause_evt is not None and pause_evt.is_set():
                     # 원칙: JSON 애니메이션이 실제로 진행 중이면(sim 모듈의 활성 상태가 있으면) 절대 tick 재개하지 않는다.
                     try:
@@ -2338,6 +2733,12 @@ def on_sim_reset_clicked(ext: Any) -> None:
     ext._sim_progress_rows = {}
     ext._sim_progress_history = []
     ext._sim_progress_start_times = {}
+    # 최근 요약/대기 토큰 초기화
+    try:
+        ext._sim_recent_story_blocks = []
+    except Exception:
+        pass
+    # (요청으로 제거) 점 표시 기능 비활성화
 
 
 def on_sim_log_view_changed(ext: Any) -> None:
@@ -2396,34 +2797,6 @@ def on_sim_ep_count_changed(ext: Any) -> None:
     if not is_ep3 and getattr(ext, "_sim_init_ep3_model", None) is not None:
         ext._sim_init_ep3_model.set_value(False)
     _sync_ep3_port_cell_visibility(ext)
-
-
-def on_play_usd_animation(ext: Any) -> None:
-    loop = ext._usd_anim_loop.get_value_as_bool()
-    try:
-        mode = ext._usd_anim_mode_combo.model.get_item_value_model().as_int
-    except Exception:
-        mode = 0
-    if mode == 1:
-        rng = usd_animation_control.resolve_saved_animation_frame_range()
-        if not rng:
-            print("[USD ANIM] 자동 범위 감지 실패.", flush=True)
-            return
-        start, end = int(rng[0]), int(rng[1])
-        ext._usd_anim_auto_range_text.set_value(f"AUTO RANGE: {start} ~ {end}")
-    else:
-        start = ext._usd_anim_start_frame.get_value_as_int()
-        end = ext._usd_anim_end_frame.get_value_as_int()
-    usd_animation_control.play_usd_animation(
-        start_frame=start, end_frame=end, loop=loop,
-        on_completed=(lambda: print(f"[USD ANIM] 완료: {start}~{end}", flush=True)) if not loop else None,
-    )
-
-
-def on_play_generator_sample(ext: Any) -> None:
-    parsed = parse_signal(SAMPLE_GENERATOR_JSON, "json")
-    if parsed:
-        run_generator_from_parsed(ext, parsed)
 
 
 def receive_signal_data(ext: Any, data: str, format: str = "json") -> bool:

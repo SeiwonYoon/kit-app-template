@@ -1,32 +1,6 @@
 {
-  "EAPEIS_PORT_READYTOLOAD": {
-    "json": "data/sim_sequences/ready_to_load.json",
-    "runner": "sequence_editor",
-    "description": "포트 대기 상태 표시"
-  },
-  "EAPEIS_PORT_ARRIVED": {
-    "json": "data/sim_sequences/arrived.json",
-    "runner": "sequence_editor",
-    "description": "포트 안착(ARRIVED) 동작"
-  },
-  "EAPEIS_PORT_MOVE_TRANSFERING": {
-    "json": "data/sim_sequences/move_transferring.json",
-    "runner": "sequence_editor",
-    "description": "포트 간 이송 동작"
-  },
-  "EAPEIS_PORT_MOVE": {
-    "json": "data/sim_sequences/move.json",
-    "runner": "sequence_editor",
-    "description": "OHT 입력/기타 이동 동작"
-  },
-  "EAPEIS_PORT_READYTOUNLOAD": {
-    "json": "data/sim_sequences/ready_to_unload.json",
-    "runner": "sequence_editor",
-    "description": "회수 준비 상태 동작"
-  },
-  "EAPEIS_PORT_REMOVED": {
-    "json": "data/sim_sequences/removed.json",
-    "runner": "sequence_editor",
-    "description": "회수 완료 동작"
-  }
+  "EAPEIS_PORT_ARRIVED": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" },
+  "EAPEIS_PORT_MOVE_TRANSFERING": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" },
+  "EISEAP_PORT_MOVE_REQ": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" },
+  "EAPEIS_PORT_REMOVED": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" }
 }

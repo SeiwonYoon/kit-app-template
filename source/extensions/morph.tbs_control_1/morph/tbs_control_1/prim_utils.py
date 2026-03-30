@@ -41,11 +41,13 @@ from .xform_utils import ensure_scale_xform_ops_first
 
 
 def get_stage():
+    """omni.usd 컨텍스트에서 현재 활성 Usd.Stage 반환(없으면 None)."""
     ctx = ou.get_context()
     return ctx.get_stage() if ctx else None
 
 
 def is_utf8_safe(s: str) -> bool:
+    """문자열이 UTF-8로 인코딩 가능한지 검사(경로 수집 시 잘못된 prim 제외)."""
     if not s:
         return True
     try:
@@ -60,6 +62,7 @@ def collect_prim_paths_safe(stage: Usd.Stage) -> List[str]:
     paths: List[str] = []
 
     def visit(prim: Usd.Prim) -> None:
+        """스테이지 트리를 DFS로 순회하며 Xform/Gprim/Scope 경로를 paths에 누적."""
         try:
             path = str(prim.GetPath())
         except Exception:
@@ -93,6 +96,7 @@ def collect_prim_paths_safe(stage: Usd.Stage) -> List[str]:
 
 
 def find_prim_path_by_name(stage: Usd.Stage, name: str) -> Optional[str]:
+    """이름 또는 절대경로로 prim을 찾아 첫 경로만 반환."""
     paths = find_all_prim_paths_by_name(stage, name)
     return paths[0] if paths else None
 
@@ -118,6 +122,7 @@ def find_all_prim_paths_by_name(stage: Usd.Stage, name: str) -> List[str]:
         pass
 
     def visit(prim: Usd.Prim) -> None:
+        """이름이 name_s와 같은 prim 경로를 result에 추가."""
         if prim.GetPath().pathString == "/":
             for ch in prim.GetChildren():
                 visit(ch)
@@ -140,6 +145,7 @@ def find_all_prim_paths_by_name(stage: Usd.Stage, name: str) -> List[str]:
 
 
 def get_prim_local_translate(prim: Usd.Prim) -> Gf.Vec3f:
+    """xform 스택에서 첫 번째 Translate op 값을 읽어 반환(없으면 0). TBS_OFFSET 전용 아님."""
     if not prim or not prim.IsValid():
         return Gf.Vec3f(0, 0, 0)
     xform = UsdGeom.Xformable(prim)
@@ -174,12 +180,15 @@ def set_prim_translate_only(prim: Usd.Prim, position: Gf.Vec3f) -> None:
 
 
 def frame_prim_in_viewport(prim_path: str) -> None:
+    """활성 뷰포트 카메라를 해당 prim에 맞춤(비동기)."""
     try:
         from omni.kit.viewport.utility import frame_viewport_prims, get_active_viewport
     except ImportError:
         return
     import asyncio
+
     async def _do_frame():
+        """다음 업데이트 후 활성 뷰포트에서 prim에 프레임 맞춤."""
         await omni.kit.app.get_app().next_update_async()
         viewport_api = get_active_viewport()
         if not viewport_api:

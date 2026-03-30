@@ -20,6 +20,8 @@ sequence_editor.py — TBS 시퀀스 편집기 UI (별도 창)
 【운영/유지보수 상세 가이드】
 - "현재 위치부터 시작" 옵션:
   · _start_from_current / _start_from_current_paths / _start_snapshot 메타를 첫 스텝에 저장
+  · _start_snapshot 은 TBS_OFFSET 만이 아니라 뷰포트에서 합성된 부모-상대 로컬 변환(XformCache)을
+    mode=composed_local + m16 로 저장하고, 재생 시 _apply_tbs_for_target_local_matrix 로 맞춘다.
   · 실행 엔진 해석은 sequence_engine.py SequenceRunner.run()
 - MOVE 랜덤 범위:
   · duration_min/max, dx_min/max, dy_min/max, dz_min/max 키를 사용
@@ -33,6 +35,12 @@ sequence_editor.py — TBS 시퀀스 편집기 UI (별도 창)
 - JSON을 시뮬레이션에서 재사용할 때:
   · 본 파일은 편집/저장 담당, 실제 이벤트 매핑 실행은 control_window.py
   · 파일 경로 등록은 config/event_animation_rules.json 또는 event_animation_map.json
+
+【주요 메서드 색인】
+- 창/스텝: __init__, _build_ui, _build_one_step, _build_step_row*, _ui_step_move/usd_timeline/rotate/delay
+- 실행: _run, _stop, _pause, SequenceRunner 연동
+- JSON: _update_json_from_steps, _load_steps_from_json, _sync_runtime_start_options_to_steps, _capture_start_snapshot
+- 기타: _fill_selected_prim, _fill_rotate_pivot_world_from_prim
 """
 
 from __future__ import annotations
@@ -45,7 +53,7 @@ import omni.ui as ui
 import omni.usd as ou
 from pxr import Gf, Usd, UsdGeom
 
-from .sequence_engine import SequenceRunner, resolve_prim_paths_multi
+from .sequence_engine import SequenceRunner, capture_composed_local_start_snapshot_for_paths, resolve_prim_paths_multi
 
 
 CHECKBOX_WHITE_STYLE = {
@@ -291,7 +299,8 @@ class SequenceEditorWindow:
                                                 )
                                             ui.Label(
                                                 "※ 이 옵션은 Step 1의 메타로 저장됩니다. "
-                                                "체크 후 '현재스탭으로 json 생성'을 누르면 현재 뷰포트 위치가 _start_snapshot으로 기록됩니다.",
+                                                "체크 후 '현재스탭으로 json 생성'을 누르면 부모 기준 합성 로컬 변환(TBS_OFFSET뿐 아님)이 "
+                                                "_start_snapshot(mode=composed_local, m16)으로 기록됩니다.",
                                                 height=0,
                                                 word_wrap=True,
                                             )
@@ -747,9 +756,10 @@ class SequenceEditorWindow:
         self._start_from_current_model.set_value(bool(first.get("_start_from_current", False)))
         self._start_from_current_paths_model.set_value(str(first.get("_start_from_current_paths", "") or ""))
 
-    def _capture_start_snapshot(self, path_text: str) -> Dict[str, Dict[str, List[float]]]:
+    def _capture_start_snapshot(self, path_text: str) -> Dict[str, Dict[str, Any]]:
         """
-        현재 뷰포트(스테이지)의 transform을 JSON 메타(_start_snapshot)로 저장한다.
+        현재 뷰포트(스테이지)의 부모-상대 합성 로컬 변환을 JSON 메타(_start_snapshot)로 저장한다.
+        (TBS_OFFSET 한 쌍만이 아니라 일반 translate/rotate 합성 포함 — sequence_engine 캡처 함수 사용)
         - path_text 비어있음: 시퀀스에 등장하는 MOVE/ROTATE 대상 전체
         - path_text 있음: 입력된 경로들만
         """
@@ -779,56 +789,7 @@ class SequenceEditorWindow:
             seen.add(p)
             uniq_paths.append(p)
 
-        out: Dict[str, Dict[str, List[float]]] = {}
-        for path in uniq_paths:
-            try:
-                prim = stage.GetPrimAtPath(path)
-                if not prim or not prim.IsValid():
-                    continue
-                # 중요: 일반 xform이 아니라 TBS_OFFSET op 값을 캡처해야
-                # sequence_engine/animation 모듈의 실제 적용 좌표계와 일치한다.
-                t = self._get_offset_translate(prim)
-                r = self._get_offset_rotate(prim)
-                out[path] = {"t": t, "r": r}
-            except Exception:
-                continue
-        return out
-
-    def _get_offset_translate(self, prim: Usd.Prim) -> List[float]:
-        try:
-            x = UsdGeom.Xformable(prim)
-            if x:
-                for op in x.GetOrderedXformOps():
-                    name = ""
-                    try:
-                        name = op.GetName()
-                    except Exception:
-                        name = ""
-                    if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and _OFFSET_SUFFIX in str(name):
-                        v = op.Get()
-                        if v is not None and len(v) >= 3:
-                            return [float(v[0]), float(v[1]), float(v[2])]
-        except Exception:
-            pass
-        return [0.0, 0.0, 0.0]
-
-    def _get_offset_rotate(self, prim: Usd.Prim) -> List[float]:
-        try:
-            x = UsdGeom.Xformable(prim)
-            if x:
-                for op in x.GetOrderedXformOps():
-                    name = ""
-                    try:
-                        name = op.GetName()
-                    except Exception:
-                        name = ""
-                    if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ and _OFFSET_SUFFIX in str(name):
-                        v = op.Get()
-                        if v is not None and len(v) >= 3:
-                            return [float(v[0]), float(v[1]), float(v[2])]
-        except Exception:
-            pass
-        return [0.0, 0.0, 0.0]
+        return capture_composed_local_start_snapshot_for_paths(stage, uniq_paths)
 
     def _fill_selected_prim(self, model: ui.SimpleStringModel) -> None:
         """현재 뷰포트 선택 prim 경로를 PRIM 필드에 채움."""
