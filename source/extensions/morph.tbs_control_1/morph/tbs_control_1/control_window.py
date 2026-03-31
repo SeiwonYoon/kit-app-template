@@ -1037,6 +1037,8 @@ def build_control_window(ext: Any) -> None:
     ext._sim_progress_rows = {}
     ext._sim_progress_history = []
     ext._sim_progress_start_times = {}
+    # 진행현황 RUNNING 라인 디듀프: percent/elapsed/total이 같으면 UI 갱신 스킵
+    ext._sim_progress_last_key = {}
     ext._sim_engine = None
     ext._sim_update_sub = None
     ext._sim_thread = None
@@ -1756,6 +1758,146 @@ def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
     _update_sim_progress(ext, payload if isinstance(payload, dict) else {})
 
 
+def _build_sim_gate_request_payload(ext: Any, p: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    공정확인(게이트) 창에 표시할 title/message를 구성해 큐 payload(dict)로 반환.
+
+    목적:
+    - 게이트 메시지 구성 로직을 한 함수로 모아, 유지보수 시 흐름 추적 비용을 줄인다.
+    - 기능 동작(표시 순서/매핑/타이머/XML)은 기존과 동일하게 유지한다.
+    """
+    try:
+        seq_raw = str(p.get("seq", "") or "")
+        seq_can = SIM_SEQ_ALIAS.get(seq_raw.strip(), seq_raw.strip()) if seq_raw else ""
+        lot = str(p.get("lot_id", "") or "")
+        lot_seq = str(p.get("lot_seq", "") or "")
+        foup_id = str(p.get("foup_id", "") or "")
+        fr = str(p.get("from_port_id", "") or "")
+        to = str(p.get("to_port_id", "") or "")
+        port = str(p.get("port_id", "") or "")
+        t = str(p.get("sim_time", "") or "")
+        title = f"EVENT t={t}" if t else "EVENT"
+
+        # 공정확인 창 메시지 구성(요구사항 순서):
+        # 1) 발생 이벤트명  2) 이벤트 동작 설명  3) 연계 애니 파일/존재/빈파일/불필요
+        # 4) TIMER(생성/회수)  5) XML 표시
+        lines: List[str] = []
+        lines.append(f"[EVENT] sequence_name={seq_can or '-'} (raw={seq_raw or '-'})")
+        lines.append(
+            f"[EVENT] lot={lot or '-'}"
+            + (f" (seq={lot_seq})" if lot_seq else "")
+            + (f" foup={foup_id}" if foup_id else "")
+            + f" | from={fr or '-'} to={to or '-'} port={port or '-'}"
+        )
+
+        xml_text = ""
+        seq_for_mapping = seq_can
+        parsed: Dict[str, Any] = {}
+        try:
+            if seq_can in xml_generator.FROM_TO_SEQS:
+                xml_text = xml_generator.build_xml_string(
+                    seq_can,
+                    from_port_id=_parse_port_num(fr, 1),
+                    to_port_id=_parse_port_num(to, 1),
+                )
+            else:
+                xml_text = xml_generator.build_xml_string(seq_can, port_id=_parse_port_num(port, 1))
+            parsed = xml_generator.parse_xml_string(xml_text) or {}
+            parsed_seq = str(parsed.get("sequence_name", "") or "").strip().upper()
+            if parsed_seq:
+                seq_for_mapping = parsed_seq
+        except Exception:
+            xml_text = ""
+            parsed = {}
+
+        # 2) 이벤트 동작 설명
+        action_desc = str(parsed.get("action_desc", "") or "").strip() if isinstance(parsed, dict) else ""
+        if action_desc:
+            lines.append(f"[ACTION] {action_desc}")
+        elif seq_for_mapping:
+            lines.append(f"[ACTION] (설명 없음) seq={seq_for_mapping}")
+        else:
+            lines.append("[ACTION] (설명 없음)")
+
+        # 3) 연계된 애니메이션 파일/존재여부/비어있는 파일 여부
+        try:
+            seq_u = str(seq_can or "").strip().upper()
+            is_anim_event = seq_u in (
+                str(xml_generator.SEQ_ARRIVED).strip().upper(),
+                str(xml_generator.SEQ_MOVE_TRANSFERING).strip().upper(),
+                str(xml_generator.SEQ_MOVE_REQ).strip().upper(),
+                str(xml_generator.SEQ_REMOVED).strip().upper(),
+            )
+        except Exception:
+            is_anim_event = False
+
+        if not is_anim_event:
+            lines.append("[ANIM] 이 이벤트는 애니메이션이 필요없는 이벤트입니다.")
+        else:
+            try:
+                mapping_payload = dict(p or {})
+                mapping_payload["seq"] = seq_for_mapping
+                if parsed:
+                    mapping_payload["from_port_id"] = _normalize_port_text_from_xml(str(parsed.get("from_port_id", "") or ""), fr)
+                    mapping_payload["to_port_id"] = _normalize_port_text_from_xml(str(parsed.get("to_port_id", "") or ""), to)
+                    mapping_payload["port_id"] = _normalize_port_text_from_xml(str(parsed.get("port_id", "") or ""), port)
+                mapped_json, _meta, rule_name, source_name = _resolve_event_animation_entry(seq_for_mapping, mapping_payload)
+                if not mapped_json:
+                    lines.append(f"[ANIM] 매핑 없음 (event={seq_for_mapping})")
+                else:
+                    jp = _normalize_json_path(mapped_json)
+                    exists_txt = "존재" if jp.exists() else "없음"
+                    empty_txt = ""
+                    if jp.exists():
+                        try:
+                            raw = json.loads(jp.read_text(encoding="utf-8"))
+                            if isinstance(raw, list) and len(raw) == 0:
+                                empty_txt = " / EMPTY(빈 파일)"
+                        except Exception:
+                            empty_txt = ""
+                    lines.append(
+                        f"[ANIM] file={jp.name} ({exists_txt}{empty_txt}) | source={source_name or '-'} rule={rule_name or '-'}"
+                    )
+            except Exception as e:
+                lines.append(f"[ANIM] 매핑 확인 실패: {e}")
+
+        # 4) TIMER
+        try:
+            sim = getattr(ext, "_sim_engine", None)
+            now_t = float(p.get("sim_time", "0.0") or 0.0)
+            spawn_at = getattr(sim, "_next_spawn_at", None) if sim is not None else None
+            pickup_at = getattr(sim, "_next_pickup_at", None) if sim is not None else None
+            lines_t: List[str] = []
+            if isinstance(spawn_at, (int, float)):
+                lines_t.append(f"다음 생성까지: {max(0.0, float(spawn_at) - now_t):.2f}s (sim)")
+            if isinstance(pickup_at, (int, float)):
+                lines_t.append(f"다음 회수티켓까지: {max(0.0, float(pickup_at) - now_t):.2f}s (sim)")
+            if lines_t:
+                lines.append("")
+                lines.append("TIMER:")
+                lines.extend(lines_t)
+        except Exception:
+            pass
+
+        # 5) XML
+        if xml_text:
+            lines.append("")
+            lines.append("XML:")
+            lines.append(xml_text)
+
+        message = "\n".join([ln for ln in lines if ln is not None])
+        return {
+            "title": title,
+            "message": message,
+            "_done_event": threading.Event(),
+            "gate_seq_raw": seq_raw,
+            "gate_seq_canonical": seq_can,
+            "gate_xml_sequence_name": "",
+        }
+    except Exception:
+        return None
+
+
 def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLogPanelMode) -> None:
     p = payload if isinstance(payload, dict) else {}
     occ = p.get("ports_occupancy", {})
@@ -1781,116 +1923,9 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     except Exception:
         return
     try:
-        seq_raw = str(p.get("seq", "") or "")
-        seq_can = SIM_SEQ_ALIAS.get(seq_raw.strip(), seq_raw.strip()) if seq_raw else ""
-        lot = str(p.get("lot_id", "") or "")
-        lot_seq = str(p.get("lot_seq", "") or "")
-        foup_id = str(p.get("foup_id", "") or "")
-        fr = str(p.get("from_port_id", "") or "")
-        to = str(p.get("to_port_id", "") or "")
-        port = str(p.get("port_id", "") or "")
-        t = str(p.get("sim_time", "") or "")
-        title = f"EVENT t={t}" if t else "EVENT"
-        base = (
-            f"sequence_name={seq_can or '-'} (raw={seq_raw or '-'})\n"
-            f"lot={lot or '-'}"
-            + (f" (seq={lot_seq})" if lot_seq else "")
-            + (f" foup={foup_id}" if foup_id else "")
-            + "\n"
-            f"from={fr or '-'} to={to or '-'} port={port or '-'}\n"
-        )
-        # 모든 이벤트: action_desc(동작 설명) + XML을 표시한다.
-        # 애니 이벤트: 추가로 매핑 JSON(파일/존재 여부)을 표시한다.
-        extra_lines: List[str] = []
-        xml_text = ""
-        seq_for_mapping = seq_can
-        parsed: Dict[str, Any] = {}
-        try:
-            if seq_can in xml_generator.FROM_TO_SEQS:
-                xml_text = xml_generator.build_xml_string(
-                    seq_can,
-                    from_port_id=_parse_port_num(fr, 1),
-                    to_port_id=_parse_port_num(to, 1),
-                )
-            else:
-                xml_text = xml_generator.build_xml_string(seq_can, port_id=_parse_port_num(port, 1))
-            parsed = xml_generator.parse_xml_string(xml_text) or {}
-            parsed_seq = str(parsed.get("sequence_name", "") or "").strip().upper()
-            if parsed_seq:
-                seq_for_mapping = parsed_seq
-        except Exception:
-            xml_text = ""
-            parsed = {}
-
-        if parsed and str(parsed.get("action_desc", "")).strip():
-            extra_lines.append(f"ACTION: {str(parsed.get('action_desc','')).strip()}")
-        elif seq_for_mapping:
-            extra_lines.append(f"ACTION: (설명 없음) seq={seq_for_mapping}")
-        try:
-            seq_u = str(seq_can or "").strip().upper()
-            is_anim_event = seq_u in (
-                str(xml_generator.SEQ_ARRIVED).strip().upper(),
-                str(xml_generator.SEQ_MOVE_TRANSFERING).strip().upper(),
-                str(xml_generator.SEQ_MOVE_REQ).strip().upper(),
-                str(xml_generator.SEQ_REMOVED).strip().upper(),
-            )
-        except Exception:
-            is_anim_event = False
-        if is_anim_event:
-            try:
-                mapping_payload = dict(p or {})
-                mapping_payload["seq"] = seq_for_mapping
-                if parsed:
-                    mapping_payload["from_port_id"] = _normalize_port_text_from_xml(str(parsed.get("from_port_id", "") or ""), fr)
-                    mapping_payload["to_port_id"] = _normalize_port_text_from_xml(str(parsed.get("to_port_id", "") or ""), to)
-                    mapping_payload["port_id"] = _normalize_port_text_from_xml(str(parsed.get("port_id", "") or ""), port)
-                mapped_json, _meta, rule_name, source_name = _resolve_event_animation_entry(seq_for_mapping, mapping_payload)
-                if mapped_json:
-                    jp = _normalize_json_path(mapped_json)
-                    exists_txt = "존재" if jp.exists() else "없음"
-                    extra_lines.append(
-                        f"JSON 매핑: source={source_name or '-'} rule={rule_name or '-'} file={jp.name} ({exists_txt})"
-                    )
-                else:
-                    extra_lines.append(f"JSON 매핑: 없음 (event={seq_for_mapping})")
-            except Exception as e:
-                extra_lines.append(f"JSON 매핑 확인 실패: {e}")
-        if xml_text:
-            extra_lines.append("")
-            extra_lines.append("XML:")
-            extra_lines.append(xml_text)
-
-        # 타이머(생성/회수) 남은 시간 표시: 공정확인 중에는 sim tick이 멈추므로 남은 시간이 유지된다.
-        try:
-            sim = getattr(ext, "_sim_engine", None)
-            now_t = float(p.get("sim_time", "0.0") or 0.0)
-            spawn_at = getattr(sim, "_next_spawn_at", None) if sim is not None else None
-            pickup_at = getattr(sim, "_next_pickup_at", None) if sim is not None else None
-            lines_t: List[str] = []
-            if isinstance(spawn_at, (int, float)):
-                lines_t.append(f"다음 생성까지: {max(0.0, float(spawn_at) - now_t):.2f}s (sim)")
-            if isinstance(pickup_at, (int, float)):
-                lines_t.append(f"다음 회수티켓까지: {max(0.0, float(pickup_at) - now_t):.2f}s (sim)")
-            if lines_t:
-                extra_lines.append("")
-                extra_lines.append("TIMER:")
-                extra_lines.extend(lines_t)
-        except Exception:
-            pass
-
-        message = base + ("\n" + "\n".join(extra_lines) if extra_lines else "")
-        # 기존 게이트 다이얼로그는 (title/message/_done_event + gate_seq_* 메타)를 표시한다.
-        _enqueue_gate_request(
-            ext,
-            {
-                "title": title,
-                "message": message,
-                "_done_event": threading.Event(),
-                "gate_seq_raw": seq_raw,
-                "gate_seq_canonical": seq_can,
-                "gate_xml_sequence_name": "",
-            },
-        )
+        gate_payload = _build_sim_gate_request_payload(ext, p)
+        if gate_payload:
+            _enqueue_gate_request(ext, gate_payload)
     except Exception:
         pass
 
@@ -2020,18 +2055,37 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     end_t = now_t
     dur_t = max(0.0, end_t - start_t)
 
-    line = (
+    # RUNNING 동안에는 매 tick마다 end_t가 변해 “같은 로그가 계속 출력”처럼 보일 수 있다.
+    # 요구사항대로 상황 로그는 1회만(=DONE 시점에 history로 남김), RUNNING은 퍼센트만 덮어쓴다.
+    line_running = f"{ev_part}{label} | {percent}% ({elapsed}/{total}s) | {status} | {detail}"
+    line_done = (
         f"[t={start_t:.2f}~{end_t:.2f} | {dur_t:.1f}s] "
         f"{ev_part}{label} | {percent}% ({elapsed}/{total}s) | {status} | {detail}"
     )
 
     # 최신이 위로 쌓이도록 관리
     if status == "DONE":
-        history.insert(0, line + " | 완료")
+        history.insert(0, line_done + " | 완료")
+        try:
+            last_key = getattr(ext, "_sim_progress_last_key", None)
+            if isinstance(last_key, dict):
+                last_key.pop(label, None)
+        except Exception:
+            pass
         start_times.pop(label, None)
         current_lines: List[str] = []
     else:
-        current_lines = [line]
+        # percent/elapsed/total이 같으면 갱신 스킵(중복 출력 느낌 방지)
+        try:
+            last_key = getattr(ext, "_sim_progress_last_key", None)
+            key = (str(percent), str(elapsed), str(total), str(status))
+            if isinstance(last_key, dict) and last_key.get(label) == key:
+                return
+            if isinstance(last_key, dict):
+                last_key[label] = key
+        except Exception:
+            pass
+        current_lines = [line_running]
 
     # 현재 진행중 1줄 + 직전 완료 내역(최신순)
     text_lines = current_lines + history[:80]
