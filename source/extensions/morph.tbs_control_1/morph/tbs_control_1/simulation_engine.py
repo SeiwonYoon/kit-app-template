@@ -185,6 +185,101 @@ class SimulationInitConfig:
     max_oht_lots: int = 0
 
 
+@dataclass
+class _StatusLogPolicy:
+    """
+    상태 로그(HEARTBEAT/WAIT)의 주기·중복 방지 정책을 한 곳에서 관리한다.
+
+    목표:
+    - 같은 상태(포트 점유/큐/티켓 등)가 반복되는 동안 로그가 과도하게 누적되지 않게 한다.
+    - interval(초) 기준의 최소 출력 주기는 유지한다.
+    """
+
+    last_heartbeat_t: float = -999.0
+    last_wait_t: float = -999.0
+    last_heartbeat_key: str = ""
+    last_wait_key: str = ""
+
+    def reset(self) -> None:
+        self.last_heartbeat_t = -999.0
+        self.last_wait_t = -999.0
+        self.last_heartbeat_key = ""
+        self.last_wait_key = ""
+
+    def may_log_heartbeat(self, now: float, interval: float) -> bool:
+        return bool(interval > 0.0 and now - self.last_heartbeat_t >= interval)
+
+    def should_emit_heartbeat(
+        self,
+        *,
+        now: float,
+        completed: int,
+        total: int,
+        next_text: str,
+        queue_len: int,
+        pickup_tickets: int,
+        ports_snapshot: str,
+    ) -> bool:
+        key = f"c={completed}/{total}|next={next_text}|q={queue_len}|t={pickup_tickets}|ports={ports_snapshot}"
+        if key == self.last_heartbeat_key:
+            return False
+        self.last_heartbeat_key = key
+        self.last_heartbeat_t = float(now)
+        return True
+
+    def may_log_wait(self, now: float, interval: float) -> bool:
+        return bool(interval > 0.0 and now - self.last_wait_t >= interval)
+
+    def should_emit_wait(self, *, now: float, key: str) -> bool:
+        if key == self.last_wait_key:
+            return False
+        self.last_wait_key = key
+        self.last_wait_t = float(now)
+        return True
+
+
+@dataclass
+class _ProgressEmitPolicy:
+    """
+    진행현황(on_progress) emit 정책을 한 곳에서 관리한다.
+
+    - interval <= 0: 중간 진행 없이 DONE만 emit
+    - interval > 0: 주기적으로 RUNNING을 emit 하되, 텍스트 로그는 찍지 않는다(UI 갱신용)
+    - 출력 포맷(소수 자리)도 여기서 고정해, 유지보수 시 _wait_with_progress를 뒤지지 않게 한다.
+    """
+
+    min_interval_sec: float = 0.2
+    percent_decimals: int = 1
+
+    def normalize_interval(self, interval: float) -> float:
+        try:
+            v = float(interval)
+        except Exception:
+            v = 0.0
+        if v <= 0.0:
+            return 0.0
+        return max(self.min_interval_sec, v)
+
+    def format_percent(self, pct: float) -> str:
+        try:
+            p = float(pct)
+        except Exception:
+            p = 0.0
+        d = int(self.percent_decimals)
+        if d <= 0:
+            return f"{p:.0f}"
+        if d == 1:
+            return f"{p:.1f}"
+        return f"{p:.{d}f}"
+
+    def format_sec_1(self, sec: float) -> str:
+        try:
+            s = float(sec)
+        except Exception:
+            s = 0.0
+        return f"{s:.1f}"
+
+
 class TBSSimulationEngine:
     """
     BP1 입력 → 버퍼 → EP(반출 대기) → OHT 회수 흐름을 simpy로 돌린다.
@@ -240,8 +335,6 @@ class TBSSimulationEngine:
         self._oht_loading_bp1 = False
         self.completed_lots: List[str] = []
         self._total_lots = 0
-        self._last_wait_log_t = -999.0
-        self._last_heartbeat_log_t = -999.0
         self._lot_stage_summary: Dict[str, Dict[str, float]] = {}
         self._lot_route_summary: Dict[str, Dict[str, str]] = {}
         self._initial_seed_seq = 1
@@ -249,9 +342,10 @@ class TBSSimulationEngine:
         # 다음 타이머 트리거 시각(sim time). UI 공정확인창에서 "남은 시간" 표시에 사용.
         self._next_spawn_at: Optional[float] = None
         self._next_pickup_at: Optional[float] = None
-        # input_status_interval 로그(HEARTBEAT/WAIT)가 상태 변화 없이 반복되는 것을 방지하기 위한 디듀프 키
-        self._last_heartbeat_key: str = ""
-        self._last_wait_key: str = ""
+        # 상태 로그(HEARTBEAT/WAIT) 정책: 중복 방지·주기 제어를 한 곳에서 관리
+        self._status_log_policy = _StatusLogPolicy()
+        # 진행현황(PROGRESS) emit 정책
+        self._progress_emit_policy = _ProgressEmitPolicy()
         # 포트 "이동/회수 진행 중" 잠금.
         # 점유(self.ports)는 완료 시점까지 유지하되, 다음 공정 선택에서는 잠긴 포트를 제외한다.
         # (요구사항: 포트 간 이동은 완료 시점에만 EMPTY/FULL 반영)
@@ -300,8 +394,7 @@ class TBSSimulationEngine:
         self._running = True
         self._log("[SIM] 시작")
         self._locked_ports.clear()
-        self._last_heartbeat_key = ""
-        self._last_wait_key = ""
+        self._status_log_policy.reset()
         self._total_lots = 0
         self._pickup_tickets = 0
         self._log(f"[INIT] 포트 구성: BP1~BP4 + {', '.join(self._ep_ports)}")
@@ -330,8 +423,7 @@ class TBSSimulationEngine:
         self._running = False
         self._done = True
         self._locked_ports.clear()
-        self._last_heartbeat_key = ""
-        self._last_wait_key = ""
+        self._status_log_policy.reset()
         self._log(
             f"[SIM] 중지 | completed={len(self.completed_lots)}/{self._total_lots} "
             f"| input_queue={len(self._oht_input_queue)} | ports={self._ports_snapshot()}"
@@ -445,12 +537,13 @@ class TBSSimulationEngine:
             if not moved:
                 now = float(self.env.now) if self.env is not None else 0.0
                 wait_interval = self._log_cfg.input_status_interval()
-                if wait_interval > 0.0 and now >= wait_interval and (now - self._last_wait_log_t >= wait_interval):
-                    self._last_wait_log_t = now
-                    self._log(
-                        "[WAIT] BP->EP 이동 대기 "
-                        f"| input_queue={len(self._oht_input_queue)} | ports={self._ports_snapshot()}"
-                    )
+                if self._status_log_policy.may_log_wait(now, wait_interval):
+                    key = f"loop|q={len(self._oht_input_queue)}|ports={self._ports_snapshot()}"
+                    if self._status_log_policy.should_emit_wait(now=now, key=key):
+                        self._log(
+                            "[WAIT] BP->EP 이동 대기 "
+                            f"| input_queue={len(self._oht_input_queue)} | ports={self._ports_snapshot()}"
+                        )
                 yield self.env.timeout(0.2)
             else:
                 yield self.env.timeout(0.05)
@@ -579,15 +672,13 @@ class TBSSimulationEngine:
         """4) 할 일 없을 때: WAIT 로그(디듀프) + 짧은 sleep."""
         now = float(self.env.now) if self.env is not None else 0.0
         wait_interval = self._log_cfg.input_status_interval()
-        if wait_interval > 0.0 and now >= wait_interval and (now - self._last_wait_log_t >= wait_interval):
+        if self._status_log_policy.may_log_wait(now, wait_interval):
             key = (
                 f"serial|q={len(self._oht_input_queue)}"
                 f"|t={self._pickup_tickets}"
                 f"|ports={self._ports_snapshot()}"
             )
-            if key != (self._last_wait_key or ""):
-                self._last_wait_key = key
-                self._last_wait_log_t = now
+            if self._status_log_policy.should_emit_wait(now=now, key=key):
                 self._log(
                     "[WAIT] 직렬 모드 대기 "
                     f"| input_queue={len(self._oht_input_queue)} | pickup_tickets={self._pickup_tickets} "
@@ -680,6 +771,10 @@ class TBSSimulationEngine:
         )
         # ARRIVED 이벤트는 위에서 이미 emit 했으므로, 여기서 _set_port가 ARRIVED를 재발행하면 중복 이벤트가 된다.
         self._set_port(ep_port, "ARRIVED", "FULL", lot, emit_arrived_event=False)
+        # 포트 상태 패널은 이벤트 수신 시점에 갱신된다.
+        # direct input은 완료 시점에 별도 이벤트가 없으면 "다음 이벤트 때" 상태가 뒤늦게 보일 수 있어,
+        # 갱신 전용 이벤트를 한 번 더 보내준다(애니/매핑 대상이 아님).
+        self._emit_event({"seq": "PORT_OCC_REFRESH"})
         self._stage_mark(lot.lot_id, "oht_to_bp1_end")
         self._log(f"[INPUT] {ep_port} 도착(직접투입): {lot.lot_id} | ports={self._ports_snapshot()}")
 
@@ -954,28 +1049,27 @@ class TBSSimulationEngine:
         interval = self._log_cfg.input_status_interval()
         if interval <= 0.0:
             return
-        if now - self._last_heartbeat_log_t < interval:
+        if not self._status_log_policy.may_log_heartbeat(now, interval):
             return
         next_lot = self._oht_input_queue[0] if self._oht_input_queue else None
         next_text = f"{next_lot.sequence}번째({next_lot.lot_id})" if next_lot else "-"
-        # 상태 변화가 없으면 같은 문구를 반복하지 않는다.
-        key = (
-            f"c={len(self.completed_lots)}/{self._total_lots}"
-            f"|next={next_text}"
-            f"|q={len(self._oht_input_queue)}"
-            f"|t={self._pickup_tickets}"
-            f"|ports={self._ports_snapshot()}"
-        )
-        if key == (self._last_heartbeat_key or ""):
+        ports = self._ports_snapshot()
+        if not self._status_log_policy.should_emit_heartbeat(
+            now=now,
+            completed=len(self.completed_lots),
+            total=self._total_lots,
+            next_text=next_text,
+            queue_len=len(self._oht_input_queue),
+            pickup_tickets=self._pickup_tickets,
+            ports_snapshot=ports,
+        ):
             return
-        self._last_heartbeat_key = key
-        self._last_heartbeat_log_t = now
         self._log(
             "[HEARTBEAT] 진행중 "
             f"| completed={len(self.completed_lots)}/{self._total_lots} "
             f"| next_input={next_text} | input_queue={len(self._oht_input_queue)} "
             f"| pickup_tickets={self._pickup_tickets} "
-            f"| ports={self._ports_snapshot()}"
+            f"| ports={ports}"
         )
 
     def _apply_initial_full_ports(self) -> None:
@@ -1024,7 +1118,7 @@ class TBSSimulationEngine:
           (요구사항: 설정한 초마다 %만 반영되도록)
         """
         total = max(0.01, float(total_sec))
-        interval = float(progress_interval)
+        interval = self._progress_emit_policy.normalize_interval(float(progress_interval))
         ev = str(event_seq or "").strip()
         self._emit_progress({
             "label": label,
@@ -1032,7 +1126,7 @@ class TBSSimulationEngine:
             "event_seq": ev,
             "status": "RUNNING",
             "elapsed": "0.0",
-            "total": f"{total:.1f}",
+            "total": self._progress_emit_policy.format_sec_1(total),
             "percent": "0",
         })
         if interval <= 0.0:
@@ -1043,12 +1137,11 @@ class TBSSimulationEngine:
                 "detail": detail,
                 "event_seq": ev,
                 "status": "DONE",
-                "elapsed": f"{total:.1f}",
-                "total": f"{total:.1f}",
+                "elapsed": self._progress_emit_policy.format_sec_1(total),
+                "total": self._progress_emit_policy.format_sec_1(total),
                 "percent": "100",
             })
             return
-        interval = max(0.2, interval)
         elapsed = 0.0
         while elapsed + 1e-9 < total:
             step = min(interval, total - elapsed)
@@ -1061,10 +1154,9 @@ class TBSSimulationEngine:
                 "detail": detail,
                 "event_seq": ev,
                 "status": "DONE" if remain <= 1e-9 else "RUNNING",
-                "elapsed": f"{elapsed:.1f}",
-                "total": f"{total:.1f}",
-                # 정수 반올림이면 몇 초 동안 값이 안 변해 "같은 로그"처럼 보일 수 있어 소수 1자리로 보낸다.
-                "percent": f"{pct:.1f}",
+                "elapsed": self._progress_emit_policy.format_sec_1(elapsed),
+                "total": self._progress_emit_policy.format_sec_1(total),
+                "percent": self._progress_emit_policy.format_percent(pct),
             })
 
     def _emit_event(self, payload: Dict[str, str]) -> None:

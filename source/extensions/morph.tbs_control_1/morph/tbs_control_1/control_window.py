@@ -1908,6 +1908,12 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     except Exception:
         pass
     _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")))
+    # 포트상태 갱신 전용 이벤트: 애니/게이트 파이프라인으로 넘기지 않는다.
+    try:
+        if str(p.get("seq", "") or "").strip().upper() == "PORT_OCC_REFRESH":
+            return
+    except Exception:
+        pass
     # 포트상태 좌/우 점(●) 카운터:
     # - READYTOLOAD 발생 시(생성 이벤트) 좌측 초록 ● +1
     # - READYTOUNLOAD 발생 시(회수 요청) 우측 빨강 ● +1
