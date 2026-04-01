@@ -617,6 +617,11 @@ class SequenceEditorWindow:
 
         def _commit() -> None:
             try:
+                # "마지막 스텝 편집 중" 상태에서 바로 JSON 생성 버튼을 누르면,
+                # 체크박스/딜레이(ms) 등 일부 UI 모델 값이 step dict에 아직 반영되지 않을 수 있다.
+                # 실행 버튼(_run_steps)과 동일한 기준으로 먼저 모델→dict 동기화를 수행한다.
+                self._flush_rotate_step_flags_to_dict()
+                self._flush_timing_models_to_dict()
                 self._sync_runtime_start_options_to_steps()
                 self._json_model.set_value(json.dumps(self._steps, ensure_ascii=False, indent=2))
             except Exception:

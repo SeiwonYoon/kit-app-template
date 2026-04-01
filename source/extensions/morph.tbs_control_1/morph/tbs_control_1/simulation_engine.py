@@ -99,6 +99,9 @@ class Lot:
     lot_id: str
     foup_id: str
     sequence: int
+    # READYTOLOAD(생성/준비) 공정확인(게이트) 확인 여부.
+    # 확인 전에는 직렬 흐름이 이 LOT을 투입 공정(ARRIVED/MOVE_*)으로 가져가면 안 된다.
+    ready_to_load_confirmed: bool = False
 
 
 @dataclass
@@ -350,6 +353,30 @@ class TBSSimulationEngine:
         # 점유(self.ports)는 완료 시점까지 유지하되, 다음 공정 선택에서는 잠긴 포트를 제외한다.
         # (요구사항: 포트 간 이동은 완료 시점에만 EMPTY/FULL 반영)
         self._locked_ports: set[str] = set()
+        # 직렬 오케스트레이터(_run_serial_flow) 깨우기용 이벤트.
+        # READYTOLOAD 확인 직후 "다른 공정이 진행중이지 않다면 ARRIVED를 우선" 수행하기 위해 사용한다.
+        self._serial_wakeup = self.env.event() if self.env is not None else None
+
+    def _kick_serial_flow(self) -> None:
+        """_run_serial_flow의 idle wait을 즉시 깨운다."""
+        if self.env is None:
+            return
+        ev = getattr(self, "_serial_wakeup", None)
+        if ev is None:
+            try:
+                self._serial_wakeup = self.env.event()
+            except Exception:
+                self._serial_wakeup = None
+            return
+        try:
+            if not ev.triggered:
+                ev.succeed(True)
+        except Exception:
+            pass
+        try:
+            self._serial_wakeup = self.env.event()
+        except Exception:
+            self._serial_wakeup = None
 
     def _lock_port(self, port: str) -> None:
         """포트를 '작업 중'으로 잠가 다음 공정 선택에서 제외."""
@@ -462,6 +489,22 @@ class TBSSimulationEngine:
             # 요구사항: 생성(준비) 이벤트(READYTOLOAD)가 먼저 발생하고, 애니는 실행하지 않는다.
             # - 공정확인 창에서 "몇번째 LOT이 생성되어 준비"인지 확인 가능해야 한다.
             # - port_id=OHT 는 "OHT 대기열에 적재(준비)" 의미로 사용한다.
+            # 또한 공정확인 모드에서는 READYTOLOAD도 반드시 "확인"을 받아야 다음 공정(ARRIVED)로 넘어간다.
+            try:
+                _ = self._request_gate(
+                    {
+                        "seq": "READYTOLOAD",
+                        "port_id": "OHT",
+                        "lot_id": lot.lot_id,
+                        "lot_seq": str(lot.sequence),
+                        "foup_id": lot.foup_id,
+                        "queue_len": str(len(self._oht_input_queue)),
+                        "est_sec": "0.0",
+                        "title": "LOT 생성(READYTOLOAD)",
+                    }
+                )
+            except Exception:
+                pass
             self._emit_event(
                 {
                     "seq": "READYTOLOAD",
@@ -472,6 +515,16 @@ class TBSSimulationEngine:
                     "queue_len": str(len(self._oht_input_queue)),
                 }
             )
+            # READYTOLOAD 확인 완료 후에만 투입 공정(ARRIVED)을 진행할 수 있게 플래그를 올린다.
+            try:
+                lot.ready_to_load_confirmed = True
+            except Exception:
+                pass
+            # 유휴 상태라면 즉시 다음 공정(ARRIVED) 우선 실행을 시도하도록 직렬 루프를 깨운다.
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
 
     def _pickup_event_timer(self):
         """설정 간격마다 회수(READYTOUNLOAD) 시도 티켓을 누적한다."""
@@ -635,6 +688,10 @@ class TBSSimulationEngine:
 
     def _step_oht_input(self):
         """2) OHT 투입: direct(빈 EP) 우선, 아니면 BP1 경유. 1건 실행하면 True."""
+        # READYTOLOAD(생성/준비) 공정확인을 통과하지 않은 LOT은 아직 투입 공정으로 가져가지 않는다.
+        if self._oht_input_queue and not bool(getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)):
+            return False
+
         if self._oht_input_queue and self._can_load_to_ep_direct():
             ep_target = self._find_empty_ep()
             if ep_target:
@@ -684,6 +741,13 @@ class TBSSimulationEngine:
                     f"| input_queue={len(self._oht_input_queue)} | pickup_tickets={self._pickup_tickets} "
                     f"| ports={self._ports_snapshot()}"
                 )
+        # READYTOLOAD 확인 직후 즉시 다음 공정(ARRIVED)을 우선 시도할 수 있도록 wakeup 이벤트를 함께 기다린다.
+        try:
+            if self.env is not None and getattr(self, "_serial_wakeup", None) is not None:
+                yield simpy.AnyOf(self.env, [self.env.timeout(0.2), self._serial_wakeup])  # type: ignore
+                return
+        except Exception:
+            pass
         yield self.env.timeout(0.2)
 
     def _load_lots_to_bp1_loop(self):
@@ -865,6 +929,8 @@ class TBSSimulationEngine:
             self._remove_from_port("BP1")
             self._unlock_port(target_bp)
             self._unlock_port("BP1")
+            # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
+            self._emit_event({"seq": "PORT_OCC_REFRESH"})
             self._log(f"[BP1->BUFFER] 완료: {lot.lot_id} @ {target_bp} | ports={self._ports_snapshot()}")
 
     def _find_oldest_empty_buffer(self) -> Optional[str]:
@@ -964,6 +1030,8 @@ class TBSSimulationEngine:
             self._unlock_port(bp_port)
             # 요구사항: READYTOLOAD는 상태/생성 의미만(애니 없음). 이벤트는 유지.
             self._emit_event({"seq": "READYTOLOAD", "port_id": bp_port, "lot_id": lot.lot_id})
+            # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
+            self._emit_event({"seq": "PORT_OCC_REFRESH"})
             self._log(f"[ARRIVED] {lot.lot_id} @ {ep_port} | ports={self._ports_snapshot()}")
 
     def _execute_pickup(self, ep_port: str):
@@ -1001,6 +1069,8 @@ class TBSSimulationEngine:
         )
         self._stage_mark(lot.lot_id, "ep_to_oht_end")
         self._remove_from_port(ep_port)
+        # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
+        self._emit_event({"seq": "PORT_OCC_REFRESH"})
         self._emit_event({"seq": "REMOVED", "port_id": ep_port, "lot_id": lot.lot_id})
         self.completed_lots.append(lot.lot_id)
         self._log(

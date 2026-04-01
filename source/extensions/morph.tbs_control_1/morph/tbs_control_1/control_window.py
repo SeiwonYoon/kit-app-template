@@ -788,15 +788,10 @@ def _execute_mapped_sequence_stub(
                 # - ARRIVED(OHT->*) 애니가 "포트 도착"을 의미하므로, 완료 후 생성 토큰 1개 소모
                 # - REMOVED 애니가 "회수 진행"이므로, 완료 후 회수 토큰 1개 소모
                 # (요청으로 제거) 포트상태 좌/우 점 표시 기능 비활성화
-                # SequenceRunner.run()은 시작 시 stop() → baseline 복원을 한다. baseline이 예전 캡처면
-                # 다음 JSON 실행 전에 씬이 "초기화된 것처럼" 튀어 간다. 완료 직후 현재 자세를 baseline으로
-                # 다시 잡아 두면, 다음 공정 run()의 선행 stop()이 곧 '방금 끝난 포즈'를 유지하게 된다.
-                try:
-                    rnr = getattr(ext, "_sim_runner", None)
-                    if rnr is not None:
-                        rnr.reset_baseline()
-                except Exception:
-                    pass
+                # 정책 변경:
+                # - 애니메이션 완료 후에는 "완료된 자세 그대로" 유지한다.
+                # - 다음 애니메이션 시작 시점에만 시퀀서 stop() 경로(=baseline 복원/초기화)가 동작하도록,
+                #   완료 직후 baseline을 현재 자세로 덮어쓰지 않는다.
                 pending = getattr(ext, "_sim_anim_pending", [])
                 if isinstance(pending, list) and pending:
                     # 우선순위 큐: _priority 낮은 job 먼저
@@ -1630,15 +1625,6 @@ def _enqueue_anim_event(ext: Any, payload: Dict[str, str]) -> None:
     q = getattr(ext, "_sim_log_queue", None)
     if q is None:
         return
-    # 공정확인 체크 시: 이벤트가 큐로 들어오는 순간부터 sim tick을 멈춰야
-    # 생성/회수 타이머도 "확인 전까지" 같이 정지된다.
-    try:
-        if getattr(ext, "_sim_confirm_each_step_model", None) is not None and ext._sim_confirm_each_step_model.get_value_as_bool():
-            gp = getattr(ext, "_sim_gate_pause_event", None)
-            if gp is not None:
-                gp.set()
-    except Exception:
-        pass
     try:
         q.put_nowait((SimUiQueueKind.ANIM_EVENT, dict(payload or {})))
     except Exception:
@@ -1908,7 +1894,7 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     except Exception:
         pass
     _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")))
-    # 포트상태 갱신 전용 이벤트: 애니/게이트 파이프라인으로 넘기지 않는다.
+    # 포트상태 갱신 전용 이벤트: 목록에 없는 내부 이벤트이므로 애니/공정확인창을 띄우지 않는다.
     try:
         if str(p.get("seq", "") or "").strip().upper() == "PORT_OCC_REFRESH":
             return
@@ -1921,19 +1907,6 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     # (요청으로 제거) 포트상태 좌/우 점 표시 기능 비활성화
     verbose = panel_mode != SimLogPanelMode.PROGRESS_ONLY
     handle_sim_event_for_animation(ext, p, verbose=verbose)
-
-    # 공정확인 체크 시에만: 이벤트 발생마다 공정확인 창을 표시한다.
-    try:
-        if getattr(ext, "_sim_confirm_each_step_model", None) is None or not ext._sim_confirm_each_step_model.get_value_as_bool():
-            return
-    except Exception:
-        return
-    try:
-        gate_payload = _build_sim_gate_request_payload(ext, p)
-        if gate_payload:
-            _enqueue_gate_request(ext, gate_payload)
-    except Exception:
-        pass
 
 
 def _sim_ui_sink_history_line(ext: Any, line: str, panel_mode: SimLogPanelMode) -> None:
@@ -2545,9 +2518,26 @@ def on_sim_start_clicked(ext: Any) -> None:
         # 요구사항: 공정시간보다 애니(JSON) 시간이 길면 다음 공정은 애니 종료까지 대기.
         # simulation_engine은 이 반환값(초)을 받아서 각 공정 timeout을 max(공정, 애니)로 확장한다.
         anim_est_sec = _estimate_anim_duration_for_gate_payload(ext, payload or {})
-        # 공정확인 UI는 "이벤트마다 확인창"(_sim_ui_sink_anim_event)에서 일원화한다.
-        # 여기(on_gate)는 시간 추정값만 반환하고, 어떤 경우에도 확인창을 띄우며 블로킹하지 않는다.
-        return float(anim_est_sec)
+        # 공정확인 체크 시에는 "확인 클릭 전에는 애니/공정 시작 금지"가 목표이므로,
+        # simulation_engine의 _request_gate() 시점에 UI 확인창을 띄우고 동기 블로킹한다.
+        try:
+            confirm_each = bool(
+                getattr(ext, "_sim_confirm_each_step_model", None) is not None
+                and ext._sim_confirm_each_step_model.get_value_as_bool()
+            )
+        except Exception:
+            confirm_each = False
+        if not confirm_each:
+            return float(anim_est_sec)
+
+        # 공정확인 중에는 sim tick thread도 멈춰야 "확인 전까지 완전 정지"가 된다.
+        try:
+            gp = getattr(ext, "_sim_gate_pause_event", None)
+            if gp is not None:
+                gp.set()
+        except Exception:
+            pass
+
         seq_raw = str(payload.get("seq", ""))
         seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
         lot = str(payload.get("lot_id", ""))
@@ -2725,7 +2715,14 @@ def on_sim_start_clicked(ext: Any) -> None:
                     break
                 time.sleep(0.02)
         except Exception as err:
-            print(f"[SIM] tick thread 예외: {err}", flush=True)
+            # 원인 파악을 위해 traceback까지 출력한다.
+            try:
+                import traceback
+
+                print(f"[SIM] tick thread 예외: {err}", flush=True)
+                print(traceback.format_exc(), flush=True)
+            except Exception:
+                print(f"[SIM] tick thread 예외: {err}", flush=True)
 
     th = threading.Thread(target=_tick_loop, name="morph.tbs_control_1.sim_tick", daemon=True)
     ext._sim_thread = th
@@ -2753,6 +2750,27 @@ def on_sim_stop_clicked(ext: Any) -> None:
             pe.clear()
         except Exception:
             pass
+    ge = getattr(ext, "_sim_gate_pause_event", None)
+    if ge is not None:
+        try:
+            ge.clear()
+        except Exception:
+            pass
+    # 공정확인 창이 열려있으면 강제 종료(리셋/중지 시 다음 실행에 pause가 남지 않게)
+    try:
+        w = getattr(ext, "_sim_gate_dialog", None)
+        if w is not None:
+            try:
+                w.visible = False
+            except Exception:
+                pass
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        ext._sim_gate_dialog = None
+    except Exception:
+        pass
     try:
         ext._sim_tick_pause_until_wall = None
     except Exception:
@@ -2788,8 +2806,17 @@ def on_sim_reset_clicked(ext: Any) -> None:
     for port in ("BP2", "BP3", "BP4", "BP1", "EP1", "EP2"):
         if port in cells:
             cells[port].text = f"{port}:-"
+        # 포트 박스 배경색(점유 색상)도 EMPTY로 초기화
+        try:
+            _set_port_box_style(ext, port, "-")
+        except Exception:
+            pass
     if getattr(ext, "_sim_port_ep3_cell", None) is not None:
         ext._sim_port_ep3_cell.text = "EP3:-"
+    try:
+        _set_port_box_style(ext, "EP3", "-")
+    except Exception:
+        pass
     ext._sim_progress_rows = {}
     ext._sim_progress_history = []
     ext._sim_progress_start_times = {}

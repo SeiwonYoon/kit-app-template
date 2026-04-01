@@ -939,7 +939,11 @@ def _set_prim_visible(path: str, visible: bool) -> None:
             img.MakeVisible()
         else:
             img.MakeInvisible()
-    except Exception:
+    except Exception as e:
+        try:
+            print(f"[ERROR_HIDE] Failed to set visibility for {path} to {visible}: {e}", flush=True)  # noqa: T201
+        except Exception:
+            pass
         pass
 
 
@@ -1033,7 +1037,9 @@ class SequenceRunner:
         self._next_tick_sub = None
         self._pending_delay_sub = None  # 레거시 단일 DELAY용(병렬 시 _delay_subs 사용)
         self._delay_subs: List[Any] = []
-        self._pending_unhide_sub = None
+        # unhide는 스텝 종료마다 예약될 수 있으므로 큐로 누적 처리한다.
+        self._unhide_sub = None
+        self._unhide_queue: List[Dict[str, Any]] = []
         self._hidden_refcount: Dict[str, int] = {}
         self._group_timer_sub = None
         self._intra_group_subs: List[Any] = []
@@ -1070,12 +1076,13 @@ class SequenceRunner:
             except Exception:
                 pass
             self._next_tick_sub = None
-        if self._pending_unhide_sub is not None:
+        if self._unhide_sub is not None:
             try:
-                self._pending_unhide_sub.unsubscribe()
+                self._unhide_sub.unsubscribe()
             except Exception:
                 pass
-            self._pending_unhide_sub = None
+            self._unhide_sub = None
+        self._unhide_queue.clear()
         if self._pending_delay_sub is not None:
             try:
                 self._pending_delay_sub.unsubscribe()
@@ -1156,12 +1163,13 @@ class SequenceRunner:
 
     def _clear_all_hides(self) -> None:
         """현재 refcount 기준으로 숨김 상태를 모두 해제."""
-        if self._pending_unhide_sub is not None:
+        if self._unhide_sub is not None:
             try:
-                self._pending_unhide_sub.unsubscribe()
+                self._unhide_sub.unsubscribe()
             except Exception:
                 pass
-            self._pending_unhide_sub = None
+            self._unhide_sub = None
+        self._unhide_queue.clear()
 
         for p in list(self._hidden_refcount.keys()):
             _set_prim_visible(p, True)
@@ -1180,57 +1188,58 @@ class SequenceRunner:
         return paths
 
     def _schedule_unhide(self, paths: List[str], delay_sec: float = 0.2) -> None:
-        """delay_sec 후 숨김 refcount를 1 감소시키고 0이면 다시 표시."""
+        """delay_sec 후 숨김 refcount를 1 감소시키고 0이면 다시 표시. (예약은 누적 처리)"""
         if not paths:
             return
+        try:
+            delay = float(delay_sec)
+        except Exception:
+            delay = 0.0
+        delay = max(0.0, delay)
+        due = time.monotonic() + delay
+        self._unhide_queue.append({"due": due, "paths": list(paths)})
 
-        if self._pending_unhide_sub is not None:
-            try:
-                self._pending_unhide_sub.unsubscribe()
-            except Exception:
-                pass
-            self._pending_unhide_sub = None
-
-        elapsed = {"t": 0.0}
-
-        def _on_update(e):
-            payload = getattr(e, "payload", None) or {}
-            dt = payload.get("dt", 0.0)
-            if dt <= 0:
-                dt = 1.0 / 60.0
-            elapsed["t"] += dt
-            if elapsed["t"] < delay_sec:
-                return
-
-            if self._pending_unhide_sub is not None:
+        def _process_due():
+            now = time.monotonic()
+            remaining: List[Dict[str, Any]] = []
+            for item in list(self._unhide_queue):
                 try:
-                    self._pending_unhide_sub.unsubscribe()
+                    if float(item.get("due", 0.0)) > now:
+                        remaining.append(item)
+                        continue
+                    for p in list(item.get("paths") or []):
+                        cnt = self._hidden_refcount.get(p, 0) - 1
+                        if cnt <= 0:
+                            self._hidden_refcount.pop(p, None)
+                            _set_prim_visible(p, True)
+                        else:
+                            self._hidden_refcount[p] = cnt
+                except Exception:
+                    # 실패한 항목도 더 이상 재시도하지 않음
+                    continue
+            self._unhide_queue = remaining
+            if not self._unhide_queue and self._unhide_sub is not None:
+                try:
+                    self._unhide_sub.unsubscribe()
                 except Exception:
                     pass
-                self._pending_unhide_sub = None
+                self._unhide_sub = None
 
-            for p in paths:
-                cnt = self._hidden_refcount.get(p, 0) - 1
-                if cnt <= 0:
-                    self._hidden_refcount.pop(p, None)
-                    _set_prim_visible(p, True)
-                else:
-                    self._hidden_refcount[p] = cnt
-
-        try:
-            self._pending_unhide_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
-                _on_update,
-                name="morph.tbs_control_1.sequence_engine.unhide_delay",
-            )
-        except Exception:
-            # fallback: delay 없이 즉시 복원
-            for p in paths:
-                cnt = self._hidden_refcount.get(p, 0) - 1
-                if cnt <= 0:
-                    self._hidden_refcount.pop(p, None)
-                    _set_prim_visible(p, True)
-                else:
-                    self._hidden_refcount[p] = cnt
+        if self._unhide_sub is None:
+            try:
+                self._unhide_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
+                    lambda e: _process_due(),
+                    name="morph.tbs_control_1.sequence_engine.unhide_queue",
+                )
+            except Exception:
+                # fallback: delay 무시하고 즉시 처리
+                for p in paths:
+                    cnt = self._hidden_refcount.get(p, 0) - 1
+                    if cnt <= 0:
+                        self._hidden_refcount.pop(p, None)
+                        _set_prim_visible(p, True)
+                    else:
+                        self._hidden_refcount[p] = cnt
 
     def _call_next_frame(self, fn: Callable[[], None]) -> None:
         """update 콜백 재진입을 피하기 위해 다음 프레임(post_update)에 호출."""
@@ -1431,6 +1440,10 @@ class SequenceRunner:
             except Exception:
                 pass
             self._group_timer_sub = None
+        try:
+            self._clear_all_hides()
+        except Exception:
+            pass
         cb = self.on_sequence_completed
         if cb:
             try:
@@ -1612,16 +1625,6 @@ class SequenceRunner:
         t0 = time.monotonic()
         self._group_t0 = t0
         self._current_group = (a, b)
-        next_union = set()
-        for i in range(a, b + 1):
-            next_union.update(self._step_hide_paths(self._steps[i] or {}))
-        to_unhide = [p for p in self._prev_group_hide_paths if p not in next_union]
-        if to_unhide:
-            self._schedule_unhide(to_unhide, delay_sec=0.2)
-        merged_hide: List[str] = []
-        for i in range(a, b + 1):
-            merged_hide.extend(self._apply_hide_for_step(self._steps[i] or {}))
-        self._prev_group_hide_paths = list(merged_hide)
 
         noop = lambda: None
         self._start_step(a, on_completed=noop)
@@ -1635,8 +1638,17 @@ class SequenceRunner:
                 self._schedule_intra_group_at(target, lambda idx=i: self._start_step(idx, lambda: None))
 
     def _start_step(self, idx: int, on_completed: Callable[[], None]) -> None:
-        """hide 는 _execute_group 에서 이미 적용. 여기서는 애니메이션만 시작."""
+        """
+        스텝 실행 시작.
+
+        hide는 "스텝 단위"로 적용/복귀한다.
+        - 스텝 시작 시 hide_enabled/hide_prims에 해당하는 prim을 숨기고(refcount +1)
+        - 스텝 완료 시 해당 prim을 refcount -1 하여 0이면 다시 표시
+
+        병렬(run_with_previous) 스텝이 겹칠 수 있어 refcount 방식은 유지한다.
+        """
         step = self._steps[idx] or {}
+        hidden_paths = self._apply_hide_for_step(step)
         t = str(step.get("type") or "").upper()
         if t == "MOVE":
             # MOVE 랜덤 범위 샘플링은 "실행 시점"에 1회 고정한다.
@@ -1647,6 +1659,13 @@ class SequenceRunner:
             step["_runtime_dz"] = _sample_step_value(step, "dz")
 
         def _done() -> None:
+            try:
+                # 스텝 종료 시 hide 복귀(스텝 단위 정책)
+                if hidden_paths:
+                    # 다음 스텝과 경계가 맞물릴 때 깜빡임을 방지하기 위해 기본 지연(0.2s)을 사용한다.
+                    self._schedule_unhide(hidden_paths)
+            except Exception:
+                pass
             try:
                 on_completed()
             except Exception:
