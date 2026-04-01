@@ -170,7 +170,7 @@ from pxr import Gf
 from . import usd_animation_control
 from . import xml_generator
 from .curve_animation import make_parabolic_path, run_prim_curve_animation, stop_prim_curve_animation
-from .port_lot_visibility import apply_port_lot_prim_visibility
+from .port_lot_visibility import apply_port_lot_prim_visibility, clear_port_lot_authoring_cache
 from .prim_info import get_prim_display_name, safe_str
 from .prim_utils import (
     collect_prim_paths_safe,
@@ -2783,6 +2783,10 @@ def on_sim_stop_clicked(ext: Any) -> None:
 
 def on_sim_reset_clicked(ext: Any) -> None:
     on_sim_stop_clicked(ext)
+    try:
+        clear_port_lot_authoring_cache()
+    except Exception:
+        pass
     ext._sim_engine = None
     if getattr(ext, "_sim_history_text", None):
         ext._sim_history_text.set_value("[SIM] 리셋 완료")

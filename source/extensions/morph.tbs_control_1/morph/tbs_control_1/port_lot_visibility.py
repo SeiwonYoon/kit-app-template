@@ -18,14 +18,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import omni.usd as ou
-from pxr import UsdGeom
+from pxr import Gf, UsdGeom
+
+from .rotate_animation import stop_prim_rotate_animation
+from .translate_animation import stop_prim_translate_animation
 
 _CONFIG_FILENAME = "port_lot_prim_paths.json"
 _CACHE: Optional[Dict[str, str]] = None
 _MTIME: Optional[float] = None
+
+# 포트별 LOT 표현 prim의 "기준 자세"(최초 캡처). 애니 시작 시 이 값으로 복원한다(가시성 로직은 별도).
+_PORT_LOT_AUTHORING: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
 
 
 def _config_path() -> Path:
@@ -80,6 +86,84 @@ def _set_prim_visible(path: str, visible: bool) -> None:
             img.MakeInvisible()
     except Exception:
         pass
+
+
+def _iter_unique_mapped_prim_paths() -> List[str]:
+    """mapping 값 중 비어 있지 않은 prim 경로(중복 제거, 순서 유지)."""
+    mapping = load_port_lot_prim_paths()
+    if not mapping:
+        return []
+    seen = set()
+    out: List[str] = []
+    for _port, prim_path in mapping.items():
+        p = str(prim_path or "").strip()
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def clear_port_lot_authoring_cache() -> None:
+    """시뮬 리셋 등에서 다음 애니 시작 시 authoring을 다시 잡을 수 있게 캐시를 비운다."""
+    _PORT_LOT_AUTHORING.clear()
+
+
+def ensure_port_lot_authoring_captured() -> None:
+    """
+    매핑 prim마다 최초 1회 현재 transform을 authoring으로 저장한다.
+    (이후 애니로 움직인 뒤에는 restore만으로 이 자세로 되돌린다.)
+    """
+    try:
+        from .sequence_engine import _get_rotate_xyz, _get_translate, _get_stage
+    except Exception:
+        return
+    stage = _get_stage()
+    if not stage:
+        return
+    for path in _iter_unique_mapped_prim_paths():
+        if path in _PORT_LOT_AUTHORING:
+            continue
+        try:
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                continue
+            _PORT_LOT_AUTHORING[path] = (_get_translate(prim), _get_rotate_xyz(prim))
+        except Exception:
+            continue
+
+
+def restore_port_lot_prims_to_authoring() -> None:
+    """
+    포트 매핑 prim의 위치/회전을 authoring 기준으로 복원한다.
+    보임/숨김은 건드리지 않는다(apply_port_lot_prim_visibility 타이밍 유지).
+    애니메이션 시작 직전(SequenceRunner.run 직전)에 호출하는 것을 전제로 한다.
+    """
+    try:
+        from .sequence_engine import _get_rotate_xyz, _get_translate, _get_stage, _set_rotate_xyz, _set_translate
+    except Exception:
+        return
+    ensure_port_lot_authoring_captured()
+    stage = _get_stage()
+    if not stage:
+        return
+    for path in _iter_unique_mapped_prim_paths():
+        try:
+            stop_prim_translate_animation(path)
+            stop_prim_rotate_animation(path)
+        except Exception:
+            pass
+        try:
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                continue
+            if path not in _PORT_LOT_AUTHORING:
+                _PORT_LOT_AUTHORING[path] = (_get_translate(prim), _get_rotate_xyz(prim))
+            t, r = _PORT_LOT_AUTHORING[path]
+            _set_translate(prim, t)
+            _set_rotate_xyz(prim, r)
+        except Exception:
+            continue
 
 
 def apply_port_lot_prim_visibility(ports_occupancy: Any) -> None:

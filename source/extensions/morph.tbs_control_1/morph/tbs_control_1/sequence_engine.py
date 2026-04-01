@@ -1308,6 +1308,14 @@ class SequenceRunner:
         # 타임라인 time=0 적용이 "다음 프레임"에 평가되는 경우가 있어,
         # 프림 baseline 복원/시퀀스 시작을 다음 프레임으로 지연해 덮어쓰기/미복원 문제를 방지한다.
         def _start():
+            # 포트 LOT 표시용 prim(port_lot_prim_paths.json)은 시퀀스 스텝에 없어도 움직일 수 있으므로,
+            # 애니 시작 시 한 번 authoring 자세로 복원한다(보임/숨김은 건드리지 않음).
+            try:
+                from .port_lot_visibility import restore_port_lot_prims_to_authoring
+
+                restore_port_lot_prims_to_authoring()
+            except Exception:
+                pass
             # baseline은 '최초 상태'를 보존해야 하므로 매 실행마다 덮어쓰지 않는다.
             # 다만 스텝 편집으로 새 prim이 등장할 수 있으니, baseline에 없는 prim만 보강 캡처한다.
             self._capture_baseline(force=False)
