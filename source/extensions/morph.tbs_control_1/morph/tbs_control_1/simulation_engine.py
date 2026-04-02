@@ -1035,43 +1035,57 @@ class TBSSimulationEngine:
             self._log(f"[ARRIVED] {lot.lot_id} @ {ep_port} | ports={self._ports_snapshot()}")
 
     def _execute_pickup(self, ep_port: str):
-        """회수 티켓으로 EP에서 OHT로 픽업(READYTOUNLOAD→REMOVED, completed_lots 반영)."""
+        """회수: READYTOUNLOAD 게이트→이벤트, REMOVED 게이트→이벤트→공정+애니 대기→포트 비움·completed."""
         lot = self.ports.get(ep_port)
         if lot is None:
             self._ep_awaiting_pickup[ep_port] = False
             return
         self._ep_awaiting_pickup[ep_port] = False
         unload_time = self._timing.rand_ep_to_oht()
-        anim_wait = self._request_gate({
-            "seq": "READYTOUNLOAD",
-            "port_id": ep_port,
-            "lot_id": lot.lot_id,
-            "lot_seq": str(lot.sequence),
-            "foup_id": lot.foup_id,
-            "est_sec": f"{unload_time:.1f}",
-            "title": "EP -> OHT 회수",
-        })
+        self._request_gate(
+            {
+                "seq": "READYTOUNLOAD",
+                "port_id": ep_port,
+                "lot_id": lot.lot_id,
+                "lot_seq": str(lot.sequence),
+                "foup_id": lot.foup_id,
+                "est_sec": f"{unload_time:.1f}",
+                "title": "EP -> OHT 회수(READYTOUNLOAD)",
+            }
+        )
+        self._emit_event({"seq": "READYTOUNLOAD", "port_id": ep_port, "lot_id": lot.lot_id})
+        self._log(f"[READY_TO_UNLOAD] {ep_port}: {lot.lot_id} (to OHT {unload_time:.1f}s)")
+        self._log(f"[STORY] {lot.lot_id}를 {ep_port}에서 OHT가 회수 중입니다.")
+
+        anim_wait = self._request_gate(
+            {
+                "seq": "REMOVED",
+                "port_id": ep_port,
+                "lot_id": lot.lot_id,
+                "lot_seq": str(lot.sequence),
+                "foup_id": lot.foup_id,
+                "est_sec": f"{unload_time:.1f}",
+                "title": "EP -> OHT 회수(REMOVED)",
+            }
+        )
         total_wait = max(float(unload_time), float(anim_wait))
         self._stage_mark(lot.lot_id, "ep_to_oht_start")
         self._route_mark(lot.lot_id, "ep_to_oht_from", ep_port)
         self._route_mark(lot.lot_id, "ep_to_oht_to", "OHT")
-        self._emit_event({"seq": "READYTOUNLOAD", "port_id": ep_port, "lot_id": lot.lot_id})
-        self._log(f"[READY_TO_UNLOAD] {ep_port}: {lot.lot_id} (to OHT {unload_time:.1f}s)")
-        self._log(f"[STORY] {lot.lot_id}를 {ep_port}에서 OHT가 회수 중입니다.")
+        self._emit_event({"seq": "REMOVED", "port_id": ep_port, "lot_id": lot.lot_id})
         yield self.env.process(
             self._wait_with_progress(
                 total_sec=total_wait,
                 label=f"{ep_port}->OHT {lot.lot_id}",
                 detail=f"{lot.lot_id} {ep_port}->OHT 회수(출발포트={ep_port}, 도착포트=OHT) | 공정={unload_time:.1f}s 애니={anim_wait:.1f}s",
                 progress_interval=self._log_cfg.progress_interval(),
-                event_seq="READYTOUNLOAD",
+                event_seq="REMOVED",
             )
         )
         self._stage_mark(lot.lot_id, "ep_to_oht_end")
         self._remove_from_port(ep_port)
         # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
         self._emit_event({"seq": "PORT_OCC_REFRESH"})
-        self._emit_event({"seq": "REMOVED", "port_id": ep_port, "lot_id": lot.lot_id})
         self.completed_lots.append(lot.lot_id)
         self._log(
             f"[COMPLETE] OHT picked {lot.lot_id} from {ep_port} "
