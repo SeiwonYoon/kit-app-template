@@ -601,7 +601,8 @@ def _execute_mapped_sequence_stub(
 ) -> None:
     """
     rules/map이 가리키는 JSON을 검증한 뒤 SequenceRunner.run()으로 실제 재생한다.
-    시뮬 tick은 _sim_tick_pause_event / is_running / wall fail-safe로 애니 종료까지 맞춘다.
+    시뮬 tick은 (필요 시) translate/rotate/curve 애니 재생 중에만 _sim_tick_pause_event로 잠시 멈춘다.
+    JSON 시퀀스(SequenceRunner) 재생 중에는 tick을 멈추지 않아 공정(sim time)과 동시에 진행된다.
     """
     p = _normalize_json_path(json_path_text)
     runner = str((meta or {}).get("runner", "sequence_editor"))
@@ -816,11 +817,8 @@ def _execute_mapped_sequence_stub(
                 ext._sim_runner.on_sequence_completed = _on_done  # type: ignore[attr-defined]
             except Exception:
                 pass
-            if pause_evt is not None:
-                try:
-                    pause_evt.set()
-                except Exception:
-                    pass
+            # JSON 시퀀스 재생 중에도 sim tick이 돌아가야 _wait_with_progress(공정)와 애니가 동시에 진행된다.
+            # (pause_evt를 여기서 켜면 전체 tick 루프가 sim.tick에 도달하지 못해 공정이 멈춘다.)
             ext._sim_runner.run(job.get("parsed", []))
             _append_anim_history_log(
                 ext,
