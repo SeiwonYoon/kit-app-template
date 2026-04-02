@@ -17,7 +17,7 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
   · BP1→BP, BP→EP, EP→OHT(회수 이동) 랜덤 범위
 - SimulationInitConfig:
   · ep_count (2/3)
-  · initial_full_ports (시작 시점 미리 적재할 포트)
+  · initial_full_ports (시작 시점 미리 적재할 포트; 내부 상태만, ARRIVED 이벤트 없음)
   · max_oht_lots (OHT 쪽에서 생성·투입할 LOT 개수)
 - TBSSimulationEngine 내부 상태:
   · ports: 현재 포트 점유(Lot 또는 None)
@@ -1157,7 +1157,10 @@ class TBSSimulationEngine:
         )
 
     def _apply_initial_full_ports(self) -> None:
-        """시작 시 지정 포트에 미리 LOT을 올려 _total_lots에 반영한다."""
+        """시작 시 지정 포트에 미리 LOT을 올려 _total_lots에 반영한다.
+
+        ARRIVED 이벤트는 보내지 않는다(애니/공정확인 없이 '이미 도착한 상태'만 반영).
+        """
         ports = list(getattr(self._init_cfg, "initial_full_ports", None) or [])
         if not ports:
             return
@@ -1178,12 +1181,13 @@ class TBSSimulationEngine:
             )
             self._initial_seed_seq += 1
             self._total_lots += 1
-            self._set_port(port, "ARRIVED", "FULL", lot)
+            self._set_port(port, "ARRIVED", "FULL", lot, emit_arrived_event=False)
             if port in BUFFER_PORTS:
                 self._buffer_loaded_at[port] = now
             applied.append(f"{port}={lot.lot_id}")
         if applied:
-            self._log(f"[INIT] 초기 적재 적용: {', '.join(applied)}")
+            self._log(f"[INIT] 초기 적재 적용(상태만, ARRIVED 이벤트 없음): {', '.join(applied)}")
+            self._emit_event({"seq": "PORT_OCC_REFRESH"})
 
     def _wait_with_progress(
         self,
