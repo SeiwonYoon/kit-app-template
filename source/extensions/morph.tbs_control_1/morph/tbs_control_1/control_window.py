@@ -60,14 +60,13 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
   3) rules 또는 map의 use.json 경로에 등록
   4) 시뮬레이션 이벤트 발생 시 자동 매칭/검증 로그 확인
  - 표시모드(SimLogPanelMode): 콤보 인덱스와 `_drain_sim_log_queue`의 이력 스킵 여부가 연동된다.
-  · "둘다": 진행현황 + 이력로그 + 애니메이션 실행이력
+  · "둘다": 진행현황 + 이력로그
   · "진행현황": 진행현황만
   · "이력로그": 스토리/시뮬 이력만
-  · "애니메이션실행이력": 애니메이션 매핑/실행 로그만
  - 시뮬 UI 큐 라우팅: `SimUiQueueKind` + `_dispatch_sim_ui_queue_item` + `_sim_ui_sink_*`.
    새 공정 텍스트 로그는 `post_sim_history_line(ext, line)`(시뮬 스레드)만 쓰면 이력 창으로 간다.
  - 시뮬레이션 종료 시 `_export_sim_logs_to_xlsx()`가 자동 호출되어
-   `data/sim_logs/sim_logs_YYYYmmdd_HHMMSS.xlsx`에 3개 시트(진행현황/이력로그/애니메이션실행이력)를 최신순으로 저장한다.
+   `data/sim_logs/sim_logs_YYYYmmdd_HHMMSS.xlsx`에 2개 시트(진행현황/이력로그)를 저장한다.
 
 【시뮬레이션 이벤트→애니메이션(JSON) 매핑 요약 (요구사항 반영)】
 주의:
@@ -136,8 +135,8 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
   _drain_sim_log_queue(메인 스레드에서 소비), _dispatch_sim_ui_queue_item, _coerce_sim_ui_queue_kind,
   _sim_ui_sink_progress·_sim_ui_sink_anim_event·_sim_ui_sink_history_line·_sim_ui_sink_action·_sim_ui_sink_gate
 - 게이트: _show_sim_gate_dialog, _close_sim_gate_dialog, on_sim_start_clicked 내부 on_gate 연동
-- 진행·로그 UI: _append_sim_log, _format_history_line·_with_history_color_icon, _append_anim_history_log,
-  _refresh_anim_history_view, _compose_anim_history_with_summary, _render_pending_dots, _format_anim_history_line,
+- 진행·로그 UI: _append_sim_log, _format_history_line·_with_history_color_icon, _append_anim_history_log(노옵),
+  _render_pending_dots,
   _update_sim_progress, _is_progress_only_mode, on_copy_sim_progress
 - 포트 패널: _port_cell_text, _compact_cell_value, _sync_ep3_port_cell_visibility, _set_port_box_style, _update_port_occupancy_panel
 - 시뮬 제어: on_sim_start_clicked·on_sim_stop_clicked·on_sim_reset_clicked, _detach_sim_update,
@@ -208,7 +207,7 @@ class SimUiQueueKind(str, Enum):
 
     PROGRESS = "progress"  # → 진행현황 패널 (_update_sim_progress)
     HISTORY_LINE = "log"  # → 이력 로그 패널 (_append_sim_log). 값 "log"는 기존 큐 호환 유지.
-    ANIM_EVENT = "anim_event"  # → 포트 상태 패널 + 애니 실행/이력 (handle_sim_event_for_animation → _append_anim_history_log)
+    ANIM_EVENT = "anim_event"  # → 포트 상태 + 시퀀스 실행 (handle_sim_event_for_animation)
     ACTION = "action"  # → 제어 액션 (예: xlsx보내기)
     GATE = "gate"  # → 공정 확인 창
 
@@ -225,7 +224,6 @@ class SimLogPanelMode(int, Enum):
     ALL = 0
     PROGRESS_ONLY = 1
     HISTORY_ONLY = 2
-    ANIM_ONLY = 3
 
 
 SIM_SEQ_ALIAS = {
@@ -626,35 +624,8 @@ def _execute_mapped_sequence_stub(
     sim_time = str(payload.get("sim_time", "")).strip()
     # 스토리-JSON 요약(애니 실행이력 창) 기록: "실행/스킵/실패" 모두 남겨야 누적이 끊기지 않는다.
     def _push_story_json(status: str) -> None:
-        try:
-            blocks = getattr(ext, "_sim_recent_story_blocks", None)
-            if not isinstance(blocks, list):
-                return
-            lot0 = str(payload.get("lot_id", "") or "").strip()
-            line = f"[애니] event={seq} | json={p.name} | {status}"
-            b0 = None
-            if lot0:
-                for cand in reversed(blocks):
-                    if isinstance(cand, dict) and str(cand.get("lot_id", "") or "").strip() == lot0:
-                        b0 = cand
-                        break
-            if b0 is None and lot0:
-                b0 = {"story": f"🟦 [스토리] (미수집) lot={lot0}", "anims": [], "lot_id": lot0}
-                blocks.append(b0)
-                if len(blocks) > 12:
-                    del blocks[:-12]
-            if isinstance(b0, dict):
-                anims0 = b0.get("anims", [])
-                if not isinstance(anims0, list):
-                    anims0 = []
-                    b0["anims"] = anims0
-                if not anims0 or str(anims0[-1]) != line:
-                    anims0.append(line)
-                    if len(anims0) > 12:
-                        del anims0[:-12]
-            _refresh_anim_history_view(ext)
-        except Exception:
-            pass
+        """(애니 실행이력 UI 제거) 스토리-JSON 요약 누적은 더 이상 사용하지 않는다."""
+        return
 
     if not p.exists():
         _push_story_json("SKIP (MISSING)")
@@ -733,58 +704,7 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 ext._sim_tick_pause_until_wall = None
 
-            recs = getattr(ext, "_sim_anim_history_records", None)
-            if isinstance(recs, list):
-                recs.append(
-                    {
-                        "sim_time": str(job.get("t", "")),
-                        "event": str(job.get("event", "")),
-                        "file": str(job.get("file", "")),
-                        "path": str(job.get("path", "")),
-                        "runner": str(job.get("runner", "")),
-                        "rule": str(job.get("rule", "")),
-                        "lot_id": str(job.get("lot_id", "")),
-                        "from_port_id": str(job.get("from_port_id", "")),
-                        "to_port_id": str(job.get("to_port_id", "")),
-                        "port_id": str(job.get("port_id", "")),
-                        "action": str(job.get("action", "")),
-                        "est_sec": float(job.get("est_total")) if isinstance(job.get("est_total"), (float, int)) else None,
-                        "wall_sec": None,
-                        "status": "START",
-                        "_started_wall": started_wall,
-                    }
-                )
-
             def _on_done():
-                info = getattr(ext, "_sim_anim_active", {}) if hasattr(ext, "_sim_anim_active") else {}
-                try:
-                    wall = max(0.0, time.monotonic() - float(info.get("_started_wall", started_wall)))
-                except Exception:
-                    wall = 0.0
-                recs2 = getattr(ext, "_sim_anim_history_records", None)
-                if isinstance(recs2, list):
-                    for r in reversed(recs2):
-                        if not isinstance(r, dict):
-                            continue
-                        if r.get("status") != "START":
-                            continue
-                        if str(r.get("event", "")) != str(info.get("event", "")):
-                            continue
-                        if str(r.get("file", "")) != str(info.get("file", "")):
-                            continue
-                        try:
-                            if float(r.get("_started_wall", -1.0)) != float(info.get("_started_wall", -2.0)):
-                                continue
-                        except Exception:
-                            continue
-                        r["status"] = "DONE"
-                        r["wall_sec"] = float(wall)
-                        r["_ended_wall"] = time.monotonic()
-                        break
-                _append_anim_history_log(
-                    ext,
-                    f"[ANIM] 실행완료 | t={info.get('t','-')} | event={info.get('event','-')} | wall={wall:.2f}s | est={info.get('est','-')} | action={info.get('action','-')} | file={info.get('file','-')}",
-                )
                 # 포트상태 점(●) 감소 시점
                 # - ARRIVED(OHT->*) 애니가 "포트 도착"을 의미하므로, 완료 후 생성 토큰 1개 소모
                 # - REMOVED 애니가 "회수 진행"이므로, 완료 후 회수 토큰 1개 소모
@@ -812,6 +732,10 @@ def _execute_mapped_sequence_stub(
                     ext._sim_tick_pause_until_wall = None
                 except Exception:
                     pass
+                try:
+                    _refresh_sim_progress_from_last(ext)
+                except Exception:
+                    pass
 
             try:
                 ext._sim_runner.on_sequence_completed = _on_done  # type: ignore[attr-defined]
@@ -820,10 +744,10 @@ def _execute_mapped_sequence_stub(
             # JSON 시퀀스 재생 중에도 sim tick이 돌아가야 _wait_with_progress(공정)와 애니가 동시에 진행된다.
             # (pause_evt를 여기서 켜면 전체 tick 루프가 sim.tick에 도달하지 못해 공정이 멈춘다.)
             ext._sim_runner.run(job.get("parsed", []))
-            _append_anim_history_log(
-                ext,
-                f"[ANIM] 실행시작 | t={job.get('t','-')} | event={job.get('event','-')} | est={job.get('est','-')} | action={job.get('action','-')} | file={job.get('file','-')}",
-            )
+            try:
+                _refresh_sim_progress_from_last(ext)
+            except Exception:
+                pass
 
         job = {
             "t": sim_time,
@@ -879,6 +803,10 @@ def _execute_mapped_sequence_stub(
                 ext,
                 f"[ANIM] 대기큐적재 | event={seq} | est={est_text} | action={action_text} | file={p.name} | queued={len(ext._sim_anim_pending)}",
             )
+            try:
+                _refresh_sim_progress_from_last(ext)
+            except Exception:
+                pass
             return
         _start_job(job)
     except Exception as e:
@@ -1020,7 +948,6 @@ def build_control_window(ext: Any) -> None:
     ext._sim_log_text = ui.SimpleStringModel("[SIM] 대기 중")
     ext._sim_history_text = ui.SimpleStringModel("[SIM] 대기 중")
     ext._sim_progress_text = ui.SimpleStringModel("[진행현황] 없음")
-    ext._sim_anim_history_text = ui.SimpleStringModel("[애니메이션 실행이력] 없음")
     ext._sim_port_state_text = ui.SimpleStringModel("[포트상태] 대기 중")
     # 요약(애니 실행이력 창): "스토리 1개 + 그 이후 연결된 JSON 목록" 블록을 유지
     # block: {"story": str, "anims": List[str]}
@@ -1053,8 +980,6 @@ def build_control_window(ext: Any) -> None:
     ext._sim_anim_history_label = None
     ext._sim_port_state_label = None
     ext._sim_runner = SequenceRunner()
-    # 엑셀 export용: 애니메이션 실행 레코드(열 분리 저장)
-    ext._sim_anim_history_records = []
     ext._sim_anim_active = {}
     ext._sim_anim_pending = []
     # 애니메이션 재생 중 sim tick을 잠시 멈추기 위한 플래그
@@ -1186,7 +1111,7 @@ def build_control_window(ext: Any) -> None:
                             ui.Button("리셋", width=80, clicked_fn=lambda: on_sim_reset_clicked(ext))
                         with ui.HStack(spacing=8, height=24):
                             ui.Label("표시모드", width=60)
-                            ext._sim_log_view_combo = ui.ComboBox(0, "둘다", "진행현황", "이력로그", "애니메이션실행이력")
+                            ext._sim_log_view_combo = ui.ComboBox(0, "둘다", "진행현황", "이력로그")
                             ext._sim_log_view_combo.model.add_item_changed_fn(lambda m, *a: on_sim_log_view_changed(ext))
                             ui.Button("진행현황 복사", width=100, clicked_fn=lambda: on_copy_sim_progress(ext))
                         ext._sim_port_state_frame = ui.ScrollingFrame(height=120)
@@ -1223,10 +1148,10 @@ def build_control_window(ext: Any) -> None:
                         # 포트 상태 UI 구성 이후 EP3 표시조건 즉시 동기화
                         on_sim_ep_count_changed(ext)
                         _sync_ep3_port_cell_visibility(ext)
-                        ext._sim_progress_frame = ui.ScrollingFrame(height=90)
+                        ext._sim_progress_frame = ui.ScrollingFrame(height=120)
                         with ext._sim_progress_frame:
                             ext._sim_progress_label = ui.Label(
-                                "", word_wrap=True, height=88, style={"color": 0xFFFFFFFF}
+                                "", word_wrap=True, height=118, style={"color": 0xFFFFFFFF}
                             )
                             ext._sim_progress_label.text = ext._sim_progress_text.as_string
                         ext._sim_history_frame = ui.ScrollingFrame(height=140)
@@ -1235,12 +1160,6 @@ def build_control_window(ext: Any) -> None:
                                 "", word_wrap=True, height=136, style={"color": 0xFFFFFFFF}
                             )
                             ext._sim_history_label.text = ext._sim_history_text.as_string
-                        ext._sim_anim_history_frame = ui.ScrollingFrame(height=120)
-                        with ext._sim_anim_history_frame:
-                            ext._sim_anim_history_label = ui.Label(
-                                "", word_wrap=True, height=116, style={"color": 0xFFFFFFFF}
-                            )
-                            ext._sim_anim_history_label.text = ext._sim_anim_history_text.as_string
                         on_sim_log_view_changed(ext)
                 ui.Spacer(height=6)
                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
@@ -1346,23 +1265,6 @@ def _append_sim_log(ext: Any, line: str) -> None:
         ext._sim_history_text.set_value(merged)
     if getattr(ext, "_sim_history_label", None) is not None:
         ext._sim_history_label.text = merged
-    # 요약(애니 실행이력 창): [스토리]를 블록으로 유지
-    try:
-        if "[스토리]" in msg:
-            blocks = getattr(ext, "_sim_recent_story_blocks", None)
-            if isinstance(blocks, list):
-                lot_m = ""
-                try:
-                    m = re.search(r"(LOT_\d+)", msg)
-                    lot_m = m.group(1) if m else ""
-                except Exception:
-                    lot_m = ""
-                blocks.append({"story": msg, "anims": [], "lot_id": lot_m})
-                if len(blocks) > 12:
-                    del blocks[:-12]
-                _refresh_anim_history_view(ext)
-    except Exception:
-        pass
 
 
 def _format_history_line(line: str) -> str:
@@ -1434,69 +1336,8 @@ def _with_history_color_icon(s: str) -> str:
 
 
 def _append_anim_history_log(ext: Any, line: str) -> None:
-    """UI 스레드 전용: 애니메이션 실행이력 패널. (애니 파이프라인 내부에서만 호출)"""
-    msg = _format_anim_history_line((line or "").strip())
-    if not msg:
-        return
-    prev = ext._sim_anim_history_text.as_string if getattr(ext, "_sim_anim_history_text", None) else ""
-    merged = f"{prev}\n{msg}".strip() if prev else msg
-    rows = merged.splitlines()
-    if len(rows) > 300:
-        merged = "\n".join(rows[-300:])
-    if getattr(ext, "_sim_anim_history_text", None):
-        ext._sim_anim_history_text.set_value(merged)
-    if getattr(ext, "_sim_anim_history_label", None) is not None:
-        ext._sim_anim_history_label.text = _compose_anim_history_with_summary(ext, merged)
-    # 요약은 _execute_mapped_sequence_stub(실행준비완료)에서만 기록한다. (중복/누락 방지)
-
-
-def _refresh_anim_history_view(ext: Any) -> None:
-    """스토리/요약 갱신 시 애니 이력 라벨도 즉시 재렌더링한다."""
-    try:
-        if getattr(ext, "_sim_anim_history_label", None) is None:
-            return
-        base = ""
-        if getattr(ext, "_sim_anim_history_text", None) is not None:
-            base = str(ext._sim_anim_history_text.as_string or "")
-        ext._sim_anim_history_label.text = _compose_anim_history_with_summary(ext, base)
-    except Exception:
-        pass
-
-
-def _compose_anim_history_with_summary(ext: Any, merged_anim_history: str) -> str:
-    """
-    '마지막 애니메이션 실행이력' 창에서:
-    - 스토리 라인 바로 밑에, 해당 이후로 발생한 JSON 실행을 계속 나열해 보여준다.
-    """
-    base = (merged_anim_history or "").strip()
-    try:
-        blocks = getattr(ext, "_sim_recent_story_blocks", None)
-        if not isinstance(blocks, list) or not blocks:
-            return base
-        tail = blocks[-10:]  # 너무 길어지지 않게 최근만
-        out: List[str] = []
-        out.append("")
-        out.append("[요약] (스토리 아래 JSON 나열)")
-        has_any = False
-        for b in tail:
-            if not isinstance(b, dict):
-                continue
-            story = str(b.get("story", "")).strip()
-            anims = b.get("anims", [])
-            if story:
-                out.append(story)
-                has_any = True
-            if isinstance(anims, list):
-                for a in anims:
-                    at = str(a).strip()
-                    if at:
-                        out.append(f"  └ {at}")
-                        has_any = True
-        if not has_any:
-            return base
-        return (base + "\n" + "\n".join(out)).strip()
-    except Exception:
-        return base
+    """애니메이션 실행이력 패널 제거됨. 호출은 호환을 위해 유지한다."""
+    return
 
 
 def _render_pending_dots(ext: Any) -> None:
@@ -1594,14 +1435,6 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
     if ep3_cell is not None:
         ep3_cell.text = f"EP3:{_compact_cell_value(ep3)}"
         _set_port_box_style(ext, "EP3", ep3)
-
-
-def _format_anim_history_line(line: str) -> str:
-    s = (line or "").strip()
-    if not s:
-        return ""
-    s = s.replace("[ANIM] ", "[애니] ")
-    return _with_history_color_icon(s)
 
 
 def _enqueue_sim_log(ext: Any, line: str) -> None:
@@ -1960,6 +1793,8 @@ def _drain_sim_log_queue(ext: Any) -> None:
             view_idx = ext._sim_log_view_combo.model.get_item_value_model().as_int
         except Exception:
             view_idx = 0
+        if view_idx > int(SimLogPanelMode.HISTORY_ONLY):
+            view_idx = int(SimLogPanelMode.ALL)
         try:
             panel_mode = SimLogPanelMode(int(view_idx))
         except Exception:
@@ -1999,8 +1834,46 @@ def _drain_sim_log_queue(ext: Any) -> None:
         print(f"[SIM UI] 로그 드레인 예외: {e}", flush=True)
 
 
+def _sim_anim_status_key(ext: Any) -> Tuple[bool, str, int, str]:
+    """진행 패널 중복 스킵용: 재생 여부·현재 파일·대기 큐·다음 파일."""
+    runner = getattr(ext, "_sim_runner", None)
+    try:
+        running = bool(runner is not None and runner.is_running())
+    except Exception:
+        running = False
+    active = getattr(ext, "_sim_anim_active", None) or {}
+    cur_file = str(active.get("file", "") or "").strip() if isinstance(active, dict) else ""
+    pend = getattr(ext, "_sim_anim_pending", None)
+    plist = pend if isinstance(pend, list) else []
+    q = len(plist)
+    next_f = ""
+    if plist and isinstance(plist[0], dict):
+        next_f = str(plist[0].get("file", "") or "").strip()
+    return (running, cur_file, q, next_f)
+
+
+def _format_anim_status_footer(ext: Any) -> str:
+    """진행현황 패널 하단: 현재 재생 JSON 파일·대기열."""
+    running, cur_file, q, next_f = _sim_anim_status_key(ext)
+    if running and cur_file:
+        lines = [f"애니메이션 파일(재생 중): {cur_file}"]
+        if q > 0 and next_f:
+            lines.append(f"대기열: {q}건 (다음 {next_f})")
+        return "\n".join(lines)
+    if q > 0 and next_f:
+        return "애니메이션: 대기 — 다음 " + next_f + (f" (큐 {q}건)" if q > 1 else "")
+    return "애니메이션 파일: 재생 없음"
+
+
+def _refresh_sim_progress_from_last(ext: Any) -> None:
+    """애니 시작/종료 직후 마지막 공정 진행 payload로 패널만 다시 그린다."""
+    lp = getattr(ext, "_sim_progress_last_payload", None)
+    if isinstance(lp, dict):
+        _update_sim_progress(ext, lp)
+
+
 def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
-    """진행현황 패널 갱신(SimUiQueueKind.PROGRESS → _sim_ui_sink_progress)."""
+    """진행현황 패널 갱신: 단일 창에 ‘현재 단계’만 표시(이벤트 로그 블록과 역할 분담)."""
     label = str(payload.get("label", "")).strip()
     if not label:
         return
@@ -2011,62 +1884,42 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     sim_time = str(payload.get("sim_time", "0.00"))
     detail = str(payload.get("detail", ""))
     event_seq = str(payload.get("event_seq") or payload.get("sequence_name") or "").strip()
-    ev_part = f"이벤트={event_seq} | " if event_seq else ""
-    history = getattr(ext, "_sim_progress_history", None)
-    start_times = getattr(ext, "_sim_progress_start_times", None)
-    if history is None or start_times is None:
-        return
 
-    try:
-        now_t = float(sim_time)
-    except Exception:
-        now_t = 0.0
-    try:
-        elapsed_t = float(elapsed)
-    except Exception:
-        elapsed_t = 0.0
-
-    if label not in start_times:
-        start_times[label] = max(0.0, now_t - elapsed_t)
-    start_t = float(start_times.get(label, max(0.0, now_t - elapsed_t)))
-    end_t = now_t
-    dur_t = max(0.0, end_t - start_t)
-
-    # RUNNING 동안에는 매 tick마다 end_t가 변해 “같은 로그가 계속 출력”처럼 보일 수 있다.
-    # 요구사항대로 상황 로그는 1회만(=DONE 시점에 history로 남김), RUNNING은 퍼센트만 덮어쓴다.
-    line_running = f"{ev_part}{label} | {percent}% ({elapsed}/{total}s) | {status} | {detail}"
-    line_done = (
-        f"[t={start_t:.2f}~{end_t:.2f} | {dur_t:.1f}s] "
-        f"{ev_part}{label} | {percent}% ({elapsed}/{total}s) | {status} | {detail}"
-    )
-
-    # 최신이 위로 쌓이도록 관리
-    if status == "DONE":
-        history.insert(0, line_done + " | 완료")
+    anim_key = _sim_anim_status_key(ext)
+    if status == "RUNNING":
         try:
             last_key = getattr(ext, "_sim_progress_last_key", None)
-            if isinstance(last_key, dict):
-                last_key.pop(label, None)
-        except Exception:
-            pass
-        start_times.pop(label, None)
-        current_lines: List[str] = []
-    else:
-        # percent/elapsed/total이 같으면 갱신 스킵(중복 출력 느낌 방지)
-        try:
-            last_key = getattr(ext, "_sim_progress_last_key", None)
-            key = (str(percent), str(elapsed), str(total), str(status))
-            if isinstance(last_key, dict) and last_key.get(label) == key:
+            key = (str(percent), str(elapsed), str(total), str(status), label, anim_key)
+            if isinstance(last_key, dict) and last_key.get("_single_panel") == key:
                 return
             if isinstance(last_key, dict):
-                last_key[label] = key
+                last_key["_single_panel"] = key
         except Exception:
             pass
-        current_lines = [line_running]
+    else:
+        try:
+            last_key = getattr(ext, "_sim_progress_last_key", None)
+            if isinstance(last_key, dict):
+                last_key.pop("_single_panel", None)
+        except Exception:
+            pass
 
-    # 현재 진행중 1줄 + 직전 완료 내역(최신순)
-    text_lines = current_lines + history[:80]
-    text = "\n".join(text_lines) if text_lines else "[진행현황] 없음"
+    head = "[진행현황] 단계 완료" if status == "DONE" else "[진행현황] 진행 중"
+    ev_line = f"이벤트: {event_seq}\n" if event_seq else ""
+    anim_footer = _format_anim_status_footer(ext)
+    text = (
+        f"{head} | t(sim)={sim_time}s\n"
+        f"{ev_line}"
+        f"{label}\n"
+        f"진행률: {percent}% ({elapsed} / {total}s)\n"
+        f"{detail}\n"
+        f"---\n"
+        f"{anim_footer}"
+    )
+    try:
+        ext._sim_progress_last_payload = dict(payload)
+    except Exception:
+        ext._sim_progress_last_payload = payload
     ext._sim_progress_text.set_value(text)
     if getattr(ext, "_sim_progress_label", None) is not None:
         ext._sim_progress_label.text = text
@@ -2342,50 +2195,16 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
 
     progress_rows = _rows(getattr(ext, "_sim_progress_label", None).text if getattr(ext, "_sim_progress_label", None) else "")
     history_rows = _rows(getattr(ext, "_sim_history_label", None).text if getattr(ext, "_sim_history_label", None) else "")
-    anim_rows = _rows(getattr(ext, "_sim_anim_history_label", None).text if getattr(ext, "_sim_anim_history_label", None) else "")
-    anim_records = getattr(ext, "_sim_anim_history_records", None)
 
     wb = Workbook()
     ws1 = wb.active
     ws1.title = "진행현황"
     ws2 = wb.create_sheet("이력로그")
-    ws3 = wb.create_sheet("애니메이션실행이력")
 
     for idx, row in enumerate(progress_rows, start=1):
         ws1.cell(row=idx, column=1, value=row)
     for idx, row in enumerate(history_rows, start=1):
         ws2.cell(row=idx, column=1, value=row)
-    # 애니메이션 실행이력은 가능하면 열(column)로 분리 저장
-    if isinstance(anim_records, list) and anim_records:
-        headers = [
-            "sim_time",
-            "event",
-            "file",
-            "runner",
-            "rule",
-            "lot_id",
-            "from_port_id",
-            "to_port_id",
-            "port_id",
-            "est_sec",
-            "wall_sec",
-            "status",
-            "action",
-            "path",
-        ]
-        for c, h in enumerate(headers, start=1):
-            ws3.cell(row=1, column=c, value=h)
-        # 실행 순서(오래된 항목 -> 최신 항목) 그대로 저장
-        out = list(anim_records)
-        for r_idx, rec in enumerate(out, start=2):
-            rec = rec if isinstance(rec, dict) else {}
-            for c, h in enumerate(headers, start=1):
-                v = rec.get(h, "")
-                ws3.cell(row=r_idx, column=c, value=v)
-    else:
-        # fallback: 기존 텍스트 1열 저장
-        for idx, row in enumerate(anim_rows, start=1):
-            ws3.cell(row=idx, column=1, value=row)
 
     wb.save(str(out_path))
     _append_sim_log(ext, f"[SIM EXPORT] 저장 완료: {out_path}")
@@ -2484,14 +2303,11 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     ext._sim_history_text.set_value("[SIM] 초기화")
     ext._sim_progress_text.set_value("[진행현황] 초기화 (시뮬레이션 시작 대기)")
-    ext._sim_anim_history_text.set_value("[애니메이션 실행이력] 초기화")
     ext._sim_port_state_text.set_value("[포트상태] 초기화 (이벤트 대기)")
     if getattr(ext, "_sim_history_label", None) is not None:
         ext._sim_history_label.text = "[SIM] 초기화"
     if getattr(ext, "_sim_progress_label", None) is not None:
         ext._sim_progress_label.text = "[진행현황] 초기화 (시뮬레이션 시작 대기)"
-    if getattr(ext, "_sim_anim_history_label", None) is not None:
-        ext._sim_anim_history_label.text = "[애니메이션 실행이력] 초기화"
     if getattr(ext, "_sim_port_state_label", None) is not None:
         ext._sim_port_state_label.text = "[포트상태] 초기화 (이벤트 대기)"
     if getattr(ext, "_sim_port_state_header_label", None) is not None:
@@ -2507,8 +2323,6 @@ def on_sim_start_clicked(ext: Any) -> None:
     ext._sim_progress_start_times = {}
     ext._sim_log_queue = queue.SimpleQueue()
     _enqueue_sim_log(ext, "[SIM UI] 실시간 로그 큐 초기화")
-    # 시뮬레이션 1회 실행 단위로 애니 레코드도 초기화
-    ext._sim_anim_history_records = []
     ext._sim_anim_active = {}
     ext._sim_anim_pending = []
 
@@ -2794,10 +2608,6 @@ def on_sim_reset_clicked(ext: Any) -> None:
         ext._sim_progress_text.set_value("[진행현황] 없음")
     if getattr(ext, "_sim_progress_label", None) is not None:
         ext._sim_progress_label.text = "[진행현황] 없음"
-    if getattr(ext, "_sim_anim_history_text", None):
-        ext._sim_anim_history_text.set_value("[애니메이션 실행이력] 없음")
-    if getattr(ext, "_sim_anim_history_label", None) is not None:
-        ext._sim_anim_history_label.text = "[애니메이션 실행이력] 없음"
     if getattr(ext, "_sim_port_state_text", None):
         ext._sim_port_state_text.set_value("[포트상태] 없음")
     if getattr(ext, "_sim_port_state_label", None) is not None:
@@ -2835,6 +2645,9 @@ def on_sim_log_view_changed(ext: Any) -> None:
         idx = ext._sim_log_view_combo.model.get_item_value_model().as_int
     except Exception:
         idx = int(SimLogPanelMode.ALL)
+    # 구버전 콤보(4항목) 저장값 호환: 인덱스 3 이상은 둘다로 취급
+    if idx > int(SimLogPanelMode.HISTORY_ONLY):
+        idx = int(SimLogPanelMode.ALL)
     try:
         mode = SimLogPanelMode(int(idx))
     except Exception:
@@ -2843,8 +2656,6 @@ def on_sim_log_view_changed(ext: Any) -> None:
         ext._sim_progress_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.PROGRESS_ONLY)
     if getattr(ext, "_sim_history_frame", None) is not None:
         ext._sim_history_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.HISTORY_ONLY)
-    if getattr(ext, "_sim_anim_history_frame", None) is not None:
-        ext._sim_anim_history_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.ANIM_ONLY)
     sim = getattr(ext, "_sim_engine", None)
     if sim is not None and hasattr(sim, "set_console_logging_enabled"):
         # 진행현황 전용 모드에서는 콘솔/이력 로그 최소화
