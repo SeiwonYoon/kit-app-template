@@ -741,8 +741,22 @@ def _execute_mapped_sequence_stub(
                 ext._sim_runner.on_sequence_completed = _on_done  # type: ignore[attr-defined]
             except Exception:
                 pass
+
+            sp = 1.0
+            try:
+                m = getattr(ext, "_sim_speed_model", None)
+                if m is not None:
+                    sp = max(0.1, float(m.get_value_as_float()))
+            except Exception:
+                sp = 1.0
+            if sp > 1.0 and pause_evt is not None:
+                print("호출됨!!!!")
+                try:
+                    pause_evt.set()
+                except Exception:
+                    pass
             # JSON 시퀀스 재생 중에도 sim tick이 돌아가야 _wait_with_progress(공정)와 애니가 동시에 진행된다.
-            # (pause_evt를 여기서 켜면 전체 tick 루프가 sim.tick에 도달하지 못해 공정이 멈춘다.)
+            # 배속>1일 때만 pause_evt.set()으로 tick을 잠시 맞춤(1배속에서는 set 하지 않음).
             ext._sim_runner.run(job.get("parsed", []))
             try:
                 _refresh_sim_progress_from_last(ext)
