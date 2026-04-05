@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TBS Kit 원격 — USD Load &amp; 제어창</title>
+    <link rel="stylesheet" href="tbs_panel.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div id="connBanner" class="banner warn">상태 확인 중…</div>
+
+      <section>
+        <h2>USD Load</h2>
+        <div class="row">
+          <label for="f_resource_combo">샘플</label>
+          <select id="f_resource_combo" style="flex: 1; min-width: 200px"></select>
+        </div>
+        <div class="row">
+          <label for="f_usd_path">경로</label>
+          <input class="w-path" type="text" id="f_usd_path" />
+        </div>
+        <div class="toolbar">
+          <button type="button" id="btnLoadUsd">Load</button>
+        </div>
+        <div class="status-line" id="usdStatus"></div>
+      </section>
+
+      <section>
+        <h2>XML 제너레이터</h2>
+        <div class="row">
+          <label for="f_xml_seq">시퀀스</label>
+          <select id="f_xml_seq" style="flex: 1">
+            <option value="0">EAPEIS_PORT_READYTOLOAD</option>
+            <option value="1">EAPEIS_PORT_ARRIVED</option>
+            <option value="2">EAPEIS_PORT_MOVE_TRANSFERING</option>
+            <option value="3">EAPEIS_PORT_MOVE</option>
+            <option value="4">EISEAP_PORT_MOVE_REQ</option>
+            <option value="5">EAPEIS_PORT_READYTOUNLOAD</option>
+            <option value="6">EAPEIS_PORT_REMOVED</option>
+          </select>
+        </div>
+        <div class="row hidden" id="xmlAbRow">
+          <label>FROM / TO</label>
+          <input type="number" id="f_xml_from" value="1" min="1" />
+          <span class="narrow">~</span>
+          <input type="number" id="f_xml_to" value="6" min="1" />
+        </div>
+        <div class="row hidden" id="xmlPortRow">
+          <label for="f_xml_port">PORT_ID</label>
+          <input type="number" id="f_xml_port" value="1" min="1" />
+        </div>
+        <div class="toolbar">
+          <button type="button" id="btnXmlOk">OK</button>
+          <button type="button" id="btnXmlRun">제너레이터 실행(역파싱)</button>
+        </div>
+      </section>
+
+      <div class="sep"></div>
+
+      <section>
+        <h2>시뮬레이션 (simpy)</h2>
+        <div class="row">
+          <label for="f_lot_count">LOT 수</label>
+          <input type="number" id="f_lot_count" value="6" min="1" />
+          <label for="f_ep_count">EP 개수</label>
+          <select id="f_ep_count">
+            <option value="0">2</option>
+            <option value="1">3</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>LOT생성간격</label>
+          <input type="number" id="f_spawn_min" value="15" step="0.1" />
+          <span class="narrow">~</span>
+          <input type="number" id="f_spawn_max" value="40" step="0.1" />
+          <label>회수간격</label>
+          <input type="number" id="f_pickup_min" value="50" step="0.1" />
+          <span class="narrow">~</span>
+          <input type="number" id="f_pickup_max" value="70" step="0.1" />
+        </div>
+        <p style="margin: 4px 0 8px; color: #888; font-size: 12px">초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)</p>
+        <div class="check-row">
+          <label><input type="checkbox" id="f_init_bp1" /> BP1</label>
+          <label><input type="checkbox" id="f_init_bp2" /> BP2</label>
+          <label><input type="checkbox" id="f_init_bp3" /> BP3</label>
+          <label><input type="checkbox" id="f_init_bp4" /> BP4</label>
+        </div>
+        <div class="check-row">
+          <label><input type="checkbox" id="f_init_ep1" /> EP1</label>
+          <label><input type="checkbox" id="f_init_ep2" /> EP2</label>
+          <label id="row_init_ep3"><input type="checkbox" id="f_init_ep3" /> EP3</label>
+        </div>
+        <div class="row">
+          <label>OHT→BP/EP</label>
+          <input type="number" id="f_oht_min" value="5" step="0.1" />
+          <span class="narrow">~</span>
+          <input type="number" id="f_oht_max" value="10" step="0.1" />
+          <label>BP1→BP</label>
+          <input type="number" id="f_bp1_bp_min" value="5" step="0.1" />
+          <span class="narrow">~</span>
+          <input type="number" id="f_bp1_bp_max" value="10" step="0.1" />
+        </div>
+        <div class="row">
+          <label>BP→EP</label>
+          <input type="number" id="f_bp_ep_min" value="5" step="0.1" />
+          <span class="narrow">~</span>
+          <input type="number" id="f_bp_ep_max" value="10" step="0.1" />
+          <label>EP→OHT</label>
+          <input type="number" id="f_ep_oht_min" value="5" step="0.1" />
+          <span class="narrow">~</span>
+          <input type="number" id="f_ep_oht_max" value="10" step="0.1" />
+        </div>
+        <div class="row">
+          <label>시뮬 속도배율</label>
+          <input type="number" id="f_speed" value="1" step="0.1" min="0.1" />
+          <label>로그주기(s)</label>
+          <input type="number" id="f_log_interval" value="0" step="0.1" />
+          <label><input type="checkbox" id="f_confirm_each" /> 각 공정 확인</label>
+        </div>
+        <div class="toolbar">
+          <button type="button" id="btnSimStart">시작</button>
+          <button type="button" id="btnSimStop">정지</button>
+          <button type="button" id="btnSimReset">리셋</button>
+        </div>
+        <div class="row">
+          <label for="f_log_mode">표시모드</label>
+          <select id="f_log_mode">
+            <option value="0">둘다</option>
+            <option value="1">진행현황</option>
+            <option value="2">이력로그</option>
+          </select>
+          <button type="button" id="btnCopyProgress">진행현황 복사</button>
+        </div>
+
+        <div id="panelPort">
+          <p id="portHeader" style="margin: 10px 0 6px; color: #bfe7ff; font-size: 13px">[포트상태]</p>
+          <div class="port-grid">
+            <div class="port-row">
+              <div class="port-cell" id="port_BP2">BP2:-</div>
+              <div class="port-cell" id="port_BP3">BP3:-</div>
+              <div class="port-cell" id="port_BP4">BP4:-</div>
+            </div>
+            <div class="port-row">
+              <div class="port-cell" id="port_BP1">BP1:-</div>
+              <div class="port-cell" id="port_EP1">EP1:-</div>
+              <div class="port-cell" id="port_EP2">EP2:-</div>
+              <div class="port-cell" id="port_EP3">EP3:-</div>
+            </div>
+          </div>
+        </div>
+
+        <div id="panelProgress">
+          <p style="margin: 10px 0 4px; color: #888; font-size: 12px">진행현황</p>
+          <div class="log-panel" id="logProgress"></div>
+        </div>
+        <div id="panelHistory">
+          <p style="margin: 10px 0 4px; color: #888; font-size: 12px">이력로그</p>
+          <div class="log-panel" id="logHistory"></div>
+        </div>
+        <div class="status-line" id="simLine"></div>
+      </section>
+
+      <section>
+        <h2>장비 prim</h2>
+        <div class="row">
+          <label for="f_priority_prefix">우선 표시 접두사</label>
+          <input class="w-path" type="text" id="f_priority_prefix" placeholder="비우면 순서대로" />
+        </div>
+        <div class="toolbar">
+          <button type="button" id="btnPrimRefresh">목록 새로고침</button>
+        </div>
+        <p style="font-size: 12px; color: #888; margin-top: 8px">
+          prim 드롭다운 목록은 Kit 제어창과 동기화됩니다. 새로고침 후 Kit 창에서 확인할 수 있습니다.
+        </p>
+      </section>
+    </div>
+    <script src="tbs_panel.js"></script>
+  </body>
+</html>

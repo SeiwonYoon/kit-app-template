@@ -8,6 +8,7 @@ TBS Control 1 확장 — 기능별 모듈 분리 버전 (진입점)
 - Omni 확장 IExt: on_startup / on_shutdown.
 - 창 조립: load_window.build_load_window, control_window.build_control_window, SequenceEditorWindow.
 - 선택 이벤트·스테이지 스트림 구독 (selection_overlay), 뷰포트 오버레이 재시도.
+- HTTP 브리지(기본 켜짐): 브라우저 원격 패널 ↔ Kit (kit_remote_http_bridge). 끄려면 TBS_REMOTE_UI=0 등(아래 주석).
 - 종료 시 모든 애니메이션·타임라인 정지.
 
 【기능을 바꾸려면 어디를 보나】
@@ -44,6 +45,7 @@ import 구조 (요약)
    - 본 파일 on_shutdown에서 스레드/구독/애니메이션 정리 순서 확인
 """
 
+import os
 from typing import List, Optional
 
 import omni.ext
@@ -66,6 +68,29 @@ from .translate_animation import stop_prim_translate_animation
 from . import usd_animation_control
 from .viewport_overlay import PrimInfoOverlay
 from .xform_utils import install_xform_op_order_warning_filter
+
+# ---------------------------------------------------------------------------
+# 웹 원격 UI(HTTP 브리지) — 선택적 모듈
+# ---------------------------------------------------------------------------
+# kit_remote_http_bridge: Kit 프로세스 안에서 작은 HTTP 서버를 띄워, 브라우저의
+#   정적 패널(web/tbs_kit_remote/)이 REST/JSON으로 TBS 제어창·USD 로드와 동일한
+#   동작(시뮬 시작/정지, XML 적용 등)을 호출할 수 있게 한다.
+#   omni/확장 로딩 순서나 환경에 따라 import 가 실패할 수 있으므로 try/except 로
+#   감싸고, 실패 시 start/stop 을 None 으로 두어 확장 전체가 죽지 않게 한다.
+# ---------------------------------------------------------------------------
+try:
+    from .kit_remote_http_bridge import start_tbs_remote_http_bridge, stop_tbs_remote_http_bridge
+except Exception:
+    start_tbs_remote_http_bridge = None  # type: ignore[misc, assignment]
+    stop_tbs_remote_http_bridge = None  # type: ignore[misc, assignment]
+
+
+def _want_tbs_remote_http_bridge() -> bool:
+    """브라우저 HTTP 브리지를 기동할지. 기본 True; 명시적으로 끌 때만 False."""
+    v = os.environ.get("TBS_REMOTE_UI", "").strip().lower()
+    if v in ("0", "false", "no", "off"):
+        return False
+    return True
 
 
 class Extension(omni.ext.IExt):
@@ -126,8 +151,34 @@ class Extension(omni.ext.IExt):
         # except Exception:
         #     pass
 
+        # -------------------------------------------------------------------
+        # 웹 원격 UI 시작 (기본 켜짐 — 환경 변수로만 끔)
+        # -------------------------------------------------------------------
+        # TBS_REMOTE_UI 가 "0", "false", "no", "off" 이면 브리지를 기동하지 않는다.
+        #   (비어 있거나 그 외 값이면 기동. 예전처럼 =1 을 안 넣어도 동작한다.)
+        # start_tbs_remote_http_bridge(self):
+        #   - 확장 인스턴스(self)를 넘겨 UI 위젯·상태에 메인 스레드에서 접근한다.
+        #   - 포트: TBS_REMOTE_UI_PORT (미설정 시 kit_remote_http_bridge 기본값, 보통 8720).
+        #   - 바인드: TBS_REMOTE_UI_BIND (기본 127.0.0.1; 원격 PC 브라우저면 0.0.0.0 등).
+        #   - 정적 파일: 확장 내 web/tbs_kit_remote/ (index.html, tbs_panel.js 등).
+        # import 실패로 start_tbs_remote_http_bridge 가 None 이면 아무 것도 하지 않음.
+        # 기동 예외는 로그 없이 삼켜 확장 로딩을 막지 않는다(필요 시 브리지 모듈에서 로깅).
+        # -------------------------------------------------------------------
+        if _want_tbs_remote_http_bridge() and start_tbs_remote_http_bridge is not None:
+            try:
+                start_tbs_remote_http_bridge(self)
+            except Exception:
+                pass
+
     def on_shutdown(self) -> None:
         """확장 언로드 시: 시뮬 정지, 구독 해제, translate/curve/rotate/usd 애니 정지, 창 destroy."""
+        # 웹 브리지를 먼저 내린다: 백그라운드 HTTP 스레드·구독을 정리해 포트 점유와
+        # 언로드 후에도 요청이 Kit 쪽으로 들어오는 것을 막는다. (시뮬 정지·창 destroy 보다 앞.)
+        if stop_tbs_remote_http_bridge is not None:
+            try:
+                stop_tbs_remote_http_bridge()
+            except Exception:
+                pass
         try:
             on_sim_stop_clicked(self)
         except Exception:
