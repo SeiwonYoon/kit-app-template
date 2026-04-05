@@ -93,33 +93,38 @@ class Extension(omni.ext.IExt):
         build_load_window(self)
         build_control_window(self)
         self._sequence_window = SequenceEditorWindow()
-        try_attach_overlay(self)
 
-        ctx = ou.get_context()
-        ed = get_eventdispatcher()
-        try:
-            event_name = ctx.stage_event_name(ou.StageEventType.SELECTION_CHANGED)
-            self._selection_sub = ed.observe_event(
-                observer_name="morph.tbs_control_1:SelectionChanged",
-                event_name=event_name,
-                on_event=lambda e: on_selection_changed(self, e),
-            )
-        except Exception:
-            pass
-        try:
-            self._stage_stream_sub = ctx.get_stage_event_stream().create_subscription_to_pop(
-                lambda e: on_selection_changed(self, e),
-                name="morph.tbs_control_1:StageEvents",
-            )
-        except Exception:
-            pass
-        try:
-            self._post_update_sub = app.get_app().get_post_update_event_stream().create_subscription_to_pop(
-                lambda e: on_post_update(self, e),
-                name="morph.tbs_control_1:PostUpdate",
-            )
-        except Exception:
-            pass
+        # --- 뷰포트 객체 클릭 시 3D 정보 패널(PrimInfoOverlay) 비활성화 ---
+        # 다시 쓰려면 아래 try_attach_overlay + 세 구독 블록의 주석을 해제하세요.
+        # (제어창의「3D 정보 보기」버튼은 control_window → show_prim_info_in_viewport 경로로
+        #  여전히 패널을 띄울 수 있음. 그 버튼까지 끄려면 해당 버튼도 주석 처리 필요.)
+        # try_attach_overlay(self)
+        #
+        # ctx = ou.get_context()
+        # ed = get_eventdispatcher()
+        # try:
+        #     event_name = ctx.stage_event_name(ou.StageEventType.SELECTION_CHANGED)
+        #     self._selection_sub = ed.observe_event(
+        #         observer_name="morph.tbs_control_1:SelectionChanged",
+        #         event_name=event_name,
+        #         on_event=lambda e: on_selection_changed(self, e),
+        #     )
+        # except Exception:
+        #     pass
+        # try:
+        #     self._stage_stream_sub = ctx.get_stage_event_stream().create_subscription_to_pop(
+        #         lambda e: on_selection_changed(self, e),
+        #         name="morph.tbs_control_1:StageEvents",
+        #     )
+        # except Exception:
+        #     pass
+        # try:
+        #     self._post_update_sub = app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+        #         lambda e: on_post_update(self, e),
+        #         name="morph.tbs_control_1:PostUpdate",
+        #     )
+        # except Exception:
+        #     pass
 
     def on_shutdown(self) -> None:
         """확장 언로드 시: 시뮬 정지, 구독 해제, translate/curve/rotate/usd 애니 정지, 창 destroy."""
