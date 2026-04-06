@@ -751,11 +751,11 @@ class TBSSimulationEngine:
             if len(self.completed_lots) >= self._total_lots:
                 break
 
-            did = yield from self._step_oht_input()
+            did = yield from self._step_buffer_to_ep()
             if did:
                 continue
 
-            did = yield from self._step_buffer_to_ep()
+            did = yield from self._step_oht_input()
             if did:
                 continue
 
