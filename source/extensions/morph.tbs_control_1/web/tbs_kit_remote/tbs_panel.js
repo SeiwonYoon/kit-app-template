@@ -14,7 +14,7 @@
  * │                    │   (control_window 가 갱신한 진행현황·이력·포트상태)      │
  * ├────────────────────┼──────────────────────────────────────────────────────┤
  * │ GET /api/resources │ get_resource_usd_list() (usd_loader_utils)           │
- * │                    │ = load_window.build_load_window 의 샘플 콤보와 동일 소스 │
+ * │                    │ = load_window.get_resource_usd_list 과 동일 소스 │
  * ├────────────────────┼──────────────────────────────────────────────────────┤
  * │ POST cmd:load_usd  │ load_window.on_load_usd(ext) + 경로/콤보 모델 반영      │
  * ├────────────────────┼──────────────────────────────────────────────────────┤

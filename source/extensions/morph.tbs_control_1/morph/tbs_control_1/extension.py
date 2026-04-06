@@ -6,7 +6,7 @@ TBS Control 1 확장 — 기능별 모듈 분리 버전 (진입점)
 
 【extension.py 역할】
 - Omni 확장 IExt: on_startup / on_shutdown.
-- 창 조립: load_window.build_load_window, control_window.build_control_window, SequenceEditorWindow.
+- 창 조립: control_window.build_control_window(상단에 USD Load 포함), SequenceEditorWindow.
 - 선택 이벤트·스테이지 스트림 구독 (selection_overlay), 뷰포트 오버레이 재시도.
 - HTTP 브리지(기본 켜짐): 브라우저 원격 패널 ↔ Kit (kit_remote_http_bridge). 끄려면 TBS_REMOTE_UI=0 등(아래 주석).
 - 종료 시 모든 애니메이션·타임라인 정지.
@@ -55,8 +55,8 @@ import omni.usd as ou
 from carb.eventdispatcher import get_eventdispatcher
 
 from .control_window import build_control_window, on_sim_stop_clicked, refresh_object_list
+from .kit_chrome_visibility import apply_kit_chrome_hidden, is_kit_chrome_hidden
 from .curve_animation import stop_prim_curve_animation
-from .load_window import build_load_window
 from .rotate_animation import stop_prim_rotate_animation
 from .selection_overlay import (
     on_selection_changed,
@@ -97,7 +97,7 @@ class Extension(omni.ext.IExt):
     """Omni 확장 진입점: 창 생성·선택/스테이지 구독·종료 시 애니/타임라인 정리."""
 
     def on_startup(self, ext_id: str) -> None:
-        """확장 로드 시: xform 경고 필터, 로드/제어/시퀀스 창, 오버레이, 이벤트 구독."""
+        """확장 로드 시: xform 경고 필터, TBS 제어창(USD Load 포함)/시퀀스 창, 오버레이, 이벤트 구독."""
         install_xform_op_order_warning_filter()
         self._ext_id = ext_id
         self._tracked_paths: List[str] = []
@@ -110,12 +110,10 @@ class Extension(omni.ext.IExt):
         self._last_paths: tuple = ()
         self._ignore_selection_until = 0.0
         self._poll_frame = 0
-        self._load_window = None
         self._control_window = None
         self._object_list_frame = None
         self._sequence_window = None
 
-        build_load_window(self)
         build_control_window(self)
         self._sequence_window = SequenceEditorWindow()
 
@@ -172,6 +170,11 @@ class Extension(omni.ext.IExt):
 
     def on_shutdown(self) -> None:
         """확장 언로드 시: 시뮬 정지, 구독 해제, translate/curve/rotate/usd 애니 정지, 창 destroy."""
+        try:
+            if is_kit_chrome_hidden(self):
+                apply_kit_chrome_hidden(self, False)
+        except Exception:
+            pass
         # 웹 브리지를 먼저 내린다: 백그라운드 HTTP 스레드·구독을 정리해 포트 점유와
         # 언로드 후에도 요청이 Kit 쪽으로 들어오는 것을 막는다. (시뮬 정지·창 destroy 보다 앞.)
         if stop_tbs_remote_http_bridge is not None:
@@ -208,9 +211,6 @@ class Extension(omni.ext.IExt):
             self._overlay.destroy()
             self._overlay = None
         usd_animation_control.stop_usd_animation()
-        if self._load_window is not None:
-            self._load_window.destroy()
-            self._load_window = None
         if self._control_window is not None:
             self._control_window.destroy()
             self._control_window = None

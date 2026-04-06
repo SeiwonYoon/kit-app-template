@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-load_window.py — USD Load 창 UI 및 로드 로직
+load_window.py — USD Load UI 및 로드 로직
 
 【역할】
-- build_load_window(ext): "USD Load" 창 — 경로 문자열, resource 콤보, Load 버튼, 상태 라벨.
+- build_load_ui_into_stack(ext): TBS 제어창 등 상단 VStack 안에 붙이는 USD Load 블록
+  (resource 콤보, 경로 문자열, Load 버튼, 상태 라벨). 별도 Window 없음.
 - get_load_path(ext): 실제로 열 경로 (콤보 선택 우선, 아니면 입력 필드).
 - on_load_usd(ext): 비동기 검증 후 open_stage.
 
@@ -14,7 +15,7 @@ load_window.py — USD Load 창 UI 및 로드 로직
 - resource 목록 소스: usd_loader_utils.get_resource_usd_list() — 폴더/확장자는 usd_loader_utils.py
 - 로드 버튼 동작·에러 메시지: on_load_usd 내부
 
-사용처: extension.py → build_load_window(self)
+사용처: control_window.build_control_window() → build_load_ui_into_stack(ext)
 
 【유지보수 시나리오】
 1) 샘플 자산 목록을 프로젝트 전용으로 고정하고 싶을 때
@@ -44,26 +45,23 @@ DEFAULT_USD_URL = (
 )
 
 
-def build_load_window(ext: Any) -> None:
-    """USD Load 창을 만들고 ext에 위젯/모델 참조를 저장."""
-    ext._load_window = ui.Window("USD Load", width=480, height=200)
+def build_load_ui_into_stack(ext: Any) -> None:
+    """USD Load UI를 현재 omni.ui 스택(VStack 등) 컨텍스트에 추가. ext에 콤보/모델/라벨 저장."""
     resource_items = get_resource_usd_list()
     ext._resource_names = ["선택안함"] + [name for name, _ in resource_items]
     ext._resource_paths = [""] + [path for _, path in resource_items]
-    with ext._load_window.frame:
-        with ui.VStack(padding=10, spacing=8):
-            ui.Label("resource 폴더 샘플 (선택안함 = 아래 경로로 로드)", height=0)
-            ext._resource_combo = ui.ComboBox(0, *ext._resource_names)
-            ext._resource_combo.model.add_item_changed_fn(lambda m, *a: on_resource_combo_changed(ext))
-            ui.Spacer(height=4)
-            ui.Label("경로 (직접 입력 또는 위에서 선택)", height=0)
-            ext._path_model = ui.SimpleStringModel(getattr(ext, "DEFAULT_USD_URL", DEFAULT_USD_URL))
-            ui.StringField(model=ext._path_model)
-            ext._load_status_label = ui.Label("", style={"color": 0xFF888888})
-            ui.Button(
-                "Load",
-                clicked_fn=lambda: asyncio.ensure_future(on_load_usd(ext)),
-            )
+    ui.Label("resource 폴더 샘플 (선택안함 = 아래 경로로 로드)", height=0)
+    ext._resource_combo = ui.ComboBox(0, *ext._resource_names)
+    ext._resource_combo.model.add_item_changed_fn(lambda m, *a: on_resource_combo_changed(ext))
+    ui.Spacer(height=4)
+    ui.Label("경로 (직접 입력 또는 위에서 선택)", height=0)
+    ext._path_model = ui.SimpleStringModel(getattr(ext, "DEFAULT_USD_URL", DEFAULT_USD_URL))
+    ui.StringField(model=ext._path_model)
+    ext._load_status_label = ui.Label("", style={"color": 0xFF888888})
+    ui.Button(
+        "Load",
+        clicked_fn=lambda: asyncio.ensure_future(on_load_usd(ext)),
+    )
 
 
 def get_load_path(ext: Any) -> str:
@@ -114,4 +112,4 @@ async def on_load_usd(ext: Any) -> None:
     ext._load_status_label.text = "로드 중..."
     import omni.usd as ou
     ou.get_context().open_stage(path)
-    ext._load_status_label.text = "로드 완료. TBS 제어창에서 '목록 새로고침'을 눌러 주세요."
+    ext._load_status_label.text = "로드 완료. 아래 '목록 새로고침'을 눌러 주세요."

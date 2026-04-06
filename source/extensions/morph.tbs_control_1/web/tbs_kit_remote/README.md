@@ -171,7 +171,7 @@ HTTP 요청은 **별도 스레드**에서 처리되므로, 브리지는 요청�
 
 응답 JSON 예시 (필드는 구현에 따라 조금 달라질 수 있음):
 
-- `usd_status` — USD Load 창 하단 상태 문구
+- `usd_status` — TBS 제어창 상단 USD Load 영역 상태 문구
 - `progress` — 진행현황 패널 텍스트
 - `history` — 이력 로그 패널 텍스트
 - `port_header` — 포트 상태 제목 줄

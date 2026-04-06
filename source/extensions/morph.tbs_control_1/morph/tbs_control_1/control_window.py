@@ -5,7 +5,9 @@
 control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 
 【역할】
-- build_control_window(ext): "TBS 제어창" 창. USD 타임라인(수동/자동), 가상 시그널 샘플,
+- build_control_window(ext): "TBS 제어창" 창. 최상단 화면 옵션(기본 메뉴/패널 숨기기),
+  USD Load(load_window.build_load_ui_into_stack),
+  USD 타임라인(수동/자동), 가상 시그널 샘플,
   XML 제너레이터(6종 시퀀스 콤보·입력 필드), 우선 표시 접두사, prim 목록.
 - refresh_object_list(ext): 드롭다운/목록 갱신.
 - on_play_usd_animation / on_play_generator_sample / on_refresh_prim_list 등 버튼·콤보 핸들러.
@@ -169,6 +171,8 @@ from pxr import Gf
 from . import usd_animation_control
 from . import xml_generator
 from .curve_animation import make_parabolic_path, run_prim_curve_animation, stop_prim_curve_animation
+from .kit_chrome_visibility import apply_kit_chrome_hidden
+from .load_window import build_load_ui_into_stack
 from .port_lot_visibility import apply_port_lot_prim_visibility, clear_port_lot_authoring_cache
 from .prim_info import get_prim_display_name, safe_str
 from .prim_utils import (
@@ -1004,13 +1008,43 @@ def build_control_window(ext: Any) -> None:
     ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
 
-    ext._control_window = ui.Window("TBS 제어창", width=800, height=720)
+    ext._control_window = ui.Window("TBS 제어창", width=800, height=840)
     with ext._control_window.frame:
         with ui.ScrollingFrame(
             height=ui.Fraction(1.0),
             style={"ScrollingFrame": {"padding": 4, "margin": 0}},
         ):
             with ui.VStack(spacing=0):
+                ext._kit_chrome_hide_model = ui.SimpleBoolModel(False)
+
+                def _on_kit_chrome_toggle(model):
+                    try:
+                        apply_kit_chrome_hidden(ext, bool(model.as_bool))
+                    except Exception:
+                        pass
+
+                ext._kit_chrome_hide_model.add_value_changed_fn(_on_kit_chrome_toggle)
+
+                with ui.Frame(style={"background_color": 0xFF23262B}):
+                    with ui.VStack(padding=8, spacing=8):
+                        ui.Label("화면", height=24, style={"color": 0xFFDDDDDD})
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label(
+                                "기본 메뉴·패널 숨기기 (3D 뷰·TBS·시퀀스 편집기 유지)",
+                                width=0,
+                                style={"color": 0xFFCCCCCC},
+                            )
+                            ui.CheckBox(
+                                model=ext._kit_chrome_hide_model,
+                                width=28,
+                                style=CHECKBOX_WHITE_STYLE,
+                            )
+                ui.Spacer(height=6)
+                with ui.Frame(style={"background_color": 0xFF23262B}):
+                    with ui.VStack(padding=8, spacing=8):
+                        ui.Label("USD Load", height=24, style={"color": 0xFFDDDDDD})
+                        build_load_ui_into_stack(ext)
+                ui.Spacer(height=6)
                 with ui.Frame(style={"background_color": 0xFF23262B}):
                     # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
                     with ui.VStack(padding=8, spacing=8):

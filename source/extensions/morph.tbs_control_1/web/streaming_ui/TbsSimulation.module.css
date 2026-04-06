@@ -1,0 +1,217 @@
+/* TbsSimulation — tbs_panel.css 와 동일 톤 (스트리밍용 React 패널) */
+:root {
+  --tbs-bg-panel: #1e2530;
+  --tbs-bg-header: #23262b;
+  --tbs-border: #3a3a3a;
+  --tbs-text: #dddddd;
+  --tbs-text-dim: #888888;
+  --tbs-accent: #bfe7ff;
+  --tbs-input-bg: #3b4250;
+  --tbs-cell-empty: #2a2f38;
+  --tbs-cell-full: #6b5b2a;
+  --tbs-cell-lot: #1f4a36;
+}
+
+.wrap {
+  box-sizing: border-box;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  color: var(--tbs-text);
+  line-height: 1.35;
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 8px;
+}
+
+.wrap * {
+  box-sizing: border-box;
+}
+
+.banner {
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+.bannerWarn {
+  background: #3d2e1a;
+  color: #f5d4a0;
+}
+.bannerOk {
+  background: #1a2d24;
+  color: #a8e6c8;
+}
+
+.section {
+  background: var(--tbs-bg-panel);
+  border: 1px solid var(--tbs-border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.section h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--tbs-accent);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.row label {
+  min-width: 100px;
+  color: var(--tbs-text-dim);
+  font-size: 12px;
+}
+
+.narrow {
+  min-width: 36px !important;
+}
+
+input[type="text"],
+input[type="number"],
+select {
+  background: var(--tbs-input-bg);
+  color: #fff;
+  border: 1px solid #5a6570;
+  border-radius: 4px;
+  padding: 4px 8px;
+  min-height: 28px;
+}
+
+input[type="number"] {
+  width: 72px;
+}
+
+.wPath {
+  flex: 1;
+  min-width: 200px;
+}
+
+button {
+  background: #3d4a5c;
+  color: #fff;
+  border: 1px solid #5a6b7d;
+  border-radius: 4px;
+  padding: 6px 14px;
+  cursor: pointer;
+  min-height: 28px;
+}
+button:hover {
+  background: #4a5a70;
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.checkRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.checkRow label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: auto;
+  color: var(--tbs-text);
+}
+
+.hint {
+  margin: 4px 0 8px;
+  color: var(--tbs-text-dim);
+  font-size: 12px;
+}
+
+.portGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.portRow {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.portCell {
+  width: 90px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  border: 1px solid #7b8799;
+  border-radius: 4px;
+  background: var(--tbs-cell-empty);
+}
+.portCellFull {
+  background: var(--tbs-cell-full);
+}
+.portCellLot {
+  background: var(--tbs-cell-lot);
+}
+
+.logPanel {
+  border: 1px solid #5a6570;
+  border-radius: 4px;
+  background: #0d0f12;
+  padding: 8px;
+  min-height: 100px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  color: #e8e8e8;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.statusLine {
+  font-size: 12px;
+  color: var(--tbs-text-dim);
+  margin-top: 6px;
+}
+
+.sep {
+  height: 2px;
+  background: var(--tbs-border);
+  margin: 12px 0;
+}
+
+.logTitle {
+  margin: 10px 0 4px;
+  color: var(--tbs-text-dim);
+  font-size: 12px;
+}
+
+.portHeader {
+  margin: 10px 0 6px;
+  color: var(--tbs-accent);
+  font-size: 13px;
+}
+
+.footerNote {
+  font-size: 12px;
+  color: var(--tbs-text-dim);
+  margin-top: 8px;
+}
