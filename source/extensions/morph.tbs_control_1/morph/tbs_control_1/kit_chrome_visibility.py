@@ -5,9 +5,16 @@
 Kit 기본 크롬(메뉴바·툴바·콘솔 등) 표시 제어.
 
 TBS 제어창·시퀀스 편집기·Viewport 는 숨기지 않는다.
+
+런치 시 기본으로 메뉴 숨김을 켤지는 아래 상수 한 곳만 바꾸면 됨
+(True: 체크됨 + 시작 후 자동 적용 / False: 체크 해제·기본 Kit UI).
 """
 
 from __future__ import annotations
+
+# 런치 시 「기본 메뉴·패널 숨기기」 체크 상태 및 자동 적용 여부.
+# 추후 기본을 "숨기지 않음"으로 바꿀 때는 False 로만 바꾸면 됨.
+KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH = False
 
 from typing import Any, Dict, List, Set
 

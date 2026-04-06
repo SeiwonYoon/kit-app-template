@@ -18,6 +18,7 @@ TBS Control 1 확장 — 기능별 모듈 분리 버전 (진입점)
 - 시퀀스 스텝 편집/실행: sequence_editor.py + sequence_engine.py
 - 뷰포트 3D 정보 패널: selection_overlay.py, viewport_overlay.py
 - xform 경고 억제: xform_utils.install_xform_op_order_warning_filter (startup에서 호출)
+- 기본 메뉴 숨김 런치 여부: kit_chrome_visibility.KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH (한 곳만 수정)
 
 --------------
 import 구조 (요약)
@@ -45,8 +46,9 @@ import 구조 (요약)
    - 본 파일 on_shutdown에서 스레드/구독/애니메이션 정리 순서 확인
 """
 
+import asyncio
 import os
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import omni.ext
 import omni.kit.app as app
@@ -55,7 +57,11 @@ import omni.usd as ou
 from carb.eventdispatcher import get_eventdispatcher
 
 from .control_window import build_control_window, on_sim_stop_clicked, refresh_object_list
-from .kit_chrome_visibility import apply_kit_chrome_hidden, is_kit_chrome_hidden
+from .kit_chrome_visibility import (
+    KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH,
+    apply_kit_chrome_hidden,
+    is_kit_chrome_hidden,
+)
 from .curve_animation import stop_prim_curve_animation
 from .rotate_animation import stop_prim_rotate_animation
 from .selection_overlay import (
@@ -93,6 +99,19 @@ def _want_tbs_remote_http_bridge() -> bool:
     return True
 
 
+async def _deferred_apply_kit_chrome_hide(ext: Any) -> None:
+    """메인 메뉴 등이 준비된 뒤 기본 숨김 적용 (KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH 가 True 일 때만)."""
+    if not KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH:
+        return
+    kit_app = app.get_app()
+    for _ in range(5):
+        await kit_app.next_update_async()
+    try:
+        apply_kit_chrome_hidden(ext, True)
+    except Exception:
+        pass
+
+
 class Extension(omni.ext.IExt):
     """Omni 확장 진입점: 창 생성·선택/스테이지 구독·종료 시 애니/타임라인 정리."""
 
@@ -113,9 +132,13 @@ class Extension(omni.ext.IExt):
         self._control_window = None
         self._object_list_frame = None
         self._sequence_window = None
+        self._kit_chrome_startup_task = None
 
         build_control_window(self)
         self._sequence_window = SequenceEditorWindow()
+
+        if KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH:
+            self._kit_chrome_startup_task = asyncio.ensure_future(_deferred_apply_kit_chrome_hide(self))
 
         # --- 뷰포트 객체 클릭 시 3D 정보 패널(PrimInfoOverlay) 비활성화 ---
         # 다시 쓰려면 아래 try_attach_overlay + 세 구독 블록의 주석을 해제하세요.
@@ -170,6 +193,13 @@ class Extension(omni.ext.IExt):
 
     def on_shutdown(self) -> None:
         """확장 언로드 시: 시뮬 정지, 구독 해제, translate/curve/rotate/usd 애니 정지, 창 destroy."""
+        t = getattr(self, "_kit_chrome_startup_task", None)
+        if t is not None and not t.done():
+            try:
+                t.cancel()
+            except Exception:
+                pass
+            self._kit_chrome_startup_task = None
         try:
             if is_kit_chrome_hidden(self):
                 apply_kit_chrome_hidden(self, False)

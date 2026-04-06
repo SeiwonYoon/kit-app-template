@@ -8,7 +8,7 @@
  * 연결: morph.tbs_control_1 의 kit_remote_http_bridge.py 와 동일 HTTP 계약
  *   GET  /api/state
  *   GET  /api/resources
- *   POST /api/command  { cmd, ... }
+ *   POST /api/command  { cmd, ... }  — kit_chrome_hide: { hidden: boolean }
  *
  * Vite(5173) + Kit 브리지(8720) 동시 사용:
  *   1) vite.config.ts 에서 /api 를 http://127.0.0.1:8720 으로 프록시 (vite.config.snippet.txt 참고)
@@ -91,6 +91,8 @@ type ApiState = {
   ports?: Partial<Record<string, string>>;
   ep3_visible?: boolean;
   kit_app?: string;
+  /** Kit 기본 메뉴·패널 숨김 (제어창「화면」체크박스와 동기) */
+  kit_chrome_hidden?: boolean;
 };
 
 type ResourceItem = { name?: string; path?: string };
@@ -178,6 +180,8 @@ export default function TbsSimulation() {
   });
   const [resources, setResources] = useState<ResourceItem[]>([]);
   const [busy, setBusy] = useState(false);
+  /** 제어창「기본 메뉴·패널 숨기기」와 동일; GET /api/state 의 kit_chrome_hidden 과 동기 */
+  const [chromeHide, setChromeHide] = useState(false);
 
   const xmlUseAb = form.xml_seq_index >= 2 && form.xml_seq_index <= 4;
   const xmlUsePort = !xmlUseAb;
@@ -206,6 +210,9 @@ export default function TbsSimulation() {
       if (!r.ok) throw new Error(r.statusText);
       const s = (await r.json()) as ApiState;
       setSnapshot(s);
+      if (typeof s.kit_chrome_hidden === "boolean") {
+        setChromeHide(s.kit_chrome_hidden);
+      }
       setBanner({
         msg: `Kit에 연결됨 — ${s.kit_app || "OK"}`,
         ok: true,
@@ -256,6 +263,16 @@ export default function TbsSimulation() {
     }
   };
 
+  const handleChromeHideChange = async (hidden: boolean) => {
+    setChromeHide(hidden);
+    try {
+      await apiCommand({ cmd: "kit_chrome_hide", hidden });
+    } catch (e) {
+      setChromeHide(!hidden);
+      throw e;
+    }
+  };
+
   const showProgress = logMode === 0 || logMode === 1;
   const showHistory = logMode === 0 || logMode === 2;
 
@@ -278,6 +295,24 @@ export default function TbsSimulation() {
   return (
     <div className={styles.wrap}>
       <div className={`${styles.banner} ${banner.ok ? styles.bannerOk : styles.bannerWarn}`}>{banner.msg}</div>
+
+      <section className={styles.section}>
+        <h2>화면</h2>
+        <div className={styles.row}>
+          <label htmlFor="tbs_chrome_hide">기본 메뉴·패널 숨기기 (3D 뷰·TBS·시퀀스 편집기 유지)</label>
+          <input
+            id="tbs_chrome_hide"
+            type="checkbox"
+            checked={chromeHide}
+            disabled={busy}
+            onChange={(e) =>
+              runCmd(async () => {
+                await handleChromeHideChange(e.target.checked);
+              })
+            }
+          />
+        </div>
+      </section>
 
       <section className={styles.section}>
         <h2>USD Load</h2>

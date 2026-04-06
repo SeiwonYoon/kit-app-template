@@ -171,7 +171,7 @@ from pxr import Gf
 from . import usd_animation_control
 from . import xml_generator
 from .curve_animation import make_parabolic_path, run_prim_curve_animation, stop_prim_curve_animation
-from .kit_chrome_visibility import apply_kit_chrome_hidden
+from .kit_chrome_visibility import KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH, apply_kit_chrome_hidden
 from .load_window import build_load_ui_into_stack
 from .port_lot_visibility import apply_port_lot_prim_visibility, clear_port_lot_authoring_cache
 from .prim_info import get_prim_display_name, safe_str
@@ -1015,7 +1015,7 @@ def build_control_window(ext: Any) -> None:
             style={"ScrollingFrame": {"padding": 4, "margin": 0}},
         ):
             with ui.VStack(spacing=0):
-                ext._kit_chrome_hide_model = ui.SimpleBoolModel(False)
+                ext._kit_chrome_hide_model = ui.SimpleBoolModel(KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH)
 
                 def _on_kit_chrome_toggle(model):
                     try:

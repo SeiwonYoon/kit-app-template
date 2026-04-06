@@ -30,6 +30,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 import omni.kit.app as app
 
 from . import load_window
+from .kit_chrome_visibility import apply_kit_chrome_hidden, is_kit_chrome_hidden
 from .control_window import (
     SimLogPanelMode,
     on_copy_sim_progress,
@@ -156,6 +157,7 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
         "ports": ports,
         "ep3_visible": ep3_visible,
         "kit_app": kit_app,
+        "kit_chrome_hidden": is_kit_chrome_hidden(ext),
     }
 
 
@@ -294,6 +296,20 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
 
     if cmd == "xml_run":
         on_xml_run_clicked(ext)
+        return {"ok": True}
+
+    if cmd == "kit_chrome_hide":
+        hidden = bool(data.get("hidden", False))
+        apply_kit_chrome_hidden(ext, hidden)
+        try:
+            m = getattr(ext, "_kit_chrome_hide_model", None)
+            if m is not None:
+                if hasattr(m, "set_value"):
+                    m.set_value(hidden)
+                elif hasattr(m, "set_value_as_bool"):
+                    m.set_value_as_bool(hidden)
+        except Exception:
+            pass
         return {"ok": True}
 
     return {"ok": False, "error": f"unknown cmd: {cmd}"}
