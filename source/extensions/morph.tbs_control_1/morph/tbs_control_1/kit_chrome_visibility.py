@@ -83,31 +83,99 @@ def _get_main_menu_bar():
         return None
 
 
+def _as_window(obj: Any) -> Any:
+    """
+    Workspace API가 버전에 따라 Window 또는 WindowHandle을 반환할 수 있어,
+    가능하면 'Window(실체)'를 얻어 visible을 토글한다.
+    """
+    if obj is None:
+        return None
+    # 이미 Window처럼 보이면 그대로 사용
+    try:
+        if hasattr(obj, "visible") and (hasattr(obj, "title") or hasattr(obj, "name")):
+            return obj
+    except Exception:
+        pass
+    # WindowHandle → window / get_window 패턴들 시도
+    try:
+        w = getattr(obj, "window", None)
+        if w is not None:
+            try:
+                if callable(w):
+                    w = w()
+            except Exception:
+                pass
+            if w is not None and hasattr(w, "visible"):
+                return w
+    except Exception:
+        pass
+    try:
+        gw = getattr(obj, "get_window", None)
+        if callable(gw):
+            w = gw()
+            if w is not None and hasattr(w, "visible"):
+                return w
+    except Exception:
+        pass
+    return obj
+
+
+def _set_window_visible(obj: Any, visible: bool) -> bool:
+    """
+    가시성 토글을 'Window(실체)' 기준으로 적용.
+    - 가능한 경우 .visible 에 직접 대입 (Window API)
+    - 그래도 안 되면 fallback으로 setVisible/set_visible을 시도
+    """
+    w = _as_window(obj)
+    if w is None:
+        return False
+    try:
+        w.visible = bool(visible)
+        return True
+    except Exception:
+        pass
+    try:
+        fn = getattr(w, "setVisible", None)
+        if callable(fn):
+            fn(bool(visible))
+            return True
+    except Exception:
+        pass
+    try:
+        fn = getattr(w, "set_visible", None)
+        if callable(fn):
+            fn(bool(visible))
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _iter_workspace_windows() -> List[Any]:
     out: List[Any] = []
-    seen: Set[int] = set()
+    seen_labels: Set[str] = set()
     try:
         if hasattr(ui.Workspace, "get_windows"):
             wins = ui.Workspace.get_windows()
             if wins:
                 for w in wins:
-                    try:
-                        i = id(w)
-                        if i not in seen:
-                            seen.add(i)
-                            out.append(w)
-                    except Exception:
-                        pass
+                    ww = _as_window(w)
+                    label = _window_label(ww)
+                    if not label:
+                        continue
+                    if label not in seen_labels:
+                        seen_labels.add(label)
+                        out.append(ww)
     except Exception:
         pass
     for name in _DEFAULT_PANEL_NAMES:
         try:
             w = ui.Workspace.get_window(name)
-            if w is not None:
-                i = id(w)
-                if i not in seen:
-                    seen.add(i)
-                    out.append(w)
+            ww = _as_window(w)
+            label = _window_label(ww)
+            if label and label not in seen_labels:
+                seen_labels.add(label)
+                out.append(ww)
         except Exception:
             pass
     return out
@@ -121,7 +189,7 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool) -> None:
     key = "_kit_chrome_visibility_backup"
     flag = "_kit_chrome_hide_active"
     if hidden:
-        backup: Dict[str, Any] = {}
+        backup: Dict[str, Any] = {"__wins__": {}}
         mb = _get_main_menu_bar()
         if mb is not None:
             try:
@@ -146,13 +214,16 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool) -> None:
             if _should_protect_window(label):
                 continue
             try:
-                k = f"win:{label}" if label else f"id:{id(w)}"
-                backup[k] = bool(w.visible)
-                w.visible = False
+                # label 기반으로 저장 (WindowHandle 교체/재생성에 강하게)
+                wins = backup.get("__wins__", {})
+                if isinstance(wins, dict) and label:
+                    wins[label] = bool(getattr(w, "visible", True))
+                _set_window_visible(w, False)
             except Exception:
                 pass
 
         setattr(ext, key, backup)
+        setattr(ext, flag, True)
         return
 
     backup = getattr(ext, key, None)
@@ -184,10 +255,10 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool) -> None:
         label = _window_label(w)
         if _should_protect_window(label):
             continue
-        k = f"win:{label}" if label else f"id:{id(w)}"
-        if k in backup:
+        wins = backup.get("__wins__", {})
+        if isinstance(wins, dict) and label in wins:
             try:
-                w.visible = bool(backup[k])
+                _set_window_visible(w, bool(wins[label]))
             except Exception:
                 pass
 
