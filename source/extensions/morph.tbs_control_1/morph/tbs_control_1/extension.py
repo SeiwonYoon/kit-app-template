@@ -112,6 +112,39 @@ async def _deferred_apply_kit_chrome_hide(ext: Any) -> None:
         pass
 
 
+def _apply_stage_default_fps_30() -> None:
+    """
+    런치/스테이지 로드 시 기본 FPS(TPS)를 30으로 맞춘다.
+
+    - USD 기준: stage timeCodesPerSecond / framesPerSecond
+    - 타임라인/프레임↔시간 변환(usm_animation_control 등)은 tl.get_time_codes_per_seconds()를 참조하므로,
+      스테이지/타임라인 쪽의 기본 TPS가 30이면 자동으로 30 기준으로 재생 시간이 계산된다.
+    """
+    try:
+        ctx = ou.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if stage is None:
+            return
+        try:
+            stage.SetTimeCodesPerSecond(30.0)
+        except Exception:
+            pass
+        try:
+            stage.SetFramesPerSecond(30.0)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+async def _deferred_apply_stage_default_fps_30() -> None:
+    """초기화 직후/스테이지 로드 타이밍을 고려해 몇 프레임 뒤 한 번 더 적용."""
+    kit_app = app.get_app()
+    for _ in range(5):
+        await kit_app.next_update_async()
+    _apply_stage_default_fps_30()
+
+
 class Extension(omni.ext.IExt):
     """Omni 확장 진입점: 창 생성·선택/스테이지 구독·종료 시 애니/타임라인 정리."""
 
@@ -125,6 +158,7 @@ class Extension(omni.ext.IExt):
         self._overlay_retry_count = 0
         self._selection_sub = None
         self._stage_stream_sub = None
+        self._fps_stage_sub = None
         self._post_update_sub = None
         self._last_paths: tuple = ()
         self._ignore_selection_until = 0.0
@@ -139,6 +173,23 @@ class Extension(omni.ext.IExt):
 
         if KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH:
             self._kit_chrome_startup_task = asyncio.ensure_future(_deferred_apply_kit_chrome_hide(self))
+
+        # -------------------------------------------------------------------
+        # 타임라인 기본 FPS(TPS) = 30 강제
+        # -------------------------------------------------------------------
+        # - 확장 실행 직후, 또는 open_stage()로 스테이지가 교체될 때 24로 돌아가는 것을 방지한다.
+        # - 스테이지 이벤트 스트림에 붙어, 스테이지가 열릴 때마다 30을 재적용한다.
+        try:
+            ctx = ou.get_context()
+            if ctx is not None:
+                self._fps_stage_sub = ctx.get_stage_event_stream().create_subscription_to_pop(
+                    lambda _e: _apply_stage_default_fps_30(),
+                    name="morph.tbs_control_1:DefaultFPS30",
+                )
+        except Exception:
+            self._fps_stage_sub = None
+        _apply_stage_default_fps_30()
+        asyncio.ensure_future(_deferred_apply_stage_default_fps_30())
 
         # --- 뷰포트 객체 클릭 시 3D 정보 패널(PrimInfoOverlay) 비활성화 ---
         # 다시 쓰려면 아래 try_attach_overlay + 세 구독 블록의 주석을 해제하세요.
@@ -225,6 +276,12 @@ class Extension(omni.ext.IExt):
             except Exception:
                 pass
             self._stage_stream_sub = None
+        if self._fps_stage_sub is not None:
+            try:
+                self._fps_stage_sub.unsubscribe()
+            except Exception:
+                pass
+            self._fps_stage_sub = None
         if self._post_update_sub is not None:
             try:
                 self._post_update_sub.unsubscribe()

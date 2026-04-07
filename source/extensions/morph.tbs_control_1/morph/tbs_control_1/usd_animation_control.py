@@ -31,6 +31,10 @@ _end_fix_sub = None
 _loop_sub = None
 _complete_sub = None
 
+# 프로젝트 정책: 모든 애니메이션은 30fps(TPS) 기반.
+# 타임라인 인터페이스가 없거나 TPS를 얻지 못하는 예외 경로에서도 일관되게 30을 사용한다.
+DEFAULT_TPS = 30.0
+
 
 def _get_timeline():
     try:
@@ -84,17 +88,17 @@ def resolve_saved_animation_frame_range() -> Optional[tuple]:
 def frame_to_time(frame: float) -> float:
     tl = _get_timeline()
     if not tl:
-        return frame / 24.0
+        return frame / DEFAULT_TPS
     tps = tl.get_time_codes_per_seconds()
-    return frame / float(tps) if tps else frame / 24.0
+    return frame / float(tps) if tps else frame / DEFAULT_TPS
 
 
 def time_to_frame(time_sec: float) -> float:
     tl = _get_timeline()
     if not tl:
-        return time_sec * 24.0
+        return time_sec * DEFAULT_TPS
     tps = tl.get_time_codes_per_seconds()
-    return time_sec * float(tps) if tps else time_sec * 24.0
+    return time_sec * float(tps) if tps else time_sec * DEFAULT_TPS
 
 
 def play_usd_animation(
@@ -110,7 +114,7 @@ def play_usd_animation(
     try:
         tps = tl.get_time_codes_per_seconds()
         if not tps:
-            tps = 24.0
+            tps = DEFAULT_TPS
         start_time = start_frame / float(tps)
         end_time = end_frame / float(tps)
         if start_time >= end_time:
