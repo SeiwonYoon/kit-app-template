@@ -130,7 +130,8 @@ function defaultForm(): WebFields {
     xml_port_id: 1,
     usd_path: "",
     resource_index: 0,
-};
+  };
+}
 
 // ---------------------------------------------------------------------------
 
