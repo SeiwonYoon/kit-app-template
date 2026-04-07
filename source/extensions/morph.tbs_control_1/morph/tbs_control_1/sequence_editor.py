@@ -222,6 +222,8 @@ class SequenceEditorWindow:
                                                         "start_frame": 200,
                                                         "end_frame": 300,
                                                         "loop": False,
+                                                        # 기본 OFF: 필요할 때만 USD_TIMELINE 시작 전 오프셋 보정 수행
+                                                        "offset_correction_enabled": False,
                                                         "offset_correct_prims": "",
                                                         "hide_enabled": False,
                                                         "hide_prims": "",
@@ -336,6 +338,22 @@ class SequenceEditorWindow:
                 step["loop"] = bool(loop_model.get_value_as_bool())
 
             loop_model.add_value_changed_fn(_on_loop)
+
+        # offset correction toggle (default OFF)
+        off_model = ui.SimpleBoolModel(bool(step.get("offset_correction_enabled", False)))
+
+        def _on_off(_m):
+            step["offset_correction_enabled"] = bool(off_model.get_value_as_bool())
+
+        off_model.add_value_changed_fn(_on_off)
+        with ui.HStack(spacing=6, height=28):
+            ui.CheckBox(model=off_model, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("오프셋 보정 적용", width=120)
+        ui.Label(
+            "체크 시 USD 재생 시작 프레임 기준으로 월드 오프셋(TBS_OFFSET) 보정을 수행합니다. (기본 OFF)",
+            height=0,
+            word_wrap=True,
+        )
 
         # manual only fields
         if str(step.get("mode", "MANUAL")).upper() == "MANUAL":

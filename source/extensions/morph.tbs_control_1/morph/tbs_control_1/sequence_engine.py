@@ -1694,18 +1694,19 @@ class SequenceRunner:
                 if end <= start:
                     _done()
                     return
-            try:
-                # 코드 이동/회전으로 누적된 오프셋을 USD 시작프레임 기준으로 보정.
-                paths_for_offset: List[str] = list(self._baseline.keys())
-                extra = str(step.get("offset_correct_prims", "") or "").strip()
-                if extra:
-                    for p in resolve_prim_paths_multi(extra):
-                        if p not in paths_for_offset:
-                            paths_for_offset.append(p)
-                if paths_for_offset:
-                    _apply_world_space_offset_correction(paths_for_offset, start)
-            except Exception:
-                pass
+            if bool(step.get("offset_correction_enabled", False)):
+                try:
+                    # 코드 이동/회전으로 누적된 오프셋을 USD 시작프레임 기준으로 보정.
+                    paths_for_offset: List[str] = list(self._baseline.keys())
+                    extra = str(step.get("offset_correct_prims", "") or "").strip()
+                    if extra:
+                        for p in resolve_prim_paths_multi(extra):
+                            if p not in paths_for_offset:
+                                paths_for_offset.append(p)
+                    if paths_for_offset:
+                        _apply_world_space_offset_correction(paths_for_offset, start)
+                except Exception:
+                    pass
             usd_animation_control.play_usd_animation(
                 start_frame=start,
                 end_frame=end,
