@@ -11,10 +11,10 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
 【핵심 데이터 구조】
 - Lot: lot_id/foup_id/sequence (EP 안착 시 곧바로 회수 대기 가능; EP 상 별도 가공 시간 없음).
 - SimulationTimingConfig:
-  · OHT→BP1 경유 또는 OHT→EP 직접 투입 이동 시간(oht_to_bp1_*)
+  · OHT→IN/OUT 경유 또는 OHT→EP 직접 투입 이동 시간(oht_to_bp1_*)
   · LOT 생성 간격(lot_spawn_interval_*): 타이머마다 대기열에 LOT 추가
   · 회수 이벤트 간격(pickup_event_interval_*): READYTOUNLOAD 실행 “티켓” 누적
-  · BP1→BP, BP→EP, EP→OHT(회수 이동) 랜덤 범위
+  · IN/OUT→버퍼(BP), BP→EP, EP→OHT(회수 이동) 랜덤 범위
 - SimulationInitConfig:
   · ep_count (2/3)
   · initial_full_ports (시작 시점 미리 적재할 포트; 내부 상태만, ARRIVED 이벤트 없음)
@@ -58,8 +58,8 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
    - control_window.py: SIM_SEQ_ALIAS, rules/map 매핑, 설명 로그 분기 반영
    - config/event_animation_rules.json 또는 event_animation_map.json: json 경로 매핑 추가
 2) 새 애니메이션 JSON 추가
-   - data/sim_sequences/*.json 파일 생성
-   - rules/map에 경로 등록(use.json)
+   - data/sim_sequences/*.json 파일 생성(명명: `arrived_inout`, `move_inout_bp*`, `move_bp*_ep*`, `arrived_ep*`, `removed_ep*`)
+   - rules/map에 경로 등록(use.json) 또는 `control_window.EVENT_JSON_CASE_MAP`
 3) UI 입력 항목 추가(시간/옵션)
    - control_window.py 모델/필드 추가
    - on_sim_start_clicked에서 config로 전달
@@ -67,7 +67,7 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
 """
 
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import random
 import threading
 
@@ -87,7 +87,8 @@ EP_TO_OHT_MAX = 10.0
 OHT_TO_BP1_MIN = 5.0
 OHT_TO_BP1_MAX = 10.0
 
-BUFFER_PORTS = ("BP2", "BP3", "BP4")
+INOUT_PORT = "INOUT"
+BUFFER_PORTS_MAX = ("BP1", "BP2", "BP3", "BP4")
 
 # UI 로그 블록용(엔진 추정, control_window 매핑과 동일 파일명 규칙)
 _LOG_SEP = "=" * 40
@@ -108,7 +109,8 @@ def _log_anim_arrived_ep_json(ep: str) -> str:
 def _log_anim_removed_ep_json(ep: str) -> str:
     return f"removed_{str(ep).lower()}.json"
 EP_PORTS_MAX = ("EP1", "EP2", "EP3")
-BASE_PORTS = ("BP1", "BP2", "BP3", "BP4")
+# BASE: IN/OUT만 고정. (BP1~BP4는 BUFFER 포트이며 EP3가 있을 때만 BP4가 추가된다.)
+BASE_PORTS = (INOUT_PORT,)
 
 
 @dataclass
@@ -216,6 +218,11 @@ class SimulationInitConfig:
     ep_count: int = 2
     initial_full_ports: Optional[List[str]] = None
     max_oht_lots: int = 0
+    # True면 공정(랜덤) 시간만 소모하고 애니 길이는 무시(UI에서 애니 스킵/중단과 연동)
+    process_time_priority: bool = False
+    # 고장(비활성) 포트: 목록에 포함된 포트는 라우팅/선택에서 제외한다.
+    # - 시뮬 시작 시점 초기값이며, 실행 중에도 TBSSimulationEngine.set_disabled_ports로 변경 가능.
+    disabled_ports: Optional[List[str]] = None
 
 
 @dataclass
@@ -350,13 +357,14 @@ class TBSSimulationEngine:
         ep_count = int(getattr(self._init_cfg, "ep_count", 2) or 2)
         ep_count = 3 if ep_count >= 3 else 2
         self._ep_ports = EP_PORTS_MAX[:ep_count]
-        self._all_ports = BASE_PORTS + self._ep_ports
+        self._buffer_ports = BUFFER_PORTS_MAX if ep_count >= 3 else BUFFER_PORTS_MAX[:3]
+        self._all_ports = BASE_PORTS + tuple(self._buffer_ports) + self._ep_ports
 
         self.ports: Dict[str, Optional[Lot]] = {p: None for p in self._all_ports}
         self.port_start_cd: Dict[str, str] = {p: "EMPTY" for p in self._all_ports}
         self.port_event_cd: Dict[str, str] = {p: "READY_TO_LOAD" for p in self._all_ports}
         self._buffer_loaded_at: Dict[str, float] = {}
-        self._buffer_empty_since: Dict[str, float] = {p: 0.0 for p in BUFFER_PORTS}
+        self._buffer_empty_since: Dict[str, float] = {p: 0.0 for p in self._buffer_ports}
         self._dispatching_to_ep: Dict[str, bool] = {ep: False for ep in self._ep_ports}
         self._max_oht_lots = int(getattr(self._init_cfg, "max_oht_lots", 0) or 0)
         self._oht_input_queue: List[Lot] = []
@@ -388,6 +396,93 @@ class TBSSimulationEngine:
         self._serial_wakeup = self.env.event() if self.env is not None else None
         # 이벤트 블록 로그 #[n] (SIM_START는 #[0] 고정)
         self._sim_log_event_seq = 0
+        self._process_time_priority = bool(getattr(self._init_cfg, "process_time_priority", False))
+        self._interrupt_anim_cb: Optional[Callable[[], None]] = None
+        self._faulty_ports_supplier: Optional[Callable[[], Set[str]]] = None
+        self._idle_sec: Dict[str, float] = {}
+        self._faulty_sec: Dict[str, float] = {}
+        self._fault_prev_snapshot: frozenset = frozenset()
+        self._last_report_text: str = ""
+
+    def set_runtime_hooks(
+        self,
+        *,
+        faulty_ports_supplier: Optional[Callable[[], Set[str]]] = None,
+        interrupt_anim_cb: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """UI에서 주입: 고장 포트 집합, 애니메이션 강제 중단 콜백."""
+        if faulty_ports_supplier is not None:
+            self._faulty_ports_supplier = faulty_ports_supplier
+        if interrupt_anim_cb is not None:
+            self._interrupt_anim_cb = interrupt_anim_cb
+
+    def kick_serial_flow(self) -> None:
+        """고장 포트 등 런타임 조건 변경 시 직렬 루프를 즉시 재평가."""
+        self._kick_serial_flow()
+
+    def get_report_text(self) -> str:
+        return str(getattr(self, "_last_report_text", "") or "")
+
+    def _get_faulty_set(self) -> Set[str]:
+        sup = getattr(self, "_faulty_ports_supplier", None)
+        if sup is None:
+            return set()
+        try:
+            out = sup()
+            if not out:
+                return set()
+            return {str(x).strip().upper() for x in out if str(x).strip()}
+        except Exception:
+            return set()
+
+    def _port_faulty(self, port: str) -> bool:
+        p = str(port or "").strip().upper()
+        return bool(p) and p in self._get_faulty_set()
+
+    def _interrupt_anim_proc_priority(self) -> None:
+        if not self._process_time_priority:
+            return
+        cb = getattr(self, "_interrupt_anim_cb", None)
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            pass
+
+    def _proc_anim_pair(self, proc_sec: float, anim_sec: float) -> Tuple[float, float, float]:
+        """반환: (anim_used, total_wait, proc_only) — 공정시간 우선이면 anim=0, total=공정."""
+        p = float(proc_sec)
+        a = float(anim_sec)
+        if self._process_time_priority:
+            return 0.0, max(0.01, p), p
+        a2 = max(0.0, a)
+        tw = max(0.01, max(p, a2))
+        return a2, tw, p
+
+    def _accumulate_sim_stats(self, ds: float) -> None:
+        dt = max(0.0, float(ds))
+        if dt <= 0.0:
+            return
+        for p in self._all_ports:
+            if self.ports.get(p) is None:
+                self._idle_sec[p] = self._idle_sec.get(p, 0.0) + dt
+        faulty = self._get_faulty_set()
+        for p in faulty:
+            if p in self._all_ports:
+                self._faulty_sec[p] = self._faulty_sec.get(p, 0.0) + dt
+
+    def _maybe_log_fault_transitions(self) -> None:
+        cur = frozenset(sorted(self._get_faulty_set()))
+        if cur == self._fault_prev_snapshot:
+            return
+        prev = set(self._fault_prev_snapshot)
+        now = set(cur)
+        for p in sorted(now - prev):
+            self._log(f"[포트고장] {p} 비가동(고장) 시작")
+        for p in sorted(prev - now):
+            self._log(f"[포트복구] {p} 가동 재개")
+        self._fault_prev_snapshot = cur
 
     def _log_raw(self, msg: str) -> None:
         """구분선·블록 등 접두 [t=] 없이 그대로 UI/콘솔로 보낸다."""
@@ -537,6 +632,10 @@ class TBSSimulationEngine:
         self._status_log_policy.reset()
         self._total_lots = 0
         self._pickup_tickets = 0
+        self._idle_sec = {p: 0.0 for p in self._all_ports}
+        self._faulty_sec = {p: 0.0 for p in self._all_ports}
+        self._fault_prev_snapshot = frozenset(sorted(self._get_faulty_set()))
+        self._last_report_text = ""
         initial_applied = self._apply_initial_full_ports()
         self._total_lots += self._max_oht_lots
         if self._total_lots <= 0:
@@ -669,6 +768,7 @@ class TBSSimulationEngine:
         # wall-clock 기반 tick을 누적해 sim time budget으로 사용.
         # (env.now가 아직 안 움직이는 구간에서도 budget은 계속 쌓여야 한다)
         self._sim_budget_sec += float(sim_delta_sec)
+        t_before = float(self.env.now)
         steps = 0
         while self._running and not self._done:
             next_t = self.env.peek()
@@ -685,6 +785,11 @@ class TBSSimulationEngine:
             if steps > 10000:
                 self._log("[SIM] 내부 step guard 발동")
                 break
+        t_after = float(self.env.now)
+        ds = max(0.0, t_after - t_before)
+        if ds > 1e-12:
+            self._accumulate_sim_stats(ds)
+            self._maybe_log_fault_transitions()
 
         if not self._done and self.env.peek() == float("inf"):
             self._deadlock = True
@@ -771,8 +876,8 @@ class TBSSimulationEngine:
             self._log_final_summary()
 
     def _step_bp1_to_buffer(self):
-        """0) BP1 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True."""
-        if self.ports.get("BP1") is not None and self._find_oldest_empty_buffer():
+        """0) IN/OUT 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True."""
+        if self.ports.get(INOUT_PORT) is not None and self._find_oldest_empty_buffer():
             yield self.env.process(self._move_bp1_to_buffer())
             return True
         return False
@@ -795,7 +900,7 @@ class TBSSimulationEngine:
         return did_pickup
 
     def _step_oht_input(self):
-        """2) OHT 투입: direct(빈 EP) 우선, 아니면 BP1 경유. 1건 실행하면 True."""
+        """2) OHT 투입: direct(빈 EP) 우선, 아니면 IN/OUT 경유. 1건 실행하면 True."""
         # READYTOLOAD(생성/준비) 공정확인을 통과하지 않은 LOT은 아직 투입 공정으로 가져가지 않는다.
         if self._oht_input_queue and not bool(getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)):
             return False
@@ -810,7 +915,7 @@ class TBSSimulationEngine:
 
         if self._oht_input_queue and self._can_load_to_bp1():
             lot = self._oht_input_queue.pop(0)
-            self._log(f"{lot.lot_id} | OHT→BP1 투입 | q={len(self._oht_input_queue)}")
+            self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
             yield self.env.process(self._load_lot_to_bp1(lot))
             return True
 
@@ -869,20 +974,24 @@ class TBSSimulationEngine:
                     next_lot = self._oht_input_queue[0] if self._oht_input_queue else None
                     nid = next_lot.lot_id if next_lot else "-"
                     self._log(
-                        f"[대기] BP1={'FULL' if self.ports['BP1'] else 'EMPTY'} "
+                        f"[대기] IN/OUT={'FULL' if self.ports[INOUT_PORT] else 'EMPTY'} "
                         f"| next={nid} | q={len(self._oht_input_queue)}"
                     )
                 yield self.env.timeout(0.2)
                 continue
             lot = self._oht_input_queue.pop(0)
-            self._log(f"{lot.lot_id} | BP1 투입시작 | q={len(self._oht_input_queue)}")
+            self._log(f"{lot.lot_id} | IN/OUT 투입시작 | q={len(self._oht_input_queue)}")
             yield self.env.process(self._load_lot_to_bp1(lot))
         self._log("[입력] 루프 종료")
 
     def _can_load_to_bp1(self) -> bool:
-        """OHT LOT을 BP1에 넣을 수 있는지: BP1 비어 있고 버퍼에 빈 슬롯이 있으며 BP1 적재 중 아님."""
-        bp1_empty = self.ports["BP1"] is None
-        any_buffer_empty = any(self.ports[p] is None for p in BUFFER_PORTS)
+        """OHT LOT을 IN/OUT에 넣을 수 있는지: IN/OUT 비어 있고 버퍼에 빈 슬롯이 있으며 적재 중 아님."""
+        if self._port_faulty(INOUT_PORT):
+            return False
+        bp1_empty = self.ports[INOUT_PORT] is None
+        any_buffer_empty = any(
+            self.ports[p] is None and not self._port_faulty(p) for p in self._buffer_ports
+        )
         return bp1_empty and any_buffer_empty and not self._oht_loading_bp1
 
     def _can_load_to_ep_direct(self) -> bool:
@@ -905,24 +1014,30 @@ class TBSSimulationEngine:
             "est_sec": f"{oht_time:.1f}",
             "title": f"OHT -> {ep_port} 직접 투입",
         })
-        total_wait = max(float(oht_time), float(anim_wait))
+        aw_u, total_wait, proc_only = self._proc_anim_pair(oht_time, anim_wait)
         self._stage_mark(lot.lot_id, "oht_to_bp1_start")
-        self._log_brief_step(lot.lot_id, f"OHT→{ep_port}", oht_time, anim_wait)
+        self._log_brief_step(lot.lot_id, f"OHT→{ep_port}", oht_time, aw_u)
         # 요구사항: OHT 이동은 ARRIVED(도착/안착) 이벤트로 통일. from/to를 포함해 UI 매핑에 사용.
         self._emit_event({"seq": "ARRIVED", "from_port_id": "OHT", "to_port_id": ep_port, "port_id": ep_port, "lot_id": lot.lot_id})
+        self._interrupt_anim_proc_priority()
         _ep_aj = _log_anim_arrived_ep_json(ep_port)
+        proc_txt = (
+            f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
+            if self._process_time_priority
+            else f"공정시간: {total_wait:.1f}s (max(공정 {oht_time:.1f}s, 애니 {aw_u:.1f}s))"
+        )
         self._log_event_block(
             seq="ARRIVED",
             summary=f"OHT -> {ep_port} 직접 투입",
             lot_id=lot.lot_id,
-            anim_line=f"애니메이션: {_ep_aj} (추정 {anim_wait:.1f}s)",
-            proc_line=f"공정시간: {total_wait:.1f}s (max(공정 {oht_time:.1f}s, 애니 {anim_wait:.1f}s))",
+            anim_line=f"애니메이션: {_ep_aj} (추정 {aw_u:.1f}s)",
+            proc_line=proc_txt,
         )
         yield self.env.process(
             self._wait_with_progress(
                 total_sec=total_wait,
                 label=f"OHT->{ep_port} {lot.lot_id}",
-                detail=f"{lot.lot_id} OHT->{ep_port} 직접투입(도착포트={ep_port}) | 공정={oht_time:.1f}s 애니={anim_wait:.1f}s",
+                detail=f"{lot.lot_id} OHT->{ep_port} 직접투입(도착포트={ep_port}) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
             )
@@ -937,87 +1052,99 @@ class TBSSimulationEngine:
         self._log(f"{lot.lot_id} | {ep_port} 도착(직접)")
 
     def _load_lot_to_bp1(self, lot: Lot):
-        """OHT 대기열 LOT을 BP1으로 투입(ARRIVED 이벤트·대기 후 BP1 안착, 이어서 버퍼로 이송)."""
+        """OHT 대기열 LOT을 IN/OUT으로 투입(ARRIVED 이벤트·대기 후 IN/OUT 안착, 이어서 버퍼로 이송)."""
         self._oht_loading_bp1 = True
         oht_time = self._timing.rand_oht_to_bp1()
         # 각 공정 확인(on_gate): UI 확인 팝업과 동기화되는 블로킹 게이트
         anim_wait = self._request_gate({
             "seq": "ARRIVED",
-            "port_id": "BP1",
+            "port_id": INOUT_PORT,
             "lot_id": lot.lot_id,
             "est_sec": f"{oht_time:.1f}",
-            "title": "OHT -> BP1 경유 안착",
+            "title": "OHT -> IN/OUT 경유 안착",
         })
-        total_wait = max(float(oht_time), float(anim_wait))
+        aw_u, total_wait, proc_only = self._proc_anim_pair(oht_time, anim_wait)
         self._stage_mark(lot.lot_id, "oht_to_bp1_start")
-        self._log_brief_step(lot.lot_id, "OHT→BP1", oht_time, anim_wait)
+        self._log_brief_step(lot.lot_id, "OHT→IN/OUT", oht_time, aw_u)
         # 요구사항 반영:
-        # OHT->BP1 단계는 MOVE가 아니라 ARRIVED(포트 안착 이벤트)로 애니메이션을 구동한다.
-        self._emit_event({"seq": "ARRIVED", "port_id": "BP1", "lot_id": lot.lot_id})
+        # OHT->IN/OUT 단계는 MOVE가 아니라 ARRIVED(포트 안착 이벤트)로 애니메이션을 구동한다.
+        self._emit_event({"seq": "ARRIVED", "port_id": INOUT_PORT, "lot_id": lot.lot_id})
+        self._interrupt_anim_proc_priority()
+        proc_txt = (
+            f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
+            if self._process_time_priority
+            else f"공정시간: {total_wait:.1f}s (max(공정 {oht_time:.1f}s, 애니 {aw_u:.1f}s))"
+        )
         self._log_event_block(
             seq="ARRIVED",
-            summary="OHT -> BP1 경유 안착",
+            summary="OHT -> IN/OUT 경유 안착",
             lot_id=lot.lot_id,
-            anim_line=f"애니메이션: arrived_bp1.json (추정 {anim_wait:.1f}s)",
-            proc_line=f"공정시간: {total_wait:.1f}s (max(공정 {oht_time:.1f}s, 애니 {anim_wait:.1f}s))",
+            anim_line=f"애니메이션: arrived_inout.json (추정 {aw_u:.1f}s)",
+            proc_line=proc_txt,
         )
         yield self.env.process(
             self._wait_with_progress(
                 total_sec=total_wait,
-                label=f"OHT->{ 'BP1' } {lot.lot_id}",
-                detail=f"{lot.lot_id} OHT->BP1 이동(도착포트=BP1) | 공정={oht_time:.1f}s 애니={anim_wait:.1f}s",
+                label=f"OHT->{INOUT_PORT} {lot.lot_id}",
+                detail=f"{lot.lot_id} OHT->IN/OUT 이동(도착포트=IN/OUT) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
             )
         )
         self._stage_mark(lot.lot_id, "oht_to_bp1_end")
-        self._set_port("BP1", "ARRIVED", "FULL", lot, emit_arrived_event=False)
-        self._log(f"{lot.lot_id} | BP1 도착")
+        self._set_port(INOUT_PORT, "ARRIVED", "FULL", lot, emit_arrived_event=False)
+        self._log(f"{lot.lot_id} | IN/OUT 도착")
         yield self.env.process(self._move_bp1_to_buffer())
         self._oht_loading_bp1 = False
 
     def _move_bp1_to_buffer(self):
-        """BP1에 있는 LOT을 가장 오래 비어 있던 빈 버퍼로 이송(MOVE_TRANSFERING)."""
-        lot = self.ports.get("BP1")
+        """IN/OUT에 있는 LOT을 가장 오래 비어 있던 빈 버퍼로 이송(MOVE_TRANSFERING)."""
+        lot = self.ports.get(INOUT_PORT)
         if lot is None:
             return
         target_bp = self._find_oldest_empty_buffer()
         if not target_bp:
-            self._log(f"{lot.lot_id} | BP1→버퍼 실패(빈 슬롯 없음)")
+            self._log(f"{lot.lot_id} | IN/OUT→버퍼 실패(빈 슬롯 없음)")
             return
-        # 이동 중에는 점유를 유지하되, 다음 공정에서 BP1/도착 버퍼가 선택되지 않도록 잠금.
-        self._lock_port("BP1")
+        # 이동 중에는 점유를 유지하되, 다음 공정에서 IN/OUT/도착 버퍼가 선택되지 않도록 잠금.
+        self._lock_port(INOUT_PORT)
         self._lock_port(target_bp)
-        self._route_mark(lot.lot_id, "bp1_to_bp_from", "BP1")
+        self._route_mark(lot.lot_id, "bp1_to_bp_from", INOUT_PORT)
         self._route_mark(lot.lot_id, "bp1_to_bp_to", target_bp)
         move_time = self._timing.rand_bp1_to_bp()
         anim_wait = self._request_gate({
             "seq": "MOVE_TRANSFERING",
-            "from_port_id": "BP1",
+            "from_port_id": INOUT_PORT,
             "to_port_id": target_bp,
             "lot_id": lot.lot_id,
             "est_sec": f"{move_time:.1f}",
-            "title": "BP1 -> BUFFER 이동",
+            "title": "IN/OUT -> BUFFER 이동",
         })
-        total_wait = max(float(move_time), float(anim_wait))
+        aw_u, total_wait, proc_only = self._proc_anim_pair(move_time, anim_wait)
         self._stage_mark(lot.lot_id, "bp1_to_bp_start")
-        # 요구사항: BP1->BP 이동 애니는 EAPEIS_PORT_MOVE_TRANSFERING(=MOVE_TRANSFERING)만 실행.
-        self._emit_event({"seq": "MOVE_TRANSFERING", "from_port_id": "BP1", "to_port_id": target_bp, "lot_id": lot.lot_id})
-        _mv_aj = _log_anim_move_transfer_json("BP1", target_bp)
+        # 요구사항: IN/OUT->BP 이동 애니는 EAPEIS_PORT_MOVE_TRANSFERING(=MOVE_TRANSFERING)만 실행.
+        self._emit_event({"seq": "MOVE_TRANSFERING", "from_port_id": INOUT_PORT, "to_port_id": target_bp, "lot_id": lot.lot_id})
+        self._interrupt_anim_proc_priority()
+        _mv_aj = _log_anim_move_transfer_json(INOUT_PORT, target_bp)
+        proc_txt = (
+            f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
+            if self._process_time_priority
+            else f"공정시간: {total_wait:.1f}s (max(공정 {move_time:.1f}s, 애니 {aw_u:.1f}s))"
+        )
         self._log_event_block(
             seq="MOVE_TRANSFERING",
-            summary=f"BP1 -> {target_bp} 이송",
+            summary=f"IN/OUT -> {target_bp} 이송",
             lot_id=lot.lot_id,
-            anim_line=f"애니메이션: {_mv_aj} (추정 {anim_wait:.1f}s)",
-            proc_line=f"공정시간: {total_wait:.1f}s (max(공정 {move_time:.1f}s, 애니 {anim_wait:.1f}s))",
+            anim_line=f"애니메이션: {_mv_aj} (추정 {aw_u:.1f}s)",
+            proc_line=proc_txt,
         )
-        self._log_brief_step(lot.lot_id, f"BP1→{target_bp}", move_time, anim_wait)
+        self._log_brief_step(lot.lot_id, f"IN/OUT→{target_bp}", move_time, aw_u)
         try:
             yield self.env.process(
                 self._wait_with_progress(
                     total_sec=total_wait,
-                    label=f"BP1->{target_bp} {lot.lot_id}",
-                    detail=f"{lot.lot_id} BP1->{target_bp} 이동(출발포트=BP1, 도착포트={target_bp}) | 공정={move_time:.1f}s 애니={anim_wait:.1f}s",
+                    label=f"IN/OUT->{target_bp} {lot.lot_id}",
+                    detail=f"{lot.lot_id} IN/OUT->{target_bp} 이동(출발포트=IN/OUT, 도착포트={target_bp}) | 공정={move_time:.1f}s 애니={aw_u:.1f}s",
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_TRANSFERING",
                 )
@@ -1027,16 +1154,20 @@ class TBSSimulationEngine:
             self._stage_mark(lot.lot_id, "bp1_to_bp_end")
             self._set_port(target_bp, "ARRIVED", "FULL", lot)
             self._buffer_loaded_at[target_bp] = float(self.env.now) if self.env is not None else 0.0
-            self._remove_from_port("BP1")
+            self._remove_from_port(INOUT_PORT)
             self._unlock_port(target_bp)
-            self._unlock_port("BP1")
+            self._unlock_port(INOUT_PORT)
             # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
-            self._emit_port_occ_refresh("BP1->버퍼 이송 완료 후 포트 표시 갱신")
+            self._emit_port_occ_refresh("IN/OUT->버퍼 이송 완료 후 포트 표시 갱신")
             self._log(f"{lot.lot_id} | {target_bp} 도착(버퍼)")
 
     def _find_oldest_empty_buffer(self) -> Optional[str]:
         """비어 있는 버퍼 BP2~BP4 중, 비어 있기 시작한 시각이 가장 이른 포트."""
-        empties = [p for p in BUFFER_PORTS if self.ports[p] is None and not self._is_port_locked(p)]
+        empties = [
+            p
+            for p in self._buffer_ports
+            if self.ports[p] is None and not self._is_port_locked(p) and not self._port_faulty(p)
+        ]
         if not empties:
             return None
         return sorted(empties, key=lambda p: self._buffer_empty_since.get(p, 0.0))[0]
@@ -1044,6 +1175,8 @@ class TBSSimulationEngine:
     def _find_empty_ep(self) -> Optional[str]:
         """비어 있고 EP로 배정 중이 아닌 EP 포트 하나."""
         for ep in self._ep_ports:
+            if self._port_faulty(ep):
+                continue
             if (
                 self.ports[ep] is None
                 and not self._dispatching_to_ep.get(ep, False)
@@ -1069,7 +1202,11 @@ class TBSSimulationEngine:
 
     def _find_oldest_bp(self) -> Optional[str]:
         """LOT이 있는 버퍼 BP2~BP4 중, 적재 시각이 가장 이른 포트(먼저 EP로 보냄)."""
-        candidates = [bp for bp in BUFFER_PORTS if self.ports[bp] is not None and not self._is_port_locked(bp)]
+        candidates = [
+            bp
+            for bp in self._buffer_ports
+            if self.ports[bp] is not None and not self._is_port_locked(bp) and not self._port_faulty(bp)
+        ]
         if not candidates:
             return None
         return sorted(candidates, key=lambda p: self._buffer_loaded_at.get(p, 0.0))[0]
@@ -1099,7 +1236,7 @@ class TBSSimulationEngine:
             "est_sec": f"{move_time:.1f}",
             "title": "BUFFER -> EP 이동",
         })
-        total_wait = max(float(move_time), float(anim_wait))
+        aw_u, total_wait, proc_only = self._proc_anim_pair(move_time, anim_wait)
         self._stage_mark(lot.lot_id, "bp_to_ep_start")
         self._route_mark(lot.lot_id, "bp_to_ep_from", bp_port)
         self._route_mark(lot.lot_id, "bp_to_ep_to", ep_port)
@@ -1107,21 +1244,27 @@ class TBSSimulationEngine:
         self._lock_port(bp_port)
         self._lock_port(ep_port)
         self._emit_event({"seq": "MOVE_REQ", "from_port_id": bp_port, "to_port_id": ep_port, "lot_id": lot.lot_id})
+        self._interrupt_anim_proc_priority()
         _req_aj = _log_anim_move_req_json(bp_port, ep_port)
+        proc_txt = (
+            f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
+            if self._process_time_priority
+            else f"공정시간: {total_wait:.1f}s (max(공정 {move_time:.1f}s, 애니 {aw_u:.1f}s))"
+        )
         self._log_event_block(
             seq="MOVE_REQ",
             summary=f"{bp_port} -> {ep_port} 이송",
             lot_id=lot.lot_id,
-            anim_line=f"애니메이션: {_req_aj} (추정 {anim_wait:.1f}s)",
-            proc_line=f"공정시간: {total_wait:.1f}s (max(공정 {move_time:.1f}s, 애니 {anim_wait:.1f}s))",
+            anim_line=f"애니메이션: {_req_aj} (추정 {aw_u:.1f}s)",
+            proc_line=proc_txt,
         )
-        self._log_brief_step(lot.lot_id, f"{bp_port}→{ep_port}", move_time, anim_wait)
+        self._log_brief_step(lot.lot_id, f"{bp_port}→{ep_port}", move_time, aw_u)
         try:
             yield self.env.process(
                 self._wait_with_progress(
                     total_sec=total_wait,
                     label=f"{bp_port}->{ep_port} {lot.lot_id}",
-                    detail=f"{lot.lot_id} {bp_port}->{ep_port} 이송(출발포트={bp_port}, 도착포트={ep_port}) | 공정={move_time:.1f}s 애니={anim_wait:.1f}s",
+                    detail=f"{lot.lot_id} {bp_port}->{ep_port} 이송(출발포트={bp_port}, 도착포트={ep_port}) | 공정={move_time:.1f}s 애니={aw_u:.1f}s",
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_REQ",
                 )
@@ -1187,24 +1330,30 @@ class TBSSimulationEngine:
                 "title": "EP -> OHT 회수(REMOVED)",
             }
         )
-        total_wait = max(float(unload_time), float(anim_wait))
+        aw_u, total_wait, proc_only = self._proc_anim_pair(unload_time, anim_wait)
         self._stage_mark(lot.lot_id, "ep_to_oht_start")
         self._route_mark(lot.lot_id, "ep_to_oht_from", ep_port)
         self._route_mark(lot.lot_id, "ep_to_oht_to", "OHT")
         self._emit_event({"seq": "REMOVED", "port_id": ep_port, "lot_id": lot.lot_id})
+        self._interrupt_anim_proc_priority()
         _rm_aj = _log_anim_removed_ep_json(ep_port)
+        proc_txt = (
+            f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
+            if self._process_time_priority
+            else f"공정시간: {total_wait:.1f}s (max(공정 {unload_time:.1f}s, 애니 {aw_u:.1f}s))"
+        )
         self._log_event_block(
             seq="REMOVED",
             summary=f"{ep_port} -> OHT 회수 실행",
             lot_id=lot.lot_id,
-            anim_line=f"애니메이션: {_rm_aj} (추정 {anim_wait:.1f}s)",
-            proc_line=f"공정시간: {total_wait:.1f}s (max(공정 {unload_time:.1f}s, 애니 {anim_wait:.1f}s))",
+            anim_line=f"애니메이션: {_rm_aj} (추정 {aw_u:.1f}s)",
+            proc_line=proc_txt,
         )
         yield self.env.process(
             self._wait_with_progress(
                 total_sec=total_wait,
                 label=f"{ep_port}->OHT {lot.lot_id}",
-                detail=f"{lot.lot_id} {ep_port}->OHT 회수(출발포트={ep_port}, 도착포트=OHT) | 공정={unload_time:.1f}s 애니={anim_wait:.1f}s",
+                detail=f"{lot.lot_id} {ep_port}->OHT 회수(출발포트={ep_port}, 도착포트=OHT) | 공정={unload_time:.1f}s 애니={aw_u:.1f}s",
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="REMOVED",
             )
@@ -1229,7 +1378,7 @@ class TBSSimulationEngine:
             self._ep_ready_since[port] = float(self.env.now) if self.env is not None else 0.0
         # 정책: BP2~BP4는 "경유 버퍼"이므로 ARRIVED(안착) 이벤트를 별도로 emit 하지 않는다.
         # (BP1->BPx 이송 이벤트(MOVE_TRANSFERING)만으로 애니/로그를 대표)
-        if emit_arrived_event and port not in BUFFER_PORTS:
+        if emit_arrived_event and port not in self._buffer_ports:
             self._emit_event({"seq": "ARRIVED", "port_id": port, "lot_id": lot.lot_id})
 
     def _remove_from_port(self, port: str) -> None:
@@ -1240,7 +1389,7 @@ class TBSSimulationEngine:
         if port in self._ep_ports:
             self._ep_awaiting_pickup[port] = False
             self._ep_ready_since[port] = 0.0
-        if port in BUFFER_PORTS:
+        if port in self._buffer_ports:
             self._buffer_empty_since[port] = float(self.env.now) if self.env is not None else 0.0
         self._emit_event({"seq": "READYTOLOAD", "port_id": port, "lot_id": ""})
 
@@ -1306,7 +1455,7 @@ class TBSSimulationEngine:
             self._initial_seed_seq += 1
             self._total_lots += 1
             self._set_port(port, "ARRIVED", "FULL", lot, emit_arrived_event=False)
-            if port in BUFFER_PORTS:
+            if port in self._buffer_ports:
                 self._buffer_loaded_at[port] = now
             applied.append(f"{port}={lot.lot_id}")
         if applied:
@@ -1329,6 +1478,7 @@ class TBSSimulationEngine:
         - progress_interval > 0: 텍스트 로그([PROGRESS])는 누적하지 않고, on_progress(UI)만 주기적으로 갱신
           (요구사항: 설정한 초마다 %만 반영되도록)
         """
+        self._interrupt_anim_proc_priority()
         total = max(0.01, float(total_sec))
         interval = self._progress_emit_policy.normalize_interval(float(progress_interval))
         ev = str(event_seq or "").strip()
@@ -1458,7 +1608,9 @@ class TBSSimulationEngine:
     def _log_final_summary(self) -> None:
         """완료 LOT별로 _stage_mark/_route_mark 기록을 모아 구간별 소요 시간 로그 출력."""
         total_t = float(self.env.now) if self.env is not None else 0.0
-        lines: List[str] = [f"[SUMMARY] 전체 t={total_t:.2f}s"]
+        lines: List[str] = [
+            f"[SUMMARY] 전체 t={total_t:.2f}s | 공정설정 시간 우선={'ON' if self._process_time_priority else 'OFF'}"
+        ]
         for lot_id in self.completed_lots:
             m = self._lot_stage_summary.get(lot_id, {})
             r = self._lot_route_summary.get(lot_id, {})
@@ -1467,8 +1619,8 @@ class TBSSimulationEngine:
             d3 = self._dur(m, "bp_to_ep_start", "bp_to_ep_end")
             d5 = self._dur(m, "ep_to_oht_start", "ep_to_oht_end")
             parts = []
-            parts.append(f"OHT->BP1={d1:.1f}s" if d1 >= 0 else "OHT->BP1=-")
-            bp1_bp_from = r.get("bp1_to_bp_from", "BP1")
+            parts.append(f"OHT->IN/OUT={d1:.1f}s" if d1 >= 0 else "OHT->IN/OUT=-")
+            bp1_bp_from = r.get("bp1_to_bp_from", INOUT_PORT)
             bp1_bp_to = r.get("bp1_to_bp_to", "?")
             parts.append(f"{bp1_bp_from}->{bp1_bp_to}={d2:.1f}s" if d2 >= 0 else f"{bp1_bp_from}->{bp1_bp_to}=-")
             bp_ep_from = r.get("bp_to_ep_from", "?")
@@ -1478,7 +1630,17 @@ class TBSSimulationEngine:
             ep_oht_to = r.get("ep_to_oht_to", "OHT")
             parts.append(f"{ep_oht_from}->{ep_oht_to}={d5:.1f}s" if d5 >= 0 else f"{ep_oht_from}->{ep_oht_to}=-")
             lines.append(f"  · {lot_id} | " + ", ".join(parts))
-        self._log("\n".join(lines))
+        # 포트별 유휴/고장 누적(보고서용)
+        lines.append("[SUMMARY] 포트별 유휴(EMPTY) 누적(초)")
+        for p in self._all_ports:
+            lines.append(f"  - {p}: {float(self._idle_sec.get(p, 0.0)):.2f}")
+        lines.append("[SUMMARY] 포트별 고장(비가동) 누적(초)")
+        for p in self._all_ports:
+            lines.append(f"  - {p}: {float(self._faulty_sec.get(p, 0.0)):.2f}")
+
+        text = "\n".join(lines)
+        self._last_report_text = text
+        self._log(text)
 
     def _log(self, msg: str) -> None:
         """시뮬 시각 접두를 붙여 콘솔·on_log로 출력."""

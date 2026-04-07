@@ -124,25 +124,20 @@
           <button type="button" id="btnSimReset">리셋</button>
         </div>
         <div class="row">
-          <label for="f_log_mode">표시모드</label>
-          <select id="f_log_mode">
-            <option value="0">둘다</option>
-            <option value="1">진행현황</option>
-            <option value="2">이력로그</option>
-          </select>
-          <button type="button" id="btnCopyProgress">진행현황 복사</button>
+          <button type="button" id="btnCopyProgress">진행현황+Sim로그 복사</button>
         </div>
 
         <div id="panelPort">
           <p id="portHeader" style="margin: 10px 0 6px; color: #bfe7ff; font-size: 13px">[포트상태]</p>
           <div class="port-grid">
             <div class="port-row">
+              <div class="port-cell" id="port_BP1">BP1:-</div>
               <div class="port-cell" id="port_BP2">BP2:-</div>
               <div class="port-cell" id="port_BP3">BP3:-</div>
               <div class="port-cell" id="port_BP4">BP4:-</div>
             </div>
             <div class="port-row">
-              <div class="port-cell" id="port_BP1">BP1:-</div>
+              <div class="port-cell" id="port_INOUT">IN/OUT:-</div>
               <div class="port-cell" id="port_EP1">EP1:-</div>
               <div class="port-cell" id="port_EP2">EP2:-</div>
               <div class="port-cell" id="port_EP3">EP3:-</div>

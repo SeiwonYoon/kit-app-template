@@ -25,7 +25,7 @@
  * ├────────────────────┼──────────────────────────────────────────────────────┤
  * │ prim_refresh       │ refresh_object_list(ext)                             │
  * ├────────────────────┼──────────────────────────────────────────────────────┤
- * │ log_mode           │ 콤보 모델 설정 → on_sim_log_view_changed(ext)         │
+ * │ (제거됨) log_mode  │ 표시모드 기능 제거(항상 둘다)                         │
  * │                    │ (SimLogPanelMode: 둘다/진행현황만/이력만)               │
  * ├────────────────────┼──────────────────────────────────────────────────────┤
  * │ copy_progress      │ on_copy_sim_progress(ext) (Kit 클립보드)               │
@@ -216,12 +216,13 @@
 
       // 포트 그리드: Kit 의 BP1/EP1… 라벨 텍스트와 동일한 occ 정보를 칸별로 표시
       const ports = s.ports || {};
-      const names = ["BP2", "BP3", "BP4", "BP1", "EP1", "EP2", "EP3"];
+      const names = ["BP1", "BP2", "BP3", "BP4", "INOUT", "EP1", "EP2", "EP3"];
       for (const p of names) {
         const cell = $("port_" + p);
         if (!cell) continue;
         const v = ports[p] != null ? String(ports[p]) : "-";
-        cell.textContent = p + ":" + v;
+        const label = p === "INOUT" ? "IN/OUT" : p;
+        cell.textContent = label + ":" + v;
         cell.className = "port-cell";
         const u = v.toUpperCase();
         if (u === "FULL") cell.classList.add("full");
@@ -229,13 +230,17 @@
       }
 
       // EP3 칸: on_sim_ep_count_changed / EP 개수에 따른 가시성과 동기
+      const bp4c = $("port_BP4");
+      if (bp4c) {
+        bp4c.classList.toggle("hidden", !(s.bp4_visible !== false));
+      }
       const ep3c = $("port_EP3");
       if (ep3c) {
-        ep3c.classList.toggle("hidden", !s.ep3_visible);
+        ep3c.classList.toggle("hidden", !(s.ep3_visible !== false));
       }
 
-      // 웹 쪽 표시모드(진행만/이력만) 패널 토글
-      applyLogModeVisibility(state.logMode);
+      // 표시모드 제거: 항상 둘다
+      applyLogModeVisibility(0);
     } catch (e) {
       setBanner(
         "Kit 브리지에 연결할 수 없습니다. Kit가 실행 중인지, TBS_REMOTE_UI=0 등으로 브리지가 꺼지지 않았는지 확인하세요. (" + e.message + ")",
@@ -256,17 +261,8 @@
     const prog = $("panelProgress")?.parentElement;
     const hist = $("panelHistory")?.parentElement;
     if (!prog || !hist) return;
-    const m = parseInt(mode, 10) || 0;
-    if (m === 0) {
-      prog.classList.remove("hidden");
-      hist.classList.remove("hidden");
-    } else if (m === 1) {
-      prog.classList.remove("hidden");
-      hist.classList.add("hidden");
-    } else {
-      prog.classList.add("hidden");
-      hist.classList.remove("hidden");
-    }
+    prog.classList.remove("hidden");
+    hist.classList.remove("hidden");
   }
 
   // ---------------------------------------------------------------------------
@@ -371,16 +367,7 @@
     // XML 제너레이터 입력 프레임 표시 (control_window on_xml_seq_changed)
     $("f_xml_seq")?.addEventListener("change", wireXmlSeqVisibility);
 
-    // 표시모드 → Kit: log_mode cmd → on_sim_log_view_changed
-    $("f_log_mode")?.addEventListener("change", async () => {
-      state.logMode = parseInt($("f_log_mode").value, 10) || 0;
-      applyLogModeVisibility(state.logMode);
-      try {
-        await apiCommand({ cmd: "log_mode", index: state.logMode });
-      } catch (e) {
-        console.warn(e);
-      }
-    });
+    // 표시모드 제거: log_mode UI/명령 미사용
 
     // Load → load_window.on_load_usd(ext) (비동기 open_stage)
     $("btnLoadUsd")?.addEventListener("click", async () => {

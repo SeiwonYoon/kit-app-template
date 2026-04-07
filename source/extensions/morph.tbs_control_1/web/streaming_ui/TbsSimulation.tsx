@@ -42,7 +42,7 @@ function getKitApiBase(): string {
 
 const POLL_MS = 400;
 
-const PORT_ORDER = ["BP2", "BP3", "BP4", "BP1", "EP1", "EP2", "EP3"] as const;
+const PORT_ORDER = ["BP1", "BP2", "BP3", "BP4", "INOUT", "EP1", "EP2", "EP3"] as const;
 
 // ---------------------------------------------------------------------------
 // 타입 (kit_remote_http_bridge._apply_web_fields / _snapshot)
@@ -58,6 +58,8 @@ export type WebFields = {
   speed: number;
   log_interval: number;
   confirm_each: boolean;
+  process_time_priority: boolean;
+  init_inout: boolean;
   init_bp1: boolean;
   init_bp2: boolean;
   init_bp3: boolean;
@@ -65,6 +67,14 @@ export type WebFields = {
   init_ep1: boolean;
   init_ep2: boolean;
   init_ep3: boolean;
+  fault_inout: boolean;
+  fault_bp1: boolean;
+  fault_bp2: boolean;
+  fault_bp3: boolean;
+  fault_bp4: boolean;
+  fault_ep1: boolean;
+  fault_ep2: boolean;
+  fault_ep3: boolean;
   oht_min: number;
   oht_max: number;
   bp1_bp_min: number;
@@ -108,6 +118,8 @@ function defaultForm(): WebFields {
     speed: 1,
     log_interval: 0,
     confirm_each: false,
+    process_time_priority: false,
+    init_inout: false,
     init_bp1: false,
     init_bp2: false,
     init_bp3: false,
@@ -115,6 +127,14 @@ function defaultForm(): WebFields {
     init_ep1: false,
     init_ep2: false,
     init_ep3: false,
+    fault_inout: false,
+    fault_bp1: false,
+    fault_bp2: false,
+    fault_bp3: false,
+    fault_bp4: false,
+    fault_ep1: false,
+    fault_ep2: false,
+    fault_ep3: false,
     oht_min: 5,
     oht_max: 10,
     bp1_bp_min: 5,
@@ -173,7 +193,7 @@ function portCellClass(v: string): string {
 
 export default function TbsSimulation() {
   const [form, setForm] = useState<WebFields>(defaultForm);
-  const [logMode, setLogMode] = useState(0);
+  // 표시모드 제거: 항상 둘다(진행현황+이력로그)
   const [snapshot, setSnapshot] = useState<ApiState>({});
   const [banner, setBanner] = useState<{ msg: string; ok: boolean }>({
     msg: "상태 확인 중…",
@@ -255,14 +275,7 @@ export default function TbsSimulation() {
     }
   };
 
-  const handleLogModeChange = async (index: number) => {
-    setLogMode(index);
-    try {
-      await apiCommand({ cmd: "log_mode", index });
-    } catch (e) {
-      console.warn(e);
-    }
-  };
+  // 표시모드 제거: log_mode 명령/상태는 더 이상 사용하지 않음
 
   const handleChromeHideChange = async (hidden: boolean) => {
     setChromeHide(hidden);
@@ -274,17 +287,21 @@ export default function TbsSimulation() {
     }
   };
 
-  const showProgress = logMode === 0 || logMode === 1;
-  const showHistory = logMode === 0 || logMode === 2;
+  const showProgress = true;
+  const showHistory = true;
 
   const ep3Port = snapshot.ep3_visible !== false;
+  const ep3Enabled = form.ep_count_index !== 0;
+  const showBp4 = ep3Enabled;
+  const showEp3InitRow = ep3Enabled;
 
   const portCells = useMemo(() => {
     const ports = snapshot.ports || {};
     return PORT_ORDER.map((name) => {
       const raw = ports[name] != null ? String(ports[name]) : "-";
       const v = raw;
-      const label = `${name}:${v}`;
+      const prefix = name === "INOUT" ? "IN/OUT" : name;
+      const label = `${prefix}:${v}`;
       return (
         <div key={name} className={portCellClass(v)}>
           {label}
@@ -478,6 +495,10 @@ export default function TbsSimulation() {
         <p className={styles.hint}>초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)</p>
         <div className={styles.checkRow}>
           <label>
+            <input type="checkbox" checked={form.init_inout} onChange={(e) => setField("init_inout", e.target.checked)} />{" "}
+            IN/OUT
+          </label>
+          <label>
             <input type="checkbox" checked={form.init_bp1} onChange={(e) => setField("init_bp1", e.target.checked)} />{" "}
             BP1
           </label>
@@ -489,7 +510,7 @@ export default function TbsSimulation() {
             <input type="checkbox" checked={form.init_bp3} onChange={(e) => setField("init_bp3", e.target.checked)} />{" "}
             BP3
           </label>
-          <label>
+          <label className={showBp4 ? "" : styles.hidden}>
             <input type="checkbox" checked={form.init_bp4} onChange={(e) => setField("init_bp4", e.target.checked)} />{" "}
             BP4
           </label>
@@ -505,6 +526,42 @@ export default function TbsSimulation() {
           </label>
           <label className={showEp3InitRow ? "" : styles.hidden}>
             <input type="checkbox" checked={form.init_ep3} onChange={(e) => setField("init_ep3", e.target.checked)} /> EP3
+          </label>
+        </div>
+
+        <p className={styles.hint}>고장(비가동) 포트 (체크 시 EMPTY로 간주 / 이동 불가)</p>
+        <div className={styles.checkRow}>
+          <label>
+            <input type="checkbox" checked={form.fault_inout} onChange={(e) => setField("fault_inout", e.target.checked)} />{" "}
+            IN/OUT
+          </label>
+          <label>
+            <input type="checkbox" checked={form.fault_bp1} onChange={(e) => setField("fault_bp1", e.target.checked)} />{" "}
+            BP1
+          </label>
+          <label>
+            <input type="checkbox" checked={form.fault_bp2} onChange={(e) => setField("fault_bp2", e.target.checked)} />{" "}
+            BP2
+          </label>
+          <label>
+            <input type="checkbox" checked={form.fault_bp3} onChange={(e) => setField("fault_bp3", e.target.checked)} />{" "}
+            BP3
+          </label>
+          <label className={showBp4 ? "" : styles.hidden}>
+            <input type="checkbox" checked={form.fault_bp4} onChange={(e) => setField("fault_bp4", e.target.checked)} /> BP4
+          </label>
+        </div>
+        <div className={styles.checkRow}>
+          <label>
+            <input type="checkbox" checked={form.fault_ep1} onChange={(e) => setField("fault_ep1", e.target.checked)} />{" "}
+            EP1
+          </label>
+          <label>
+            <input type="checkbox" checked={form.fault_ep2} onChange={(e) => setField("fault_ep2", e.target.checked)} />{" "}
+            EP2
+          </label>
+          <label className={showEp3InitRow ? "" : styles.hidden}>
+            <input type="checkbox" checked={form.fault_ep3} onChange={(e) => setField("fault_ep3", e.target.checked)} /> EP3
           </label>
         </div>
         <div className={styles.row}>
@@ -588,6 +645,14 @@ export default function TbsSimulation() {
           <label>
             <input
               type="checkbox"
+              checked={form.process_time_priority}
+              onChange={(e) => setField("process_time_priority", e.target.checked)}
+            />{" "}
+            공정설정 시간 우선
+          </label>
+          <label>
+            <input
+              type="checkbox"
               checked={form.confirm_each}
               onChange={(e) => setField("confirm_each", e.target.checked)}
             />{" "}
@@ -606,28 +671,18 @@ export default function TbsSimulation() {
           </button>
         </div>
         <div className={styles.row}>
-          <label htmlFor="tbs_log_mode">표시모드</label>
-          <select
-            id="tbs_log_mode"
-            value={logMode}
-            onChange={(e) => handleLogModeChange(parseInt(e.target.value, 10) || 0)}
-          >
-            <option value="0">둘다</option>
-            <option value="1">진행현황</option>
-            <option value="2">이력로그</option>
-          </select>
           <button type="button" disabled={busy} onClick={() => runCmd(() => apiCommand({ cmd: "copy_progress" }))}>
-            진행현황 복사
+            진행현황+Sim로그 복사
           </button>
         </div>
 
         <div id="tbs_panelPort">
           <p className={styles.portHeader}>{snapshot.port_header || "[포트상태]"}</p>
           <div className={styles.portGrid}>
-            <div className={styles.portRow}>{portCells.slice(0, 3)}</div>
+            <div className={styles.portRow}>{portCells.slice(0, 4)}</div>
             <div className={styles.portRow}>
-              {portCells.slice(3, 6)}
-              <div className={ep3Port ? undefined : styles.hidden}>{portCells[6]}</div>
+              {portCells.slice(4, 7)}
+              <div className={ep3Port ? undefined : styles.hidden}>{portCells[7]}</div>
             </div>
           </div>
         </div>

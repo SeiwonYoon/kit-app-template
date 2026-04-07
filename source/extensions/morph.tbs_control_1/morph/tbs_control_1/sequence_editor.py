@@ -34,7 +34,7 @@ sequence_editor.py — TBS 시퀀스 편집기 UI (별도 창)
   5) sequence_engine._start_step 분기 구현
 - JSON을 시뮬레이션에서 재사용할 때:
   · 본 파일은 편집/저장 담당, 실제 이벤트 매핑 실행은 control_window.py
-  · 파일 경로 등록은 config/event_animation_rules.json 또는 event_animation_map.json
+  · 파일 경로: control_window.EVENT_JSON_CASE_MAP(최우선) 또는 event_animation_rules.json / event_animation_map.json
 
 【주요 메서드 색인】
 - 창/스텝: __init__, _build_ui, _build_one_step, _build_step_row*, _ui_step_move/usd_timeline/rotate/delay

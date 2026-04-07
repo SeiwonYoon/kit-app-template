@@ -74,37 +74,26 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 주의:
 - 실제 실행 우선순위는 `EVENT_JSON_CASE_MAP` → rules(`config/event_animation_rules.json`) → map(`config/event_animation_map.json`) 순이다.
 - 아래 목록은 코드 내 기본 테이블 `EVENT_JSON_CASE_MAP` 기준이며, payload의 키는 seq + (from_port_id/to_port_id 또는 port_id)이다.
+- 포트 ID: **INOUT**(IN/OUT), 버퍼 **BP1~BP4**(EP3 구성일 때만 BP4 사용), **EP1~EP3**.
 
 1) 생성/투입(OHT 운반) — 애니는 ARRIVED에서만
 - **이벤트(sequence_name)**: `EAPEIS_PORT_ARRIVED`
-- **조건**: `from_port_id="OHT"`, `to_port_id="BP1|EP1|EP2|EP3"`
+- **조건·케이스맵 키**
+  - OHT→EP 직접 투입: `from_port_id="OHT"`, `to_port_id="EP1|EP2|EP3"` → 키 `OHT->EPn`
+  - OHT→IN/OUT 안착: `port_id="INOUT"` 만 전달(from/to 없음) → 키 `INOUT`
 - **JSON**
-  - OHT->BP1: `data/sim_sequences/arrived_bp1.json`
-  - OHT->EP1: `data/sim_sequences/arrived_ep1.json`
-  - OHT->EP2: `data/sim_sequences/arrived_ep2.json`
-  - OHT->EP3: `data/sim_sequences/arrived_ep3.json`
+  - `arrived_inout.json` — IN/OUT 안착
+  - `arrived_ep1.json` … `arrived_ep3.json` — EP 직접 투입
 
-2) BP1 → BP(버퍼) 이동 — 애니 실행
+2) IN/OUT → 버퍼(BP) 이동 — 애니 실행
 - **이벤트(sequence_name)**: `EAPEIS_PORT_MOVE_TRANSFERING`
-- **조건**: `from_port_id="BP1"`, `to_port_id="BP2|BP3|BP4"`
-- **JSON**
-  - BP1->BP2: `data/sim_sequences/move_bp1_bp2.json`
-  - BP1->BP3: `data/sim_sequences/move_bp1_bp3.json`
-  - BP1->BP4: `data/sim_sequences/move_bp1_bp4.json`
+- **조건**: `from_port_id="INOUT"`, `to_port_id="BP1|BP2|BP3|BP4"`
+- **JSON**: `move_inout_bp1.json` … `move_inout_bp4.json` (도착 버퍼별)
 
-3) BP → EP(공정포트) 이동 — 애니 실행
+3) 버퍼 → EP(공정포트) 이동 — 애니 실행
 - **이벤트(sequence_name)**: `EISEAP_PORT_MOVE_REQ`
-- **조건**: `from_port_id="BP2|BP3|BP4"`, `to_port_id="EP1|EP2|EP3"`
-- **JSON**
-  - BP2->EP1: `data/sim_sequences/move_bp2_ep1.json`
-  - BP2->EP2: `data/sim_sequences/move_bp2_ep2.json`
-  - BP2->EP3: `data/sim_sequences/move_bp2_ep3.json`
-  - BP3->EP1: `data/sim_sequences/move_bp3_ep1.json`
-  - BP3->EP2: `data/sim_sequences/move_bp3_ep2.json`
-  - BP3->EP3: `data/sim_sequences/move_bp3_ep3.json`
-  - BP4->EP1: `data/sim_sequences/move_bp4_ep1.json`
-  - BP4->EP2: `data/sim_sequences/move_bp4_ep2.json`
-  - BP4->EP3: `data/sim_sequences/move_bp4_ep3.json`
+- **조건**: `from_port_id="BP1|BP2|BP3|BP4"`, `to_port_id="EP1|EP2|EP3"`
+- **JSON**: `move_{버퍼}_{EP}.json` (예: `move_bp1_ep1.json`, `move_bp4_ep3.json`)
 
 4) 회수 우선 실행 — 애니는 REMOVED에서만
 - **이벤트(sequence_name)**: `EAPEIS_PORT_REMOVED`
@@ -154,7 +143,7 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import random
 import threading
 import time
@@ -243,20 +232,21 @@ SIM_SEQ_ALIAS = {
 # - 운영 중 수정은 이 테이블을 우선 수정한다.
 # - key 규칙:
 #   * READYTOLOAD/READYTOUNLOAD: 애니 없음(매핑 비워둠)
-#   * ARRIVED: OHT 이동 애니만 실행 → key="FROM->TO" (예: OHT->EP1, OHT->BP1)
-#   * EAPEIS_PORT_MOVE_TRANSFERING: BP1->BPx 이동 애니만 실행 → key="FROM->TO"
+#   * ARRIVED: OHT 이동 애니만 실행 → key="FROM->TO"(직접 EP) 또는 port만 있으면 key=port(INOUT 안착)
+#   * EAPEIS_PORT_MOVE_TRANSFERING: INOUT->BPx 이동 애니만 실행 → key="FROM->TO"
 #   * EISEAP_PORT_MOVE_REQ: BPx->EPy 이동 애니만 실행 → key="FROM->TO"
 #   * REMOVED: 회수 우선순위가 되었을 때 회수 애니 실행 → key="PORT" (EP1/2/3)
 EVENT_JSON_CASE_MAP: Dict[str, Dict[str, str]] = {
-    # 요구사항: OHT 이동은 ARRIVED에서만(=MOVE 불필요)
+    # IN/OUT → 버퍼: 시뮬 payload from=INOUT, to=BP1..BP4
     xml_generator.SEQ_MOVE_TRANSFERING: {
-        "BP1->BP2": "data/sim_sequences/move_bp1_bp2.json",  # BP1 LOT를 BP2 버퍼로 이송
-        "BP1->BP3": "data/sim_sequences/move_bp1_bp3.json",  # BP1 LOT를 BP3 버퍼로 이송
-        "BP1->BP4": "data/sim_sequences/move_bp1_bp4.json",  # BP1 LOT를 BP4 버퍼로 이송
+        "INOUT->BP1": "data/sim_sequences/move_inout_bp1.json",
+        "INOUT->BP2": "data/sim_sequences/move_inout_bp2.json",
+        "INOUT->BP3": "data/sim_sequences/move_inout_bp3.json",
+        "INOUT->BP4": "data/sim_sequences/move_inout_bp4.json",
     },
     xml_generator.SEQ_ARRIVED: {
-        # 요구사항: ARRIVED는 "OHT가 옮기는 모든 애니" 트리거. FROM->TO 로 매핑한다.
-        "OHT->BP1": "data/sim_sequences/arrived_bp1.json",
+        # OHT→EP 직접: FROM->TO / OHT→IN/OUT 안착: port_id만 → 키 INOUT
+        "INOUT": "data/sim_sequences/arrived_inout.json",
         "OHT->EP1": "data/sim_sequences/arrived_ep1.json",
         "OHT->EP2": "data/sim_sequences/arrived_ep2.json",
         "OHT->EP3": "data/sim_sequences/arrived_ep3.json",
@@ -266,6 +256,9 @@ EVENT_JSON_CASE_MAP: Dict[str, Dict[str, str]] = {
     xml_generator.SEQ_READYTOUNLOAD: {},
     # 요구사항: BP->EP 이동 애니는 EISEAP_PORT_MOVE_REQ 에서만 실행
     xml_generator.SEQ_MOVE_REQ: {
+        "BP1->EP1": "data/sim_sequences/move_bp1_ep1.json",
+        "BP1->EP2": "data/sim_sequences/move_bp1_ep2.json",
+        "BP1->EP3": "data/sim_sequences/move_bp1_ep3.json",
         "BP2->EP1": "data/sim_sequences/move_bp2_ep1.json",
         "BP2->EP2": "data/sim_sequences/move_bp2_ep2.json",
         "BP2->EP3": "data/sim_sequences/move_bp2_ep3.json",
@@ -282,6 +275,10 @@ EVENT_JSON_CASE_MAP: Dict[str, Dict[str, str]] = {
         "EP3": "data/sim_sequences/removed_ep3.json",  # EP3에서 LOT/Foup 회수 완료 연출
     },
 }
+
+def _case_map_port_token(p: str) -> str:
+    """이벤트 payload 포트 문자열을 케이스맵 키용으로 정규화(대문자·트림)."""
+    return str(p or "").strip().upper()
 SAMPLE_GENERATOR_JSON = """{
   "objects": ["Mesh_308", "Mesh_561", "WalkwayEndA_01"],
   "animation": {
@@ -419,9 +416,9 @@ def _resolve_event_case_map_entry(seq: str, payload: Dict[str, str]) -> Tuple[Op
     table = EVENT_JSON_CASE_MAP.get(seq, {})
     if not isinstance(table, dict) or not table:
         return (None, None, None)
-    p_from = str(payload.get("from_port_id", "") or "").strip().upper()
-    p_to = str(payload.get("to_port_id", "") or "").strip().upper()
-    p_port = str(payload.get("port_id", "") or "").strip().upper()
+    p_from = _case_map_port_token(str(payload.get("from_port_id", "") or ""))
+    p_to = _case_map_port_token(str(payload.get("to_port_id", "") or ""))
+    p_port = _case_map_port_token(str(payload.get("port_id", "") or ""))
     key = f"{p_from}->{p_to}" if p_from and p_to else p_port
     if not key:
         return (None, None, None)
@@ -753,8 +750,17 @@ def _execute_mapped_sequence_stub(
                     sp = max(0.1, float(m.get_value_as_float()))
             except Exception:
                 sp = 1.0
-            if sp > 1.0 and pause_evt is not None:
-                print("호출됨!!!!")
+            proc_priority = False
+            try:
+                ppm = getattr(ext, "_sim_process_time_priority_model", None)
+                if ppm is not None:
+                    proc_priority = bool(ppm.get_value_as_bool())
+            except Exception:
+                proc_priority = False
+
+            # 배속>1일 때: 애니메이션이 실제로 진행되는 동안 tick이 너무 앞서가면
+            # 다음 공정이 애니 종료 전 시작될 수 있어, (공정시간 우선 OFF인 경우에만) tick을 잠시 멈춘다.
+            if (not proc_priority) and sp > 1.0 and pause_evt is not None:
                 try:
                     pause_evt.set()
                 except Exception:
@@ -946,6 +952,8 @@ def build_control_window(ext: Any) -> None:
     ext._sim_speed_model = ui.SimpleFloatModel(1.0)
     ext._sim_log_interval_model = ui.SimpleFloatModel(0.0)
     ext._sim_confirm_each_step_model = ui.SimpleBoolModel(False)
+    # 공정설정 시간 우선(기본 OFF)
+    ext._sim_process_time_priority_model = ui.SimpleBoolModel(False)
     ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(5.0)
     ext._sim_oht_bp1_max_model = ui.SimpleFloatModel(10.0)
     ext._sim_bp1_bp_min_model = ui.SimpleFloatModel(5.0)
@@ -955,6 +963,9 @@ def build_control_window(ext: Any) -> None:
     ext._sim_ep_oht_min_model = ui.SimpleFloatModel(5.0)
     ext._sim_ep_oht_max_model = ui.SimpleFloatModel(10.0)
     ext._sim_ep_count_combo = None
+    # 초기 적재 포트: IN/OUT + BP1~BP4 + EP1~EP3
+    # (EP 개수=2이면 BP4/EP3은 UI에서 숨기며 값도 강제로 False로 유지)
+    ext._sim_init_inout_model = ui.SimpleBoolModel(False)
     ext._sim_init_bp1_model = ui.SimpleBoolModel(False)
     ext._sim_init_bp2_model = ui.SimpleBoolModel(False)
     ext._sim_init_bp3_model = ui.SimpleBoolModel(False)
@@ -962,7 +973,19 @@ def build_control_window(ext: Any) -> None:
     ext._sim_init_ep1_model = ui.SimpleBoolModel(False)
     ext._sim_init_ep2_model = ui.SimpleBoolModel(False)
     ext._sim_init_ep3_model = ui.SimpleBoolModel(False)
+    ext._sim_init_bp4_row = None
     ext._sim_init_ep3_row = None
+    # 고장(비가동) 포트 체크박스 모델(런타임 변경 가능)
+    ext._sim_fault_inout_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_bp1_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_bp2_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_bp3_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_bp4_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_ep1_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_ep2_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_ep3_model = ui.SimpleBoolModel(False)
+    ext._sim_fault_bp4_row = None
+    ext._sim_fault_ep3_row = None
     ext._sim_log_text = ui.SimpleStringModel("[SIM] 대기 중")
     ext._sim_history_text = ui.SimpleStringModel("[SIM] 대기 중")
     ext._sim_progress_text = ui.SimpleStringModel("[진행현황] 없음")
@@ -991,6 +1014,7 @@ def build_control_window(ext: Any) -> None:
     ext._sim_port_state_header_label = None
     ext._sim_port_cells = {}
     ext._sim_port_cell_boxes = {}
+    ext._sim_port_bp4_cell_container = None
     ext._sim_port_ep3_cell = None
     ext._sim_port_ep3_cell_container = None
     ext._sim_progress_label = None
@@ -1101,10 +1125,13 @@ def build_control_window(ext: Any) -> None:
                             ui.FloatField(model=ext._sim_pickup_evt_max_model, width=55)
                         ui.Label("초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)", height=20)
                         with ui.HStack(spacing=8, height=26):
+                            ui.Label("IN/OUT", width=55); ui.CheckBox(model=ext._sim_init_inout_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("BP1", width=30); ui.CheckBox(model=ext._sim_init_bp1_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("BP2", width=30); ui.CheckBox(model=ext._sim_init_bp2_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("BP3", width=30); ui.CheckBox(model=ext._sim_init_bp3_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("BP4", width=30); ui.CheckBox(model=ext._sim_init_bp4_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ext._sim_init_bp4_row = ui.HStack(spacing=8, height=26)
+                            with ext._sim_init_bp4_row:
+                                ui.Label("BP4", width=30); ui.CheckBox(model=ext._sim_init_bp4_model, width=30, style=CHECKBOX_WHITE_STYLE)
                         with ui.HStack(spacing=8, height=26):
                             ui.Label("EP1", width=30); ui.CheckBox(model=ext._sim_init_ep1_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("EP2", width=30); ui.CheckBox(model=ext._sim_init_ep2_model, width=30, style=CHECKBOX_WHITE_STYLE)
@@ -1116,6 +1143,7 @@ def build_control_window(ext: Any) -> None:
                         except Exception:
                             pass
                         for mdl in (
+                            ext._sim_init_inout_model,
                             ext._sim_init_bp1_model,
                             ext._sim_init_bp2_model,
                             ext._sim_init_bp3_model,
@@ -1129,6 +1157,69 @@ def build_control_window(ext: Any) -> None:
                             except Exception:
                                 pass
                         on_sim_ep_count_changed(ext)
+                        ui.Spacer(height=2)
+                        ui.Label("고장(비가동) 포트 (체크 시 해당 포트는 라우팅에서 제외, 실행 중에도 즉시 반영)", height=20)
+
+                        def _collect_faulty_ports() -> Set[str]:
+                            out: Set[str] = set()
+                            try:
+                                if ext._sim_fault_inout_model.get_value_as_bool():
+                                    out.add("INOUT")
+                                if ext._sim_fault_bp1_model.get_value_as_bool():
+                                    out.add("BP1")
+                                if ext._sim_fault_bp2_model.get_value_as_bool():
+                                    out.add("BP2")
+                                if ext._sim_fault_bp3_model.get_value_as_bool():
+                                    out.add("BP3")
+                                if ext._sim_fault_bp4_model.get_value_as_bool():
+                                    out.add("BP4")
+                                if ext._sim_fault_ep1_model.get_value_as_bool():
+                                    out.add("EP1")
+                                if ext._sim_fault_ep2_model.get_value_as_bool():
+                                    out.add("EP2")
+                                if ext._sim_fault_ep3_model.get_value_as_bool():
+                                    out.add("EP3")
+                            except Exception:
+                                pass
+                            return out
+
+                        def _on_faulty_changed(_m=None):
+                            # 엔진이 동작 중이면 즉시 반영: 다음 선택부터 고장포트 회피
+                            sim = getattr(ext, "_sim_engine", None)
+                            if sim is not None:
+                                try:
+                                    sim.kick_serial_flow()
+                                except Exception:
+                                    pass
+
+                        with ui.HStack(spacing=8, height=26):
+                            ui.Label("IN/OUT", width=55); ui.CheckBox(model=ext._sim_fault_inout_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("BP1", width=30); ui.CheckBox(model=ext._sim_fault_bp1_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("BP2", width=30); ui.CheckBox(model=ext._sim_fault_bp2_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("BP3", width=30); ui.CheckBox(model=ext._sim_fault_bp3_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ext._sim_fault_bp4_row = ui.HStack(spacing=8, height=26)
+                            with ext._sim_fault_bp4_row:
+                                ui.Label("BP4", width=30); ui.CheckBox(model=ext._sim_fault_bp4_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                        with ui.HStack(spacing=8, height=26):
+                            ui.Label("EP1", width=30); ui.CheckBox(model=ext._sim_fault_ep1_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("EP2", width=30); ui.CheckBox(model=ext._sim_fault_ep2_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ext._sim_fault_ep3_row = ui.HStack(spacing=8, height=26)
+                            with ext._sim_fault_ep3_row:
+                                ui.Label("EP3", width=30); ui.CheckBox(model=ext._sim_fault_ep3_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                        for mdl in (
+                            ext._sim_fault_inout_model,
+                            ext._sim_fault_bp1_model,
+                            ext._sim_fault_bp2_model,
+                            ext._sim_fault_bp3_model,
+                            ext._sim_fault_bp4_model,
+                            ext._sim_fault_ep1_model,
+                            ext._sim_fault_ep2_model,
+                            ext._sim_fault_ep3_model,
+                        ):
+                            try:
+                                mdl.add_value_changed_fn(lambda m: _on_faulty_changed(m))
+                            except Exception:
+                                pass
                         with ui.HStack(spacing=8, height=28):
                             ui.Label("OHT→BP/EP", width=100)
                             ui.FloatField(model=ext._sim_oht_bp1_min_model, width=70)
@@ -1152,16 +1243,15 @@ def build_control_window(ext: Any) -> None:
                             ui.FloatField(model=ext._sim_speed_model, width=80)
                             ui.Label("로그주기(s)", width=70)
                             ui.FloatField(model=ext._sim_log_interval_model, width=70)
+                            ui.CheckBox(model=ext._sim_process_time_priority_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("공정설정 시간 우선", width=120)
                             ui.CheckBox(model=ext._sim_confirm_each_step_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("각 공정 확인", width=80)
                             ui.Button("시작", width=80, clicked_fn=lambda: on_sim_start_clicked(ext))
                             ui.Button("정지", width=80, clicked_fn=lambda: on_sim_stop_clicked(ext))
                             ui.Button("리셋", width=80, clicked_fn=lambda: on_sim_reset_clicked(ext))
                         with ui.HStack(spacing=8, height=24):
-                            ui.Label("표시모드", width=60)
-                            ext._sim_log_view_combo = ui.ComboBox(0, "둘다", "진행현황", "이력로그")
-                            ext._sim_log_view_combo.model.add_item_changed_fn(lambda m, *a: on_sim_log_view_changed(ext))
-                            ui.Button("진행현황 복사", width=100, clicked_fn=lambda: on_copy_sim_progress(ext))
+                            ui.Button("진행현황+Sim로그 복사", width=160, clicked_fn=lambda: on_copy_sim_progress(ext))
                         ext._sim_port_state_frame = ui.ScrollingFrame(height=120)
                         with ext._sim_port_state_frame:
                             with ui.VStack(spacing=4):
@@ -1170,18 +1260,22 @@ def build_control_window(ext: Any) -> None:
                                 with ui.VStack(spacing=4):
                                     with ui.HStack(spacing=4, height=24):
                                         with ui.ZStack(width=90, height=24):
+                                            ext._sim_port_cell_boxes["BP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                        with ui.ZStack(width=90, height=24):
                                             ext._sim_port_cell_boxes["BP2"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
                                             ext._sim_port_cells["BP2"] = ui.Label("BP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
                                         with ui.ZStack(width=90, height=24):
                                             ext._sim_port_cell_boxes["BP3"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
                                             ext._sim_port_cells["BP3"] = ui.Label("BP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                                        with ui.ZStack(width=90, height=24):
+                                        ext._sim_port_bp4_cell_container = ui.ZStack(width=90, height=24)
+                                        with ext._sim_port_bp4_cell_container:
                                             ext._sim_port_cell_boxes["BP4"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
                                             ext._sim_port_cells["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
                                     with ui.HStack(spacing=4, height=24):
                                         with ui.ZStack(width=90, height=24):
-                                            ext._sim_port_cell_boxes["BP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
-                                            ext._sim_port_cells["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                            ext._sim_port_cell_boxes["INOUT"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
+                                            ext._sim_port_cells["INOUT"] = ui.Label("IN/OUT:-", width=90, height=24, style={"color": 0xFFFFFFFF})
                                         with ui.ZStack(width=90, height=24):
                                             ext._sim_port_cell_boxes["EP1"] = ui.Rectangle(style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1})
                                             ext._sim_port_cells["EP1"] = ui.Label("EP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
@@ -1208,7 +1302,11 @@ def build_control_window(ext: Any) -> None:
                                 "", word_wrap=True, height=136, style={"color": 0xFFFFFFFF}
                             )
                             ext._sim_history_label.text = ext._sim_history_text.as_string
-                        on_sim_log_view_changed(ext)
+                        # 표시모드 제거: 항상 둘다(진행현황+이력로그) 표시
+                        if getattr(ext, "_sim_progress_frame", None) is not None:
+                            ext._sim_progress_frame.visible = True
+                        if getattr(ext, "_sim_history_frame", None) is not None:
+                            ext._sim_history_frame.visible = True
                 ui.Spacer(height=6)
                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
                 ui.Spacer(height=8)
@@ -1411,8 +1509,7 @@ def _compact_cell_value(v: str, max_len: int = 10) -> str:
 
 def _sync_ep3_port_cell_visibility(ext: Any) -> None:
     container = getattr(ext, "_sim_port_ep3_cell_container", None)
-    if container is None:
-        return
+    bp4_container = getattr(ext, "_sim_port_bp4_cell_container", None)
     try:
         ep_idx = ext._sim_ep_count_combo.model.get_item_value_model().as_int
     except Exception:
@@ -1425,7 +1522,11 @@ def _sync_ep3_port_cell_visibility(ext: Any) -> None:
             checked = False
     # 일부 환경에서 체크 이벤트 반영이 지연되는 문제를 피하기 위해
     # EP 개수=3이면 EP3 칸은 항상 보이게 유지하고, 체크 여부는 초기 적재 로직에서 사용.
-    container.visible = bool(ep_idx == 1)
+    is_ep3 = bool(ep_idx == 1)
+    if container is not None:
+        container.visible = is_ep3
+    if bp4_container is not None:
+        bp4_container.visible = is_ep3
 
 
 def _set_port_box_style(ext: Any, port: str, value: str) -> None:
@@ -1448,10 +1549,11 @@ def _set_port_box_style(ext: Any, port: str, value: str) -> None:
 def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = "") -> None:
     if not isinstance(occ, dict):
         return
+    inout = _port_cell_text(occ, "INOUT")
+    bp1 = _port_cell_text(occ, "BP1")
     bp2 = _port_cell_text(occ, "BP2")
     bp3 = _port_cell_text(occ, "BP3")
     bp4 = _port_cell_text(occ, "BP4")
-    bp1 = _port_cell_text(occ, "BP1")
     ep1 = _port_cell_text(occ, "EP1")
     ep2 = _port_cell_text(occ, "EP2")
     ep3 = _port_cell_text(occ, "EP3")
@@ -1461,6 +1563,12 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
         ext._sim_port_state_header_label.text = head
     _sync_ep3_port_cell_visibility(ext)
     cells = getattr(ext, "_sim_port_cells", {}) or {}
+    if "INOUT" in cells:
+        cells["INOUT"].text = f"IN/OUT:{_compact_cell_value(inout)}"
+        _set_port_box_style(ext, "INOUT", inout)
+    if "BP1" in cells:
+        cells["BP1"].text = f"BP1:{_compact_cell_value(bp1)}"
+        _set_port_box_style(ext, "BP1", bp1)
     if "BP2" in cells:
         cells["BP2"].text = f"BP2:{_compact_cell_value(bp2)}"
         _set_port_box_style(ext, "BP2", bp2)
@@ -1470,9 +1578,6 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
     if "BP4" in cells:
         cells["BP4"].text = f"BP4:{_compact_cell_value(bp4)}"
         _set_port_box_style(ext, "BP4", bp4)
-    if "BP1" in cells:
-        cells["BP1"].text = f"BP1:{_compact_cell_value(bp1)}"
-        _set_port_box_style(ext, "BP1", bp1)
     if "EP1" in cells:
         cells["EP1"].text = f"EP1:{_compact_cell_value(ep1)}"
         _set_port_box_style(ext, "EP1", ep1)
@@ -1837,16 +1942,8 @@ def _drain_sim_log_queue(ext: Any) -> None:
         q = getattr(ext, "_sim_log_queue", None)
         if q is None:
             return
-        try:
-            view_idx = ext._sim_log_view_combo.model.get_item_value_model().as_int
-        except Exception:
-            view_idx = 0
-        if view_idx > int(SimLogPanelMode.HISTORY_ONLY):
-            view_idx = int(SimLogPanelMode.ALL)
-        try:
-            panel_mode = SimLogPanelMode(int(view_idx))
-        except Exception:
-            panel_mode = SimLogPanelMode.ALL
+        # 표시모드 제거: 항상 둘다(진행현황+이력로그)
+        panel_mode = SimLogPanelMode.ALL
         count = 0
         # 중요: UI 프레임 1회당 처리량 상한.
         # 큐가 많아도 렌더링 starvation을 막기 위해 200개까지만 드레인한다.
@@ -2218,10 +2315,8 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
 
 
 def _is_progress_only_mode(ext: Any) -> bool:
-    try:
-        return ext._sim_log_view_combo.model.get_item_value_model().as_int == int(SimLogPanelMode.PROGRESS_ONLY)
-    except Exception:
-        return False
+    # 표시모드 제거: 진행현황 전용 모드는 더 이상 사용하지 않는다.
+    return False
 
 
 def _export_sim_logs_to_xlsx(ext: Any) -> None:
@@ -2248,11 +2343,24 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
     ws1 = wb.active
     ws1.title = "진행현황"
     ws2 = wb.create_sheet("이력로그")
+    ws3 = wb.create_sheet("리포트")
 
     for idx, row in enumerate(progress_rows, start=1):
         ws1.cell(row=idx, column=1, value=row)
     for idx, row in enumerate(history_rows, start=1):
         ws2.cell(row=idx, column=1, value=row)
+
+    # 리포트: 엔진 요약(총시간, 포트별 유휴/고장 등)
+    rep = ""
+    try:
+        sim = getattr(ext, "_sim_engine", None)
+        if sim is not None and hasattr(sim, "get_report_text"):
+            rep = str(sim.get_report_text() or "")
+    except Exception:
+        rep = ""
+    rep_rows = [ln for ln in (rep or "").splitlines() if ln.strip()] or ["(리포트 없음)"]
+    for idx, row in enumerate(rep_rows, start=1):
+        ws3.cell(row=idx, column=1, value=row)
 
     wb.save(str(out_path))
     _append_sim_log(ext, f"[SIM EXPORT] 저장 완료: {out_path}")
@@ -2298,6 +2406,8 @@ def on_sim_start_clicked(ext: Any) -> None:
     ep_count = 2 if ep_count_idx == 0 else 3
 
     initial_full_ports: List[str] = []
+    if ext._sim_init_inout_model.get_value_as_bool():
+        initial_full_ports.append("INOUT")
     if ext._sim_init_bp1_model.get_value_as_bool():
         initial_full_ports.append("BP1")
     if ext._sim_init_bp2_model.get_value_as_bool():
@@ -2346,6 +2456,7 @@ def on_sim_start_clicked(ext: Any) -> None:
         ep_count=ep_count,
         initial_full_ports=initial_full_ports,
         max_oht_lots=lot_count,
+        process_time_priority=bool(getattr(ext, "_sim_process_time_priority_model", None) is not None and ext._sim_process_time_priority_model.get_value_as_bool()),
     )
     lots: List[Lot] = []
 
@@ -2361,9 +2472,9 @@ def on_sim_start_clicked(ext: Any) -> None:
     if getattr(ext, "_sim_port_state_header_label", None) is not None:
         ext._sim_port_state_header_label.text = "[포트상태] 초기화 (이벤트 대기)"
     cells = getattr(ext, "_sim_port_cells", {}) or {}
-    for port in ("BP2", "BP3", "BP4", "BP1", "EP1", "EP2"):
+    for port in ("INOUT", "BP2", "BP3", "BP4", "BP1", "EP1", "EP2"):
         if port in cells:
-            cells[port].text = f"{port}:-"
+            cells[port].text = "IN/OUT:-" if port == "INOUT" else f"{port}:-"
     if getattr(ext, "_sim_port_ep3_cell", None) is not None:
         ext._sim_port_ep3_cell.text = "EP3:-"
     ext._sim_progress_rows = {}
@@ -2373,6 +2484,73 @@ def on_sim_start_clicked(ext: Any) -> None:
     _enqueue_sim_log(ext, "[SIM UI] 실시간 로그 큐 초기화")
     ext._sim_anim_active = {}
     ext._sim_anim_pending = []
+
+    def _collect_faulty_ports_for_engine() -> Set[str]:
+        out: Set[str] = set()
+        try:
+            if getattr(ext, "_sim_fault_inout_model", None) is not None and ext._sim_fault_inout_model.get_value_as_bool():
+                out.add("INOUT")
+            if getattr(ext, "_sim_fault_bp1_model", None) is not None and ext._sim_fault_bp1_model.get_value_as_bool():
+                out.add("BP1")
+            if getattr(ext, "_sim_fault_bp2_model", None) is not None and ext._sim_fault_bp2_model.get_value_as_bool():
+                out.add("BP2")
+            if getattr(ext, "_sim_fault_bp3_model", None) is not None and ext._sim_fault_bp3_model.get_value_as_bool():
+                out.add("BP3")
+            if getattr(ext, "_sim_fault_bp4_model", None) is not None and ext._sim_fault_bp4_model.get_value_as_bool():
+                out.add("BP4")
+            if getattr(ext, "_sim_fault_ep1_model", None) is not None and ext._sim_fault_ep1_model.get_value_as_bool():
+                out.add("EP1")
+            if getattr(ext, "_sim_fault_ep2_model", None) is not None and ext._sim_fault_ep2_model.get_value_as_bool():
+                out.add("EP2")
+            if getattr(ext, "_sim_fault_ep3_model", None) is not None and ext._sim_fault_ep3_model.get_value_as_bool():
+                out.add("EP3")
+        except Exception:
+            pass
+        # EP 개수=2일 때는 EP3/BP4는 무조건 제외
+        if ep_count < 3:
+            out.discard("EP3")
+            out.discard("BP4")
+        return out
+
+    def _interrupt_anim_for_proc_priority() -> None:
+        """
+        공정설정 시간 우선 모드에서 '애니가 재생 중이어도 끊고 다음 단계로 진행'을 위해 호출.
+        - 시뮬 tick pause 플래그를 해제하고
+        - 시퀀스 러너/개별 애니메이션을 stop 한다.
+        """
+        try:
+            # pending 큐 비우기(현재 모드에서는 애니 길이를 기다리지 않음)
+            ext._sim_anim_pending = []
+        except Exception:
+            pass
+        try:
+            runner = getattr(ext, "_sim_runner", None)
+            if runner is not None:
+                runner.stop()
+        except Exception:
+            pass
+        try:
+            translate_animation.stop_all_translate_animations()
+        except Exception:
+            pass
+        try:
+            rotate_animation.stop_all_rotate_animations()
+        except Exception:
+            pass
+        try:
+            curve_animation.stop_all_curve_animations()
+        except Exception:
+            pass
+        pe = getattr(ext, "_sim_tick_pause_event", None)
+        if pe is not None:
+            try:
+                pe.clear()
+            except Exception:
+                pass
+        try:
+            ext._sim_tick_pause_until_wall = None
+        except Exception:
+            pass
 
     def _on_gate(payload: Dict[str, str]) -> float:
         # 요구사항: 공정시간보다 애니(JSON) 시간이 길면 다음 공정은 애니 종료까지 대기.
@@ -2497,6 +2675,14 @@ def on_sim_start_clicked(ext: Any) -> None:
         on_gate=_on_gate,
         print_to_console=(not _is_progress_only_mode(ext)),
     )
+    # 런타임 훅 주입: 고장포트 공급 + 공정시간우선 시 애니 중단 콜백
+    try:
+        engine.set_runtime_hooks(
+            faulty_ports_supplier=_collect_faulty_ports_for_engine,
+            interrupt_anim_cb=_interrupt_anim_for_proc_priority,
+        )
+    except Exception:
+        pass
     ext._sim_engine = engine
     if not engine.start():
         _append_sim_log(ext, "[SIM] 시작 실패")
@@ -2663,9 +2849,9 @@ def on_sim_reset_clicked(ext: Any) -> None:
     if getattr(ext, "_sim_port_state_header_label", None) is not None:
         ext._sim_port_state_header_label.text = "[포트상태] 없음"
     cells = getattr(ext, "_sim_port_cells", {}) or {}
-    for port in ("BP2", "BP3", "BP4", "BP1", "EP1", "EP2"):
+    for port in ("INOUT", "BP2", "BP3", "BP4", "BP1", "EP1", "EP2"):
         if port in cells:
-            cells[port].text = f"{port}:-"
+            cells[port].text = "IN/OUT:-" if port == "INOUT" else f"{port}:-"
         # 포트 박스 배경색(점유 색상)도 EMPTY로 초기화
         try:
             _set_port_box_style(ext, port, "-")
@@ -2689,35 +2875,31 @@ def on_sim_reset_clicked(ext: Any) -> None:
 
 
 def on_sim_log_view_changed(ext: Any) -> None:
-    try:
-        idx = ext._sim_log_view_combo.model.get_item_value_model().as_int
-    except Exception:
-        idx = int(SimLogPanelMode.ALL)
-    # 구버전 콤보(4항목) 저장값 호환: 인덱스 3 이상은 둘다로 취급
-    if idx > int(SimLogPanelMode.HISTORY_ONLY):
-        idx = int(SimLogPanelMode.ALL)
-    try:
-        mode = SimLogPanelMode(int(idx))
-    except Exception:
-        mode = SimLogPanelMode.ALL
+    # 표시모드 제거: 항상 둘다(진행현황+이력로그)
     if getattr(ext, "_sim_progress_frame", None) is not None:
-        ext._sim_progress_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.PROGRESS_ONLY)
+        ext._sim_progress_frame.visible = True
     if getattr(ext, "_sim_history_frame", None) is not None:
-        ext._sim_history_frame.visible = mode in (SimLogPanelMode.ALL, SimLogPanelMode.HISTORY_ONLY)
-    sim = getattr(ext, "_sim_engine", None)
-    if sim is not None and hasattr(sim, "set_console_logging_enabled"):
-        # 진행현황 전용 모드에서는 콘솔/이력 로그 최소화
-        sim.set_console_logging_enabled(mode != SimLogPanelMode.PROGRESS_ONLY)
+        ext._sim_history_frame.visible = True
 
 
 def on_copy_sim_progress(ext: Any) -> None:
-    text = ""
+    # 확장: 진행현황 + Sim 로그(이력) 함께 복사
+    progress = ""
+    history = ""
     if getattr(ext, "_sim_progress_label", None) is not None:
-        text = ext._sim_progress_label.text or ""
-    if not text.strip() and getattr(ext, "_sim_progress_text", None):
-        text = ext._sim_progress_text.as_string or ""
+        progress = ext._sim_progress_label.text or ""
+    if not progress.strip() and getattr(ext, "_sim_progress_text", None):
+        progress = ext._sim_progress_text.as_string or ""
+    if getattr(ext, "_sim_history_label", None) is not None:
+        history = ext._sim_history_label.text or ""
+    if not history.strip() and getattr(ext, "_sim_history_text", None):
+        history = ext._sim_history_text.as_string or ""
+
+    text = (progress or "").strip()
+    if history.strip():
+        text = (text + "\n\n" if text else "") + "[Sim 로그]\n" + history.strip()
     if not text.strip():
-        _append_sim_log(ext, "[SIM UI] 복사할 진행현황이 없습니다.")
+        _append_sim_log(ext, "[SIM UI] 복사할 진행현황/Sim 로그가 없습니다.")
         return
     try:
         import omni.kit.clipboard as cb  # type: ignore
@@ -2727,9 +2909,9 @@ def on_copy_sim_progress(ext: Any) -> None:
             cb.set_text(text)
         else:
             raise RuntimeError("clipboard api not found")
-        _append_sim_log(ext, "[SIM UI] 진행현황 복사 완료")
+        _append_sim_log(ext, "[SIM UI] 진행현황+Sim 로그 복사 완료")
     except Exception:
-        print("[SIM UI] 클립보드 미지원: 진행현황을 콘솔에 출력합니다.", flush=True)
+        print("[SIM UI] 클립보드 미지원: 텍스트를 콘솔에 출력합니다.", flush=True)
         print(text, flush=True)
         _append_sim_log(ext, "[SIM UI] 클립보드 미지원으로 콘솔 출력")
 
@@ -2740,10 +2922,23 @@ def on_sim_ep_count_changed(ext: Any) -> None:
     except Exception:
         idx = 0
     is_ep3 = idx == 1
+    if getattr(ext, "_sim_init_bp4_row", None) is not None:
+        ext._sim_init_bp4_row.visible = is_ep3
+    if not is_ep3 and getattr(ext, "_sim_init_bp4_model", None) is not None:
+        ext._sim_init_bp4_model.set_value(False)
     if getattr(ext, "_sim_init_ep3_row", None) is not None:
         ext._sim_init_ep3_row.visible = is_ep3
     if not is_ep3 and getattr(ext, "_sim_init_ep3_model", None) is not None:
         ext._sim_init_ep3_model.set_value(False)
+    # 고장 포트 행도 동일 규칙 적용
+    if getattr(ext, "_sim_fault_bp4_row", None) is not None:
+        ext._sim_fault_bp4_row.visible = is_ep3
+    if not is_ep3 and getattr(ext, "_sim_fault_bp4_model", None) is not None:
+        ext._sim_fault_bp4_model.set_value(False)
+    if getattr(ext, "_sim_fault_ep3_row", None) is not None:
+        ext._sim_fault_ep3_row.visible = is_ep3
+    if not is_ep3 and getattr(ext, "_sim_fault_ep3_model", None) is not None:
+        ext._sim_fault_ep3_model.set_value(False)
     _sync_ep3_port_cell_visibility(ext)
 
 

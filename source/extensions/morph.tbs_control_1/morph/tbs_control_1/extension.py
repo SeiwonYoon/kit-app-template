@@ -40,8 +40,8 @@ import 구조 (요약)
    - simulation_engine.py: 단계 함수/선택 정책(_find_*) 수정
    - control_window.py: UI 입력 항목 전달(on_sim_start_clicked)과 로그 표기 동기화
 3) "이벤트별 JSON 애니메이션 연결 변경"
-   - config/event_animation_rules.json(권장) 또는 event_animation_map.json 수정
-   - control_window.py의 handle_sim_event_for_animation에서 매핑/실행 로그 확인
+   - control_window.EVENT_JSON_CASE_MAP(최우선) 또는 config/event_animation_rules.json / event_animation_map.json
+   - data/sim_sequences/*.json 파일명은 포트 ID(INOUT, BP1~4, EP1~3)와 이벤트 키와 일치시킴
 4) "종료/정리 누락 이슈"
    - 본 파일 on_shutdown에서 스레드/구독/애니메이션 정리 순서 확인
 """

@@ -120,7 +120,7 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
 
     ports: Dict[str, str] = {}
     cells = getattr(ext, "_sim_port_cells", None) or {}
-    for name in ("BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"):
+    for name in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"):
         lbl = cells.get(name)
         try:
             if lbl is not None:
@@ -142,6 +142,14 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
     except Exception:
         pass
 
+    bp4_visible = True
+    try:
+        c = getattr(ext, "_sim_port_bp4_cell_container", None)
+        if c is not None:
+            bp4_visible = bool(c.visible)
+    except Exception:
+        pass
+
     kit_app = ""
     try:
         kit_app = app.get_app().get_name() or ""
@@ -156,6 +164,7 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
         "port_header": port_header,
         "ports": ports,
         "ep3_visible": ep3_visible,
+        "bp4_visible": bp4_visible,
         "kit_app": kit_app,
         "kit_chrome_hidden": is_kit_chrome_hidden(ext),
     }
@@ -197,6 +206,9 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
         ext._sim_speed_model.set_value_as_float(max(0.1, _f("speed", 1.0)))
         ext._sim_log_interval_model.set_value_as_float(max(0.0, _f("log_interval", 0.0)))
         ext._sim_confirm_each_step_model.set_value_as_bool(_b("confirm_each"))
+        # 공정설정 시간 우선(=애니 길이 무시 + 진행 시 애니 중단)
+        if getattr(ext, "_sim_process_time_priority_model", None) is not None:
+            ext._sim_process_time_priority_model.set_value_as_bool(_b("process_time_priority"))
         ext._sim_oht_bp1_min_model.set_value_as_float(max(0.1, _f("oht_min", 5.0)))
         ext._sim_oht_bp1_max_model.set_value_as_float(max(0.1, _f("oht_max", 10.0)))
         ext._sim_bp1_bp_min_model.set_value_as_float(max(0.1, _f("bp1_bp_min", 5.0)))
@@ -208,6 +220,8 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
     except Exception:
         pass
     try:
+        if getattr(ext, "_sim_init_inout_model", None) is not None:
+            ext._sim_init_inout_model.set_value_as_bool(_b("init_inout"))
         ext._sim_init_bp1_model.set_value_as_bool(_b("init_bp1"))
         ext._sim_init_bp2_model.set_value_as_bool(_b("init_bp2"))
         ext._sim_init_bp3_model.set_value_as_bool(_b("init_bp3"))
@@ -215,6 +229,26 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
         ext._sim_init_ep1_model.set_value_as_bool(_b("init_ep1"))
         ext._sim_init_ep2_model.set_value_as_bool(_b("init_ep2"))
         ext._sim_init_ep3_model.set_value_as_bool(_b("init_ep3"))
+    except Exception:
+        pass
+    try:
+        # 고장(비가동) 포트
+        if getattr(ext, "_sim_fault_inout_model", None) is not None:
+            ext._sim_fault_inout_model.set_value_as_bool(_b("fault_inout"))
+        if getattr(ext, "_sim_fault_bp1_model", None) is not None:
+            ext._sim_fault_bp1_model.set_value_as_bool(_b("fault_bp1"))
+        if getattr(ext, "_sim_fault_bp2_model", None) is not None:
+            ext._sim_fault_bp2_model.set_value_as_bool(_b("fault_bp2"))
+        if getattr(ext, "_sim_fault_bp3_model", None) is not None:
+            ext._sim_fault_bp3_model.set_value_as_bool(_b("fault_bp3"))
+        if getattr(ext, "_sim_fault_bp4_model", None) is not None:
+            ext._sim_fault_bp4_model.set_value_as_bool(_b("fault_bp4"))
+        if getattr(ext, "_sim_fault_ep1_model", None) is not None:
+            ext._sim_fault_ep1_model.set_value_as_bool(_b("fault_ep1"))
+        if getattr(ext, "_sim_fault_ep2_model", None) is not None:
+            ext._sim_fault_ep2_model.set_value_as_bool(_b("fault_ep2"))
+        if getattr(ext, "_sim_fault_ep3_model", None) is not None:
+            ext._sim_fault_ep3_model.set_value_as_bool(_b("fault_ep3"))
     except Exception:
         pass
     try:
@@ -273,14 +307,7 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": True}
 
     if cmd == "log_mode":
-        idx = int(data.get("index", 0) or 0)
-        if idx > int(SimLogPanelMode.HISTORY_ONLY):
-            idx = int(SimLogPanelMode.ALL)
-        try:
-            ext._sim_log_view_combo.model.get_item_value_model().set_value(idx)
-            on_sim_log_view_changed(ext)
-        except Exception:
-            pass
+        # 표시모드 제거(항상 둘다). 과거 클라이언트 호환을 위해 ok만 반환.
         return {"ok": True}
 
     if cmd == "copy_progress":

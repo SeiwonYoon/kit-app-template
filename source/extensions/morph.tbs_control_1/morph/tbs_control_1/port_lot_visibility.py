@@ -5,7 +5,7 @@
 포트 점유(ports_occupancy)에 따라, 포트별로 매핑된 LOT 표현 prim의 보임/숨김을 맞춘다.
 
 설정: config/port_lot_prim_paths.json (확장 루트 기준)
-- 키: BP1~BP4, EP1~EP3 등 시뮬과 동일한 포트 ID
+- 키: INOUT, BP1~BP4, EP1~EP3 등 시뮬과 동일한 포트 ID
 - 값: 해당 포트의 LOT을 묘사하는 prim 절대 경로. 빈 문자열이면 이 포트는 처리하지 않음.
 
 규칙(예외 규칙 없음):
