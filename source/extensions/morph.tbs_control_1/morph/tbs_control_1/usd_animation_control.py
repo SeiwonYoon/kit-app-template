@@ -30,6 +30,7 @@ from typing import Optional, Callable
 _end_fix_sub = None
 _loop_sub = None
 _complete_sub = None
+_play_token = 0
 
 # 프로젝트 정책: 모든 애니메이션은 30fps(TPS) 기반.
 # 타임라인 인터페이스가 없거나 TPS를 얻지 못하는 예외 경로에서도 일관되게 30을 사용한다.
@@ -107,11 +108,13 @@ def play_usd_animation(
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
 ) -> bool:
-    global _loop_sub, _complete_sub, _end_fix_sub
+    global _loop_sub, _complete_sub, _end_fix_sub, _play_token
     tl = _get_timeline()
     if not tl:
         return False
     try:
+        _play_token += 1
+        my_token = int(_play_token)
         tps = tl.get_time_codes_per_seconds()
         if not tps:
             tps = DEFAULT_TPS
@@ -194,6 +197,12 @@ def play_usd_animation(
                     t = tl.get_current_time()
                     if t >= end_time - 1e-6:
                         tl.pause()
+                        # 완료 직후 즉시 end_time으로 고정해, 다음 스텝이 start_time을 세팅할 때
+                        # "end->start->end"로 튀는 레이스를 최소화한다.
+                        try:
+                            tl.set_current_time(end_time)
+                        except Exception:
+                            pass
                         global _complete_sub
                         if _complete_sub is not None:
                             try:
@@ -205,6 +214,11 @@ def play_usd_animation(
                         try:
                             import omni.kit.app as app
                             def _fix(_e=None):
+                                # 이전 재생에서 예약된 end_fix가, 다음 재생(start_time 세팅)에
+                                # 끼어들어 프레임이 튀는 것을 방지한다.
+                                global _play_token
+                                if int(_play_token) != int(my_token):
+                                    return
                                 global _end_fix_sub
                                 try:
                                     tl.set_current_time(end_time)
