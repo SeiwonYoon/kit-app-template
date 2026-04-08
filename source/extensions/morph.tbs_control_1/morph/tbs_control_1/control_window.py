@@ -493,7 +493,7 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any]) -> Optional[float]
     애니메이션 실행이력용 "예상 길이" 계산(보수적).
     - MOVE/ROTATE: duration_max가 있으면 max, 없으면 duration.
     - DELAY: duration
-    - USD_TIMELINE: 수동이면 프레임 범위로 추정, AUTO는 환경 의존이라 None.
+    - USD_TIMELINE: 프레임 범위(start/end)로 추정
     """
     try:
         t = str((step or {}).get("type") or "").upper()
@@ -507,9 +507,6 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any]) -> Optional[float]
         if t == "DELAY":
             return max(0.0, float((step or {}).get("duration", 0.0)))
         if t == "USD_TIMELINE":
-            mode = str((step or {}).get("mode", "MANUAL")).upper()
-            if mode == "AUTO":
-                return None
             start = int((step or {}).get("start_frame", 0))
             end = int((step or {}).get("end_frame", 0))
             if end <= start:
@@ -1949,6 +1946,25 @@ def _drain_sim_log_queue(ext: Any) -> None:
         q = getattr(ext, "_sim_log_queue", None)
         if q is None:
             return
+
+        # 공정설정 시간 우선 모드에서의 애니 중단은 tick 스레드가 아니라 UI(메인) 스레드에서만 수행한다.
+        # tick 스레드에서 stop_all_* / runner.stop() 등을 호출하면 Kit 내부가 스레드-unsafe로 크래시할 수 있다.
+        try:
+            ie = getattr(ext, "_sim_interrupt_anim_event", None)
+            if ie is not None and hasattr(ie, "is_set") and ie.is_set():
+                try:
+                    ie.clear()
+                except Exception:
+                    pass
+                fn = getattr(ext, "_sim_interrupt_anim_apply_fn", None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # 표시모드 제거: 항상 둘다(진행현황+이력로그)
         panel_mode = SimLogPanelMode.ALL
         count = 0
@@ -2411,6 +2427,22 @@ def _detach_sim_update(ext: Any) -> None:
             pass
         ext._sim_log_ui_sub = None
 
+    # 공정설정 시간 우선 모드: 애니 중단 요청 플래그 정리
+    try:
+        ie = getattr(ext, "_sim_interrupt_anim_event", None)
+        if ie is not None:
+            try:
+                ie.clear()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        ext._sim_interrupt_anim_event = None
+        ext._sim_interrupt_anim_apply_fn = None
+    except Exception:
+        pass
+
 
 def on_sim_start_clicked(ext: Any) -> None:
     try:
@@ -2566,6 +2598,22 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             pass
 
+    # tick 스레드 -> UI 스레드 마샬링: 중단 요청 플래그만 세팅하고, 실제 stop은 _drain_sim_log_queue에서 처리.
+    try:
+        ext._sim_interrupt_anim_event = threading.Event()
+        ext._sim_interrupt_anim_apply_fn = _interrupt_anim_for_proc_priority
+    except Exception:
+        ext._sim_interrupt_anim_event = None
+        ext._sim_interrupt_anim_apply_fn = None
+
+    def _request_interrupt_anim_for_proc_priority() -> None:
+        try:
+            ie = getattr(ext, "_sim_interrupt_anim_event", None)
+            if ie is not None:
+                ie.set()
+        except Exception:
+            pass
+
     def _on_gate(payload: Dict[str, str]) -> float:
         # 요구사항: 공정시간보다 애니(JSON) 시간이 길면 다음 공정은 애니 종료까지 대기.
         # simulation_engine은 이 반환값(초)을 받아서 각 공정 timeout을 max(공정, 애니)로 확장한다.
@@ -2693,7 +2741,7 @@ def on_sim_start_clicked(ext: Any) -> None:
     try:
         engine.set_runtime_hooks(
             faulty_ports_supplier=_collect_faulty_ports_for_engine,
-            interrupt_anim_cb=_interrupt_anim_for_proc_priority,
+            interrupt_anim_cb=_request_interrupt_anim_for_proc_priority,
         )
     except Exception:
         pass

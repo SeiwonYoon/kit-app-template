@@ -232,7 +232,6 @@ class SequenceEditorWindow:
                                                         "mode": "MANUAL",
                                                         "start_frame": 200,
                                                         "end_frame": 300,
-                                                        "loop": False,
                                                         # 기본 OFF: 필요할 때만 USD_TIMELINE 시작 전 오프셋 보정 수행
                                                         "offset_correction_enabled": False,
                                                         "offset_correct_prims": "",
@@ -331,8 +330,11 @@ class SequenceEditorWindow:
                                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
 
     def _ui_step_usd_timeline(self, step: Dict[str, Any]) -> None:
-        mode_items = ["MANUAL", "AUTO"]
-        initial_mode_idx = 0 if str(step.get("mode", "MANUAL")).upper() == "MANUAL" else 1
+        # AUTO 모드는 사용하지 않으므로 제거. 기존 JSON 호환을 위해 AUTO면 MANUAL로 강제한다.
+        if str(step.get("mode", "MANUAL")).upper() != "MANUAL":
+            step["mode"] = "MANUAL"
+        mode_items = ["MANUAL"]
+        initial_mode_idx = 0
 
         def _on_mode_changed(model, *_):
             step["mode"] = mode_items[model.get_item_value_model().as_int]
@@ -341,14 +343,7 @@ class SequenceEditorWindow:
             ui.Label("MODE", width=60)
             cb = ui.ComboBox(initial_mode_idx, *mode_items)
             cb.model.add_item_changed_fn(_on_mode_changed)
-            loop_model = ui.SimpleBoolModel(bool(step.get("loop", False)))
-            ui.CheckBox(model=loop_model, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("LOOP", height=0)
-
-            def _on_loop(_m):
-                step["loop"] = bool(loop_model.get_value_as_bool())
-
-            loop_model.add_value_changed_fn(_on_loop)
+            # LOOP 옵션은 혼선/레이스 이슈를 줄이기 위해 UI에서 제거한다.
 
         # offset correction toggle (default OFF)
         off_model = ui.SimpleBoolModel(bool(step.get("offset_correction_enabled", False)))
@@ -359,7 +354,7 @@ class SequenceEditorWindow:
         off_model.add_value_changed_fn(_on_off)
         with ui.HStack(spacing=6, height=28):
             ui.CheckBox(model=off_model, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("오프셋 보정 적용", width=120)
+            ui.Label("오프셋 보정 적용", height=0)
         ui.Label(
             "체크 시 USD 재생 시작 프레임 기준으로 월드 오프셋(TBS_OFFSET) 보정을 수행합니다. (기본 OFF)",
             height=0,

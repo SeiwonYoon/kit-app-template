@@ -154,15 +154,8 @@ def _step_duration_sec(step: Dict[str, Any]) -> float:
     if t == "DELAY":
         return max(1e-6, float((step or {}).get("duration", 1.0)))
     if t == "USD_TIMELINE":
-        mode = str((step or {}).get("mode", "MANUAL")).upper()
-        if mode == "AUTO":
-            rng = usd_animation_control.resolve_saved_animation_frame_range()
-            if not rng:
-                return 1e-6
-            start_f, end_f = int(rng[0]), int(rng[1])
-        else:
-            start_f = int((step or {}).get("start_frame", 0))
-            end_f = int((step or {}).get("end_frame", 0))
+        start_f = int((step or {}).get("start_frame", 0))
+        end_f = int((step or {}).get("end_frame", 0))
         if end_f <= start_f:
             return 1e-6
         return max(usd_animation_control.frame_to_time(float(end_f - start_f)), 1e-6)
@@ -1680,20 +1673,11 @@ class SequenceRunner:
                 pass
 
         if t == "USD_TIMELINE":
-            mode = str(step.get("mode") or "MANUAL").upper()
-            loop = bool(step.get("loop", False))
-            if mode == "AUTO":
-                rng = usd_animation_control.resolve_saved_animation_frame_range()
-                if not rng:
-                    _done()
-                    return
-                start, end = int(rng[0]), int(rng[1])
-            else:
-                start = int(step.get("start_frame", 0))
-                end = int(step.get("end_frame", 0))
-                if end <= start:
-                    _done()
-                    return
+            start = int(step.get("start_frame", 0))
+            end = int(step.get("end_frame", 0))
+            if end <= start:
+                _done()
+                return
             if bool(step.get("offset_correction_enabled", False)):
                 try:
                     # 코드 이동/회전으로 누적된 오프셋을 USD 시작프레임 기준으로 보정.
@@ -1710,8 +1694,8 @@ class SequenceRunner:
             usd_animation_control.play_usd_animation(
                 start_frame=start,
                 end_frame=end,
-                loop=loop,
-                on_completed=_done if not loop else None,
+                loop=False,
+                on_completed=_done,
             )
             return
 
