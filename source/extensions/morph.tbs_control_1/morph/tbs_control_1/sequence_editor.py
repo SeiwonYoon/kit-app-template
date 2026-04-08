@@ -199,6 +199,15 @@ class SequenceEditorWindow:
                     with ui.Frame(style={"background_color": 0xFF191C20}):
                         with ui.CollapsableFrame(f"Step {idx+1}: {step.get('type','')}", collapsed=False):
                             with ui.VStack(spacing=6, padding=6):
+                                if "description" not in step:
+                                    step["description"] = ""
+                                desc_model = ui.SimpleStringModel(str(step.get("description", "") or ""))
+                                desc_model.add_value_changed_fn(
+                                    lambda _m: step.__setitem__("description", desc_model.get_value_as_string())
+                                )
+                                with ui.HStack(spacing=6, height=28):
+                                    ui.Label("설명", width=40)
+                                    ui.StringField(model=desc_model, width=540, height=28, style=INPUT_FIELD_STYLE)
                                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
                                 # 드롭다운/버튼 영역 배경 분리(가독성 개선)
                                 with ui.Frame(style={"background_color": 0xFF20242A}):
@@ -212,8 +221,10 @@ class SequenceEditorWindow:
 
                                         def _on_type_change(model, *_):
                                             t = STEP_TYPES[model.get_item_value_model().as_int]
+                                            prev_desc = str(step.get("description", "") or "")
                                             step.clear()
                                             step["type"] = t
+                                            step["description"] = prev_desc
                                             # init defaults
                                             if t == "USD_TIMELINE":
                                                 step.update(
@@ -594,6 +605,7 @@ class SequenceEditorWindow:
         self._steps.append(
             {
                 "type": "MOVE",
+                "description": "",
                 "prim": "",
                 "duration": 1.0,
                 "dx": 100.0,
@@ -682,6 +694,10 @@ class SequenceEditorWindow:
             data = json.loads(self._json_model.get_value_as_string() or "[]")
             if isinstance(data, list):
                 self._steps = data
+                # 신규 필드 기본값 보강 (구버전 JSON 호환)
+                for s in self._steps:
+                    if isinstance(s, dict) and "description" not in s:
+                        s["description"] = ""
                 # JSON에서 읽은 시작옵션을 UI 체크/텍스트 박스로 역주입
                 self._load_runtime_start_options_from_steps()
                 self._schedule_refresh()
