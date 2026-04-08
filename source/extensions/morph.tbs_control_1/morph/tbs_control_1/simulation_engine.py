@@ -916,7 +916,7 @@ class TBSSimulationEngine:
         if self._oht_input_queue and self._can_load_to_bp1():
             lot = self._oht_input_queue.pop(0)
             self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
-            yield self.env.process(self._load_lot_to_bp1(lot))
+            yield self.env.process(self._load_lot_to_inout(lot))
             return True
 
         return False
@@ -981,7 +981,7 @@ class TBSSimulationEngine:
                 continue
             lot = self._oht_input_queue.pop(0)
             self._log(f"{lot.lot_id} | IN/OUT 투입시작 | q={len(self._oht_input_queue)}")
-            yield self.env.process(self._load_lot_to_bp1(lot))
+            yield self.env.process(self._load_lot_to_inout(lot))
         self._log("[입력] 루프 종료")
 
     def _can_load_to_bp1(self) -> bool:
@@ -1015,7 +1015,7 @@ class TBSSimulationEngine:
             "title": f"OHT -> {ep_port} 직접 투입",
         })
         aw_u, total_wait, proc_only = self._proc_anim_pair(oht_time, anim_wait)
-        self._stage_mark(lot.lot_id, "oht_to_bp1_start")
+        self._stage_mark(lot.lot_id, "oht_to_inout_start")
         self._log_brief_step(lot.lot_id, f"OHT→{ep_port}", oht_time, aw_u)
         # 요구사항: OHT 이동은 ARRIVED(도착/안착) 이벤트로 통일. from/to를 포함해 UI 매핑에 사용.
         self._emit_event({"seq": "ARRIVED", "from_port_id": "OHT", "to_port_id": ep_port, "port_id": ep_port, "lot_id": lot.lot_id})
@@ -1048,10 +1048,10 @@ class TBSSimulationEngine:
         # direct input은 완료 시점에 별도 이벤트가 없으면 "다음 이벤트 때" 상태가 뒤늦게 보일 수 있어,
         # 갱신 전용 이벤트를 한 번 더 보내준다(애니/매핑 대상이 아님).
         self._emit_port_occ_refresh("직접투입 완료 후 포트 표시 갱신")
-        self._stage_mark(lot.lot_id, "oht_to_bp1_end")
+        self._stage_mark(lot.lot_id, "oht_to_inout_end")
         self._log(f"{lot.lot_id} | {ep_port} 도착(직접)")
 
-    def _load_lot_to_bp1(self, lot: Lot):
+    def _load_lot_to_inout(self, lot: Lot):
         """OHT 대기열 LOT을 IN/OUT으로 투입(ARRIVED 이벤트·대기 후 IN/OUT 안착, 이어서 버퍼로 이송)."""
         self._oht_loading_bp1 = True
         oht_time = self._timing.rand_oht_to_bp1()
@@ -1064,7 +1064,7 @@ class TBSSimulationEngine:
             "title": "OHT -> IN/OUT 경유 안착",
         })
         aw_u, total_wait, proc_only = self._proc_anim_pair(oht_time, anim_wait)
-        self._stage_mark(lot.lot_id, "oht_to_bp1_start")
+        self._stage_mark(lot.lot_id, "oht_to_inout_start")
         self._log_brief_step(lot.lot_id, "OHT→IN/OUT", oht_time, aw_u)
         # 요구사항 반영:
         # OHT->IN/OUT 단계는 MOVE가 아니라 ARRIVED(포트 안착 이벤트)로 애니메이션을 구동한다.
@@ -1091,7 +1091,7 @@ class TBSSimulationEngine:
                 event_seq="ARRIVED",
             )
         )
-        self._stage_mark(lot.lot_id, "oht_to_bp1_end")
+        self._stage_mark(lot.lot_id, "oht_to_inout_end")
         self._set_port(INOUT_PORT, "ARRIVED", "FULL", lot, emit_arrived_event=False)
         self._log(f"{lot.lot_id} | IN/OUT 도착")
         yield self.env.process(self._move_bp1_to_buffer())
@@ -1121,7 +1121,7 @@ class TBSSimulationEngine:
             "title": "IN/OUT -> BUFFER 이동",
         })
         aw_u, total_wait, proc_only = self._proc_anim_pair(move_time, anim_wait)
-        self._stage_mark(lot.lot_id, "bp1_to_bp_start")
+        self._stage_mark(lot.lot_id, "inout_to_bp_start")
         # 요구사항: IN/OUT->BP 이동 애니는 EAPEIS_PORT_MOVE_TRANSFERING(=MOVE_TRANSFERING)만 실행.
         self._emit_event({"seq": "MOVE_TRANSFERING", "from_port_id": INOUT_PORT, "to_port_id": target_bp, "lot_id": lot.lot_id})
         self._interrupt_anim_proc_priority()
@@ -1151,7 +1151,7 @@ class TBSSimulationEngine:
             )
         finally:
             # 완료 시점에만 상태 반영: 도착 포트 FULL, 출발 포트 EMPTY
-            self._stage_mark(lot.lot_id, "bp1_to_bp_end")
+            self._stage_mark(lot.lot_id, "inout_to_bp_end")
             self._set_port(target_bp, "ARRIVED", "FULL", lot)
             self._buffer_loaded_at[target_bp] = float(self.env.now) if self.env is not None else 0.0
             self._remove_from_port(INOUT_PORT)
@@ -1614,8 +1614,8 @@ class TBSSimulationEngine:
         for lot_id in self.completed_lots:
             m = self._lot_stage_summary.get(lot_id, {})
             r = self._lot_route_summary.get(lot_id, {})
-            d1 = self._dur(m, "oht_to_bp1_start", "oht_to_bp1_end")
-            d2 = self._dur(m, "bp1_to_bp_start", "bp1_to_bp_end")
+            d1 = self._dur(m, "oht_to_inout_start", "oht_to_inout_end")
+            d2 = self._dur(m, "inout_to_bp_start", "inout_to_bp_end")
             d3 = self._dur(m, "bp_to_ep_start", "bp_to_ep_end")
             d5 = self._dur(m, "ep_to_oht_start", "ep_to_oht_end")
             parts = []

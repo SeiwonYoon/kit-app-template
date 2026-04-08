@@ -222,7 +222,7 @@ def build_xml_string(
 
         fi = int(from_port_id)
         ti = int(to_port_id)
-        # PROCESS_JOB PORT_ID: OHT→EP(MOVE) 등에서 FROM 가상 ID(9)가 아닌 도착 EP(1~3)가 되도록 TO 우선
+        # PROCESS_JOB PORT_ID: OHT→EP(MOVE) 등에서 FROM 가상 ID(10)가 아닌 도착 EP(1~3)가 되도록 TO 우선
         if seq == SEQ_MOVE:
             pj_port = ti
         elif 1 <= ti <= 3:

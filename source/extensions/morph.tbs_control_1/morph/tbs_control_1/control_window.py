@@ -1100,6 +1100,11 @@ def build_control_window(ext: Any) -> None:
                             ui.Label("PORT_ID", width=110, height=28)
                             ui.IntField(model=ext._xml_port_id_model, width=60, height=28)
                         ext._xml_port_inputs_frame.visible = False
+                        ui.Label(
+                            "포트 ID 표: EP1~3=1~3, IN/OUT=5, BP1~4=6~9, OHT=10",
+                            height=18,
+                            style={"color": 0xFF9AA4B2},
+                        )
                         # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
                         on_xml_seq_changed(ext)
                 ui.Spacer(height=6)
@@ -1221,11 +1226,11 @@ def build_control_window(ext: Any) -> None:
                             except Exception:
                                 pass
                         with ui.HStack(spacing=8, height=28):
-                            ui.Label("OHT→BP/EP", width=100)
+                            ui.Label("OHT→IN/OUT/EP", width=100)
                             ui.FloatField(model=ext._sim_oht_bp1_min_model, width=70)
                             ui.Label("~", width=10)
                             ui.FloatField(model=ext._sim_oht_bp1_max_model, width=70)
-                            ui.Label("BP1->BP", width=60)
+                            ui.Label("IN/OUT->BP", width=60)
                             ui.FloatField(model=ext._sim_bp1_bp_min_model, width=55)
                             ui.Label("~", width=10)
                             ui.FloatField(model=ext._sim_bp1_bp_max_model, width=55)
@@ -1243,13 +1248,15 @@ def build_control_window(ext: Any) -> None:
                             ui.FloatField(model=ext._sim_speed_model, width=80)
                             ui.Label("로그주기(s)", width=70)
                             ui.FloatField(model=ext._sim_log_interval_model, width=70)
+                        with ui.HStack(spacing=8, height=28):
                             ui.CheckBox(model=ext._sim_process_time_priority_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("공정설정 시간 우선", width=120)
                             ui.CheckBox(model=ext._sim_confirm_each_step_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("각 공정 확인", width=80)
-                            ui.Button("시작", width=80, clicked_fn=lambda: on_sim_start_clicked(ext))
-                            ui.Button("정지", width=80, clicked_fn=lambda: on_sim_stop_clicked(ext))
-                            ui.Button("리셋", width=80, clicked_fn=lambda: on_sim_reset_clicked(ext))
+                            ui.Spacer(width=8)
+                            ui.Button("시작", width=72, clicked_fn=lambda: on_sim_start_clicked(ext))
+                            ui.Button("정지", width=72, clicked_fn=lambda: on_sim_stop_clicked(ext))
+                            ui.Button("리셋", width=72, clicked_fn=lambda: on_sim_reset_clicked(ext))
                         with ui.HStack(spacing=8, height=24):
                             ui.Button("진행현황+Sim로그 복사", width=160, clicked_fn=lambda: on_copy_sim_progress(ext))
                         ext._sim_port_state_frame = ui.ScrollingFrame(height=120)
@@ -2100,15 +2107,18 @@ def _parse_port_num(port_text: str, default_value: int = 1) -> int:
     """
     내부 포트 텍스트를 EAPEIS 포트 ID로 변환한다.
     매핑 규칙:
-    - OHT -> 9 (MOVE FROM 가상 포트; EP/BP와 충돌 없음)
+    - OHT -> 10 (MOVE FROM 가상 포트; EP/BP/INOUT과 충돌 없음)
     - EP1/2/3 -> 1/2/3
-    - BP1/2/3/4 -> 5/6/7/8
+    - INOUT(=IN/OUT) -> 5
+    - BP1/2/3/4 -> 6/7/8/9
     """
     txt = (port_text or "").strip().upper()
     if not txt:
         return default_value
+    if txt in ("INOUT", "IN/OUT"):
+        return 5
     if txt.startswith("OHT"):
-        return 9
+        return 10
     if txt.startswith("EP"):
         try:
             n = int(txt.replace("EP", ""))
@@ -2120,7 +2130,7 @@ def _parse_port_num(port_text: str, default_value: int = 1) -> int:
         try:
             n = int(txt.replace("BP", ""))
             if 1 <= n <= 4:
-                return 4 + n
+                return 5 + n
         except Exception:
             return default_value
     if txt.startswith("PORT_"):
@@ -2157,22 +2167,26 @@ def _normalize_port_text_from_xml(parsed_val: str, original_text: str) -> str:
     except Exception:
         n = None
     if o.startswith("BP"):
-        # XML ID 5~8은 BP1~4에 대응
-        if n is not None and 5 <= n <= 8:
-            return f"BP{n - 4}"
+        # XML ID 6~9는 BP1~4에 대응
+        if n is not None and 6 <= n <= 9:
+            return f"BP{n - 5}"
         return f"BP{p}"
     if o.startswith("EP"):
         # XML ID 1~3은 EP1~3에 대응
         if n is not None and 1 <= n <= 3:
             return f"EP{n}"
         return f"EP{p}"
+    if o.startswith("INOUT") or o.startswith("IN/OUT"):
+        return "INOUT"
     if o.startswith("OHT"):
         return "OHT"
     if n is not None:
         if 1 <= n <= 3:
             return f"EP{n}"
-        if 5 <= n <= 8:
-            return f"BP{n - 4}"
+        if n == 5:
+            return "INOUT"
+        if 6 <= n <= 9:
+            return f"BP{n - 5}"
     return p
 
 

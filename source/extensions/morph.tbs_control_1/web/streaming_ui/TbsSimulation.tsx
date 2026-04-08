@@ -37,7 +37,9 @@ function getKitApiBase(): string {
     const w = window as Window & { TBS_KIT_REMOTE_API?: string };
     if (w.TBS_KIT_REMOTE_API) return w.TBS_KIT_REMOTE_API;
   }
-  return "";
+  // 프록시/환경변수/전역 주입이 없으면 기본 브리지 포트로 fallback
+  // (Kit 브리지 기본값: 127.0.0.1:8720)
+  return "http://127.0.0.1:8720";
 }
 
 const POLL_MS = 400;
@@ -206,7 +208,6 @@ export default function TbsSimulation() {
 
   const xmlUseAb = form.xml_seq_index >= 2 && form.xml_seq_index <= 4;
   const xmlUsePort = !xmlUseAb;
-  const showEp3InitRow = form.ep_count_index === 1;
 
   const setField = useCallback(<K extends keyof WebFields>(key: K, value: WebFields[K]) => {
     setForm((f) => ({ ...f, [key]: value }));
@@ -425,6 +426,7 @@ export default function TbsSimulation() {
             onChange={(e) => setField("xml_port_id", parseInt(e.target.value, 10) || 1)}
           />
         </div>
+        <p className={styles.footerNote}>포트 ID 표: EP1~3=1~3, IN/OUT=5, BP1~4=6~9, OHT=10</p>
         <div className={styles.toolbar}>
           <button
             type="button"
@@ -565,7 +567,7 @@ export default function TbsSimulation() {
           </label>
         </div>
         <div className={styles.row}>
-          <label>OHT→BP/EP</label>
+          <label>OHT→IN/OUT/EP</label>
           <input
             type="number"
             step={0.1}
@@ -579,7 +581,7 @@ export default function TbsSimulation() {
             value={form.oht_max}
             onChange={(e) => setField("oht_max", parseFloat(e.target.value) || 0)}
           />
-          <label>BP1→BP</label>
+          <label>IN/OUT→BP</label>
           <input
             type="number"
             step={0.1}
@@ -642,6 +644,8 @@ export default function TbsSimulation() {
             value={form.log_interval}
             onChange={(e) => setField("log_interval", parseFloat(e.target.value) || 0)}
           />
+        </div>
+        <div className={styles.row}>
           <label>
             <input
               type="checkbox"
@@ -658,8 +662,7 @@ export default function TbsSimulation() {
             />{" "}
             각 공정 확인
           </label>
-        </div>
-        <div className={styles.toolbar}>
+          <div style={{ flex: 1 }} />
           <button type="button" disabled={busy} onClick={() => runCmd(() => apiCommand({ cmd: "sim_start", fields: collectFields() }))}>
             시작
           </button>
