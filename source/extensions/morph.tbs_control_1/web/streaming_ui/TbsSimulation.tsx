@@ -205,6 +205,8 @@ export default function TbsSimulation() {
   const [busy, setBusy] = useState(false);
   /** 제어창「기본 메뉴·패널 숨기기」와 동일; GET /api/state 의 kit_chrome_hidden 과 동기 */
   const [chromeHide, setChromeHide] = useState(false);
+  /** 스트리밍용: Kit 내부 TBS 창 숨김 */
+  const [hideKitTbsWindows, setHideKitTbsWindows] = useState(false);
 
   const xmlUseAb = form.xml_seq_index >= 2 && form.xml_seq_index <= 4;
   const xmlUsePort = !xmlUseAb;
@@ -288,6 +290,16 @@ export default function TbsSimulation() {
     }
   };
 
+  const handleKitTbsWindowsHideChange = async (hide: boolean) => {
+    setHideKitTbsWindows(hide);
+    try {
+      await apiCommand({ cmd: "ui_windows", hide });
+    } catch (e) {
+      setHideKitTbsWindows(!hide);
+      throw e;
+    }
+  };
+
   const showProgress = true;
   const showHistory = true;
 
@@ -327,6 +339,20 @@ export default function TbsSimulation() {
             onChange={(e) =>
               runCmd(async () => {
                 await handleChromeHideChange(e.target.checked);
+              })
+            }
+          />
+        </div>
+        <div className={styles.row}>
+          <label htmlFor="tbs_hide_kit_windows">스트리밍용: Kit의 TBS 창 숨기기</label>
+          <input
+            id="tbs_hide_kit_windows"
+            type="checkbox"
+            checked={hideKitTbsWindows}
+            disabled={busy}
+            onChange={(e) =>
+              runCmd(async () => {
+                await handleKitTbsWindowsHideChange(e.target.checked);
               })
             }
           />

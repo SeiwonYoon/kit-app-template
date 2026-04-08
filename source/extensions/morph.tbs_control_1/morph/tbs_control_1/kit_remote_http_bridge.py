@@ -339,6 +339,43 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
             pass
         return {"ok": True}
 
+    if cmd == "ui_windows":
+        """
+        스트리밍 화면에서만 보이게 하기 위한 UI 토글:
+        - hide=True  → Kit 내부의 TBS 제어창/시퀀스 편집기 창을 숨김(visible=False)
+        - hide=False → 다시 표시(visible=True)
+        """
+        hide = bool(data.get("hide", False))
+
+        def _set_visible(win: Any, visible: bool) -> None:
+            if win is None:
+                return
+            try:
+                win.visible = bool(visible)
+                return
+            except Exception:
+                pass
+            try:
+                if hasattr(win, "set_visible"):
+                    win.set_visible(bool(visible))
+            except Exception:
+                pass
+
+        # 1) TBS 제어창
+        try:
+            _set_visible(getattr(ext, "_control_window", None), not hide)
+        except Exception:
+            pass
+
+        # 2) 시퀀스 편집기(SequenceEditorWindow 내부 _window)
+        try:
+            sw = getattr(ext, "_sequence_window", None)
+            _set_visible(getattr(sw, "_window", None) if sw is not None else None, not hide)
+        except Exception:
+            pass
+
+        return {"ok": True, "hide": hide}
+
     return {"ok": False, "error": f"unknown cmd: {cmd}"}
 
 
