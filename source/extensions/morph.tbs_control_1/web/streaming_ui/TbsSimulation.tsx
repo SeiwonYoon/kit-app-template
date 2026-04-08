@@ -18,7 +18,7 @@
  * 이 저장소에서는 React 빌드가 없어 여기서는 실행되지 않을 수 있음(회사 프로젝트에 붙여 넣어 사용).
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import styles from "./TbsSimulation.module.css";
 
 // ---------------------------------------------------------------------------
@@ -102,6 +102,7 @@ type ApiState = {
   port_header?: string;
   ports?: Partial<Record<string, string>>;
   ep3_visible?: boolean;
+  bp4_visible?: boolean;
   kit_app?: string;
   /** Kit 기본 메뉴·패널 숨김 (제어창「화면」체크박스와 동기) */
   kit_chrome_hidden?: boolean;
@@ -195,6 +196,10 @@ function portCellClass(v: string): string {
 
 export default function TbsSimulation() {
   const [form, setForm] = useState<WebFields>(defaultForm);
+  const formRef = useRef<WebFields>(form);
+  useEffect(() => {
+    formRef.current = form;
+  }, [form]);
   // 표시모드 제거: 항상 둘다(진행현황+이력로그)
   const [snapshot, setSnapshot] = useState<ApiState>({});
   const [banner, setBanner] = useState<{ msg: string; ok: boolean }>({
@@ -212,10 +217,29 @@ export default function TbsSimulation() {
   const xmlUsePort = !xmlUseAb;
 
   const setField = useCallback(<K extends keyof WebFields>(key: K, value: WebFields[K]) => {
-    setForm((f) => ({ ...f, [key]: value }));
+    setForm((f) => {
+      const next = { ...f, [key]: value };
+      formRef.current = next;
+      return next;
+    });
   }, []);
 
-  const collectFields = useCallback((): WebFields => ({ ...form }), [form]);
+  // 클릭 직전(렌더 커밋 전)에도 최신 입력값을 보내기 위해 ref 기준으로 수집
+  const collectFields = useCallback((): WebFields => ({ ...formRef.current }), []);
+
+  // EP 개수 변경 등 “즉시 UI 반영”이 필요한 항목은 Kit에 바로 적용한다.
+  // (포트표의 EP3/BP4 가시성은 Kit 쪽 on_sim_ep_count_changed 결과를 /api/state로 받아야 동기화된다.)
+  useEffect(() => {
+    // 초기 마운트 직후에는 불필요한 호출을 줄이기 위해 1회 스킵
+    if ((window as unknown as { __tbsAppliedOnce?: boolean }).__tbsAppliedOnce !== true) {
+      (window as unknown as { __tbsAppliedOnce?: boolean }).__tbsAppliedOnce = true;
+      return;
+    }
+    // busy 중에는 다음 변경에서 다시 적용되도록 여기서는 스킵
+    if (busy) return;
+    runCmd(() => apiCommand({ cmd: "apply_fields", fields: collectFields() }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.ep_count_index]);
 
   const loadResources = useCallback(async () => {
     try {
@@ -304,6 +328,7 @@ export default function TbsSimulation() {
   const showHistory = true;
 
   const ep3Port = snapshot.ep3_visible !== false;
+  const bp4Port = snapshot.bp4_visible !== false;
   const ep3Enabled = form.ep_count_index !== 0;
   const showBp4 = ep3Enabled;
   const showEp3InitRow = ep3Enabled;
@@ -689,7 +714,16 @@ export default function TbsSimulation() {
             각 공정 확인
           </label>
           <div style={{ flex: 1 }} />
-          <button type="button" disabled={busy} onClick={() => runCmd(() => apiCommand({ cmd: "sim_start", fields: collectFields() }))}>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() =>
+              runCmd(async () => {
+                // 시작은 항상 fields 포함: Kit 쪽에서 "시작 시점"에 동일 payload로 세팅/초기화가 보장되게 한다.
+                await apiCommand({ cmd: "sim_start", fields: collectFields() });
+              })
+            }
+          >
             시작
           </button>
           <button type="button" disabled={busy} onClick={() => runCmd(() => apiCommand({ cmd: "sim_stop" }))}>
@@ -708,7 +742,10 @@ export default function TbsSimulation() {
         <div id="tbs_panelPort">
           <p className={styles.portHeader}>{snapshot.port_header || "[포트상태]"}</p>
           <div className={styles.portGrid}>
-            <div className={styles.portRow}>{portCells.slice(0, 4)}</div>
+            <div className={styles.portRow}>
+              {portCells.slice(0, 3)}
+              <div className={bp4Port ? undefined : styles.hidden}>{portCells[3]}</div>
+            </div>
             <div className={styles.portRow}>
               {portCells.slice(4, 7)}
               <div className={ep3Port ? undefined : styles.hidden}>{portCells[7]}</div>
@@ -725,29 +762,6 @@ export default function TbsSimulation() {
           <div className={styles.logPanel}>{snapshot.history || ""}</div>
         </div>
         <div className={styles.statusLine}>{snapshot.sim_line || ""}</div>
-      </section>
-
-      <section className={styles.section}>
-        <h2>장비 prim</h2>
-        <div className={styles.row}>
-          <label htmlFor="tbs_pri">우선 표시 접두사</label>
-          <input
-            id="tbs_pri"
-            className={styles.wPath}
-            type="text"
-            placeholder="비우면 순서대로"
-            value={form.priority_prefix}
-            onChange={(e) => setField("priority_prefix", e.target.value)}
-          />
-        </div>
-        <div className={styles.toolbar}>
-          <button type="button" disabled={busy} onClick={() => runCmd(() => apiCommand({ cmd: "prim_refresh" }))}>
-            목록 새로고침
-          </button>
-        </div>
-        <p className={styles.footerNote}>
-          prim 드롭다운 목록은 Kit 제어창과 동기화됩니다. 새로고침 후 Kit 창에서 확인할 수 있습니다.
-        </p>
       </section>
     </div>
   );

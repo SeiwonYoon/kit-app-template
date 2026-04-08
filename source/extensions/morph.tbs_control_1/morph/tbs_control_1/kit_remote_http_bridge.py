@@ -174,6 +174,54 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
     if not f:
         return
 
+    def _set_bool_model(m: Any, v: bool) -> None:
+        if m is None:
+            return
+        try:
+            if hasattr(m, "set_value_as_bool"):
+                m.set_value_as_bool(bool(v))
+                return
+        except Exception:
+            pass
+        try:
+            if hasattr(m, "set_value"):
+                m.set_value(bool(v))
+                return
+        except Exception:
+            pass
+
+    def _set_int_model(m: Any, v: int) -> None:
+        if m is None:
+            return
+        try:
+            if hasattr(m, "set_value_as_int"):
+                m.set_value_as_int(int(v))
+                return
+        except Exception:
+            pass
+        try:
+            if hasattr(m, "set_value"):
+                m.set_value(int(v))
+                return
+        except Exception:
+            pass
+
+    def _set_float_model(m: Any, v: float) -> None:
+        if m is None:
+            return
+        try:
+            if hasattr(m, "set_value_as_float"):
+                m.set_value_as_float(float(v))
+                return
+        except Exception:
+            pass
+        try:
+            if hasattr(m, "set_value"):
+                m.set_value(float(v))
+                return
+        except Exception:
+            pass
+
     def _i(key: str, default: int = 0) -> int:
         try:
             return int(f.get(key, default))
@@ -190,7 +238,7 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
         return bool(f.get(key))
 
     try:
-        ext._sim_lot_count_model.set_value_as_int(max(1, _i("lot_count", 6)))
+        _set_int_model(getattr(ext, "_sim_lot_count_model", None), max(1, _i("lot_count", 6)))
     except Exception:
         pass
     try:
@@ -198,25 +246,69 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
         on_sim_ep_count_changed(ext)
     except Exception:
         pass
+    # NOTE: 어떤 1개 모델 접근이 실패해도 speed/log 등 핵심 값 적용이 누락되지 않게 개별 적용한다.
     try:
-        ext._sim_lot_spawn_min_model.set_value_as_float(max(0.1, _f("lot_spawn_min", 15.0)))
-        ext._sim_lot_spawn_max_model.set_value_as_float(max(0.1, _f("lot_spawn_max", 40.0)))
-        ext._sim_pickup_evt_min_model.set_value_as_float(max(0.1, _f("pickup_min", 50.0)))
-        ext._sim_pickup_evt_max_model.set_value_as_float(max(0.1, _f("pickup_max", 70.0)))
-        ext._sim_speed_model.set_value_as_float(max(0.1, _f("speed", 1.0)))
-        ext._sim_log_interval_model.set_value_as_float(max(0.0, _f("log_interval", 0.0)))
-        ext._sim_confirm_each_step_model.set_value_as_bool(_b("confirm_each"))
-        # 공정설정 시간 우선(=애니 길이 무시 + 진행 시 애니 중단)
-        if getattr(ext, "_sim_process_time_priority_model", None) is not None:
-            ext._sim_process_time_priority_model.set_value_as_bool(_b("process_time_priority"))
-        ext._sim_oht_bp1_min_model.set_value_as_float(max(0.1, _f("oht_min", 5.0)))
-        ext._sim_oht_bp1_max_model.set_value_as_float(max(0.1, _f("oht_max", 10.0)))
-        ext._sim_bp1_bp_min_model.set_value_as_float(max(0.1, _f("bp1_bp_min", 5.0)))
-        ext._sim_bp1_bp_max_model.set_value_as_float(max(0.1, _f("bp1_bp_max", 10.0)))
-        ext._sim_bp_ep_min_model.set_value_as_float(max(0.1, _f("bp_ep_min", 5.0)))
-        ext._sim_bp_ep_max_model.set_value_as_float(max(0.1, _f("bp_ep_max", 10.0)))
-        ext._sim_ep_oht_min_model.set_value_as_float(max(0.1, _f("ep_oht_min", 5.0)))
-        ext._sim_ep_oht_max_model.set_value_as_float(max(0.1, _f("ep_oht_max", 10.0)))
+        _set_float_model(getattr(ext, "_sim_lot_spawn_min_model", None), max(0.1, _f("lot_spawn_min", 15.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_lot_spawn_max_model", None), max(0.1, _f("lot_spawn_max", 40.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_pickup_evt_min_model", None), max(0.1, _f("pickup_min", 50.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_pickup_evt_max_model", None), max(0.1, _f("pickup_max", 70.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_speed_model", None), max(0.1, _f("speed", 1.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_log_interval_model", None), max(0.0, _f("log_interval", 0.0)))
+    except Exception:
+        pass
+    try:
+        _set_bool_model(getattr(ext, "_sim_confirm_each_step_model", None), _b("confirm_each"))
+    except Exception:
+        pass
+    try:
+        _set_bool_model(getattr(ext, "_sim_process_time_priority_model", None), _b("process_time_priority"))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_oht_bp1_min_model", None), max(0.1, _f("oht_min", 5.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_oht_bp1_max_model", None), max(0.1, _f("oht_max", 10.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_bp1_bp_min_model", None), max(0.1, _f("bp1_bp_min", 5.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_bp1_bp_max_model", None), max(0.1, _f("bp1_bp_max", 10.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_bp_ep_min_model", None), max(0.1, _f("bp_ep_min", 5.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_bp_ep_max_model", None), max(0.1, _f("bp_ep_max", 10.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_ep_oht_min_model", None), max(0.1, _f("ep_oht_min", 5.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_ep_oht_max_model", None), max(0.1, _f("ep_oht_max", 10.0)))
     except Exception:
         pass
     try:
@@ -285,6 +377,12 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
         asyncio.ensure_future(load_window.on_load_usd(ext))
+        return {"ok": True}
+
+    if cmd == "apply_fields":
+        fields = data.get("fields")
+        if isinstance(fields, dict):
+            _apply_web_fields(ext, fields)
         return {"ok": True}
 
     if cmd == "sim_start":
