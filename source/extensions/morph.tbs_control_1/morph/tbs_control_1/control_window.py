@@ -731,6 +731,10 @@ def _execute_mapped_sequence_stub(
                 except Exception:
                     pass
                 try:
+                    ext._sim_anim_active = {}
+                except Exception:
+                    pass
+                try:
                     _refresh_sim_progress_from_last(ext)
                 except Exception:
                     pass
@@ -2021,10 +2025,19 @@ def _sim_anim_status_key(ext: Any) -> Tuple[bool, str, int, str]:
 
 
 def _format_anim_status_footer(ext: Any) -> str:
-    """진행현황 패널 하단: 현재 재생 JSON 파일·대기열."""
+    """진행현황 패널 하단: 현재 재생 JSON 파일·대기열.
+
+    SequenceRunner.run()은 _begin_sequence()를 다음 프레임으로 미루므로,
+    잠깐 동안은 _sim_anim_active.file 은 있는데 is_running() 이 False 인 구간이 있다.
+    이 경우에도 파일명을 보여준다(진행현황에 '재생 없음'으로 보이는 문제 방지).
+    시퀀스가 끝나면 _on_done 경로에서 _sim_anim_active 를 비운다.
+    """
     running, cur_file, q, next_f = _sim_anim_status_key(ext)
-    if running and cur_file:
-        lines = [f"애니메이션 파일(재생 중): {cur_file}"]
+    if cur_file:
+        if running:
+            lines = [f"애니메이션 파일(재생 중): {cur_file}"]
+        else:
+            lines = [f"애니메이션 파일: {cur_file}"]
         if q > 0 and next_f:
             lines.append(f"대기열: {q}건 (다음 {next_f})")
         return "\n".join(lines)
