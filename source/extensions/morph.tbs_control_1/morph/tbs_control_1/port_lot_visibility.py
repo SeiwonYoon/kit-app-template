@@ -68,12 +68,10 @@ def load_port_lot_prim_paths() -> Dict[str, str]:
         return {}
 
 
-def _set_prim_visible(path: str, visible: bool) -> None:
+def _set_prim_visible_on_stage(stage: Any, path: str, visible: bool) -> None:
+    if not stage or not path:
+        return
     try:
-        ctx = ou.get_context()
-        stage = ctx.get_stage() if ctx else None
-        if not stage:
-            return
         prim = stage.GetPrimAtPath(path)
         if not prim or not prim.IsValid():
             return
@@ -84,6 +82,17 @@ def _set_prim_visible(path: str, visible: bool) -> None:
             img.MakeVisible()
         else:
             img.MakeInvisible()
+    except Exception:
+        pass
+
+
+def _set_prim_visible(path: str, visible: bool) -> None:
+    try:
+        ctx = ou.get_context()
+        stage = ctx.get_stage() if ctx else None
+        if not stage:
+            return
+        _set_prim_visible_on_stage(stage, path, visible)
     except Exception:
         pass
 
@@ -166,23 +175,44 @@ def restore_port_lot_prims_to_authoring() -> None:
             continue
 
 
+def _normalized_ports_occupancy(ports_occupancy: Any) -> Dict[str, str]:
+    if not isinstance(ports_occupancy, dict):
+        return {}
+    occ: Dict[str, str] = {}
+    for k, v in ports_occupancy.items():
+        occ[str(k).strip().upper()] = str(v).strip() if v is not None else ""
+    return occ
+
+
+def apply_port_lot_prim_visibility_for_context(usd_context_name: Optional[str], ports_occupancy: Any) -> None:
+    """
+    지정 USD 컨텍스트(이름)의 스테이지에 포트 LOT prim 가시성을 적용한다.
+    ``usd_context_name`` 이 None/빈 문자열이면 기본 컨텍스트(``get_context()``)와 동일.
+    """
+    occ = _normalized_ports_occupancy(ports_occupancy)
+    if not occ:
+        return
+    mapping = load_port_lot_prim_paths()
+    if not mapping:
+        return
+    try:
+        nm = (usd_context_name or "").strip()
+        ctx = ou.get_context(nm) if nm else ou.get_context()
+        stage = ctx.get_stage() if ctx else None
+    except Exception:
+        stage = None
+    if not stage:
+        return
+    for port, prim_path in mapping.items():
+        if not prim_path:
+            continue
+        lot_id = occ.get(str(port).strip().upper(), "")
+        has_lot = bool(lot_id)
+        _set_prim_visible_on_stage(stage, str(prim_path).strip(), has_lot)
+
+
 def apply_port_lot_prim_visibility(ports_occupancy: Any) -> None:
     """
     시뮬 이벤트의 ports_occupancy(dict: 포트→LOT id 또는 빈 문자열)에 맞춰 매핑 prim 가시성 적용.
     """
-    if not isinstance(ports_occupancy, dict):
-        return
-    occ: Dict[str, str] = {}
-    for k, v in ports_occupancy.items():
-        occ[str(k).strip().upper()] = str(v).strip() if v is not None else ""
-
-    mapping = load_port_lot_prim_paths()
-    if not mapping:
-        return
-
-    for port, prim_path in mapping.items():
-        if not prim_path:
-            continue
-        lot_id = occ.get(port, "")
-        has_lot = bool(lot_id)
-        _set_prim_visible(prim_path, has_lot)
+    apply_port_lot_prim_visibility_for_context(None, ports_occupancy)

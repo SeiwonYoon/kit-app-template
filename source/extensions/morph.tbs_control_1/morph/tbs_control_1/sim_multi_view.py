@@ -26,6 +26,7 @@ sim_multi_view.py — 멀티 시뮼 화면 분할
 
 - **제어창 동기화(1단계)**: ``ext._sim_viewport_split_count`` 는 **실제로 적용된** 분할 수만 담는다.
   분할 불가(3D 끔·USD 미준비·경로 없음)·빌드 롤백 시 **1로 되돌리고** ``notify_sim_split_ui_sync`` 로 체크박스를 맞춘다.
+- **스냅샷 HUD(뷰포트 인-뷰 2D)**: 각 타일의 ``ViewportWindow.get_frame(ext_id)`` 슬롯에 우측 상단 패널을 올려, **해당 3D 타일 안에만** 시뮼 스냅샷 요약(저장 여부·LOT·EP·간격·고장 등)이 보이게 한다. 제어창 저장·자동 채움·분할 변경 시 갱신된다.
 
 보조 뷰는 Stage 패널에 올리지 않는다(메인 스테이지만 편집 UI에 노출).
 """
@@ -889,6 +890,7 @@ def _restore_main_viewport_layout(ext: Any) -> None:
 
 def teardown_sim_multi_viewports(ext: Any) -> None:
     """분할 뷰·보조 USD 컨텍스트를 정리하고 기본 Viewport 를 복원한다."""
+    destroy_viewport_snapshot_hud_layers(ext)
     entries: List[Dict[str, Any]] = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
     # 보조 뷰를 먼저 파괴한 뒤 메인 Viewport 를 복원한다(메인만 먼저 키우면 보조와 동시에 그려져 GPU 부담).
     for ent in entries:
@@ -920,6 +922,11 @@ def teardown_sim_multi_viewports(ext: Any) -> None:
         pass
 
     _unlink_split_session_files(ext)
+
+    try:
+        ext._tbs_split_main_viewport_window = None
+    except Exception:
+        pass
 
     _workspace_show_named_window("Viewport", True)
 
@@ -1328,6 +1335,19 @@ def notify_sim_split_ui_sync(ext: Any) -> None:
             fn()
         except Exception:
             pass
+    fn2 = getattr(ext, "_sync_sim_per_screen_rows_fn", None)
+    if callable(fn2):
+        try:
+            fn2()
+        except Exception:
+            pass
+    fn3 = getattr(ext, "_rebuild_sim_monitor_split_ui_fn", None)
+    if callable(fn3):
+        try:
+            fn3()
+        except Exception:
+            pass
+    schedule_viewport_snapshot_hud_refresh(ext)
 
 
 def _rollback_split_attempt(ext: Any, entries: List[Dict[str, Any]], ctx_names: List[str]) -> None:
@@ -1383,7 +1403,7 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str) 
         return
 
     _workspace_show_named_window("Viewport", True)
-    entries.append({"kind": "main_viewport", "win_name": "Viewport", "cell_index": 0})
+    entries.append({"kind": "main_viewport", "win_name": "Viewport", "cell_index": 0, "viewport_window": None, "kit_vp": None})
 
     for ti in range(1, n):
         if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
@@ -1457,7 +1477,16 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str) 
                     width=int(pw),
                     height=int(ph),
                 )
-                entries.append({"window": win, "context_name": ctx_name, "win_name": wname, "cell_index": ti})
+                entries.append(
+                    {
+                        "window": win,
+                        "viewport_window": win,
+                        "context_name": ctx_name,
+                        "win_name": wname,
+                        "cell_index": ti,
+                        "kit_vp": None,
+                    }
+                )
             except Exception as e2:
                 try:
                     print(f"[TBS multi-sim] ViewportWindow 폴백도 실패 name={wname} err={e2}", flush=True)
@@ -1469,7 +1498,15 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str) 
             if vp_obj is None:
                 _rollback_split_attempt(ext, entries, ctx_names)
                 return
-            entries.append({"kit_vp": vp_obj, "context_name": ctx_name, "win_name": wname, "cell_index": ti})
+            entries.append(
+                {
+                    "kit_vp": vp_obj,
+                    "viewport_window": vp_obj,
+                    "context_name": ctx_name,
+                    "win_name": wname,
+                    "cell_index": ti,
+                }
+            )
 
         try:
             wui = ui.Workspace.get_window(wname)
@@ -1527,6 +1564,13 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str) 
         )
     except Exception:
         pass
+    try:
+        ext._tbs_split_main_viewport_window = _resolve_viewport_window_for_workspace_name("Viewport")
+    except Exception:
+        try:
+            ext._tbs_split_main_viewport_window = None
+        except Exception:
+            pass
     notify_sim_split_ui_sync(ext)
 
 
@@ -1673,5 +1717,389 @@ def detach_stage_visibility_subscription(ext: Any) -> None:
             pass
     try:
         ext._sim_split_stage_sub = None
+    except Exception:
+        pass
+
+
+def _viewport_window_name_for_screen(screen_1based: int) -> str:
+    """화면 인덱스(1~)에 대응하는 Workspace 뷰포트 창 이름."""
+    si = int(screen_1based)
+    if si <= 1:
+        return "Viewport"
+    return _split_window_name(si - 1)
+
+
+def _resolve_viewport_window_for_workspace_name(wname: str) -> Optional[Any]:
+    """
+    ``Workspace`` 창 이름(예: ``Viewport``, ``TBS_SimSplit_1``)에 대응하는 ``ViewportWindow`` 를 찾는다.
+
+    ``get_viewport_from_window_name`` 이 반환하는 API 객체에 ``viewport_window`` 등이 붙는 Kit 버전이 있다.
+    """
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+    except Exception:
+        return None
+    try:
+        api = get_viewport_from_window_name(str(wname))
+    except Exception:
+        api = None
+    if api is None:
+        return None
+    for attr in ("viewport_window", "window", "_viewport_window", "_window"):
+        try:
+            cand = getattr(api, attr, None)
+        except Exception:
+            cand = None
+        if cand is not None and callable(getattr(cand, "get_frame", None)):
+            return cand
+    if callable(getattr(api, "get_frame", None)):
+        return api
+    return None
+
+
+def _snapshot_hud_frame_slot(ext: Any) -> str:
+    """``ViewportWindow.get_frame`` 슬롯 ID(확장 인스턴스별로 분리)."""
+    eid = str(getattr(ext, "_ext_id", "") or "").strip()
+    if not eid:
+        eid = "morph.tbs_control_1"
+    return f"{eid}:sim_snapshot_hud"
+
+
+def _viewport_window_for_screen(ext: Any, screen_1based: int) -> Optional[Any]:
+    """화면 인덱스(1~)에 붙일 ``ViewportWindow`` (또는 ``get_frame`` 제공 객체)."""
+    si = int(screen_1based)
+    entries = list(getattr(ext, "_sim_multi_viewport_entries", None) or [])
+    if si <= 1:
+        vw = getattr(ext, "_tbs_split_main_viewport_window", None)
+        if vw is not None and callable(getattr(vw, "get_frame", None)):
+            return vw
+        return _resolve_viewport_window_for_workspace_name("Viewport")
+    for ent in entries:
+        try:
+            ci = int(ent.get("cell_index", -999))
+        except Exception:
+            ci = -999
+        if ci != si - 1:
+            continue
+        vw = ent.get("viewport_window") or ent.get("kit_vp") or ent.get("window")
+        if vw is not None and callable(getattr(vw, "get_frame", None)):
+            return vw
+    return _resolve_viewport_window_for_workspace_name(_viewport_window_name_for_screen(si))
+
+
+def detach_sim_screen1_live_hud_subscription(ext: Any) -> None:
+    """화면1 실시간 HUD 갱신 구독 해제."""
+    sub = getattr(ext, "_tbs_sim_hud_screen1_live_sub", None)
+    if sub is not None:
+        try:
+            sub.unsubscribe()
+        except Exception:
+            pass
+    try:
+        ext._tbs_sim_hud_screen1_live_sub = None
+    except Exception:
+        pass
+    try:
+        ext._tbs_sim_hud_screen1_label = None
+    except Exception:
+        pass
+
+
+def _sim_screen1_hud_post_tick(ext: Any, _e: Any = None) -> None:
+    """제어창 값 변경 시 화면1 패널 텍스트만 저빈도로 갱신한다."""
+    try:
+        ext._tbs_sim_hud_live_ctr = int(getattr(ext, "_tbs_sim_hud_live_ctr", 0) or 0) + 1
+    except Exception:
+        return
+    if ext._tbs_sim_hud_live_ctr % 5 != 0:
+        return
+    lbl = getattr(ext, "_tbs_sim_hud_screen1_label", None)
+    if lbl is None:
+        return
+    cap_fn = getattr(ext, "_capture_sim_settings_dict_for_hud_fn", None)
+    if not callable(cap_fn):
+        return
+    try:
+        cap = cap_fn()
+        if not isinstance(cap, dict):
+            return
+    except Exception:
+        return
+    try:
+        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
+        slot0_saved = len(snaps) > 0 and isinstance(snaps[0], dict)
+    except Exception:
+        slot0_saved = False
+    try:
+        txt = _describe_snapshot_for_viewport_hud(
+            1,
+            dict(cap),
+            slot_saved=slot0_saved,
+            live_control_panel=True,
+        )
+    except Exception:
+        return
+    try:
+        lbl.text = txt
+    except Exception:
+        pass
+
+
+def _ensure_sim_screen1_live_hud_subscription(ext: Any) -> None:
+    if getattr(ext, "_tbs_sim_hud_screen1_live_sub", None) is not None:
+        return
+    try:
+        ext._tbs_sim_hud_live_ctr = 0
+    except Exception:
+        pass
+    try:
+        ext._tbs_sim_hud_screen1_live_sub = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+            lambda e: _sim_screen1_hud_post_tick(ext, e),
+            name="morph.tbs_control_1:sim_hud_screen1_live",
+        )
+    except Exception:
+        try:
+            ext._tbs_sim_hud_screen1_live_sub = None
+        except Exception:
+            pass
+
+
+def _format_initial_load_ports_line(snap: Dict[str, Any]) -> str:
+    """스냅샷/캡처 dict 기준 초기 적재(풀) 포트 목록."""
+    try:
+        ep2 = int(snap.get("ep_count_idx", 0) or 0) == 0
+    except Exception:
+        ep2 = True
+    pairs = (
+        ("INOUT", "init_inout"),
+        ("BP1", "init_bp1"),
+        ("BP2", "init_bp2"),
+        ("BP3", "init_bp3"),
+        ("BP4", "init_bp4"),
+        ("EP1", "init_ep1"),
+        ("EP2", "init_ep2"),
+        ("EP3", "init_ep3"),
+    )
+    acc: List[str] = []
+    for lab, key in pairs:
+        if ep2 and lab in ("BP4", "EP3"):
+            continue
+        try:
+            if bool(snap.get(key)):
+                acc.append(lab)
+        except Exception:
+            pass
+    return ",".join(acc) if acc else "(없음)"
+
+
+def _fault_count_from_snapshot_dict(d: Dict[str, Any]) -> int:
+    n = 0
+    for k in (
+        "fault_inout",
+        "fault_bp1",
+        "fault_bp2",
+        "fault_bp3",
+        "fault_bp4",
+        "fault_ep1",
+        "fault_ep2",
+        "fault_ep3",
+    ):
+        try:
+            if bool(d.get(k)):
+                n += 1
+        except Exception:
+            pass
+    return n
+
+
+def _describe_snapshot_for_viewport_hud(
+    screen_1based: int,
+    snap: Dict[str, Any],
+    *,
+    slot_saved: bool,
+    live_control_panel: bool = False,
+) -> str:
+    """
+    뷰포트 인-뷰 패널 텍스트.
+
+    - ``live_control_panel=True`` (화면1): 제어창과 동기 표시. 글리프 깨짐 방지로 ``|`` 구분·``시뮬`` 표기.
+    """
+    try:
+        ep2 = int(snap.get("ep_count_idx", 0) or 0) == 0
+    except Exception:
+        ep2 = True
+    ep_s = "EP2구성" if ep2 else "EP3구성"
+    try:
+        lots = max(1, int(snap.get("lot_count", 6) or 6))
+    except Exception:
+        lots = 6
+    try:
+        smn = float(snap.get("spawn_min", 15.0))
+        smx = float(snap.get("spawn_max", 40.0))
+    except Exception:
+        smn, smx = 15.0, 40.0
+    try:
+        pmn = float(snap.get("pue_min", 50.0))
+        pmx = float(snap.get("pue_max", 70.0))
+    except Exception:
+        pmn, pmx = 50.0, 70.0
+    fc = _fault_count_from_snapshot_dict(snap)
+    init_line = _format_initial_load_ports_line(snap)
+    if live_control_panel:
+        tag = "제어창 실시간"
+    elif slot_saved:
+        tag = "저장됨"
+    else:
+        tag = "미저장 | 제어창값"
+    title = f"화면{int(screen_1based)} | 시뮬 설정 ({tag})"
+    line_a = f"{ep_s} | LOT {lots} | 고장 {fc}개"
+    line_b = f"초기 적재: {init_line}"
+    line_c = f"생성 {smn:.0f}-{smx:.0f}s | 회수 {pmn:.0f}-{pmx:.0f}s"
+    return f"{title}\n{line_a}\n{line_b}\n{line_c}"
+
+
+def destroy_viewport_snapshot_hud_layers(ext: Any) -> None:
+    """``get_frame`` 슬롯에 넣었던 스냅샷 패널 루트 위젯을 제거한다."""
+    detach_sim_screen1_live_hud_subscription(ext)
+    roots = getattr(ext, "_tbs_sim_snapshot_hud_roots", None)
+    if isinstance(roots, dict):
+        for _k, w in list(roots.items()):
+            if w is None:
+                continue
+            try:
+                w.destroy()
+            except Exception:
+                pass
+    try:
+        ext._tbs_sim_snapshot_hud_roots = {}
+    except Exception:
+        pass
+    try:
+        ext._tbs_sim_snapshot_hud_windows = []
+    except Exception:
+        pass
+
+
+def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
+    """
+    각 분할 타일의 ``ViewportWindow.get_frame`` 레이어에 우측 상단 2D 패널을 붙인다(별도 ``ui.Window`` 없음).
+
+    - **화면1**: 항상 ``_capture_sim_settings_dict_for_hud_fn()`` 제어창 값으로 표시하고, post_update 로 저빈도 텍스트 갱신.
+    - **화면2~**: ``_sim_per_screen_snapshots`` 가 있으면 해당 dict, 없으면 제어창 캡처로 표시.
+    """
+    destroy_viewport_snapshot_hud_layers(ext)
+    try:
+        n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+    except Exception:
+        n = 1
+
+    try:
+        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
+    except Exception:
+        snaps = [None, None, None, None]
+    while len(snaps) < 4:
+        snaps.append(None)
+    snaps = snaps[:4]
+
+    cap: Dict[str, Any] = {}
+    cap_fn = getattr(ext, "_capture_sim_settings_dict_for_hud_fn", None)
+    if callable(cap_fn):
+        try:
+            raw = cap_fn()
+            if isinstance(raw, dict):
+                cap = raw
+        except Exception:
+            cap = {}
+
+    slot = _snapshot_hud_frame_slot(ext)
+    new_roots: Dict[int, Any] = {}
+
+    for si in range(1, n + 1):
+        vw = _viewport_window_for_screen(ext, si)
+        if vw is None:
+            continue
+        raw_snap = snaps[si - 1] if si - 1 < len(snaps) else None
+        slot_saved = isinstance(raw_snap, dict)
+        if si == 1:
+            snap_d = dict(cap or {})
+            body = _describe_snapshot_for_viewport_hud(
+                si,
+                snap_d,
+                slot_saved=slot_saved,
+                live_control_panel=True,
+            )
+        else:
+            snap_d = dict(raw_snap) if isinstance(raw_snap, dict) else dict(cap or {})
+            body = _describe_snapshot_for_viewport_hud(si, snap_d, slot_saved=slot_saved)
+        root: Optional[Any] = None
+        body_lbl: Optional[Any] = None
+        try:
+            ra = getattr(ui, "Alignment", None)
+            rt = getattr(ra, "RIGHT_TOP", None) if ra is not None else None
+            with vw.get_frame(slot):
+                root = ui.ZStack(alignment=rt) if rt is not None else ui.ZStack()
+                with root:
+                    ui.Spacer()
+                    with ui.Frame(
+                        width=278,
+                        style={
+                            "background_color": 0xE8121824,
+                            "border_width": 1,
+                            "border_color": 0xFF5A6A80,
+                            "border_radius": 4,
+                            "padding": 8,
+                        },
+                    ):
+                        body_lbl = ui.Label(
+                            body,
+                            word_wrap=True,
+                            width=260,
+                            style={"color": 0xFFE8F4FF, "font_size": 13},
+                        )
+        except Exception:
+            root = None
+            body_lbl = None
+        if root is not None:
+            new_roots[si] = root
+        if si == 1 and body_lbl is not None:
+            try:
+                ext._tbs_sim_hud_screen1_label = body_lbl
+            except Exception:
+                pass
+
+    try:
+        ext._tbs_sim_snapshot_hud_roots = new_roots
+    except Exception:
+        pass
+    if getattr(ext, "_tbs_sim_hud_screen1_label", None) is not None:
+        _ensure_sim_screen1_live_hud_subscription(ext)
+
+
+def schedule_viewport_snapshot_hud_refresh(ext: Any) -> None:
+    """Dock/뷰포트 레이아웃이 잡힌 뒤 HUD 를 다시 붙이기 위해 몇 프레임 뒤에 실행한다."""
+    try:
+        ext._tbs_sim_snapshot_hud_sched_token = int(getattr(ext, "_tbs_sim_snapshot_hud_sched_token", 0) or 0) + 1
+        tok = int(ext._tbs_sim_snapshot_hud_sched_token)
+    except Exception:
+        tok = 0
+
+    async def _go() -> None:
+        for _ in range(10):
+            try:
+                await kit_app.get_app().next_update_async()
+            except Exception:
+                return
+        try:
+            if int(getattr(ext, "_tbs_sim_snapshot_hud_sched_token", 0) or 0) != tok:
+                return
+        except Exception:
+            return
+        try:
+            sync_viewport_snapshot_hud_layers(ext)
+        except Exception:
+            pass
+
+    try:
+        asyncio.ensure_future(_go())
     except Exception:
         pass

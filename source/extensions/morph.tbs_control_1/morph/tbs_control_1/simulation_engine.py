@@ -337,8 +337,13 @@ class TBSSimulationEngine:
         on_progress: Optional[Callable[[Dict[str, str]], None]] = None,
         on_gate: Optional[Callable[[Dict[str, str]], object]] = None,
         print_to_console: bool = True,
+        event_tags: Optional[Dict[str, str]] = None,
     ) -> None:
-        """lots: 초기 LOT 목록(보통 비움). 타이밍·초기화·콜백을 묶어 엔진 상태를 구성한다."""
+        """lots: 초기 LOT 목록(보통 비움). 타이밍·초기화·콜백을 묶어 엔진 상태를 구성한다.
+
+        ``event_tags``: ``on_event`` / ``on_progress`` / ``on_gate`` 로 넘기는 payload 에 항상 병합되는
+        짧은 문자열 딕셔너리(예: 멀티 뷰 ``tbs_sim_screen``).
+        """
         self._lots = list(lots)
         self._timing = timing or SimulationTimingConfig()
         self._log_cfg = log_config or SimulationLogConfig()
@@ -348,6 +353,7 @@ class TBSSimulationEngine:
         self._on_progress = on_progress
         self._on_gate = on_gate
         self._print_to_console = bool(print_to_console)
+        self._event_tags = dict(event_tags or {})
         self._running = False
         self._done = False
         self._deadlock = False
@@ -1040,6 +1046,7 @@ class TBSSimulationEngine:
                 detail=f"{lot.lot_id} OHT->{ep_port} 직접투입(도착포트={ep_port}) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
+                linked_anim_json=_ep_aj,
             )
         )
         # ARRIVED 이벤트는 위에서 이미 emit 했으므로, 여기서 _set_port가 ARRIVED를 재발행하면 중복 이벤트가 된다.
@@ -1089,6 +1096,7 @@ class TBSSimulationEngine:
                 detail=f"{lot.lot_id} OHT->IN/OUT 이동(도착포트=IN/OUT) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
+                linked_anim_json="arrived_inout.json",
             )
         )
         self._stage_mark(lot.lot_id, "oht_to_inout_end")
@@ -1147,6 +1155,7 @@ class TBSSimulationEngine:
                     detail=f"{lot.lot_id} IN/OUT->{target_bp} 이동(출발포트=IN/OUT, 도착포트={target_bp}) | 공정={move_time:.1f}s 애니={aw_u:.1f}s",
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_TRANSFERING",
+                    linked_anim_json=_mv_aj,
                 )
             )
         finally:
@@ -1267,6 +1276,7 @@ class TBSSimulationEngine:
                     detail=f"{lot.lot_id} {bp_port}->{ep_port} 이송(출발포트={bp_port}, 도착포트={ep_port}) | 공정={move_time:.1f}s 애니={aw_u:.1f}s",
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_REQ",
+                    linked_anim_json=_req_aj,
                 )
             )
         finally:
@@ -1356,6 +1366,7 @@ class TBSSimulationEngine:
                 detail=f"{lot.lot_id} {ep_port}->OHT 회수(출발포트={ep_port}, 도착포트=OHT) | 공정={unload_time:.1f}s 애니={aw_u:.1f}s",
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="REMOVED",
+                linked_anim_json=_rm_aj,
             )
         )
         self._stage_mark(lot.lot_id, "ep_to_oht_end")
@@ -1469,6 +1480,7 @@ class TBSSimulationEngine:
         detail: str,
         progress_interval: float = 5.0,
         event_seq: str = "",
+        linked_anim_json: str = "",
     ):
         """
         공정 대기 시간을 simpy timeout으로 소모하고 진행률을 낸다.
@@ -1477,15 +1489,18 @@ class TBSSimulationEngine:
         - progress_interval <= 0: 중간 진행 출력 없이 DONE만 emit (기존 동작)
         - progress_interval > 0: 텍스트 로그([PROGRESS])는 누적하지 않고, on_progress(UI)만 주기적으로 갱신
           (요구사항: 설정한 초마다 %만 반영되도록)
+        - linked_anim_json: UI 진행현황에 표시할 ``data/sim_sequences`` 기준 파일명(로그 anim_line 과 동일).
         """
         self._interrupt_anim_proc_priority()
         total = max(0.01, float(total_sec))
         interval = self._progress_emit_policy.normalize_interval(float(progress_interval))
         ev = str(event_seq or "").strip()
+        aj = str(linked_anim_json or "").strip()
         self._emit_progress({
             "label": label,
             "detail": detail,
             "event_seq": ev,
+            "linked_anim_json": aj,
             "status": "RUNNING",
             "elapsed": "0.0",
             "total": self._progress_emit_policy.format_sec_1(total),
@@ -1498,6 +1513,7 @@ class TBSSimulationEngine:
                 "label": label,
                 "detail": detail,
                 "event_seq": ev,
+                "linked_anim_json": aj,
                 "status": "DONE",
                 "elapsed": self._progress_emit_policy.format_sec_1(total),
                 "total": self._progress_emit_policy.format_sec_1(total),
@@ -1516,6 +1532,7 @@ class TBSSimulationEngine:
                 "label": label,
                 "detail": detail,
                 "event_seq": ev,
+                "linked_anim_json": aj,
                 "status": "DONE" if remain <= 1e-9 else "RUNNING",
                 "elapsed": self._progress_emit_policy.format_sec_1(elapsed),
                 "total": self._progress_emit_policy.format_sec_1(total),
@@ -1546,7 +1563,9 @@ class TBSSimulationEngine:
             payload["ports_occupancy"] = {}
         if self._on_event:
             try:
-                self._on_event(payload)
+                merged = dict(payload or {})
+                merged.update(self._event_tags)
+                self._on_event(merged)
             except Exception:
                 pass
 
@@ -1559,7 +1578,9 @@ class TBSSimulationEngine:
             payload["sim_time"] = "0.00"
         if self._on_progress:
             try:
-                self._on_progress(payload)
+                merged = dict(payload or {})
+                merged.update(self._event_tags)
+                self._on_progress(merged)
             except Exception:
                 pass
 
@@ -1572,7 +1593,9 @@ class TBSSimulationEngine:
             # 게이트 콜백은 UI와 동기 통신하므로 직렬화를 위해 lock을 강제한다.
             # (다중 공정에서 dialog 중복 생성 방지)
             try:
-                res = cb(dict(payload or {}))
+                merged = dict(payload or {})
+                merged.update(self._event_tags)
+                res = cb(merged)
                 # on_gate는 "단계 확인"을 위한 훅이지만,
                 # 추가 요구사항(애니메이션이 더 길면 다음 공정 대기)을 위해
                 # float(예상 애니메이션 길이, sec)을 반환할 수 있도록 확장한다.
