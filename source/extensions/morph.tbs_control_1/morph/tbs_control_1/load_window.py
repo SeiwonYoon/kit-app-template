@@ -112,4 +112,55 @@ async def on_load_usd(ext: Any) -> None:
     ext._load_status_label.text = "로드 중..."
     import omni.usd as ou
     ou.get_context().open_stage(path)
+    try:
+        if "https://" in str(path).lower() and not getattr(ext, "_tbs_mdl_https_texture_hint_done", False):
+            ext._tbs_mdl_https_texture_hint_done = True
+            print(
+                "[TBS] https 원격 씬: MDL 본문에만 있는 https 텍스처는 RTX가 자주 못 풉니다. "
+                "USD 속성(Asset/String/Token)으로 드러난 https 이미지는 로드 후 자동으로 로컬 캐시에 받아 덮어쓰며, "
+                "약 1초 뒤 한 번 더 스캔합니다. "
+                "같은 오류가 남으면 해당 URL은 MDL 내부 전용이므로 재질 재출력·씬 로컬 복제가 필요합니다. "
+                "자동 덮어쓰기 끄기: TBS_SKIP_HTTPS_TEXTURE_FIXUP=1",
+                flush=True,
+            )
+    except Exception:
+        pass
+    try:
+        ext._tbs_last_loaded_usd_path = str(path or "").strip()
+        ext._tbs_multi_split_usd_ready = True
+    except Exception:
+        pass
     ext._load_status_label.text = "로드 완료. 아래 '목록 새로고침'을 눌러 주세요."
+    fn = getattr(ext, "_sync_sim_multi_split_row_visibility_fn", None)
+    if callable(fn):
+        try:
+            fn(ext)
+        except Exception:
+            pass
+
+    async def _sync_split_after_stage_settles() -> None:
+        """open_stage 직후 한 프레임 뒤에 다시 동기화(루트 레이어가 늦게 붙는 환경 대비)."""
+        try:
+            import omni.kit.app as kapp
+
+            await kapp.get_app().next_update_async()
+        except Exception:
+            return
+        f2 = getattr(ext, "_sync_sim_multi_split_row_visibility_fn", None)
+        if callable(f2):
+            try:
+                f2(ext)
+            except Exception:
+                pass
+
+    try:
+        asyncio.ensure_future(_sync_split_after_stage_settles())
+    except Exception:
+        pass
+
+    try:
+        from .usd_https_asset_fixup import schedule_https_asset_fixup_if_applicable
+
+        asyncio.ensure_future(schedule_https_asset_fixup_if_applicable(ext, path))
+    except Exception:
+        pass

@@ -169,12 +169,14 @@ from .prim_utils import (
     find_all_prim_paths_by_name,
     get_prim_local_translate,
     get_stage,
+    is_usd_file_stage_loaded,
     set_prim_translate_only,
 )
 from .rotate_animation import run_prim_rotate_animation, stop_prim_rotate_animation
 from .selection_overlay import show_prim_info_in_viewport
 from .signal_parser import parse_signal
 from .sequence_engine import SequenceRunner
+from . import sim_multi_view
 from .simulation_engine import (
     Lot,
     SimulationInitConfig,
@@ -917,6 +919,112 @@ def _estimate_anim_duration_for_gate_payload(ext: Any, payload: Dict[str, str]) 
         return 0.0
 
 
+def _sync_sim_multi_split_row_visibility(ext: Any) -> None:
+    """TBS 제어창 'Load'로 스테이지 연 뒤에만 분할 행 표시. Kit 기본 빈 씬은 제외."""
+    row = getattr(ext, "_sim_multi_split_row", None)
+    if row is None:
+        return
+    try:
+        if get_stage() is None:
+            try:
+                ext._tbs_multi_split_usd_ready = False
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        st_ok = bool(is_usd_file_stage_loaded())
+        ready = bool(getattr(ext, "_tbs_multi_split_usd_ready", False))
+        row.visible = bool(ready and st_ok)
+    except Exception:
+        try:
+            row.visible = False
+        except Exception:
+            pass
+    if not getattr(row, "visible", False):
+        _force_sim_split_to_default(ext)
+
+
+def _sync_sim_split_checkboxes_from_ext_count(ext: Any) -> None:
+    """``ext._sim_viewport_split_count``(실제 적용 분할 수)에 맞춰 1~4 체크박스를 맞춘다. ``apply`` 를 호출하지 않는다."""
+    if getattr(ext, "_sim_split_mutate_guard", False):
+        return
+    try:
+        n = int(getattr(ext, "_sim_viewport_split_count", 1) or 1)
+    except Exception:
+        n = 1
+    n = max(1, min(4, n))
+    models = getattr(ext, "_sim_split_cb_models", None)
+    if not isinstance(models, list) or len(models) != 4:
+        return
+    ext._sim_split_mutate_guard = True
+    try:
+        for i, m in enumerate(models, start=1):
+            try:
+                m.set_value(i == n)
+            except Exception:
+                pass
+    finally:
+        ext._sim_split_mutate_guard = False
+
+
+def _force_sim_split_to_default(ext: Any) -> None:
+    """분할 UI를 1개 시뮼만 선택된 상태로 되돌린다."""
+    ext._sim_split_mutate_guard = True
+    try:
+        models = getattr(ext, "_sim_split_cb_models", None)
+        if isinstance(models, list) and len(models) == 4:
+            for i, m in enumerate(models, start=1):
+                try:
+                    m.set_value(i == 1)
+                except Exception:
+                    pass
+        try:
+            ext._sim_viewport_split_count = 1
+        except Exception:
+            pass
+    finally:
+        ext._sim_split_mutate_guard = False
+    try:
+        sim_multi_view.apply_sim_viewport_split_layout(ext, 1)
+    except Exception:
+        pass
+
+
+def _on_sim_split_choice_changed(ext: Any, idx: int, m: Any) -> None:
+    """1~4 상호 배타 체크 + 분할 스텁 적용."""
+    if getattr(ext, "_sim_split_mutate_guard", False):
+        return
+    try:
+        if not m.get_value_as_bool():
+            cur = int(getattr(ext, "_sim_viewport_split_count", 1) or 1)
+            if cur == idx:
+                ext._sim_split_mutate_guard = True
+                try:
+                    m.set_value(True)
+                finally:
+                    ext._sim_split_mutate_guard = False
+            return
+        ext._sim_split_mutate_guard = True
+        try:
+            models = list(getattr(ext, "_sim_split_cb_models", []) or [])
+            for j, md in enumerate(models, start=1):
+                if j != idx:
+                    try:
+                        if md.get_value_as_bool():
+                            md.set_value(False)
+                    except Exception:
+                        pass
+        finally:
+            ext._sim_split_mutate_guard = False
+        sim_multi_view.apply_sim_viewport_split_layout(ext, idx)
+    except Exception as err:
+        try:
+            print(f"[TBS multi-sim] split UI err: {err}", flush=True)
+        except Exception:
+            pass
+
+
 def build_control_window(ext: Any) -> None:
     """TBS 제어창을 만들고 ext에 위젯/모델 참조를 저장."""
     # destroy()가 실패하거나(Kit 이벤트/프레임 타이밍), 핫리로드로 ext 인스턴스가 바뀌면
@@ -1002,6 +1110,19 @@ def build_control_window(ext: Any) -> None:
     # 진행현황 RUNNING 라인 디듀프: percent/elapsed/total이 같으면 UI 갱신 스킵
     ext._sim_progress_last_key = {}
     ext._sim_engine = None
+    ext._sim_viewport_split_count = 1
+    ext._sync_sim_multi_split_ui_fn = None
+    ext._tbs_multi_split_usd_ready = False
+    ext._tbs_last_loaded_usd_path = ""
+    ext._sim_multi_view_apply_token = 0
+    ext._sim_multi_viewport_entries = []
+    ext._sim_multi_context_names = []
+    ext._tbs_split_session_layer_paths = []
+    ext._tbs_mdl_https_texture_hint_done = False
+    ext._sim_split_mutate_guard = False
+    ext._sim_split_cb_models = []
+    ext._sim_split_stage_sub = None
+    ext._sim_multi_split_row = None
     ext._sim_update_sub = None
     ext._sim_thread = None
     ext._sim_thread_stop = None
@@ -1113,7 +1234,33 @@ def build_control_window(ext: Any) -> None:
                 ui.Spacer(height=6)
                 with ui.Frame(style={"background_color": 0xFF1E2530}):
                     with ui.VStack(padding=8, spacing=6):
-                        ui.Label("시뮬레이션 (simpy)", height=24, style={"color": 0xFFDDDDDD})
+                        with ui.HStack(spacing=10, height=28):
+                            ui.Label(
+                                "시뮬레이션 (simpy)",
+                                width=150,
+                                height=24,
+                                style={"color": 0xFFDDDDDD},
+                            )
+                            ext._sim_multi_split_row = ui.HStack(spacing=8, height=26)
+                            ext._sim_multi_split_row.visible = False
+                            with ext._sim_multi_split_row:
+                                ui.Label(
+                                    "시뮬 화면(USD 로드 시)",
+                                    width=130,
+                                    height=22,
+                                    style={"color": 0xFF9AA4B2},
+                                )
+                                ext._sim_split_cb_models = []
+                                for i in range(1, 5):
+                                    m = ui.SimpleBoolModel(i == 1)
+                                    ext._sim_split_cb_models.append(m)
+                                    ui.Label(f"{i}개", width=30, height=22, style={"color": 0xFFDDDDDD})
+                                    ui.CheckBox(model=m, width=22, style=CHECKBOX_WHITE_STYLE)
+                                    try:
+                                        m.add_value_changed_fn(lambda md, ii=i: _on_sim_split_choice_changed(ext, ii, md))
+                                    except Exception:
+                                        pass
+                                ext._sync_sim_multi_split_ui_fn = lambda: _sync_sim_split_checkboxes_from_ext_count(ext)
                         with ui.HStack(spacing=8, height=28):
                             ui.Label("LOT 수", width=80)
                             ui.IntField(model=ext._sim_lot_count_model, width=80)
@@ -1326,7 +1473,15 @@ def build_control_window(ext: Any) -> None:
                 ui.Spacer(height=4)
                 with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
                     ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
+    ext._sync_sim_multi_split_row_visibility_fn = _sync_sim_multi_split_row_visibility
     refresh_object_list(ext)
+    try:
+        sim_multi_view.attach_stage_visibility_subscription(
+            ext, lambda: _sync_sim_multi_split_row_visibility(ext)
+        )
+        _sync_sim_multi_split_row_visibility(ext)
+    except Exception:
+        pass
 
 
 def on_xml_seq_changed(ext: Any) -> None:

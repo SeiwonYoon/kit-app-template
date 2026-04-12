@@ -6,6 +6,7 @@ prim_utils.py — 스테이지/prim 조회 및 변환 유틸 (경로 수집, 이
 
 【역할】
 - get_stage(): 현재 Usd.Stage 반환.
+- is_usd_file_stage_loaded(): 실제 USD·원격 URL·서브레이어로 연 스테이지 여부(멀티 시뮼 UI 게이트; 빈 씬 제외).
 - is_utf8_safe(s): UTF-8 인코딩 가능 여부.
 - collect_prim_paths_safe(stage): 스테이지 전체에서 Xform/Gprim/Scope prim 경로 수집 (UTF-8 안전).
 - find_prim_path_by_name(stage, name): 이름/경로 일치 첫 번째 경로.
@@ -44,6 +45,65 @@ def get_stage():
     """omni.usd 컨텍스트에서 현재 활성 Usd.Stage 반환(없으면 None)."""
     ctx = ou.get_context()
     return ctx.get_stage() if ctx else None
+
+
+def is_usd_file_stage_loaded() -> bool:
+    """
+    사용자 USD가 열린 스테이지인지 판별(멀티 시뮼 화면 분할 UI 표시용).
+
+    빈 템플릿 씬(/World 만 있는 익명 스테이지 등)에서 분할 UI가 뜨지 않도록,
+    **실제 파일·원격 URL 식별자가 있을 때만** True 로 한다.
+    """
+    st = get_stage()
+    if st is None:
+        return False
+    try:
+        lyr = st.GetRootLayer()
+        if lyr is None:
+            return False
+        ident = str(lyr.identifier or "").strip()
+        realp = str(getattr(lyr, "realPath", "") or "").strip()
+        pathish = ident or realp
+        if pathish:
+            low = pathish.lower()
+            if any(low.endswith(suf) for suf in (".usd", ".usda", ".usdc")):
+                return True
+            if low.startswith("omniverse://") or low.startswith("http://") or low.startswith("https://"):
+                return True
+            if not lyr.IsAnonymous():
+                return True
+        # 루트는 익명이지만 subLayerPaths 등으로 USD 가 붙은 경우
+        try:
+            for raw in list(getattr(lyr, "subLayerPaths", []) or []):
+                lid = str(raw or "").strip()
+                if not lid:
+                    continue
+                lo = lid.lower()
+                if any(lo.endswith(suf) for suf in (".usd", ".usda", ".usdc")):
+                    return True
+                if lo.startswith("omniverse://") or lo.startswith("http://") or lo.startswith("https://"):
+                    return True
+        except Exception:
+            pass
+        try:
+            gul = getattr(st, "GetUsedLayers", None)
+            if callable(gul):
+                for layer in gul() or []:
+                    if layer is None:
+                        continue
+                    lid = str(layer.identifier or "").strip()
+                    if not lid:
+                        continue
+                    lo = lid.lower()
+                    if any(lo.endswith(suf) for suf in (".usd", ".usda", ".usdc")):
+                        return True
+                    if lo.startswith("omniverse://") or lo.startswith("http://") or lo.startswith("https://"):
+                        return True
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
 
 
 def is_utf8_safe(s: str) -> bool:

@@ -4,7 +4,12 @@
 """
 Kit 기본 크롬(메뉴바·툴바·콘솔 등) 표시 제어.
 
-TBS 제어창·시퀀스 편집기·Viewport 는 숨기지 않는다.
+TBS 제어창·시퀀스 편집기·Viewport·멀티 시뮼 분할 보조 창(``TBS_SimSplit_*``)은 숨기지 않는다.
+
+표시/복원 직후 ``schedule_split_layout_refresh_for_chrome_change(ext, hidden)`` 로
+Dock 이 안정된 뒤 1분할은 ``Viewport.dock_in(DockSpace, …)``(또는 사각형 폴백)으로 채우고,
+Dock 분할(2~4)은 기존 ``dock_in`` 비율을 다시 적용한 뒤 각 타일 ``resolution`` 을 맞춘다.
+격자(비 Dock) 분할은 타일 합집합 기준으로 다시 맞춘다.
 
 런치 시 기본으로 메뉴 숨김을 켤지는 아래 상수 한 곳만 바꾸면 됨
 (True: 체크됨 + 시작 후 자동 적용 / False: 체크 해제·기본 Kit UI).
@@ -28,6 +33,9 @@ _PROTECTED_TITLES = frozenset(
         "Viewport",
     }
 )
+
+# sim_multi_view._split_window_name → Workspace 창 이름 ``TBS_SimSplit_1`` …
+_PROTECTED_NAME_PREFIXES = ("TBS_SimSplit", "tbs_simsplit")
 
 # Dock/레이아웃 골격은 건드리지 않음
 _DOCK_SKIP_SUBSTR = ("dockspace", "dock", "main dock")
@@ -65,6 +73,10 @@ def _should_protect_window(label: str) -> bool:
     low = label.lower()
     if label in _PROTECTED_TITLES:
         return True
+    stripped = label.strip()
+    for pref in _PROTECTED_NAME_PREFIXES:
+        if stripped.startswith(pref):
+            return True
     for s in _DOCK_SKIP_SUBSTR:
         if s in low:
             return True
@@ -120,6 +132,28 @@ def _as_window(obj: Any) -> Any:
     return obj
 
 
+def _unwrap_window_handle(w: Any) -> Any:
+    """WindowHandle → 실제 Window 등 visible 안전 대상으로 한 단계 더 풀기."""
+    if w is None:
+        return None
+    try:
+        tn = type(w).__name__
+        if "Handle" not in tn:
+            return w
+        for attr in ("window", "ui_window"):
+            ch = getattr(w, attr, None)
+            if callable(ch):
+                try:
+                    ch = ch()
+                except Exception:
+                    ch = None
+            if ch is not None and hasattr(ch, "visible") and "Handle" not in type(ch).__name__:
+                return ch
+    except Exception:
+        pass
+    return w
+
+
 def _set_window_visible(obj: Any, visible: bool) -> bool:
     """
     가시성 토글을 'Window(실체)' 기준으로 적용.
@@ -129,16 +163,10 @@ def _set_window_visible(obj: Any, visible: bool) -> bool:
     w = _as_window(obj)
     if w is None:
         return False
+    w = _unwrap_window_handle(w) or w
     try:
         w.visible = bool(visible)
         return True
-    except Exception:
-        pass
-    try:
-        fn = getattr(w, "setVisible", None)
-        if callable(fn):
-            fn(bool(visible))
-            return True
     except Exception:
         pass
     try:
@@ -146,6 +174,14 @@ def _set_window_visible(obj: Any, visible: bool) -> bool:
         if callable(fn):
             fn(bool(visible))
             return True
+    except Exception:
+        pass
+    try:
+        if "Handle" not in type(w).__name__:
+            fn = getattr(w, "setVisible", None)
+            if callable(fn):
+                fn(bool(visible))
+                return True
     except Exception:
         pass
     return False
@@ -183,93 +219,109 @@ def _iter_workspace_windows() -> List[Any]:
 
 def apply_kit_chrome_hidden(ext: Any, hidden: bool) -> None:
     """
-    hidden=True: 기본 메뉴바·상태줄·알려진 패널 창을 숨김. TBS/시퀀스/Viewport 유지.
+    hidden=True: 기본 메뉴바·상태줄·알려진 패널 창을 숨김. TBS/시퀀스/Viewport·TBS_SimSplit_* 유지.
     hidden=False: 직전 백업으로 복원(없으면 메뉴만 보이게 시도).
     """
     key = "_kit_chrome_visibility_backup"
     flag = "_kit_chrome_hide_active"
-    if hidden:
-        backup: Dict[str, Any] = {"__wins__": {}}
-        mb = _get_main_menu_bar()
-        if mb is not None:
-            try:
-                backup["__menubar_visible__"] = bool(mb.visible)
-                mb.visible = False
-            except Exception:
-                pass
-
-        try:
-            settings = carb.settings.get_settings()
-            if settings:
+    try:
+        if hidden:
+            backup: Dict[str, Any] = {"__wins__": {}}
+            mb = _get_main_menu_bar()
+            if mb is not None:
                 try:
-                    backup["__statusbar_setting__"] = settings.get("/app/window/showStatusBar")
+                    backup["__menubar_visible__"] = bool(mb.visible)
+                    mb.visible = False
                 except Exception:
-                    backup["__statusbar_setting__"] = None
-                settings.set("/app/window/showStatusBar", False)
-        except Exception:
-            pass
+                    pass
 
-        for w in _iter_workspace_windows():
-            label = _window_label(w)
-            if _should_protect_window(label):
-                continue
             try:
-                # label 기반으로 저장 (WindowHandle 교체/재생성에 강하게)
+                settings = carb.settings.get_settings()
+                if settings:
+                    try:
+                        backup["__statusbar_setting__"] = settings.get("/app/window/showStatusBar")
+                    except Exception:
+                        backup["__statusbar_setting__"] = None
+                    settings.set("/app/window/showStatusBar", False)
+            except Exception:
+                pass
+
+            for w in _iter_workspace_windows():
+                label = _window_label(w)
+                if _should_protect_window(label):
+                    continue
+                try:
+                    # label 기반으로 저장 (WindowHandle 교체/재생성에 강하게)
+                    wins = backup.get("__wins__", {})
+                    if isinstance(wins, dict) and label:
+                        wins[label] = bool(getattr(w, "visible", True))
+                    _set_window_visible(w, False)
+                except Exception:
+                    pass
+
+            setattr(ext, key, backup)
+            setattr(ext, flag, True)
+        else:
+            backup = getattr(ext, key, None)
+            if not isinstance(backup, dict):
+                backup = {}
+
+            mb = _get_main_menu_bar()
+            if mb is not None:
+                try:
+                    if "__menubar_visible__" in backup:
+                        mb.visible = bool(backup["__menubar_visible__"])
+                    else:
+                        mb.visible = True
+                except Exception:
+                    pass
+
+            try:
+                settings = carb.settings.get_settings()
+                if settings and "__statusbar_setting__" in backup:
+                    v = backup["__statusbar_setting__"]
+                    if v is not None:
+                        settings.set("/app/window/showStatusBar", v)
+                    else:
+                        settings.set("/app/window/showStatusBar", True)
+            except Exception:
+                pass
+
+            for w in _iter_workspace_windows():
+                label = _window_label(w)
+                if _should_protect_window(label):
+                    continue
                 wins = backup.get("__wins__", {})
-                if isinstance(wins, dict) and label:
-                    wins[label] = bool(getattr(w, "visible", True))
-                _set_window_visible(w, False)
+                if isinstance(wins, dict) and label in wins:
+                    try:
+                        _set_window_visible(w, bool(wins[label]))
+                    except Exception:
+                        pass
+
+            try:
+                delattr(ext, key)
             except Exception:
-                pass
-
-        setattr(ext, key, backup)
-        setattr(ext, flag, True)
-        return
-
-    backup = getattr(ext, key, None)
-    if not isinstance(backup, dict):
-        backup = {}
-
-    mb = _get_main_menu_bar()
-    if mb is not None:
+                setattr(ext, key, None)
+            try:
+                delattr(ext, flag)
+            except Exception:
+                setattr(ext, flag, False)
+    finally:
         try:
-            if "__menubar_visible__" in backup:
-                mb.visible = bool(backup["__menubar_visible__"])
-            else:
-                mb.visible = True
+            from . import sim_multi_view as _smv
+
+            if hidden:
+                # Dock/Workspace 재배치 전에도 fill_frame 을 켜 두면 고정 resolution 3D가
+                # UI 확장을 따라가기 시작한다(지연 레이아웃 태스크와 병행).
+                try:
+                    _smv.set_viewport_fill_frame_for_split_count(
+                        int(getattr(ext, "_sim_viewport_split_count", 1) or 1), True
+                    )
+                except Exception:
+                    pass
+            _smv.schedule_split_layout_refresh_for_chrome_change(ext, bool(hidden))
         except Exception:
             pass
-
-    try:
-        settings = carb.settings.get_settings()
-        if settings and "__statusbar_setting__" in backup:
-            v = backup["__statusbar_setting__"]
-            if v is not None:
-                settings.set("/app/window/showStatusBar", v)
-            else:
-                settings.set("/app/window/showStatusBar", True)
-    except Exception:
-        pass
-
-    for w in _iter_workspace_windows():
-        label = _window_label(w)
-        if _should_protect_window(label):
-            continue
-        wins = backup.get("__wins__", {})
-        if isinstance(wins, dict) and label in wins:
-            try:
-                _set_window_visible(w, bool(wins[label]))
-            except Exception:
-                pass
-
-    try:
-        delattr(ext, key)
-    except Exception:
-        setattr(ext, key, None)
-    try:
-        delattr(ext, flag)
-    except Exception:
-        setattr(ext, flag, False)
 
 
 def is_kit_chrome_hidden(ext: Any) -> bool:

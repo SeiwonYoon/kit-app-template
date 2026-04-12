@@ -57,6 +57,7 @@ import omni.usd as ou
 from carb.eventdispatcher import get_eventdispatcher
 
 from .control_window import build_control_window, on_sim_stop_clicked, refresh_object_list
+from .sim_multi_view import detach_stage_visibility_subscription, teardown_sim_multi_viewports
 from .kit_chrome_visibility import (
     KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH,
     apply_kit_chrome_hidden,
@@ -167,6 +168,12 @@ class Extension(omni.ext.IExt):
         self._object_list_frame = None
         self._sequence_window = None
         self._kit_chrome_startup_task = None
+
+        # 이전 비정상 종료 등으로 남은 보조 ViewportWindow / 보조 USD 컨텍스트 정리
+        try:
+            teardown_sim_multi_viewports(self)
+        except Exception:
+            pass
 
         build_control_window(self)
         self._sequence_window = SequenceEditorWindow()
@@ -298,6 +305,14 @@ class Extension(omni.ext.IExt):
             self._overlay.destroy()
             self._overlay = None
         usd_animation_control.stop_usd_animation()
+        try:
+            teardown_sim_multi_viewports(self)
+        except Exception:
+            pass
+        try:
+            detach_stage_visibility_subscription(self)
+        except Exception:
+            pass
         if self._control_window is not None:
             self._control_window.destroy()
             self._control_window = None

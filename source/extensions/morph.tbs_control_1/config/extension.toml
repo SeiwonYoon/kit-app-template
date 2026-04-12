@@ -13,6 +13,7 @@ repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
 "omni.ui" = {}
 "omni.usd" = {}
 "omni.kit.viewport.utility" = {}
+"omni.kit.viewport.window" = {}
 "omni.timeline" = {}
 "omni.kit.pipapi" = {}
 
