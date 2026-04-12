@@ -28,6 +28,74 @@ sim_multi_view.py — 멀티 시뮼 화면 분할
   분할 불가(3D 끔·USD 미준비·경로 없음)·빌드 롤백 시 **1로 되돌리고** ``notify_sim_split_ui_sync`` 로 체크박스를 맞춘다.
 - **스냅샷 HUD(뷰포트 인-뷰 2D)**: 각 타일의 ``ViewportWindow.get_frame(ext_id)`` 슬롯에 우측 상단 패널을 올려, **해당 3D 타일 안에만** 시뮼 스냅샷 요약(저장 여부·LOT·EP·간격·고장 등)이 보이게 한다. 제어창 저장·자동 채움·분할 변경 시 갱신된다.
 
+【control_window.py 와의 역할 분담】
+- **본 모듈(sim_multi_view)**: Kit 뷰포트/Workspace 창·Dock·보조 ``omni.usd`` 컨텍스트·스테이지 복제/래퍼·
+  뷰포트 해상도·카메라·크롬(메뉴) 숨김 후 재레이아웃·인-뷰 HUD 레이어 등 **3D 쪽 분할**만 담당한다.
+- **제어창(control_window)**: ``TBSSimulationEngine`` 다중 생성·화면별 tick 스레드·진행/로그 UI·
+  스냅샷 dict 저장 등 **시뮼 로직·UI**를 담당한다. 분할 수는 양쪽이 ``ext._sim_viewport_split_count`` 로 동기화한다.
+
+【함수·코루틴 역할 색인 (파일 전체)】
+환경/플래그:
+- ``_env_flag`` : 문자열 환경변수를 bool 로 해석.
+- ``_use_aux_file_clone`` / ``_use_multi_split_session_layer`` : 보조 타일 USD 복제·session layer 사용 여부.
+
+분할 정책·표현:
+- ``sim_viewport_split_dock_enabled`` / ``sim_viewport_split_3d_enabled`` : Dock 사용·보조 Hydra 3D 생성 on/off.
+- ``channel_count_for_split`` : 1~4 클램프.
+- ``split_layout_description`` : 사용자 안내 문구.
+- ``_split_window_name`` : 보조 Workspace 창 이름.
+- ``_split_cell_layout_fracs`` : 타일별 정규화 사각형(레이아웃 계산).
+- ``_split_dock_operations`` : ``dock_in`` 순서(창 이름·기준·DockPosition·비율).
+
+비동기·Dock 보조:
+- ``_wait_workspace_windows_ready`` / ``_wait_aux_windows_docked`` : 창 등록/Dock 완료 대기.
+- ``_dock_aux_into_target`` / ``_dock_viewport_fill_dockspace`` : Dock API 래퍼.
+- ``_reapply_split_dock_in_geometry`` : Dock 기하 재적용.
+- ``_sync_viewport_resolution_from_workspace_window`` : 보조 창에 맞춰 뷰포트 해상도 동기화.
+- ``set_viewport_fill_frame_for_split_count`` : Viewport fill 프레임 on/off.
+- ``_apply_split_dock_layout`` : 코루틴으로 Dock 시퀀스 실행.
+
+USD·스테이지·복제:
+- ``_main_usd_path_for_clone`` : 메인 스테이지에서 복제할 USD 경로.
+- ``_apply_stage_fps_30`` : 보조 스테이지 FPS 힌트.
+- ``_register_session_layer_path`` / ``_unlink_split_session_files`` / ``_unlink_one_session_file`` : session 파일 추적·삭제.
+- ``_clone_dest_suffix`` / ``_clone_usd_for_aux_tile`` : 보조 타일용 파일 복제.
+- ``_make_aux_wrapper_root_layer`` / ``_export_empty_session_usda`` : 래퍼·빈 session usda 생성.
+- ``_ctx_open_stage_path`` / ``_open_aux_stage_with_unique_session`` : 네임드 컨텍스트에 스테이지 오픈.
+
+컨텍스트·뷰포트 생명주기:
+- ``_log_split_stage_not_shared_with_main`` : 디버그 로그.
+- ``_named_usd_context`` / ``_release_usd_context_names`` : omni.usd 컨텍스트 생성·해제.
+- ``_destroy_viewport_window`` / ``_destroy_kit_viewport`` : 뷰포트/윈도우 파괴.
+- ``_log_viewport_usd_context_bind`` : 컨텍스트 바인딩 로그.
+- ``_workspace_show_named_window`` : Workspace 창 표시 토글.
+- ``_restore_main_viewport_layout`` / ``teardown_sim_multi_viewports`` : 1화면 복원·전체 철거.
+
+기하·크롬 연동:
+- ``_read_viewport_rect`` / ``_read_dockspace_rect`` / ``_read_split_cluster_union_rect`` / ``_read_split_layout_bbox_for_chrome`` : 픽셀 박스 읽기.
+- ``_refresh_docked_multi_split_after_chrome`` / ``_apply_split_geometry_sync`` : 레이아웃 동기 적용.
+- ``_menubar_reserved_height_px`` / ``_relayout_single_viewport_fill_available`` : 메뉴바 높이 보정.
+- ``relayout_split_views_to_viewport`` / ``schedule_split_layout_refresh_for_chrome_change`` : 외부에서 레이아웃 재요청.
+
+빌드·롤백·진입점:
+- ``notify_sim_split_ui_sync`` : 제어창 체크박스를 ``ext._sim_viewport_split_count`` 에 맞춤.
+- ``_rollback_split_attempt`` : 실패 시 생성물 되돌리기.
+- ``_finalize_split_window_geometry_sequential`` / ``_assign_split_cameras_after_layout`` : 레이아웃 후 창 위치·카메라.
+- ``_build_multi_split_async`` / ``_post_teardown_rebuild_split`` : 비동기 빌드·teardown 후 재빌드.
+- ``_apply_sim_viewport_split_layout_impl`` / ``apply_sim_viewport_split_layout`` : 분할 적용(동기 래퍼+impl).
+
+스테이지 가시성 구독:
+- ``attach_stage_visibility_subscription`` / ``detach_stage_visibility_subscription`` : 로드/가시성 변화 시 콜백.
+
+HUD:
+- ``_viewport_window_name_for_screen`` / ``_resolve_viewport_window_for_workspace_name`` / ``_snapshot_hud_frame_slot`` /
+  ``_viewport_window_for_screen`` : 뷰포트 윈도우 조회.
+- ``detach_sim_screen1_live_hud_subscription`` / ``_sim_screen1_hud_post_tick`` / ``_ensure_sim_screen1_live_hud_subscription`` :
+  화면1 라이브 HUD 갱신 틱.
+- ``_format_initial_load_ports_line`` / ``_fault_count_from_snapshot_dict`` / ``_describe_snapshot_for_viewport_hud`` : HUD 문자열.
+- ``destroy_viewport_snapshot_hud_layers`` / ``sync_viewport_snapshot_hud_layers`` / ``schedule_viewport_snapshot_hud_refresh`` :
+  HUD 레이어 파괴·동기·지연 갱신.
+
 보조 뷰는 Stage 패널에 올리지 않는다(메인 스테이지만 편집 UI에 노출).
 """
 

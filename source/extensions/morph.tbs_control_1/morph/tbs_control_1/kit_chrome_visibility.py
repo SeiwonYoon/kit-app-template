@@ -11,8 +11,20 @@ Dock 이 안정된 뒤 1분할은 ``Viewport.dock_in(DockSpace, …)``(또는 �
 Dock 분할(2~4)은 기존 ``dock_in`` 비율을 다시 적용한 뒤 각 타일 ``resolution`` 을 맞춘다.
 격자(비 Dock) 분할은 타일 합집합 기준으로 다시 맞춘다.
 
+【시뮼 분할·제어창과의 연동】
+- 메뉴/툴바 등 표시 상태가 바뀌면 제어창 쪽에서 ``sim_multi_view.schedule_split_layout_refresh_for_chrome_change`` 를 호출해
+  뷰포트 Dock 분할(2~4)의 기하·해상도를 다시 맞춘다. 시뮼 **엔진·tick 독립** 로직은 ``control_window`` 에 있다.
+
 런치 시 기본으로 메뉴 숨김을 켤지는 아래 상수 한 곳만 바꾸면 됨
 (True: 체크됨 + 시작 후 자동 적용 / False: 체크 해제·기본 Kit UI).
+
+【본 파일 함수 역할】
+- ``_window_label`` / ``_should_protect_window`` : Workspace 창 라벨 추출·TBS/Viewport/분할 보조 창 보호 판단.
+- ``_get_main_menu_bar`` : 메인 메뉴바 핸들 조회.
+- ``_as_window`` / ``_unwrap_window_handle`` / ``_set_window_visible`` : omni.ui 윈도우 래핑·표시 토글.
+- ``_iter_workspace_windows`` : 워크스페이스 등록 창 순회.
+- ``apply_kit_chrome_hidden`` : 숨김 정책 적용 후 분할 레이아웃 재스케줄(``ext`` 필요).
+- ``is_kit_chrome_hidden`` : 현재 숨김 상태 조회(모델 기준).
 """
 
 from __future__ import annotations

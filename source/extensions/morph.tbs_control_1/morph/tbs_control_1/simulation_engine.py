@@ -8,6 +8,12 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
 - UI(control_window.py)와는 콜백(on_log/on_event/on_progress/on_gate)으로만 통신한다.
 - 애니메이션 실행에 필요한 이벤트 payload(seq/from/to/port/lot/ports_occupancy)를 생성한다.
 
+【멀티 뷰(분할) 시 여러 엔진】
+- 제어창은 분할 수만큼 ``TBSSimulationEngine`` 인스턴스를 만들며, 각 인스턴스에 ``event_tags``(예: ``tbs_sim_screen``)를 넣는다.
+- ``_emit_event`` / ``_emit_progress`` / ``_request_gate``(on_gate) 호출 시 이 태그가 payload 에 **항상 병합**되어
+  로그 접두(``[화면N]``)·진행현황 패널 라우팅·게이트가 **어느 채널인지** 구분 가능하다.
+- **simpy 환경(env)은 엔진마다 독립**이며, ``tick()`` 호출 스레딩 전략은 control_window(단일 vs 화면별 worker)에 있다.
+
 【핵심 데이터 구조】
 - Lot: lot_id/foup_id/sequence (EP 안착 시 곧바로 회수 대기 가능; EP 상 별도 가공 시간 없음).
 - SimulationTimingConfig:

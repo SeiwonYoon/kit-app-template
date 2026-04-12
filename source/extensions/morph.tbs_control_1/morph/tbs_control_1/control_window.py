@@ -138,6 +138,53 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 - 가상 시그널: receive_signal_data, run_generator_from_parsed
 - 창: build_control_window(전체 UI 조립)
 
+【멀티 뷰포트 분할·화면별 시뮼 독립 진행 (유지보수 가이드)】
+개요:
+- **뷰포트 분할(2~4)**: `sim_multi_view.apply_sim_viewport_split_layout` 이 Kit Viewport/보조 창·USD 컨텍스트를 구성한다.
+  제어창은 `ext._sim_viewport_split_count` 만 “실제 적용된 분할 수”로 유지하고, 체크박스·모니터 UI와 동기화한다.
+- **시뮼 엔진**: 분할 수가 N>1 이면 `TBSSimulationEngine` 인스턴스를 N개 만들고 `ext._sim_engines` 에 넣는다. 각 엔진은
+  `event_tags={"tbs_sim_screen": "1".."N"}` 로 로그·진행·게이트 payload에 화면 번호를 붙인다.
+- **독립 tick**: N>1 일 때 **화면마다 별도 스레드**(`_sim_multi_engine_tick_worker`)에서 `sim.tick()` 만 호출한다.
+  한 화면이 공정 확인(`on_gate` → `done_evt.wait()`)에 블로킹돼도 다른 화면 스레드는 계속 진행한다.
+- **애니·pause와의 관계**: JSON `SequenceRunner`·Kit translate/rotate/curve 가 돌 때 `_sim_tick_pause_event` 가 켜질 수 있다.
+  멀티일 때는 `_multi_tick_should_skip_for_screen` 으로 **해당 화면만** tick 을 잠시 건너뛰어, 다른 화면 sim 시간은 진행시킨다.
+  애니 job 에는 `tbs_sim_screen` 이 들어가 `_sim_active_anim_owner_screen` 이 “어느 화면용 pause 인지”를 판별한다.
+- **애니 재생 경로**: `_sim_ui_sink_anim_event` 에서 화면1만 `handle_sim_event_for_animation` → JSON 시퀀스 실행.
+  화면2+는 보조 USD 컨텍스트의 **포트 LOT 가시성**만 갱신한다(러너는 메인 스테이지 단일).
+
+주요 ext 필드:
+- `_sim_viewport_split_count` : 1~4, sim_multi_view 와 제어창 체크박스의 단일 소스.
+- `_sim_engines` / `_sim_engine` : 멀티 시 엔진 리스트·호환용 [0] 참조.
+- `_sim_tick_threads` : 멀티 시 worker 스레드들; `_detach_sim_update` 에서 모두 join.
+- `_sim_thread` / `_sim_thread_stop` : 단일 채널용 기존 tick 스레드; 멀티 시 `_sim_thread` 는 None 일 수 있음.
+- `_sim_per_screen_snapshots` : 화면별 시뮼 설정 스냅샷(저장/미저장); `_on_save_sim_settings_to_screen` 으로 갱신.
+- `_sim_monitor_channels` : 분할 모니터(포트/진행/로그) 컬럼 dict 리스트; `_rebuild_sim_monitor_split_ui` 가 조립.
+- `_sim_multi_export_done` / `_sim_multi_tick_shutdown` : 멀티 전체 종료·엑셀 export 한 번만.
+
+함수별 역할 (분할·멀티 시뮼 직접 관련):
+- `_refresh_sim_per_screen_status_labels` : 스냅샷 유무에 따라 화면별 “(저장됨)/(미저장)” 라벨 갱신.
+- `_refresh_sim_per_screen_rows` : 분할 수에 맞춰 화면별 설정 행(HStack) visible 처리.
+- `_on_save_sim_settings_to_screen` : 현재 제어창 값을 해당 화면 스냅샷에 저장·EP3 셀·HUD 스케줄.
+- `_auto_fill_per_screen_snapshots_on_start` : 시뮼 시작 시 비어 있는 화면 슬롯에 현재 설정 복사.
+- `_fault_ports_from_snapshot` / `_timing_and_init_from_snapshot` : 스냅샷→엔진용 고장 집합·Timing/InitConfig.
+- `_sync_sim_multi_split_row_visibility` : USD 로드 후에만 분할 설정 행 표시.
+- `_sync_sim_split_checkboxes_from_ext_count` : `ext` 분할 수와 1~4 체크박스 모델 동기화(재진입 가드).
+- `_force_sim_split_to_default` : 분할 불가·스테이지 없을 때 1화면·스냅샷 초기화·레이아웃 1로 롤백.
+- `_on_sim_split_choice_changed` : 사용자가 분할 체크박스 변경 시 상호 배타 처리 후 `apply_sim_viewport_split_layout`.
+- `_usd_context_name_for_sim_screen` : 애니/가시성용 보조 USD 컨텍스트 이름(`morph_tbs_split_aux_*`).
+- `_sim_monitor_channel_count` : 모니터 열 개수(분할 수와 동일).
+- `_snapshot_monitor_channel_texts` / `_create_sim_monitor_channel_column` / `_rebuild_sim_monitor_split_ui` :
+  분할 모니터 UI 재구축 및 이전 채널 텍스트 보존.
+- `_sim_active_anim_owner_screen` : `_sim_anim_active["tbs_sim_screen"]` 기반 pause 대상 화면(1-based).
+- `_multi_tick_should_skip_for_screen` : pause 이벤트 시 **이번 프레임에 tick 을 건너뛸 화면** 판정.
+- `_sim_multi_engine_tick_worker` : 한 엔진 전용 tick 루프 스레드; 전 엔진 종료 시 export 액션 enqueue.
+- `_detach_sim_update` : tick 스레드(복수 우선) 정지·join, 로그 UI 구독 해제.
+- `on_sim_start_clicked` : N채널 엔진 생성·콜백 연결·N>1 이면 worker 스레드 기동, N==1 이면 기존 단일 `_tick_loop`.
+- `_tick_loop` (내부 함수) : 단일/구조상 단일 스레드에서 모든 엔진 순차 tick(레거시 멀티 경로는 worker로 대체됨).
+- `_execute_mapped_sequence_stub` : 이벤트→JSON 실행; job 에 `tbs_sim_screen` 포함(멀티 pause 판별용).
+- `_sim_ui_sink_anim_event` : 큐에서 소비; 화면별 가시성 + 화면1만 풀 애니 파이프라인.
+- `_update_sim_progress` : `tbs_sim_screen` 으로 멀티 진행현황 라벨 라우팅.
+
 사용처: extension.py on_startup → build_control_window(self)
   · 재호출 시 기존 TBS 제어창은 destroy 후 재생성(확장 리로드 등으로 위젯 이중 생성 방지).
 """
@@ -160,7 +207,13 @@ from pxr import Gf
 
 from . import usd_animation_control
 from . import xml_generator
-from .curve_animation import make_parabolic_path, run_prim_curve_animation, stop_prim_curve_animation
+from .curve_animation import (
+    is_curve_animation_running,
+    make_parabolic_path,
+    run_prim_curve_animation,
+    stop_all_curve_animations,
+    stop_prim_curve_animation,
+)
 from .kit_chrome_visibility import KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH, apply_kit_chrome_hidden
 from .load_window import build_load_ui_into_stack
 from .port_lot_visibility import (
@@ -177,7 +230,12 @@ from .prim_utils import (
     is_usd_file_stage_loaded,
     set_prim_translate_only,
 )
-from .rotate_animation import run_prim_rotate_animation, stop_prim_rotate_animation
+from .rotate_animation import (
+    is_rotate_animation_running,
+    run_prim_rotate_animation,
+    stop_all_rotate_animations,
+    stop_prim_rotate_animation,
+)
 from .selection_overlay import show_prim_info_in_viewport
 from .signal_parser import parse_signal
 from .sequence_engine import SequenceRunner
@@ -189,7 +247,12 @@ from .simulation_engine import (
     SimulationTimingConfig,
     TBSSimulationEngine,
 )
-from .translate_animation import run_prim_translate_animation, stop_prim_translate_animation
+from .translate_animation import (
+    is_translate_animation_running,
+    run_prim_translate_animation,
+    stop_all_translate_animations,
+    stop_prim_translate_animation,
+)
 
 MAX_PRIMS_DISPLAY = 80
 DEFAULT_PRIORITY_NAME_PREFIX = "Mesh_"
@@ -691,8 +754,11 @@ def _execute_mapped_sequence_stub(
 ) -> None:
     """
     rules/map이 가리키는 JSON을 검증한 뒤 SequenceRunner.run()으로 실제 재생한다.
-    시뮬 tick은 (필요 시) translate/rotate/curve 애니 재생 중에만 _sim_tick_pause_event로 잠시 멈춘다.
-    JSON 시퀀스(SequenceRunner) 재생 중에는 tick을 멈추지 않아 공정(sim time)과 동시에 진행된다.
+
+    - 시뮬 tick: 배속>1 등에서 ``_sim_tick_pause_event`` 로 잠시 맞출 수 있다. 멀티 뷰에서는 job 의
+      ``tbs_sim_screen``(``payload`` 의 ``tbs_sim_screen``)으로 **어느 화면의 tick 만** 멈출지 판별한다.
+    - JSON 시퀀스(SequenceRunner) 재생 중에는 단일 스레드 모드에서는 tick 을 막지 않아 공정과 병행될 수 있다.
+    - 동시 ``run()`` 방지를 위해 ``_sim_anim_pending`` 큐로 직렬화한다.
     """
     p = _normalize_json_path(json_path_text)
     runner = str((meta or {}).get("runner", "sequence_editor"))
@@ -868,6 +934,11 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 pass
 
+        try:
+            _scr = int(str(payload.get("tbs_sim_screen", "1") or "1").strip() or "1")
+        except Exception:
+            _scr = 1
+        _scr = max(1, _scr)
         job = {
             "t": sim_time,
             "event": seq,
@@ -883,6 +954,7 @@ def _execute_mapped_sequence_stub(
             "to_port_id": to_port,
             "port_id": port,
             "parsed": parsed,
+            "tbs_sim_screen": str(_scr),
         }
         # 우선순위: 생성(OHT->EP 직접투입 등) / 회수(REMOVED) 는 현재 애니가 끝나자마자 즉시 실행되어야 한다.
         # - 선점(interrupt)은 하지 않고, pending 큐의 "앞"에 삽입한다.
@@ -1077,6 +1149,12 @@ def _capture_per_screen_sim_settings(ext: Any) -> Dict[str, Any]:
 
 
 def _refresh_sim_per_screen_status_labels(ext: Any) -> None:
+    """
+    화면별 시뮼 설정 스냅샷(``_sim_per_screen_snapshots``) 존재 여부를 라벨에 반영한다.
+
+    - 인덱스 i(0-based)는 화면 i+1 과 대응한다.
+    - ``_on_save_sim_settings_to_screen`` / 자동 채움 후 호출되어 “(저장됨)/(미저장)” 만 갱신한다.
+    """
     labels = getattr(ext, "_sim_per_screen_status_labels", None)
     snaps = getattr(ext, "_sim_per_screen_snapshots", None)
     if not isinstance(labels, list) or not isinstance(snaps, list):
@@ -1283,7 +1361,12 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
 
 
 def _sync_sim_multi_split_row_visibility(ext: Any) -> None:
-    """TBS 제어창 'Load'로 스테이지 연 뒤에만 분할 행 표시. Kit 기본 빈 씬은 제외."""
+    """
+    제어창의 **시뮼 뷰포트 분할** 설정 행(``_sim_multi_split_row``) 표시 여부를 갱신한다.
+
+    - USD 파일 스테이지가 로드되고(``is_usd_file_stage_loaded``)·내부 플래그 ``_tbs_multi_split_usd_ready`` 가 참일 때만 표시.
+    - 조건 미충족 시 ``_force_sim_split_to_default`` 로 분할 UI·카운트를 1로 되돌린다.
+    """
     row = getattr(ext, "_sim_multi_split_row", None)
     if row is None:
         return
@@ -1401,7 +1484,12 @@ def _on_sim_split_choice_changed(ext: Any, idx: int, m: Any) -> None:
 
 
 def _usd_context_name_for_sim_screen(screen: int) -> Optional[str]:
-    """화면1=메인 Viewport(기본 컨텍스트). 화면2+는 보조 USD ``morph_tbs_split_aux_{화면-1}``."""
+    """
+    시뮼 **화면 인덱스**에 대응하는 USD 컨텍스트 이름을 반환한다.
+
+    - 화면 1: ``None`` → ``apply_port_lot_prim_visibility`` 등 **기본 omni.usd 컨텍스트** 사용.
+    - 화면 2 이상: ``sim_multi_view`` 가 만든 보조 컨텍스트 ``morph_tbs_split_aux_{screen-1}``.
+    """
     try:
         s = int(screen)
     except Exception:
@@ -1412,10 +1500,21 @@ def _usd_context_name_for_sim_screen(screen: int) -> Optional[str]:
 
 
 def _sim_monitor_channel_count(ext: Any) -> int:
+    """
+    시뮼 모니터(포트상태·진행현황·SIM 로그) 열 개수를 반환한다.
+
+    ``ext._sim_viewport_split_count``(1~4)와 동일하며, ``_rebuild_sim_monitor_split_ui`` 의 열 수와 맞춘다.
+    """
     return max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
 
 
 def _snapshot_monitor_channel_texts(ext: Any) -> Tuple[Dict[int, str], Dict[int, str]]:
+    """
+    ``_sim_monitor_channels`` 에서 화면별 진행/이력 라벨 텍스트를 읽어 재빌드 시 복원한다.
+
+    Returns:
+        (history_by_screen, progress_by_screen) — 키는 1-based 화면 인덱스.
+    """
     saved_h: Dict[int, str] = {}
     saved_p: Dict[int, str] = {}
     old = getattr(ext, "_sim_monitor_channels", None)
@@ -1446,7 +1545,13 @@ def _snapshot_monitor_channel_texts(ext: Any) -> Tuple[Dict[int, str], Dict[int,
 
 
 def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
-    """단일 화면 채널: 포트상태 + 진행현황 + SIM 로그(세로 스택)."""
+    """
+    단일 화면(채널)용 모니터 UI 블록을 만든다.
+
+    - 구성: 포트상태 스크롤 → 진행현황 스크롤 → SIM 이력 스크롤.
+    - 반환 dict 는 ``screen``, ``port_frame``/``port_cells``, ``progress_label``, ``history_label`` 등
+      ``_rebuild_sim_monitor_split_ui``·``_update_sim_progress``·``_append_sim_log_channel`` 가 참조한다.
+    """
     ch: Dict[str, Any] = {"screen": int(screen)}
     ch["port_cells"] = {}
     ch["port_cell_boxes"] = {}
@@ -1513,7 +1618,14 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
 
 
 def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
-    """뷰포트 분할 수에 맞춰 포트상태/진행현황/SIM 로그 패널을 재배치한다."""
+    """
+    뷰포트 분할 수(1~4)에 맞춰 제어창 하단 시뮼 모니터 영역을 다시 그린다.
+
+    - 기존 ``_sim_monitor_split_inner`` 를 destroy 한 뒤 ``_sim_monitor_channel_count`` 만큼
+      ``_create_sim_monitor_channel_column`` 을 HStack/VStack 으로 배치한다.
+    - 분할 전 각 채널의 진행/이력 문자열은 ``_snapshot_monitor_channel_texts`` 로 백업 후 복원한다.
+    - 단일 채널일 때는 ``ext._sim_progress_label`` 등 레거시 단일 위젯 참조를 [0] 채널에 다시 연결한다.
+    """
     host = getattr(ext, "_sim_monitor_split_host", None)
     if host is None:
         return
@@ -1746,6 +1858,7 @@ def build_control_window(ext: Any) -> None:
     ext._sync_sim_per_screen_rows_fn = None
     ext._sim_update_sub = None
     ext._sim_thread = None
+    ext._sim_tick_threads = []
     ext._sim_thread_stop = None
     ext._sim_log_queue = None
     ext._sim_log_ui_sub = None
@@ -2168,7 +2281,12 @@ def on_xml_run_clicked(ext: Any) -> None:
 
 
 def _append_sim_log_channel(ext: Any, screen: int, msg: str) -> None:
-    """분할 모드: 특정 화면 채널 SIM 로그에만 줄 추가."""
+    """
+    멀티 모니터에서 **지정 화면**의 ``history_label`` 에만 한 줄(또는 누적 블록)을 붙인다.
+
+    - ``screen`` 은 1-based; ``_sim_monitor_channels[screen-1]`` 을 사용한다.
+    - 최대 약 200줄을 넘기면 앞부분을 잘라 메모리·UI 부하를 줄인다.
+    """
     if not msg:
         return
     chans = getattr(ext, "_sim_monitor_channels", None)
@@ -2194,7 +2312,12 @@ def _append_sim_log_channel(ext: Any, screen: int, msg: str) -> None:
 
 
 def _append_sim_log(ext: Any, line: str) -> None:
-    """UI 스레드 전용: 이력 로그 패널(_sim_history_*)에 줄 추가. 시뮬 스레드는 post_sim_history_line 사용."""
+    """
+    UI 스레드 전용: 이력 로그 패널에 줄 추가. 시뮬 워커는 ``post_sim_history_line`` 로 큐에 넣는다.
+
+    - 멀티(``_sim_monitor_channels`` 길이>1)이면 ``[화면N]`` 접두가 있으면 해당 채널로, 없으면 화면1로 라우팅.
+    - 단일 모드는 ``_sim_history_text`` / ``_sim_history_label`` 레거시 경로.
+    """
     msg = _format_history_line((line or "").strip())
     if not msg:
         return
@@ -2739,6 +2862,13 @@ def _build_sim_gate_request_payload(ext: Any, p: Dict[str, Any]) -> Optional[Dic
 
 
 def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLogPanelMode) -> None:
+    """
+    시뮼 엔진에서 올라온 이벤트(큐 ``ANIM_EVENT``)를 메인 스레드에서 처리한다.
+
+    - ``tbs_sim_screen`` 으로 보조 USD 컨텍스트를 골라 **포트 LOT prim 가시성**을 맞춘다.
+    - **화면1만** ``handle_sim_event_for_animation`` → rules/map → JSON ``SequenceRunner`` 경로를 탄다.
+      화면2+는 가시성·로그 안내만(러너는 메인 스테이지 단일이라 이중 실행을 피함).
+    """
     p = payload if isinstance(payload, dict) else {}
     try:
         scr = int(str(p.get("tbs_sim_screen", "1") or "1").strip() or "1")
@@ -2895,6 +3025,150 @@ def _drain_sim_log_queue(ext: Any) -> None:
         print(f"[SIM UI] 로그 드레인 예외: {e}", flush=True)
 
 
+def _sim_active_anim_owner_screen(ext: Any) -> int:
+    """
+    현재(또는 직전) JSON 애니 job 이 어느 시뮼 화면에서 시작됐는지 1-based 인덱스로 반환한다.
+
+    ``_execute_mapped_sequence_stub`` 가 job 에 넣은 ``tbs_sim_screen`` 과 ``_sim_anim_active`` 를 읽는다.
+    값이 없거나 파싱 실패 시 1(메인).
+    """
+    active = getattr(ext, "_sim_anim_active", None) or {}
+    if isinstance(active, dict):
+        try:
+            v = int(str(active.get("tbs_sim_screen", "1") or "1").strip() or "1")
+            return max(1, v)
+        except Exception:
+            pass
+    return 1
+
+
+def _multi_tick_should_skip_for_screen(ext: Any, screen_idx: int, anim_running: bool) -> bool:
+    """
+    멀티 뷰 전용: ``_sim_tick_pause_event`` 가 켜져 있을 때 이 화면만 tick 을 건너뛸지.
+
+    - SequenceRunner 가 돌면: 해당 애니가 시작된 화면(owner)만 sim 을 잠시 멈춘다(배속>1 동기).
+    - Kit translate/rotate/curve 만 돌면: 메인 스테이지(화면 1)만 멈춘다.
+    - 그 외 pause 구간(보수적): 모든 화면 멈춤(기존 단일 루프와 동일).
+    """
+    pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+    if pause_evt is None or not pause_evt.is_set():
+        return False
+    owner = _sim_active_anim_owner_screen(ext)
+    try:
+        ru = bool(
+            getattr(ext, "_sim_runner", None) is not None
+            and getattr(ext._sim_runner, "is_running", lambda: False)()
+        )
+    except Exception:
+        ru = False
+    if ru:
+        return screen_idx == owner
+    kit_only = bool(anim_running) and not ru
+    if kit_only:
+        return screen_idx == 1
+    if anim_running:
+        return True
+    uw = getattr(ext, "_sim_tick_pause_until_wall", None)
+    if isinstance(uw, (float, int)) and time.monotonic() < float(uw):
+        return screen_idx == owner
+    return True
+
+
+def _sim_multi_engine_tick_worker(
+    ext: Any,
+    sim: Any,
+    screen_idx: int,
+    stop_evt: threading.Event,
+    export_lock: threading.Lock,
+) -> None:
+    """
+    한 개 ``TBSSimulationEngine`` 전용 tick 루프(별도 스레드에서 실행).
+
+    - ``screen_idx`` 에 해당하는 엔진만 ``sim.tick(scaled)``; 배속은 매 루프 ``_sim_speed_model`` 에서 읽는다.
+    - ``_sim_tick_pause_event`` 가 켜져 있으면 ``_multi_tick_should_skip_for_screen`` 으로 **이 화면만**
+      tick 을 건너뛸지 결정해, 다른 화면은 계속 진행한다.
+    - ``ext._sim_engines`` 전원 ``is_done`` 이면 export 액션을 한 번만 enqueue 하고 ``_sim_multi_tick_shutdown`` 을 세운다.
+    """
+    last = time.perf_counter()
+    printed = False
+    while not stop_evt.is_set():
+        if getattr(ext, "_sim_multi_tick_shutdown", False):
+            break
+        pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+        gate_pause_evt = getattr(ext, "_sim_gate_pause_event", None)
+        try:
+            confirm_each = bool(
+                getattr(ext, "_sim_confirm_each_step_model", None) is not None
+                and ext._sim_confirm_each_step_model.get_value_as_bool()
+            )
+        except Exception:
+            confirm_each = False
+        if not confirm_each and gate_pause_evt is not None and gate_pause_evt.is_set():
+            try:
+                gate_pause_evt.clear()
+            except Exception:
+                pass
+        if pause_evt is not None and pause_evt.is_set():
+            try:
+                anim_running = bool(
+                    is_translate_animation_running()
+                    or is_rotate_animation_running()
+                    or is_curve_animation_running()
+                    or (
+                        getattr(ext, "_sim_runner", None) is not None
+                        and getattr(ext._sim_runner, "is_running", lambda: False)()
+                    )
+                )
+            except Exception:
+                anim_running = True
+            if _multi_tick_should_skip_for_screen(ext, screen_idx, anim_running):
+                time.sleep(0.02)
+                continue
+
+        now = time.perf_counter()
+        dt = now - last
+        last = now
+        dt = max(0.001, min(dt, 0.1))
+        try:
+            sp = max(0.1, float(ext._sim_speed_model.get_value_as_float()))
+        except Exception:
+            sp = 1.0
+        scaled = dt * sp
+        try:
+            if sim is not None and not getattr(sim, "is_done", False):
+                sim.tick(scaled)
+        except Exception:
+            pass
+
+        if not printed:
+            try:
+                print(f"[SIM] tick 동작 확인 (screen{screen_idx} worker)", flush=True)
+            except Exception:
+                pass
+            printed = True
+
+        eng_list = getattr(ext, "_sim_engines", None)
+        if isinstance(eng_list, list) and len(eng_list) > 0:
+            if all(getattr(s, "is_done", False) for s in eng_list if s is not None):
+                try:
+                    print("[SIM] 멀티 종료 감지", flush=True)
+                except Exception:
+                    pass
+                with export_lock:
+                    if not getattr(ext, "_sim_multi_export_done", False):
+                        try:
+                            ext._sim_multi_export_done = True
+                        except Exception:
+                            pass
+                        try:
+                            ext._sim_multi_tick_shutdown = True
+                        except Exception:
+                            pass
+                        _enqueue_control_action(ext, SimUiControlAction.EXPORT_XLSX.value)
+                break
+        time.sleep(0.02)
+
+
 def _sim_anim_status_key(ext: Any) -> Tuple[bool, str, int, str]:
     """진행 패널 중복 스킵용: 재생 여부·현재 파일·대기 큐·다음 파일."""
     runner = getattr(ext, "_sim_runner", None)
@@ -2984,7 +3258,13 @@ def _refresh_sim_progress_from_last(ext: Any) -> None:
 
 
 def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
-    """진행현황 패널 갱신: 단일 창에 ‘현재 단계’만 표시(이벤트 로그 블록과 역할 분담)."""
+    """
+    진행현황 텍스트를 갱신한다.
+
+    - ``payload["tbs_sim_screen"]``(엔진 ``event_tags`` 병합)으로 **멀티 모니터** 중 해당 열의
+      ``progress_label`` 에만 쓴다. 단일 모드는 첫 채널 + ``_sim_progress_text`` 레거시 모델.
+    - RUNNING 일 때 동일 내용 반복 갱신을 줄이기 위해 ``_sim_progress_last_key`` 로 디듀프한다.
+    """
     label = str(payload.get("label", "")).strip()
     if not label:
         return
@@ -3427,6 +3707,13 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
 
 
 def _detach_sim_update(ext: Any) -> None:
+    """
+    시뮼 tick·UI 구독을 정리한다.
+
+    - ``_sim_thread_stop`` 을 set 한 뒤, **멀티 시** ``_sim_tick_threads`` 의 worker 를 순서대로 join 하고,
+      단일 tick 스레드 ``_sim_thread`` 가 남아 있으면 join 한다.
+    - 시뮼 로그 큐 드레인용 ``_sim_log_ui_sub`` 구독을 해제한다.
+    """
     sub = getattr(ext, "_sim_update_sub", None)
     if sub is not None:
         try:
@@ -3437,11 +3724,22 @@ def _detach_sim_update(ext: Any) -> None:
 
     stop_evt = getattr(ext, "_sim_thread_stop", None)
     th = getattr(ext, "_sim_thread", None)
+    tick_threads = list(getattr(ext, "_sim_tick_threads", None) or [])
     if stop_evt is not None:
         try:
             stop_evt.set()
         except Exception:
             pass
+    for tth in tick_threads:
+        if tth is not None:
+            try:
+                tth.join(timeout=1.0)
+            except Exception:
+                pass
+    try:
+        ext._sim_tick_threads = []
+    except Exception:
+        pass
     if th is not None:
         try:
             th.join(timeout=1.0)
@@ -3475,6 +3773,14 @@ def _detach_sim_update(ext: Any) -> None:
 
 
 def on_sim_start_clicked(ext: Any) -> None:
+    """
+    시뮬레이션 시작: 엔진(들) 생성, 콜백 연결, tick 스레드(들) 기동.
+
+    - ``ext._sim_viewport_split_count`` 로 채널 수 N 을 정한다. N<=1 이면 단일 ``TBSSimulationEngine`` +
+      기존 ``_tick_loop`` 스레드 한 개. N>1 이면 화면별 스냅샷으로 N 개 엔진을 만들고
+      ``_sim_multi_engine_tick_worker`` 를 **화면마다 한 스레드씩** 띄운다(게이트·pause 독립).
+    - 시작 전 ``on_sim_stop_clicked`` 로 이전 스레드·엔진을 정리한다.
+    """
     try:
         n_ch = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
     except Exception:
@@ -3646,15 +3952,15 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             pass
         try:
-            translate_animation.stop_all_translate_animations()
+            stop_all_translate_animations()
         except Exception:
             pass
         try:
-            rotate_animation.stop_all_rotate_animations()
+            stop_all_rotate_animations()
         except Exception:
             pass
         try:
-            curve_animation.stop_all_curve_animations()
+            stop_all_curve_animations()
         except Exception:
             pass
         pe = getattr(ext, "_sim_tick_pause_event", None)
@@ -3925,6 +4231,10 @@ def on_sim_start_clicked(ext: Any) -> None:
     tick_state = {"count": 0}
     stop_evt = threading.Event()
     ext._sim_thread_stop = stop_evt
+    try:
+        ext._sim_tick_threads = []
+    except Exception:
+        pass
     speed_value = max(0.1, ext._sim_speed_model.get_value_as_float())
     _append_sim_log(ext, f"[SIM] tick thread 준비 (speed={speed_value:.2f}x)")
     try:
@@ -3935,7 +4245,46 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception as e:
         _append_sim_log(ext, f"[SIM UI] 로그 큐 드레인 구독 실패: {e}")
 
+    eng_list_outer = getattr(ext, "_sim_engines", None)
+    if isinstance(eng_list_outer, list) and len(eng_list_outer) > 1:
+        try:
+            ext._sim_multi_export_done = False
+            ext._sim_multi_tick_shutdown = False
+        except Exception:
+            pass
+        export_lock = threading.Lock()
+        threads: List[threading.Thread] = []
+        for i, sim in enumerate(eng_list_outer):
+            if sim is None:
+                continue
+            si = i + 1
+            t = threading.Thread(
+                target=_sim_multi_engine_tick_worker,
+                args=(ext, sim, si, stop_evt, export_lock),
+                name=f"morph.tbs_control_1.sim_tick.screen{si}",
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+        try:
+            ext._sim_tick_threads = threads
+        except Exception:
+            pass
+        ext._sim_thread = None
+        try:
+            _append_sim_log(ext, f"[SIM] 멀티 tick: 화면별 독립 스레드 ({len(threads)}개)")
+        except Exception:
+            pass
+        return
+
     def _tick_loop():
+        """
+        단일 스레드 시뮼 tick 루프(분할 1 또는 레거시 경로).
+
+        - ``ext._sim_engines`` 가 비어 있지 않으면 모든 엔진에 동일 ``scaled`` 로 순차 ``tick``(구조상 한 스레드).
+        - ``_sim_tick_pause_event`` 가 켜지면 **전역**으로 tick 을 멈출 수 있다(멀티 N>1 은 별도 worker 사용).
+        - ``confirm_each`` + ``_sim_gate_pause_event`` 이면 게이트 확인 전까지 이 루프가 대기한다.
+        """
         try:
             print("[SIM] tick thread 시작", flush=True)
             last = time.perf_counter()
@@ -3959,9 +4308,9 @@ def on_sim_start_clicked(ext: Any) -> None:
                     # 원칙: JSON 애니메이션이 실제로 진행 중이면(sim 모듈의 활성 상태가 있으면) 절대 tick 재개하지 않는다.
                     try:
                         anim_running = bool(
-                            translate_animation.is_translate_animation_running()
-                            or rotate_animation.is_rotate_animation_running()
-                            or curve_animation.is_curve_animation_running()
+                            is_translate_animation_running()
+                            or is_rotate_animation_running()
+                            or is_curve_animation_running()
                             or (getattr(ext, "_sim_runner", None) is not None and getattr(ext._sim_runner, "is_running", lambda: False)())
                         )
                     except Exception:
