@@ -599,7 +599,7 @@ def _world_delta_to_local_delta(
     로컬 translate op(TBS_OFFSET)에 넣을 delta로 변환한다.
     """
     try:
-        stage = _get_stage()
+        stage = prim.GetStage() if prim and prim.IsValid() else _get_stage()
         if not stage:
             return Gf.Vec3d(world_delta[0], world_delta[1], world_delta[2])
         tc = time_code if time_code is not None else Usd.TimeCode.Default()
@@ -810,13 +810,23 @@ def _get_stage() -> Optional[Usd.Stage]:
     return ctx.get_stage() if ctx else None
 
 
-def resolve_prim_paths(identifier: str) -> List[str]:
+def _get_stage_for_context(usd_context_name: Optional[str]) -> Optional[Usd.Stage]:
+    """이름 있는 USD 컨텍스트(분할 보조 타일) 또는 기본 컨텍스트의 스테이지."""
+    try:
+        nm = (usd_context_name or "").strip()
+        ctx = ou.get_context(nm) if nm else ou.get_context()
+        return ctx.get_stage() if ctx else None
+    except Exception:
+        return None
+
+
+def resolve_prim_paths(identifier: str, stage: Optional[Usd.Stage] = None) -> List[str]:
     """
     prim 식별자(identifier)로 경로 리스트 반환.
     - '/World/...'로 시작하면 해당 경로 1개만 유효할 때 반환
     - 그 외에는 prim.GetName() == identifier 인 모든 prim 경로를 반환 (동일 이름 다중 지원)
     """
-    stage = _get_stage()
+    stage = stage if stage is not None else _get_stage()
     if not stage:
         return []
     name = (identifier or "").strip()
@@ -869,24 +879,24 @@ def split_prim_identifier_tokens(text: str) -> List[str]:
     return [p for p in re.split(r"[\s,]+", str(text).strip()) if p]
 
 
-def resolve_prim_paths_multi(identifier_text: str) -> List[str]:
+def resolve_prim_paths_multi(identifier_text: str, stage: Optional[Usd.Stage] = None) -> List[str]:
     """콤마·공백으로 구분된 prim 식별자를 모두 해석해 prim path 목록 반환."""
     out: List[str] = []
     seen = set()
     for key in split_prim_identifier_tokens(identifier_text or ""):
-        for p in resolve_prim_paths(key):
+        for p in resolve_prim_paths(key, stage=stage):
             if p and p not in seen:
                 seen.add(p)
                 out.append(p)
     return out
 
 
-def _expand_with_descendants(paths_csv: str) -> List[str]:
+def _expand_with_descendants(paths_csv: str, stage: Optional[Usd.Stage] = None) -> List[str]:
     """입력한 prim 경로(또는 prim name)를 포함해 하위 prim까지 모두 반환."""
-    stage = _get_stage()
+    stage = stage if stage is not None else _get_stage()
     if not stage:
         return []
-    roots = resolve_prim_paths_multi(paths_csv)
+    roots = resolve_prim_paths_multi(paths_csv, stage=stage)
     if not roots:
         return []
 
@@ -917,8 +927,8 @@ def _expand_with_descendants(paths_csv: str) -> List[str]:
     return out
 
 
-def _set_prim_visible(path: str, visible: bool) -> None:
-    stage = _get_stage()
+def _set_prim_visible(path: str, visible: bool, stage: Optional[Usd.Stage] = None) -> None:
+    stage = stage if stage is not None else _get_stage()
     if not stage:
         return
     prim = stage.GetPrimAtPath(path)
@@ -1025,6 +1035,7 @@ class SequenceRunner:
 
     def __post_init__(self) -> None:
         self._running = False
+        self._usd_context_name: Optional[str] = None
         self._steps: List[Dict[str, Any]] = []
         self._baseline: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
         self._next_tick_sub = None
@@ -1047,15 +1058,21 @@ class SequenceRunner:
     def is_running(self) -> bool:
         return self._running
 
+    def _stage(self) -> Optional[Usd.Stage]:
+        """현재 시퀀스가 대상으로 하는 USD 스테이지(분할 보조 컨텍스트 지원)."""
+        return _get_stage_for_context(getattr(self, "_usd_context_name", None))
+
     def _stop_step_animations(self, step: Dict[str, Any]) -> None:
         if not isinstance(step, dict):
             return
         t = str(step.get("type") or "").upper()
         if t == "MOVE":
-            for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
-                stop_prim_translate_animation(p)
+            st = self._stage()
+            for p in resolve_prim_paths_multi(str(step.get("prim", "")), stage=st):
+                stop_prim_translate_animation(p, getattr(self, "_usd_context_name", None))
         elif t == "ROTATE":
-            for p in resolve_prim_paths_multi(str(step.get("prim", ""))):
+            st = self._stage()
+            for p in resolve_prim_paths_multi(str(step.get("prim", "")), stage=st):
                 stop_prim_rotate_animation(p)
         elif t == "USD_TIMELINE":
             usd_animation_control.stop_usd_animation()
@@ -1164,20 +1181,22 @@ class SequenceRunner:
             self._unhide_sub = None
         self._unhide_queue.clear()
 
+        st = self._stage()
         for p in list(self._hidden_refcount.keys()):
-            _set_prim_visible(p, True)
+            _set_prim_visible(p, True, stage=st)
         self._hidden_refcount.clear()
 
     def _step_hide_paths(self, step: Dict[str, Any]) -> List[str]:
         if not bool(step.get("hide_enabled", False)):
             return []
-        return _expand_with_descendants(str(step.get("hide_prims", "")))
+        return _expand_with_descendants(str(step.get("hide_prims", "")), stage=self._stage())
 
     def _apply_hide_for_step(self, step: Dict[str, Any]) -> List[str]:
         paths = self._step_hide_paths(step)
+        st = self._stage()
         for p in paths:
             self._hidden_refcount[p] = self._hidden_refcount.get(p, 0) + 1
-            _set_prim_visible(p, False)
+            _set_prim_visible(p, False, stage=st)
         return paths
 
     def _schedule_unhide(self, paths: List[str], delay_sec: float = 0.2) -> None:
@@ -1200,11 +1219,12 @@ class SequenceRunner:
                     if float(item.get("due", 0.0)) > now:
                         remaining.append(item)
                         continue
+                    stg = self._stage()
                     for p in list(item.get("paths") or []):
                         cnt = self._hidden_refcount.get(p, 0) - 1
                         if cnt <= 0:
                             self._hidden_refcount.pop(p, None)
-                            _set_prim_visible(p, True)
+                            _set_prim_visible(p, True, stage=stg)
                         else:
                             self._hidden_refcount[p] = cnt
                 except Exception:
@@ -1226,11 +1246,12 @@ class SequenceRunner:
                 )
             except Exception:
                 # fallback: delay 무시하고 즉시 처리
+                stg = self._stage()
                 for p in paths:
                     cnt = self._hidden_refcount.get(p, 0) - 1
                     if cnt <= 0:
                         self._hidden_refcount.pop(p, None)
-                        _set_prim_visible(p, True)
+                        _set_prim_visible(p, True, stage=stg)
                     else:
                         self._hidden_refcount[p] = cnt
 
@@ -1263,8 +1284,9 @@ class SequenceRunner:
         except Exception:
             fn()
 
-    def run(self, steps: List[Dict[str, Any]]) -> None:
+    def run(self, steps: List[Dict[str, Any]], *, usd_context_name: Optional[str] = None) -> None:
         """시퀀스 실행 시작."""
+        self._usd_context_name = (usd_context_name or "").strip() or None
         incoming_steps = list(steps or [])
         first = incoming_steps[0] if incoming_steps else {}
         start_from_current = bool((first or {}).get("_start_from_current", False))
@@ -1337,7 +1359,7 @@ class SequenceRunner:
         """현재 스테이지의 prim transform을 baseline으로 저장. force=True면 기존 baseline을 덮어씀."""
         if force:
             self._baseline.clear()
-        stage = _get_stage()
+        stage = self._stage()
         if not stage:
             return
         # 시퀀스에 등장하는 prim들을 수집
@@ -1345,7 +1367,7 @@ class SequenceRunner:
             t = str(step.get("type") or "").upper()
             if t in ("MOVE", "ROTATE"):
                 prim_id_text = str(step.get("prim") or "")
-                for path in resolve_prim_paths_multi(prim_id_text):
+                for path in resolve_prim_paths_multi(prim_id_text, stage=stage):
                     try:
                         if not force and path in self._baseline:
                             continue
@@ -1358,7 +1380,7 @@ class SequenceRunner:
 
     def _restore_baseline(self, exclude_paths: Optional[set] = None) -> None:
         """baseline으로 transform을 되돌림. (실행을 항상 초기값부터 재현하기 위함)"""
-        stage = _get_stage()
+        stage = self._stage()
         if not stage:
             return
         # exclude_paths는 "현재 위치부터 시작" 부분 적용을 위한 선택적 복원 예외 목록.
@@ -1401,7 +1423,7 @@ class SequenceRunner:
         return out
 
     def _apply_start_snapshot(self, snapshot: Dict[str, Dict[str, Any]]) -> None:
-        stage = _get_stage()
+        stage = self._stage()
         if not stage:
             return
         # 캡처(capture_composed_local_start_snapshot_for_paths)와 동일하게 Default 시간으로
@@ -1684,7 +1706,7 @@ class SequenceRunner:
                     paths_for_offset: List[str] = list(self._baseline.keys())
                     extra = str(step.get("offset_correct_prims", "") or "").strip()
                     if extra:
-                        for p in resolve_prim_paths_multi(extra):
+                        for p in resolve_prim_paths_multi(extra, stage=self._stage()):
                             if p not in paths_for_offset:
                                 paths_for_offset.append(p)
                     if paths_for_offset:
@@ -1746,8 +1768,8 @@ class SequenceRunner:
             dx = float(step.get("_runtime_dx", step.get("dx", 0.0)))
             dy = float(step.get("_runtime_dy", step.get("dy", 0.0)))
             dz = float(step.get("_runtime_dz", step.get("dz", 0.0)))
-            stage = _get_stage()
-            paths = resolve_prim_paths_multi(prim_id)
+            stage = self._stage()
+            paths = resolve_prim_paths_multi(prim_id, stage=stage)
             if not paths:
                 # prim 경로 해석 실패는 하드 에러로 중단하지 않고 step만 스킵한다.
                 _done()
@@ -1768,12 +1790,13 @@ class SequenceRunner:
                     if prim
                     else world_delta
                 )
-                stop_prim_translate_animation(p)
+                stop_prim_translate_animation(p, getattr(self, "_usd_context_name", None))
                 run_prim_translate_animation(
                     p,
                     [{"duration": duration, "delta": (local_delta[0], local_delta[1], local_delta[2])}],
                     loop=False,
                     on_completed=_one_done,
+                    usd_context_name=getattr(self, "_usd_context_name", None),
                 )
             return
 
@@ -1791,7 +1814,7 @@ class SequenceRunner:
             pwx = float(step.get("pivot_wx", 0.0))
             pwy = float(step.get("pivot_wy", 0.0))
             pwz = float(step.get("pivot_wz", 0.0))
-            paths = resolve_prim_paths_multi(prim_id)
+            paths = resolve_prim_paths_multi(prim_id, stage=self._stage())
             if not paths:
                 _done()
                 return
@@ -1836,7 +1859,7 @@ class SequenceRunner:
                 tc_rot = tc_now
                 # auto_center=True면 실행 순간의 "월드 BBox 중심"을 pivot으로 고정한다(단일 prim 기준).
                 if auto_center and len(paths) == 1:
-                    stage = _get_stage()
+                    stage = self._stage()
                     prim = stage.GetPrimAtPath(paths[0]) if stage else None
                     c = _prim_world_bbox_center(prim, tc_now) if prim else None
                     pivot_world = c if c is not None else None

@@ -149,8 +149,8 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 - **애니·pause와의 관계**: JSON `SequenceRunner`·Kit translate/rotate/curve 가 돌 때 `_sim_tick_pause_event` 가 켜질 수 있다.
   멀티일 때는 `_multi_tick_should_skip_for_screen` 으로 **해당 화면만** tick 을 잠시 건너뛰어, 다른 화면 sim 시간은 진행시킨다.
   애니 job 에는 `tbs_sim_screen` 이 들어가 `_sim_active_anim_owner_screen` 이 “어느 화면용 pause 인지”를 판별한다.
-- **애니 재생 경로**: `_sim_ui_sink_anim_event` 에서 화면1만 `handle_sim_event_for_animation` → JSON 시퀀스 실행.
-  화면2+는 보조 USD 컨텍스트의 **포트 LOT 가시성**만 갱신한다(러너는 메인 스테이지 단일).
+- **애니 재생 경로**: `_sim_ui_sink_anim_event` → `handle_sim_event_for_animation` → JSON `SequenceRunner`
+  (`usd_context_name` 으로 분할 보조 스테이지에 MOVE 등 적용).
 
 주요 ext 필드:
 - `_sim_viewport_split_count` : 1~4, sim_multi_view 와 제어창 체크박스의 단일 소스.
@@ -182,7 +182,7 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 - `on_sim_start_clicked` : N채널 엔진 생성·콜백 연결·N>1 이면 worker 스레드 기동, N==1 이면 기존 단일 `_tick_loop`.
 - `_tick_loop` (내부 함수) : 단일/구조상 단일 스레드에서 모든 엔진 순차 tick(레거시 멀티 경로는 worker로 대체됨).
 - `_execute_mapped_sequence_stub` : 이벤트→JSON 실행; job 에 `tbs_sim_screen` 포함(멀티 pause 판별용).
-- `_sim_ui_sink_anim_event` : 큐에서 소비; 화면별 가시성 + 화면1만 풀 애니 파이프라인.
+- `_sim_ui_sink_anim_event` : 큐에서 소비; 화면별 가시성 + 이벤트→JSON(화면별 USD 컨텍스트).
 - `_update_sim_progress` : `tbs_sim_screen` 으로 멀티 진행현황 라벨 라우팅.
 
 사용처: extension.py on_startup → build_control_window(self)
@@ -928,7 +928,8 @@ def _execute_mapped_sequence_stub(
                     pass
             # JSON 시퀀스 재생 중에도 sim tick이 돌아가야 _wait_with_progress(공정)와 애니가 동시에 진행된다.
             # 배속>1일 때만 pause_evt.set()으로 tick을 잠시 맞춤(1배속에서는 set 하지 않음).
-            ext._sim_runner.run(job.get("parsed", []))
+            _ctx_run = _usd_context_name_for_sim_screen(ext, _scr)
+            ext._sim_runner.run(job.get("parsed", []), usd_context_name=_ctx_run)
             try:
                 _refresh_sim_progress_from_last(ext)
             except Exception:
@@ -1483,12 +1484,13 @@ def _on_sim_split_choice_changed(ext: Any, idx: int, m: Any) -> None:
             pass
 
 
-def _usd_context_name_for_sim_screen(screen: int) -> Optional[str]:
+def _usd_context_name_for_sim_screen(ext: Any, screen: int) -> Optional[str]:
     """
     시뮼 **화면 인덱스**에 대응하는 USD 컨텍스트 이름을 반환한다.
 
-    - 화면 1: ``None`` → ``apply_port_lot_prim_visibility`` 등 **기본 omni.usd 컨텍스트** 사용.
-    - 화면 2 이상: ``sim_multi_view`` 가 만든 보조 컨텍스트 ``morph_tbs_split_aux_{screen-1}``.
+    - 화면 1: ``None`` → 기본 ``omni.usd`` 컨텍스트.
+    - 화면 2 이상: ``sim_multi_view`` 가 실제 생성한 이름(``ext._sim_multi_context_names``) 우선,
+      없으면 ``morph_tbs_split_aux_{screen-1}`` 폴백.
     """
     try:
         s = int(screen)
@@ -1496,6 +1498,14 @@ def _usd_context_name_for_sim_screen(screen: int) -> Optional[str]:
         s = 1
     if s <= 1:
         return None
+    try:
+        names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+    except Exception:
+        names = []
+    idx = s - 2
+    if 0 <= idx < len(names):
+        nm = str(names[idx] or "").strip()
+        return nm if nm else None
     return f"morph_tbs_split_aux_{s - 1}"
 
 
@@ -2866,8 +2876,7 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     시뮼 엔진에서 올라온 이벤트(큐 ``ANIM_EVENT``)를 메인 스레드에서 처리한다.
 
     - ``tbs_sim_screen`` 으로 보조 USD 컨텍스트를 골라 **포트 LOT prim 가시성**을 맞춘다.
-    - **화면1만** ``handle_sim_event_for_animation`` → rules/map → JSON ``SequenceRunner`` 경로를 탄다.
-      화면2+는 가시성·로그 안내만(러너는 메인 스테이지 단일이라 이중 실행을 피함).
+    - ``handle_sim_event_for_animation`` → rules/map → JSON ``SequenceRunner``(화면별 USD 컨텍스트).
     """
     p = payload if isinstance(payload, dict) else {}
     try:
@@ -2877,7 +2886,7 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     occ = p.get("ports_occupancy", {})
     if not isinstance(occ, dict):
         occ = {}
-    ctx_nm = _usd_context_name_for_sim_screen(scr)
+    ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
     try:
         apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
     except Exception:
@@ -2898,26 +2907,9 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     # - 실제 감소는 애니 완료 시점(ARRIVED(OHT->*) 완료 / REMOVED 완료)에서 수행
     # (요청으로 제거) 포트상태 좌/우 점 표시 기능 비활성화
     verbose = panel_mode != SimLogPanelMode.PROGRESS_ONLY
-    # JSON 시퀀스(SequenceRunner/sequence_engine)는 기본 USD 스테이지에만 연결되어 있다.
-    # 보조 뷰포트에는 포트 LOT 가시성(위)만 동기화하고, 이벤트 매핑 JSON 재생은 화면1에서만 수행한다.
-    if scr == 1:
-        handle_sim_event_for_animation(ext, p, verbose=verbose)
-    else:
-        try:
-            if str(p.get("seq", "") or "").strip().upper() != "PORT_OCC_REFRESH":
-                warned = getattr(ext, "_sim_aux_anim_notice_screens", None)
-                if not isinstance(warned, set):
-                    warned = set()
-                    ext._sim_aux_anim_notice_screens = warned
-                if scr not in warned:
-                    warned.add(scr)
-                    _append_sim_log_channel(
-                        ext,
-                        scr,
-                        "[애니] LOT 가시성은 이 화면(보조 USD)에 반영됨. JSON 시퀀스 재생은 메인 스테이지(화면1) 러너만 연결됨.",
-                    )
-        except Exception:
-            pass
+    # 화면별 보조 USD 컨텍스트에서도 MOVE 등 JSON 시퀀스가 대상 스테이지에 적용되도록
+    # `_execute_mapped_sequence_stub` → `SequenceRunner.run(usd_context_name=...)` 경로를 탄다.
+    handle_sim_event_for_animation(ext, p, verbose=verbose)
 
 
 def _sim_ui_sink_history_line(ext: Any, line: str, panel_mode: SimLogPanelMode) -> None:

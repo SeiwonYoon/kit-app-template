@@ -40,6 +40,20 @@ _update_sub = None
 _OFFSET_SUFFIX = "TBS_OFFSET"
 
 
+def _tx_anim_key(prim_path: str, usd_context_name: Optional[str]) -> str:
+    """분할 보조 USD 컨텍스트와 기본 컨텍스트에서 동일 prim 경로가 공존할 수 있어 키를 분리한다."""
+    return f"{(usd_context_name or '').strip()}\x00{prim_path}"
+
+
+def _stage_for_translate(usd_context_name: Optional[str]):
+    try:
+        nm = (usd_context_name or "").strip()
+        ctx = ou.get_context(nm) if nm else ou.get_context()
+        return ctx.get_stage() if ctx else None
+    except Exception:
+        return None
+
+
 def is_translate_animation_running() -> bool:
     """control_window에서 sim tick pause 판단에 사용."""
     try:
@@ -114,11 +128,12 @@ def run_prim_translate_animation(
     segments: List[Dict[str, Any]],
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
+    usd_context_name: Optional[str] = None,
 ) -> None:
     global _animations, _update_sub
     if not segments:
         return
-    stage = ou.get_context().get_stage() if ou.get_context() else None
+    stage = _stage_for_translate(usd_context_name)
     if not stage:
         return
     prim = stage.GetPrimAtPath(prim_path)
@@ -140,7 +155,10 @@ def run_prim_translate_animation(
         normalized.append({"duration": duration, "delta": delta})
     if not normalized:
         return
-    _animations[prim_path] = {
+    key = _tx_anim_key(prim_path, usd_context_name)
+    _animations[key] = {
+        "prim_path": prim_path,
+        "usd_context_name": usd_context_name,
         "start_pos": Gf.Vec3f(start_pos[0], start_pos[1], start_pos[2]),
         "segments": normalized,
         "segment_index": 0,
@@ -153,10 +171,11 @@ def run_prim_translate_animation(
         _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_1.translate_animation")
 
 
-def stop_prim_translate_animation(prim_path: str) -> bool:
+def stop_prim_translate_animation(prim_path: str, usd_context_name: Optional[str] = None) -> bool:
     global _animations, _update_sub
-    if prim_path in _animations:
-        del _animations[prim_path]
+    key = _tx_anim_key(prim_path, usd_context_name)
+    if key in _animations:
+        del _animations[key]
         if not _animations and _update_sub is not None:
             try:
                 _update_sub.unsubscribe()
@@ -189,15 +208,18 @@ def _on_update(e) -> None:
         dt = 1.0 / 60.0
     if not _animations:
         return
-    stage = ou.get_context().get_stage() if ou.get_context() else None
-    if not stage:
-        return
     to_remove = []
-    for prim_path, state in list(_animations.items()):
+    for anim_key, state in list(_animations.items()):
         try:
+            prim_path = str(state.get("prim_path") or anim_key.split("\x00", 1)[-1])
+            ctx_nm = state.get("usd_context_name")
+            stage = _stage_for_translate(ctx_nm if ctx_nm is not None else None)
+            if not stage:
+                to_remove.append(anim_key)
+                continue
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
-                to_remove.append(prim_path)
+                to_remove.append(anim_key)
                 continue
             segments = state["segments"]
             idx = state["segment_index"]
@@ -226,7 +248,7 @@ def _on_update(e) -> None:
                                 cb()
                             except Exception:
                                 pass
-                        to_remove.append(prim_path)
+                        to_remove.append(anim_key)
                 else:
                     remainder = elapsed - duration
                     state["elapsed_in_segment"] = remainder
@@ -250,9 +272,9 @@ def _on_update(e) -> None:
             )
             _set_prim_translate(prim, current_pos)
         except (UnicodeDecodeError, UnicodeEncodeError):
-            to_remove.append(prim_path)
-    for prim_path in to_remove:
-        _animations.pop(prim_path, None)
+            to_remove.append(anim_key)
+    for k in to_remove:
+        _animations.pop(k, None)
     global _update_sub
     if not _animations and _update_sub is not None:
         try:
