@@ -25,28 +25,49 @@ usd_animation_control.py — USD 내장 타임라인(프레임) 재생
    - frame_to_time / time_to_frame 사용부 전역 검색
 """
 
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Any, Tuple
 
-_end_fix_sub = None
-_loop_sub = None
-_complete_sub = None
-_play_token = 0
+_states: Dict[str, Dict[str, Any]] = {}
 
 # 프로젝트 정책: 모든 애니메이션은 30fps(TPS) 기반.
 # 타임라인 인터페이스가 없거나 TPS를 얻지 못하는 예외 경로에서도 일관되게 30을 사용한다.
 DEFAULT_TPS = 30.0
 
 
-def _get_timeline():
+def _timeline_key(usd_context_name: Optional[str]) -> str:
+    return (usd_context_name or "").strip() or "default"
+
+
+def _state_for(usd_context_name: Optional[str]) -> Dict[str, Any]:
+    k = _timeline_key(usd_context_name)
+    st = _states.get(k)
+    if isinstance(st, dict):
+        return st
+    st = {"_end_fix_sub": None, "_loop_sub": None, "_complete_sub": None, "_play_token": 0}
+    _states[k] = st
+    return st
+
+
+def _get_timeline(usd_context_name: Optional[str] = None):
     try:
         import omni.timeline
+        nm = (usd_context_name or "").strip()
+        # Kit 버전에 따라 get_timeline_interface(name) 형태를 지원한다.
+        try:
+            if nm:
+                return omni.timeline.get_timeline_interface(nm)
+        except TypeError:
+            pass
+        except Exception:
+            pass
+        # 폴백: 전역 타임라인
         return omni.timeline.get_timeline_interface()
     except Exception:
         return None
 
 
-def reset_timeline_to_zero() -> None:
-    tl = _get_timeline()
+def reset_timeline_to_zero(usd_context_name: Optional[str] = None) -> None:
+    tl = _get_timeline(usd_context_name)
     if not tl:
         return
     try:
@@ -59,10 +80,11 @@ def reset_timeline_to_zero() -> None:
         pass
 
 
-def resolve_saved_animation_frame_range() -> Optional[tuple]:
+def resolve_saved_animation_frame_range(usd_context_name: Optional[str] = None) -> Optional[tuple]:
     try:
         import omni.usd as ou
-        ctx = ou.get_context()
+        nm = (usd_context_name or "").strip()
+        ctx = ou.get_context(nm) if nm else ou.get_context()
         stage = ctx.get_stage() if ctx else None
         if stage:
             s = float(stage.GetStartTimeCode())
@@ -71,7 +93,7 @@ def resolve_saved_animation_frame_range() -> Optional[tuple]:
                 return (int(round(s)), int(round(e)))
     except Exception:
         pass
-    tl = _get_timeline()
+    tl = _get_timeline(usd_context_name)
     if tl:
         try:
             get_start = getattr(tl, "get_start_time", None)
@@ -86,16 +108,16 @@ def resolve_saved_animation_frame_range() -> Optional[tuple]:
     return None
 
 
-def frame_to_time(frame: float) -> float:
-    tl = _get_timeline()
+def frame_to_time(frame: float, usd_context_name: Optional[str] = None) -> float:
+    tl = _get_timeline(usd_context_name)
     if not tl:
         return frame / DEFAULT_TPS
     tps = tl.get_time_codes_per_seconds()
     return frame / float(tps) if tps else frame / DEFAULT_TPS
 
 
-def time_to_frame(time_sec: float) -> float:
-    tl = _get_timeline()
+def time_to_frame(time_sec: float, usd_context_name: Optional[str] = None) -> float:
+    tl = _get_timeline(usd_context_name)
     if not tl:
         return time_sec * DEFAULT_TPS
     tps = tl.get_time_codes_per_seconds()
@@ -107,14 +129,15 @@ def play_usd_animation(
     end_frame: int = 300,
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
+    usd_context_name: Optional[str] = None,
 ) -> bool:
-    global _loop_sub, _complete_sub, _end_fix_sub, _play_token
-    tl = _get_timeline()
+    st = _state_for(usd_context_name)
+    tl = _get_timeline(usd_context_name)
     if not tl:
         return False
     try:
-        _play_token += 1
-        my_token = int(_play_token)
+        st["_play_token"] = int(st.get("_play_token", 0) or 0) + 1
+        my_token = int(st["_play_token"])
         tps = tl.get_time_codes_per_seconds()
         if not tps:
             tps = DEFAULT_TPS
@@ -127,26 +150,26 @@ def play_usd_animation(
         tl.set_current_time(start_time)
         tl.play()
 
-        if _complete_sub is not None:
+        if st.get("_complete_sub") is not None:
             try:
-                _complete_sub.unsubscribe()
+                st["_complete_sub"].unsubscribe()
             except Exception:
                 pass
-            _complete_sub = None
-        if _end_fix_sub is not None:
+            st["_complete_sub"] = None
+        if st.get("_end_fix_sub") is not None:
             try:
-                _end_fix_sub.unsubscribe()
+                st["_end_fix_sub"].unsubscribe()
             except Exception:
                 pass
-            _end_fix_sub = None
+            st["_end_fix_sub"] = None
 
         if loop:
-            if _loop_sub is not None:
+            if st.get("_loop_sub") is not None:
                 try:
-                    _loop_sub.unsubscribe()
+                    st["_loop_sub"].unsubscribe()
                 except Exception:
                     pass
-                _loop_sub = None
+                st["_loop_sub"] = None
             try:
                 import omni.timeline as ot
                 ticked = getattr(ot.TimelineEventType, "CURRENT_TIME_TICKED", None)
@@ -168,19 +191,19 @@ def play_usd_animation(
 
             try:
                 stream = tl.get_timeline_event_stream()
-                _loop_sub = stream.create_subscription_to_pop(
+                st["_loop_sub"] = stream.create_subscription_to_pop(
                     _on_tick,
                     name="morph.tbs_control_1:usd_animation_loop",
                 )
             except Exception:
                 pass
         else:
-            if _loop_sub is not None:
+            if st.get("_loop_sub") is not None:
                 try:
-                    _loop_sub.unsubscribe()
+                    st["_loop_sub"].unsubscribe()
                 except Exception:
                     pass
-                _loop_sub = None
+                st["_loop_sub"] = None
             try:
                 import omni.timeline as ot
                 ticked = getattr(ot.TimelineEventType, "CURRENT_TIME_TICKED", None)
@@ -216,21 +239,19 @@ def play_usd_animation(
                             def _fix(_e=None):
                                 # 이전 재생에서 예약된 end_fix가, 다음 재생(start_time 세팅)에
                                 # 끼어들어 프레임이 튀는 것을 방지한다.
-                                global _play_token
-                                if int(_play_token) != int(my_token):
+                                if int(st.get("_play_token", 0) or 0) != int(my_token):
                                     return
-                                global _end_fix_sub
                                 try:
                                     tl.set_current_time(end_time)
                                 except Exception:
                                     pass
-                                if _end_fix_sub is not None:
+                                if st.get("_end_fix_sub") is not None:
                                     try:
-                                        _end_fix_sub.unsubscribe()
+                                        st["_end_fix_sub"].unsubscribe()
                                     except Exception:
                                         pass
-                                    _end_fix_sub = None
-                            _end_fix_sub = app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+                                    st["_end_fix_sub"] = None
+                            st["_end_fix_sub"] = app.get_app().get_post_update_event_stream().create_subscription_to_pop(
                                 _fix,
                                 name="morph.tbs_control_1:usd_animation_end_fix",
                             )
@@ -246,38 +267,38 @@ def play_usd_animation(
 
             try:
                 stream = tl.get_timeline_event_stream()
-                _complete_sub = stream.create_subscription_to_pop(
+                st["_complete_sub"] = stream.create_subscription_to_pop(
                     _on_complete,
                     name="morph.tbs_control_1:usd_animation_complete",
                 )
             except Exception:
-                _complete_sub = None
+                st["_complete_sub"] = None
         return True
     except Exception:
         return False
 
 
-def stop_usd_animation() -> None:
-    global _loop_sub, _complete_sub, _end_fix_sub
-    if _loop_sub is not None:
+def stop_usd_animation(usd_context_name: Optional[str] = None) -> None:
+    st = _state_for(usd_context_name)
+    if st.get("_loop_sub") is not None:
         try:
-            _loop_sub.unsubscribe()
+            st["_loop_sub"].unsubscribe()
         except Exception:
             pass
-        _loop_sub = None
-    if _complete_sub is not None:
+        st["_loop_sub"] = None
+    if st.get("_complete_sub") is not None:
         try:
-            _complete_sub.unsubscribe()
+            st["_complete_sub"].unsubscribe()
         except Exception:
             pass
-        _complete_sub = None
-    if _end_fix_sub is not None:
+        st["_complete_sub"] = None
+    if st.get("_end_fix_sub") is not None:
         try:
-            _end_fix_sub.unsubscribe()
+            st["_end_fix_sub"].unsubscribe()
         except Exception:
             pass
-        _end_fix_sub = None
-    tl = _get_timeline()
+        st["_end_fix_sub"] = None
+    tl = _get_timeline(usd_context_name)
     if tl:
         try:
             tl.pause()

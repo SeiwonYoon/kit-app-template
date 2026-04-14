@@ -1075,7 +1075,7 @@ class SequenceRunner:
             for p in resolve_prim_paths_multi(str(step.get("prim", "")), stage=st):
                 stop_prim_rotate_animation(p)
         elif t == "USD_TIMELINE":
-            usd_animation_control.stop_usd_animation()
+            usd_animation_control.stop_usd_animation(getattr(self, "_usd_context_name", None))
 
     def pause(self) -> None:
         """진행 중인 애니메이션만 멈춘다. (위치/타임라인은 초기화하지 않음)"""
@@ -1300,8 +1300,8 @@ class SequenceRunner:
             except Exception:
                 pass
             try:
-                usd_animation_control.stop_usd_animation()
-                usd_animation_control.reset_timeline_to_zero()
+                usd_animation_control.stop_usd_animation(getattr(self, "_usd_context_name", None))
+                usd_animation_control.reset_timeline_to_zero(getattr(self, "_usd_context_name", None))
             except Exception:
                 pass
         else:
@@ -1316,8 +1316,8 @@ class SequenceRunner:
         self._prev_group_hide_paths = []
         # 실행 버튼을 누르면 타임라인은 항상 0에서 시작
         try:
-            usd_animation_control.stop_usd_animation()
-            usd_animation_control.reset_timeline_to_zero()
+            usd_animation_control.stop_usd_animation(getattr(self, "_usd_context_name", None))
+            usd_animation_control.reset_timeline_to_zero(getattr(self, "_usd_context_name", None))
         except Exception:
             pass
         # 타임라인 time=0 적용이 "다음 프레임"에 평가되는 경우가 있어,
@@ -1718,6 +1718,7 @@ class SequenceRunner:
                 end_frame=end,
                 loop=False,
                 on_completed=_done,
+                usd_context_name=getattr(self, "_usd_context_name", None),
             )
             return
 

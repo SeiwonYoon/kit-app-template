@@ -849,18 +849,80 @@ def _execute_mapped_sequence_stub(
             ext._sim_anim_pending = []
 
         def _start_job(job: Dict[str, Any]) -> None:
-            pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+            # 화면별 runner/active/pending/pause로 분리한다(멀티에서 덮어쓰기/간섭 방지).
+            try:
+                scr_i = int(str(job.get("tbs_sim_screen", "1") or "1").strip() or "1")
+            except Exception:
+                scr_i = 1
+            scr_i = max(1, scr_i)
+            try:
+                runners = getattr(ext, "_sim_runners_by_screen", None)
+                if not isinstance(runners, dict):
+                    runners = {}
+                    ext._sim_runners_by_screen = runners
+            except Exception:
+                runners = {}
+                ext._sim_runners_by_screen = runners
+            try:
+                runner_obj = runners.get(str(scr_i))
+            except Exception:
+                runner_obj = None
+            if runner_obj is None:
+                try:
+                    from .sequence_engine import SequenceRunner
+                    runner_obj = SequenceRunner()
+                    runners[str(scr_i)] = runner_obj
+                except Exception:
+                    runner_obj = getattr(ext, "_sim_runner", None)
+
+            try:
+                pause_map = getattr(ext, "_sim_tick_pause_events_by_screen", None)
+                if not isinstance(pause_map, dict):
+                    pause_map = {}
+                    ext._sim_tick_pause_events_by_screen = pause_map
+            except Exception:
+                pause_map = {}
+                ext._sim_tick_pause_events_by_screen = pause_map
+            pause_evt = pause_map.get(str(scr_i))
+            if pause_evt is None:
+                pause_evt = threading.Event()
+                pause_map[str(scr_i)] = pause_evt
+
             started_wall = time.monotonic()
             active = dict(job)
             active["_started_wall"] = started_wall
-            ext._sim_anim_active = active
+            try:
+                active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+                if not isinstance(active_by, dict):
+                    active_by = {}
+                    ext._sim_anim_active_by_screen = active_by
+                active_by[str(scr_i)] = active
+            except Exception:
+                ext._sim_anim_active = active
             try:
                 if isinstance(job.get("est_total"), (float, int)) and float(job.get("est_total")) > 0.0:
-                    ext._sim_tick_pause_until_wall = float(started_wall) + float(job.get("est_total"))
+                    try:
+                        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                        if not isinstance(until_by, dict):
+                            until_by = {}
+                            ext._sim_tick_pause_until_wall_by_screen = until_by
+                        until_by[str(scr_i)] = float(started_wall) + float(job.get("est_total"))
+                    except Exception:
+                        ext._sim_tick_pause_until_wall = float(started_wall) + float(job.get("est_total"))
                 else:
-                    ext._sim_tick_pause_until_wall = None
+                    try:
+                        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                        if isinstance(until_by, dict):
+                            until_by[str(scr_i)] = None
+                    except Exception:
+                        ext._sim_tick_pause_until_wall = None
             except Exception:
-                ext._sim_tick_pause_until_wall = None
+                try:
+                    until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                    if isinstance(until_by, dict):
+                        until_by[str(scr_i)] = None
+                except Exception:
+                    ext._sim_tick_pause_until_wall = None
 
             def _on_done():
                 # 포트상태 점(●) 감소 시점
@@ -871,7 +933,11 @@ def _execute_mapped_sequence_stub(
                 # - 애니메이션 완료 후에는 "완료된 자세 그대로" 유지한다.
                 # - 다음 애니메이션 시작 시점에만 시퀀서 stop() 경로(=baseline 복원/초기화)가 동작하도록,
                 #   완료 직후 baseline을 현재 자세로 덮어쓰지 않는다.
-                pending = getattr(ext, "_sim_anim_pending", [])
+                # 화면별 pending 큐에서 다음 job만 이어서 실행
+                pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                pending = []
+                if isinstance(pending_by, dict):
+                    pending = pending_by.get(str(scr_i), []) or []
                 if isinstance(pending, list) and pending:
                     # 우선순위 큐: _priority 낮은 job 먼저
                     try:
@@ -879,6 +945,8 @@ def _execute_mapped_sequence_stub(
                     except Exception:
                         pass
                     nxt = pending.pop(0)
+                    if isinstance(pending_by, dict):
+                        pending_by[str(scr_i)] = pending
                     _start_job(nxt)
                     return
                 if pause_evt is not None:
@@ -887,11 +955,15 @@ def _execute_mapped_sequence_stub(
                     except Exception:
                         pass
                 try:
-                    ext._sim_tick_pause_until_wall = None
+                    until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                    if isinstance(until_by, dict):
+                        until_by[str(scr_i)] = None
                 except Exception:
                     pass
                 try:
-                    ext._sim_anim_active = {}
+                    active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+                    if isinstance(active_by, dict):
+                        active_by[str(scr_i)] = {}
                 except Exception:
                     pass
                 try:
@@ -900,7 +972,8 @@ def _execute_mapped_sequence_stub(
                     pass
 
             try:
-                ext._sim_runner.on_sequence_completed = _on_done  # type: ignore[attr-defined]
+                if runner_obj is not None:
+                    runner_obj.on_sequence_completed = _on_done  # type: ignore[attr-defined]
             except Exception:
                 pass
 
@@ -928,8 +1001,9 @@ def _execute_mapped_sequence_stub(
                     pass
             # JSON 시퀀스 재생 중에도 sim tick이 돌아가야 _wait_with_progress(공정)와 애니가 동시에 진행된다.
             # 배속>1일 때만 pause_evt.set()으로 tick을 잠시 맞춤(1배속에서는 set 하지 않음).
-            _ctx_run = _usd_context_name_for_sim_screen(ext, _scr)
-            ext._sim_runner.run(job.get("parsed", []), usd_context_name=_ctx_run)
+            _ctx_run = _usd_context_name_for_sim_screen(ext, scr_i)
+            if runner_obj is not None:
+                runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run)
             try:
                 _refresh_sim_progress_from_last(ext)
             except Exception:
@@ -972,28 +1046,33 @@ def _execute_mapped_sequence_stub(
         except Exception:
             is_spawn = False
         job["_priority"] = 0 if (is_spawn or is_pickup) else 10
+        # 화면별 runner의 busy 여부를 본다.
+        runner_busy = False
         try:
-            runner_busy = bool(
-                getattr(ext, "_sim_runner", None) is not None
-                and getattr(ext._sim_runner, "is_running", lambda: False)()
-            )
+            runners = getattr(ext, "_sim_runners_by_screen", None)
+            rr = runners.get(str(_scr)) if isinstance(runners, dict) else None
+            runner_busy = bool(rr is not None and getattr(rr, "is_running", lambda: False)())
         except Exception:
             runner_busy = False
         if runner_busy:
             try:
-                pending = getattr(ext, "_sim_anim_pending", None)
+                pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                if not isinstance(pending_by, dict):
+                    pending_by = {}
+                    ext._sim_anim_pending_by_screen = pending_by
+                pending = pending_by.get(str(_scr), [])
                 if not isinstance(pending, list):
                     pending = []
-                    ext._sim_anim_pending = pending
                 if int(job.get("_priority", 10)) <= 0:
                     pending.insert(0, job)
                 else:
                     pending.append(job)
+                pending_by[str(_scr)] = pending
             except Exception:
-                ext._sim_anim_pending.append(job)
+                pass
             _append_anim_history_log(
                 ext,
-                f"[ANIM] 대기큐적재 | event={seq} | est={est_text} | action={action_text} | file={p.name} | queued={len(ext._sim_anim_pending)}",
+                f"[ANIM] 대기큐적재 | screen={_scr} | event={seq} | est={est_text} | action={action_text} | file={p.name}",
             )
             try:
                 _refresh_sim_progress_from_last(ext)
@@ -3034,6 +3113,16 @@ def _sim_active_anim_owner_screen(ext: Any) -> int:
     return 1
 
 
+def _pause_event_for_screen(ext: Any, screen_idx: int) -> Optional[threading.Event]:
+    try:
+        m = getattr(ext, "_sim_tick_pause_events_by_screen", None)
+        if not isinstance(m, dict):
+            return getattr(ext, "_sim_tick_pause_event", None)
+        return m.get(str(max(1, int(screen_idx))))
+    except Exception:
+        return getattr(ext, "_sim_tick_pause_event", None)
+
+
 def _multi_tick_should_skip_for_screen(ext: Any, screen_idx: int, anim_running: bool) -> bool:
     """
     멀티 뷰 전용: ``_sim_tick_pause_event`` 가 켜져 있을 때 이 화면만 tick 을 건너뛸지.
@@ -3086,7 +3175,7 @@ def _sim_multi_engine_tick_worker(
     while not stop_evt.is_set():
         if getattr(ext, "_sim_multi_tick_shutdown", False):
             break
-        pause_evt = getattr(ext, "_sim_tick_pause_event", None)
+        pause_evt = _pause_event_for_screen(ext, screen_idx)
         gate_pause_evt = getattr(ext, "_sim_gate_pause_event", None)
         try:
             confirm_each = bool(
@@ -3100,22 +3189,10 @@ def _sim_multi_engine_tick_worker(
                 gate_pause_evt.clear()
             except Exception:
                 pass
+        # 화면별 pause 이벤트가 켜져 있으면 해당 화면 tick만 잠시 멈춘다.
         if pause_evt is not None and pause_evt.is_set():
-            try:
-                anim_running = bool(
-                    is_translate_animation_running()
-                    or is_rotate_animation_running()
-                    or is_curve_animation_running()
-                    or (
-                        getattr(ext, "_sim_runner", None) is not None
-                        and getattr(ext._sim_runner, "is_running", lambda: False)()
-                    )
-                )
-            except Exception:
-                anim_running = True
-            if _multi_tick_should_skip_for_screen(ext, screen_idx, anim_running):
-                time.sleep(0.02)
-                continue
+            time.sleep(0.02)
+            continue
 
         now = time.perf_counter()
         dt = now - last
