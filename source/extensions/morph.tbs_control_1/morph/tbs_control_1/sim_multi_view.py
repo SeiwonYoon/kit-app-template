@@ -1812,6 +1812,17 @@ def _resolve_viewport_window_for_workspace_name(wname: str) -> Optional[Any]:
     except Exception:
         api = None
     if api is None:
+        # 일부 Kit 환경에서는 get_viewport_from_window_name("Viewport")가 None을 반환한다.
+        # 이 경우 활성 뷰포트 윈도우를 폴백으로 사용한다(주로 화면1).
+        try:
+            if str(wname) == "Viewport":
+                from omni.kit.viewport.utility import get_active_viewport_window
+
+                win = get_active_viewport_window()
+                if win is not None and callable(getattr(win, "get_frame", None)):
+                    return win
+        except Exception:
+            pass
         return None
     for attr in ("viewport_window", "window", "_viewport_window", "_window"):
         try:
@@ -1822,6 +1833,16 @@ def _resolve_viewport_window_for_workspace_name(wname: str) -> Optional[Any]:
             return cand
     if callable(getattr(api, "get_frame", None)):
         return api
+    # 마지막 폴백: 화면1의 활성 뷰포트 윈도우
+    try:
+        if str(wname) == "Viewport":
+            from omni.kit.viewport.utility import get_active_viewport_window
+
+            win = get_active_viewport_window()
+            if win is not None and callable(getattr(win, "get_frame", None)):
+                return win
+    except Exception:
+        pass
     return None
 
 
@@ -2026,6 +2047,25 @@ def _describe_snapshot_for_viewport_hud(
     return f"{title}\n{line_a}\n{line_b}\n{line_c}"
 
 
+def _hud_panel_size_for_text(body: str, *, font_size: int = 13, padding: int = 8) -> tuple[int, int]:
+    """
+    HUD 패널을 텍스트 크기에 맞춰 타이트하게 감싸는 폭/높이를 계산한다.
+    (Kit UI 폰트/레이아웃은 완전한 auto-size가 환경별로 달라, 보수적인 근사치를 사용)
+    """
+    lines = [str(ln) for ln in str(body or "").splitlines()]
+    if not lines:
+        lines = [""]
+    max_chars = max((len(ln) for ln in lines), default=0)
+    # 경험치 기반 근사치(13px 폰트): 글자폭 ~7px, 줄높이 ~18px
+    char_w = 7
+    line_h = max(16, int(font_size * 1.35))
+    text_w = max(120, min(520, max_chars * char_w))
+    text_h = max(line_h, len(lines) * line_h)
+    panel_w = text_w + padding * 2
+    panel_h = text_h + padding * 2
+    return int(panel_w), int(panel_h)
+
+
 def destroy_viewport_snapshot_hud_layers(ext: Any) -> None:
     """``get_frame`` 슬롯에 넣었던 스냅샷 패널 루트 위젯을 제거한다."""
     detach_sim_screen1_live_hud_subscription(ext)
@@ -2099,6 +2139,13 @@ def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
         else:
             snap_d = dict(raw_snap) if isinstance(raw_snap, dict) else dict(cap or {})
             body = _describe_snapshot_for_viewport_hud(si, snap_d, slot_saved=slot_saved)
+        try:
+            pw, ph = _hud_panel_size_for_text(body, font_size=13, padding=8)
+            # 최소/최대 (너무 작은 패널/너무 큰 패널 방지)
+            pw = max(160, min(560, int(pw)))
+            ph = max(56, min(260, int(ph)))
+        except Exception:
+            pw, ph = 300, 120
         root: Optional[Any] = None
         body_lbl: Optional[Any] = None
         try:
@@ -2107,23 +2154,31 @@ def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
             with vw.get_frame(slot):
                 root = ui.ZStack(alignment=rt) if rt is not None else ui.ZStack()
                 with root:
-                    ui.Spacer()
-                    with ui.Frame(
-                        width=278,
-                        style={
-                            "background_color": 0xE8121824,
-                            "border_width": 1,
-                            "border_color": 0xFF5A6A80,
-                            "border_radius": 4,
-                            "padding": 8,
-                        },
-                    ):
-                        body_lbl = ui.Label(
-                            body,
-                            word_wrap=True,
-                            width=260,
-                            style={"color": 0xFFE8F4FF, "font_size": 13},
-                        )
+                    # RIGHT_TOP 정렬이 환경에 따라 동작이 달라질 수 있어, Spacer 기반으로 우측 상단에 고정한다.
+                    with ui.VStack():
+                        ui.Spacer(height=200)
+                        with ui.HStack():
+                            ui.Spacer()
+                            with ui.Frame(
+                                width=pw,
+                                height=ph,
+                                style={
+                                    "border_width": 1,
+                                    "border_color": 0xFF5A6A80,
+                                    "border_radius": 4,
+                                    "padding": 8,
+                                },
+                            ):
+                                with ui.ZStack():
+                                    ui.Rectangle(style={"background_color": 0xCC1A1A1A})
+                                    body_lbl = ui.Label(
+                                        body,
+                                        word_wrap=True,
+                                        width=max(1, pw - 16),
+                                        height=max(1, ph - 16),
+                                        style={"color": 0xFFFFFFFF, "font_size": 13},
+                                    )
+                        ui.Spacer()
         except Exception:
             root = None
             body_lbl = None
