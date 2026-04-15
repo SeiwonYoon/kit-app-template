@@ -43,7 +43,13 @@ def _state_for(usd_context_name: Optional[str]) -> Dict[str, Any]:
     st = _states.get(k)
     if isinstance(st, dict):
         return st
-    st = {"_end_fix_sub": None, "_loop_sub": None, "_complete_sub": None, "_play_token": 0}
+    st = {
+        "_end_fix_sub": None,
+        "_loop_sub": None,
+        "_complete_sub": None,
+        "_speed_sub": None,
+        "_play_token": 0,
+    }
     _states[k] = st
     return st
 
@@ -124,18 +130,63 @@ def time_to_frame(time_sec: float, usd_context_name: Optional[str] = None) -> fl
     return time_sec * float(tps) if tps else time_sec * DEFAULT_TPS
 
 
+def _try_set_timeline_speed(tl: Any, speed_scale: float) -> Optional[float]:
+    """
+    Kit 버전/타임라인 구현마다 속도 API가 달라 best-effort로 적용한다.
+    Returns:
+        이전 speed 값(복구용) 또는 None(복구 불가/미지원)
+    """
+    try:
+        s = float(speed_scale)
+    except Exception:
+        s = 1.0
+    s = max(0.01, min(100.0, s))
+    if tl is None:
+        return None
+    # 후보 API들
+    for get_nm, set_nm in (
+        ("get_time_scale", "set_time_scale"),
+        ("get_playback_rate", "set_playback_rate"),
+        ("get_speed", "set_speed"),
+    ):
+        try:
+            g = getattr(tl, get_nm, None)
+            f = getattr(tl, set_nm, None)
+            if callable(f):
+                prev = float(g()) if callable(g) else None
+                f(float(s))
+                return prev
+        except Exception:
+            continue
+    # 속성 기반(time_scale/playback_rate/speed)
+    for attr in ("time_scale", "playback_rate", "speed"):
+        try:
+            prev = getattr(tl, attr, None)
+            setattr(tl, attr, float(s))
+            try:
+                return float(prev) if isinstance(prev, (float, int)) else None
+            except Exception:
+                return None
+        except Exception:
+            continue
+    return None
+
+
 def play_usd_animation(
     start_frame: int = 200,
     end_frame: int = 300,
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
     usd_context_name: Optional[str] = None,
+    speed_scale: float = 1.0,
 ) -> bool:
     st = _state_for(usd_context_name)
     tl = _get_timeline(usd_context_name)
     if not tl:
         return False
     try:
+        # 배속 적용(지원되는 경우에만). 완료/중단 시 복구 시도.
+        prev_speed = _try_set_timeline_speed(tl, float(speed_scale))
         st["_play_token"] = int(st.get("_play_token", 0) or 0) + 1
         my_token = int(st["_play_token"])
         tps = tl.get_time_codes_per_seconds()
@@ -149,6 +200,90 @@ def play_usd_animation(
         tl.set_end_time(end_time)
         tl.set_current_time(start_time)
         tl.play()
+
+        # 속도 API가 없는 환경(또는 적용 실패)에서는 current_time을 직접 가속해서 배속을 맞춘다.
+        # - tl 자체는 1x로 재생되므로, 추가로 (sp-1)x 만큼 current_time을 더 밀어 총 sp가 되게 한다.
+        try:
+            if st.get("_speed_sub") is not None:
+                try:
+                    st["_speed_sub"].unsubscribe()
+                except Exception:
+                    pass
+                st["_speed_sub"] = None
+        except Exception:
+            pass
+        try:
+            sp = float(speed_scale)
+        except Exception:
+            sp = 1.0
+        if prev_speed is None and sp > 1.000001:
+            try:
+                import omni.kit.app as kit_app
+
+                def _on_update(e):
+                    try:
+                        # 재생 토큰이 바뀌면(새 재생/stop) 즉시 종료
+                        if int(st.get("_play_token", 0) or 0) != int(my_token):
+                            if st.get("_speed_sub") is not None:
+                                try:
+                                    st["_speed_sub"].unsubscribe()
+                                except Exception:
+                                    pass
+                                st["_speed_sub"] = None
+                            return
+                        if not tl.is_playing():
+                            return
+                        dt = 0.0
+                        try:
+                            dt = float(getattr(e, "payload", {}) or {}).get("dt", 0.0)  # type: ignore[union-attr]
+                        except Exception:
+                            dt = 0.0
+                        if dt <= 0.0:
+                            dt = 1.0 / 60.0
+                        # 추가 가속분만큼 current_time을 더 전진시킨다.
+                        extra = dt * max(0.0, sp - 1.0)
+                        t = float(tl.get_current_time())
+                        t2 = t + extra
+                        if t2 >= end_time - 1e-6:
+                            try:
+                                tl.pause()
+                            except Exception:
+                                pass
+                            try:
+                                tl.set_current_time(end_time)
+                            except Exception:
+                                pass
+                            if st.get("_speed_sub") is not None:
+                                try:
+                                    st["_speed_sub"].unsubscribe()
+                                except Exception:
+                                    pass
+                                st["_speed_sub"] = None
+                            if st.get("_complete_sub") is not None:
+                                try:
+                                    st["_complete_sub"].unsubscribe()
+                                except Exception:
+                                    pass
+                                st["_complete_sub"] = None
+                            if on_completed:
+                                try:
+                                    on_completed()
+                                except Exception:
+                                    pass
+                            return
+                        try:
+                            tl.set_current_time(t2)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                st["_speed_sub"] = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
+                    _on_update,
+                    name="morph.tbs_control_1:usd_animation_speed_fallback",
+                )
+            except Exception:
+                pass
 
         if st.get("_complete_sub") is not None:
             try:
@@ -220,6 +355,20 @@ def play_usd_animation(
                     t = tl.get_current_time()
                     if t >= end_time - 1e-6:
                         tl.pause()
+                        try:
+                            if prev_speed is not None:
+                                _try_set_timeline_speed(tl, float(prev_speed))
+                        except Exception:
+                            pass
+                        try:
+                            if st.get("_speed_sub") is not None:
+                                try:
+                                    st["_speed_sub"].unsubscribe()
+                                except Exception:
+                                    pass
+                                st["_speed_sub"] = None
+                        except Exception:
+                            pass
                         # 완료 직후 즉시 end_time으로 고정해, 다음 스텝이 start_time을 세팅할 때
                         # "end->start->end"로 튀는 레이스를 최소화한다.
                         try:
@@ -280,6 +429,12 @@ def play_usd_animation(
 
 def stop_usd_animation(usd_context_name: Optional[str] = None) -> None:
     st = _state_for(usd_context_name)
+    if st.get("_speed_sub") is not None:
+        try:
+            st["_speed_sub"].unsubscribe()
+        except Exception:
+            pass
+        st["_speed_sub"] = None
     if st.get("_loop_sub") is not None:
         try:
             st["_loop_sub"].unsubscribe()
@@ -302,6 +457,11 @@ def stop_usd_animation(usd_context_name: Optional[str] = None) -> None:
     if tl:
         try:
             tl.pause()
+        except Exception:
+            pass
+        # 속도는 기본값(1.0)으로 복구 시도(지원되는 경우)
+        try:
+            _try_set_timeline_speed(tl, 1.0)
         except Exception:
             pass
 

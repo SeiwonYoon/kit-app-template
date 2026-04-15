@@ -140,25 +140,29 @@ def _group_end_index(steps: List[Dict[str, Any]], start_idx: int) -> int:
     return g_end
 
 
-def _step_duration_sec(step: Dict[str, Any]) -> float:
+def _step_duration_sec(step: Dict[str, Any], speed_scale: float = 1.0) -> float:
     """스텝의 재생 길이(초). USD 타임라인은 프레임 구간을 타임라인 TPS로 환산."""
+    try:
+        sp = max(0.01, float(speed_scale))
+    except Exception:
+        sp = 1.0
     t = str((step or {}).get("type") or "").upper()
     if t in ("MOVE", "ROTATE"):
         rt = (step or {}).get("_runtime_duration", None)
         if rt is not None:
-            return max(1e-6, float(rt))
+            return max(1e-6, float(rt) / sp)
         if t == "MOVE":
             if "duration_max" in (step or {}):
-                return max(1e-6, float((step or {}).get("duration_max", (step or {}).get("duration", 1.0))))
-        return max(1e-6, float((step or {}).get("duration", 1.0)))
+                return max(1e-6, float((step or {}).get("duration_max", (step or {}).get("duration", 1.0))) / sp)
+        return max(1e-6, float((step or {}).get("duration", 1.0)) / sp)
     if t == "DELAY":
-        return max(1e-6, float((step or {}).get("duration", 1.0)))
+        return max(1e-6, float((step or {}).get("duration", 1.0)) / sp)
     if t == "USD_TIMELINE":
         start_f = int((step or {}).get("start_frame", 0))
         end_f = int((step or {}).get("end_frame", 0))
         if end_f <= start_f:
             return 1e-6
-        return max(usd_animation_control.frame_to_time(float(end_f - start_f)), 1e-6)
+        return max(usd_animation_control.frame_to_time(float(end_f - start_f)) / sp, 1e-6)
     return 1e-6
 
 
@@ -1036,6 +1040,7 @@ class SequenceRunner:
     def __post_init__(self) -> None:
         self._running = False
         self._usd_context_name: Optional[str] = None
+        self._speed_scale: float = 1.0
         self._steps: List[Dict[str, Any]] = []
         self._baseline: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
         self._next_tick_sub = None
@@ -1284,9 +1289,19 @@ class SequenceRunner:
         except Exception:
             fn()
 
-    def run(self, steps: List[Dict[str, Any]], *, usd_context_name: Optional[str] = None) -> None:
+    def run(
+        self,
+        steps: List[Dict[str, Any]],
+        *,
+        usd_context_name: Optional[str] = None,
+        speed_scale: float = 1.0,
+    ) -> None:
         """시퀀스 실행 시작."""
         self._usd_context_name = (usd_context_name or "").strip() or None
+        try:
+            self._speed_scale = max(0.01, float(speed_scale))
+        except Exception:
+            self._speed_scale = 1.0
         incoming_steps = list(steps or [])
         first = incoming_steps[0] if incoming_steps else {}
         start_from_current = bool((first or {}).get("_start_from_current", False))
@@ -1581,6 +1596,7 @@ class SequenceRunner:
             self._complete_sequence()
             return
         d0 = int(self._steps[0].get("step_delay_ms", 0)) / 1000.0
+        d0 = d0 / float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
         # 첫 스텝(step_delay_ms)은 "시퀀스 시작 전 초기 대기"로 해석한다.
         if d0 <= 0:
             self._execute_group_and_schedule_next(0)
@@ -1600,47 +1616,52 @@ class SequenceRunner:
         if not self._running:
             return
         b = _group_end_index(self._steps, a)
-        self._execute_group(a, b)
         next_idx = b + 1
-        if next_idx >= len(self._steps):
-            # 마지막 그룹에서 팔로워가 지연 시작이면 _complete_sequence 가 먼저 호출되면
-            # _running=False 가 되어 intra 타이머가 막힘 → 완료를 최대 지연만큼 미룸.
-            self._defer_complete_sequence_if_needed(a, b)
-            return
-        anchor_dur = _step_duration_sec(self._steps[b])
-        delay_ms_next = int(self._steps[next_idx].get("step_delay_ms", 0))
-        delay_sec_next = delay_ms_next / 1000.0
+        sp = float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
         t0 = self._group_t0
-        if b > a:
-            # 병렬 그룹 앵커(b)가 리더보다 늦게 시작할 수 있으므로 시작 오프셋을 반영한다.
-            anchor_rel = int(self._steps[b].get("step_delay_ms", 0)) / 1000.0
-            t_anchor_start = t0 + max(0.0, anchor_rel)
-        else:
-            t_anchor_start = t0
-        anchor_end = t_anchor_start + anchor_dur
-        # 음수 delay를 쓰더라도 현재 구현은 그룹 시작(t0)보다 앞당기지 않는다.
-        next_start = max(t0, anchor_end + delay_sec_next)
 
-        def _go() -> None:
-            self._run_from_index(next_idx)
+        # 모든 타입의 앵커는 "실제 완료" 기준으로 다음 그룹을 시작해야
+        # 배속>1에서 duration 추정 오차로 다음 스텝이 먼저 실행되는 문제를 막을 수 있다.
+        if next_idx >= len(self._steps):
+            # 마지막 그룹: 앵커 완료 후 종료(팔로워 지연 시작이 있으면 그만큼은 추가로 보장)
+            def _anchor_done_last() -> None:
+                self._defer_complete_sequence_if_needed(a, b)
 
-        self._schedule_at(next_start, _go)
+            self._execute_group(a, b, anchor_on_completed=_anchor_done_last)
+            return
+
+        delay_ms_next = int(self._steps[next_idx].get("step_delay_ms", 0))
+        delay_sec_next = (delay_ms_next / 1000.0) / sp
+
+        def _anchor_done() -> None:
+            if not self._running:
+                return
+            anchor_end_wall = time.monotonic()
+            # 음수 delay를 쓰더라도 현재 구현은 그룹 시작(t0)보다 앞당기지 않는다.
+            next_start = max(t0, anchor_end_wall + delay_sec_next)
+            self._schedule_at(next_start, lambda: self._run_from_index(next_idx))
+
+        self._execute_group(a, b, anchor_on_completed=_anchor_done)
 
     def _defer_complete_sequence_if_needed(self, a: int, b: int) -> None:
         """마지막 그룹: 팔로워 step_delay_ms 가 있으면 그 시작이 스케줄된 뒤에 시퀀스 종료."""
         if not self._running:
             return
         t0 = self._group_t0
+        sp = float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
         max_off = 0.0
         for i in range(a + 1, b + 1):
-            max_off = max(max_off, max(0.0, int((self._steps[i] or {}).get("step_delay_ms", 0)) / 1000.0))
+            max_off = max(
+                max_off,
+                max(0.0, (int((self._steps[i] or {}).get("step_delay_ms", 0)) / 1000.0) / sp),
+            )
         if max_off <= 1e-9:
             self._complete_sequence()
             return
         # intra 타이머 → _call_next_frame 체인 여유
         self._schedule_at(t0 + max_off + 0.05, lambda: self._complete_sequence())
 
-    def _execute_group(self, a: int, b: int) -> None:
+    def _execute_group(self, a: int, b: int, anchor_on_completed: Optional[Callable[[], None]] = None) -> None:
         """구간 [a..b]: 리더(a) 즉시 시작, run_with_previous 인 스텝은 step_delay_ms 만큼 리더 시작 후 지연 시작. 앵커=b."""
         if not self._running:
             return
@@ -1650,15 +1671,23 @@ class SequenceRunner:
         self._current_group = (a, b)
 
         noop = lambda: None
-        self._start_step(a, on_completed=noop)
+        if a == b and anchor_on_completed is not None:
+            self._start_step(a, on_completed=anchor_on_completed)
+        else:
+            self._start_step(a, on_completed=noop)
         for i in range(a + 1, b + 1):
-            off_sec = int((self._steps[i] or {}).get("step_delay_ms", 0)) / 1000.0
+            sp = float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
+            off_sec = (int((self._steps[i] or {}).get("step_delay_ms", 0)) / 1000.0) / sp
             off_sec = max(0.0, off_sec)
             target = t0 + off_sec
             if target <= time.monotonic():
-                self._start_step(i, on_completed=noop)
+                self._start_step(i, on_completed=(anchor_on_completed if (i == b and anchor_on_completed is not None) else noop))
             else:
-                self._schedule_intra_group_at(target, lambda idx=i: self._start_step(idx, lambda: None))
+                def _mk(idx=i):
+                    cb = anchor_on_completed if (idx == b and anchor_on_completed is not None) else noop
+                    return lambda: self._start_step(idx, cb)
+
+                self._schedule_intra_group_at(target, _mk(i))
 
     def _start_step(self, idx: int, on_completed: Callable[[], None]) -> None:
         """
@@ -1676,7 +1705,8 @@ class SequenceRunner:
         if t == "MOVE":
             # MOVE 랜덤 범위 샘플링은 "실행 시점"에 1회 고정한다.
             # 이후 duration/dx/dy/dz는 _runtime_* 값을 사용해 로그/스케줄과 일치시킨다.
-            step["_runtime_duration"] = _sample_step_value(step, "duration")
+            sp = float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
+            step["_runtime_duration"] = _sample_step_value(step, "duration") / sp
             step["_runtime_dx"] = _sample_step_value(step, "dx")
             step["_runtime_dy"] = _sample_step_value(step, "dy")
             step["_runtime_dz"] = _sample_step_value(step, "dz")
@@ -1719,11 +1749,13 @@ class SequenceRunner:
                 loop=False,
                 on_completed=_done,
                 usd_context_name=getattr(self, "_usd_context_name", None),
+                speed_scale=float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0)),
             )
             return
 
         if t == "DELAY":
-            delay_sec = float(step.get("duration", 1.0))
+            sp = float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
+            delay_sec = float(step.get("duration", 1.0)) / sp
             if delay_sec <= 0:
                 _done()
                 return
@@ -1803,7 +1835,8 @@ class SequenceRunner:
 
         if t == "ROTATE":
             prim_id = str(step.get("prim") or "")
-            duration = float(step.get("duration", 1.0))
+            sp = float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
+            duration = float(step.get("duration", 1.0)) / sp
             rx = float(step.get("rx", 0.0))
             ry = float(step.get("ry", 0.0))
             rz = float(step.get("rz", 0.0))

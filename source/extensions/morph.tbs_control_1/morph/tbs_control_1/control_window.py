@@ -1003,7 +1003,7 @@ def _execute_mapped_sequence_stub(
             # 배속>1일 때만 pause_evt.set()으로 tick을 잠시 맞춤(1배속에서는 set 하지 않음).
             _ctx_run = _usd_context_name_for_sim_screen(ext, scr_i)
             if runner_obj is not None:
-                runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run)
+                runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run, speed_scale=sp)
             try:
                 _refresh_sim_progress_from_last(ext)
             except Exception:
@@ -2682,7 +2682,12 @@ def _enqueue_anim_event(ext: Any, payload: Dict[str, str]) -> None:
     if q is None:
         return
     try:
-        q.put_nowait((SimUiQueueKind.ANIM_EVENT, dict(payload or {})))
+        p2 = dict(payload or {})
+        try:
+            p2["_run_gen"] = str(int(getattr(ext, "_sim_run_gen", 0) or 0))
+        except Exception:
+            p2["_run_gen"] = "0"
+        q.put_nowait((SimUiQueueKind.ANIM_EVENT, p2))
     except Exception:
         pass
 
@@ -2958,6 +2963,14 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     - ``handle_sim_event_for_animation`` → rules/map → JSON ``SequenceRunner``(화면별 USD 컨텍스트).
     """
     p = payload if isinstance(payload, dict) else {}
+    # stop/reset 이후 들어온 잔여 이벤트는 무시한다.
+    try:
+        gen_now = int(getattr(ext, "_sim_run_gen", 0) or 0)
+        gen_evt = int(str(p.get("_run_gen", gen_now) or gen_now).strip() or gen_now)
+        if gen_evt != gen_now:
+            return
+    except Exception:
+        pass
     try:
         scr = int(str(p.get("tbs_sim_screen", "1") or "1").strip() or "1")
     except Exception:
@@ -3191,8 +3204,39 @@ def _sim_multi_engine_tick_worker(
                 pass
         # 화면별 pause 이벤트가 켜져 있으면 해당 화면 tick만 잠시 멈춘다.
         if pause_evt is not None and pause_evt.is_set():
+            # fail-safe 1) 예상 애니 길이(벽시계) 경과 시 자동 해제
+            try:
+                until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                until_t = until_by.get(str(screen_idx)) if isinstance(until_by, dict) else None
+                if isinstance(until_t, (float, int)) and time.monotonic() >= float(until_t):
+                    try:
+                        pause_evt.clear()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # fail-safe 2) runner/active가 없는데 pause만 남아있으면 해제
+            try:
+                runner_alive = False
+                runners_by = getattr(ext, "_sim_runners_by_screen", None)
+                rr = runners_by.get(str(screen_idx)) if isinstance(runners_by, dict) else None
+                runner_alive = bool(rr is not None and getattr(rr, "is_running", lambda: False)())
+            except Exception:
+                runner_alive = False
+            try:
+                active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+                act = active_by.get(str(screen_idx)) if isinstance(active_by, dict) else None
+                active_has = bool(isinstance(act, dict) and act)
+            except Exception:
+                active_has = False
+            if (not runner_alive) and (not active_has):
+                try:
+                    pause_evt.clear()
+                except Exception:
+                    pass
             time.sleep(0.02)
-            continue
+            if pause_evt.is_set():
+                continue
 
         now = time.perf_counter()
         dt = now - last
@@ -3856,6 +3900,11 @@ def on_sim_start_clicked(ext: Any) -> None:
         n_ch = 1
 
     on_sim_stop_clicked(ext)
+    # 실행 세대 토큰: stop/reset 후 남은 이벤트/애니 job을 무시하기 위해 사용
+    try:
+        ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
+    except Exception:
+        ext._sim_run_gen = 1
     _auto_fill_per_screen_snapshots_on_start(ext)
 
     ep_count = 2
@@ -4449,6 +4498,11 @@ def on_sim_start_clicked(ext: Any) -> None:
 
 
 def on_sim_stop_clicked(ext: Any) -> None:
+    # stop/reset 이후 남아있는 큐 아이템을 무시하기 위한 세대 토큰 증가
+    try:
+        ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
+    except Exception:
+        ext._sim_run_gen = 1
     for eng in list(getattr(ext, "_sim_engines", None) or []):
         if eng is None:
             continue
