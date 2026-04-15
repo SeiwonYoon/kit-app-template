@@ -462,6 +462,87 @@ class TBSSimulationEngine:
             (avg_move + avg_pickup) * max(1, total_lots_est) + avg_spawn * max(0, int(self._max_oht_lots)),
         )
 
+        # -----------------------------
+        # 사전 샘플링(요구사항)
+        # -----------------------------
+        # 정책: 시뮬 시작 시점에 난수 스트림을 고정(=풀을 미리 생성)하고,
+        # 런타임에서는 "새로 uniform을 뽑지 않고" 풀에서 순차 소비한다.
+        # (경로 선택은 런타임에 달라질 수 있으므로, 이벤트별 정확한 개수는 미리 알 수 없고,
+        #  대신 충분한 길이의 풀을 만들어 고정된 순서로 소비한다.)
+        try:
+            self._rng = random.Random()
+        except Exception:
+            self._rng = None
+        self._pre_pool: Dict[str, List[float]] = {"spawn": [], "pickup": [], "oht_to_bp1": [], "bp1_to_bp": [], "bp_to_ep": [], "ep_to_oht": []}
+        self._pre_idx: Dict[str, int] = {k: 0 for k in self._pre_pool.keys()}
+        self._presample_fill()
+
+    def _presample_fill(self) -> None:
+        """사전 샘플링 풀을 충분히 채운다."""
+        # 안전 상한: 매우 큰 값도 커버하되 메모리 폭주 방지
+        spawn_n = max(16, int(self._max_oht_lots) + 8)
+        pickup_n = max(32, int(self._max_oht_lots) * 4 + 16)
+        move_n = max(64, int(self._max_oht_lots) * 4 + 32)
+
+        def _fill(key: str, n: int, a: float, b: float) -> None:
+            try:
+                lo, hi = SimulationTimingConfig._norm(float(a), float(b))
+            except Exception:
+                lo, hi = (0.01, 0.01)
+            arr = self._pre_pool.get(key, [])
+            if not isinstance(arr, list):
+                arr = []
+                self._pre_pool[key] = arr
+            while len(arr) < n:
+                try:
+                    if self._rng is not None:
+                        arr.append(float(self._rng.uniform(lo, hi)))
+                    else:
+                        arr.append(float(random.uniform(lo, hi)))
+                except Exception:
+                    arr.append(float(lo))
+
+        _fill("spawn", spawn_n, self._timing.lot_spawn_interval_min, self._timing.lot_spawn_interval_max)
+        _fill("pickup", pickup_n, self._timing.pickup_event_interval_min, self._timing.pickup_event_interval_max)
+        _fill("oht_to_bp1", move_n, self._timing.oht_to_bp1_min, self._timing.oht_to_bp1_max)
+        _fill("bp1_to_bp", move_n, self._timing.bp1_to_bp_min, self._timing.bp1_to_bp_max)
+        _fill("bp_to_ep", move_n, self._timing.bp_to_ep_min, self._timing.bp_to_ep_max)
+        _fill("ep_to_oht", move_n, self._timing.ep_to_oht_min, self._timing.ep_to_oht_max)
+
+        # 사전 샘플 기반 총 예상 시간(시작 시점 계산) — “랜덤 구간이 반영된 고정 값”
+        try:
+            init_full = len(list(getattr(self._init_cfg, "initial_full_ports", None) or []))
+        except Exception:
+            init_full = 0
+        n_spawn = max(0, int(self._max_oht_lots))
+        n_lots = max(1, int(self._max_oht_lots) + int(init_full))
+        spawn_sum = sum(self._pre_pool["spawn"][:n_spawn]) if n_spawn > 0 else 0.0
+        # direct input 기준으로 OHT->EP는 oht_to_bp1 분포를 사용
+        in_sum = sum(self._pre_pool["oht_to_bp1"][:n_spawn]) if n_spawn > 0 else 0.0
+        out_sum = sum(self._pre_pool["ep_to_oht"][:n_lots]) if n_lots > 0 else 0.0
+        pickup_sum = sum(self._pre_pool["pickup"][:n_lots]) if n_lots > 0 else 0.0
+        self._sim_total_est_sec = max(10.0, float(spawn_sum + in_sum + out_sum + pickup_sum))
+
+    def _presampled(self, key: str, fallback_fn) -> float:
+        """사전 샘플 풀에서 1개를 순차 소비. 부족하면 refill."""
+        arr = self._pre_pool.get(key, [])
+        idx = int(self._pre_idx.get(key, 0) or 0)
+        if not isinstance(arr, list) or idx >= len(arr):
+            try:
+                self._presample_fill()
+            except Exception:
+                pass
+            arr = self._pre_pool.get(key, [])
+        try:
+            v = float(arr[idx])
+            self._pre_idx[key] = idx + 1
+            return v
+        except Exception:
+            try:
+                return float(fallback_fn())
+            except Exception:
+                return 0.01
+
     def set_runtime_hooks(
         self,
         *,
@@ -713,6 +794,20 @@ class TBSSimulationEngine:
         self._faulty_sec = {p: 0.0 for p in self._all_ports}
         self._fault_prev_snapshot = frozenset(sorted(self._get_faulty_set()))
         self._last_report_text = ""
+        # EP 타임라인용 progress emit 타이머 초기화(시작 직후부터 움직이게)
+        try:
+            self._progress_timeline_last_emit_t = -999.0
+        except Exception:
+            pass
+        # 시작 시점마다 사전 샘플 풀/커서를 초기화(=이번 실행에서 고정된 난수 시퀀스)
+        try:
+            self._pre_idx = {k: 0 for k in (getattr(self, "_pre_pool", {}) or {}).keys()}
+        except Exception:
+            pass
+        try:
+            self._presample_fill()
+        except Exception:
+            pass
         initial_applied = self._apply_initial_full_ports()
         self._total_lots += self._max_oht_lots
         if self._total_lots <= 0:
@@ -723,6 +818,22 @@ class TBSSimulationEngine:
         self._log_sim_start_block(initial_applied)
         if initial_applied != "(없음)":
             self._emit_port_occ_refresh("초기 적재 후 포트 표시 갱신")
+        # 시작 직후(t=0)에도 그래프가 바로 전진할 수 있도록 timeline_only progress를 1회 emit
+        try:
+            self._emit_progress(
+                {
+                    "sim_time": "0.00",
+                    "timeline_only": "1",
+                    "label": "EP 타임라인",
+                    "detail": "",
+                    "status": "RUNNING",
+                    "elapsed": "0.0",
+                    "total": "0.0",
+                    "percent": "0",
+                }
+            )
+        except Exception:
+            pass
         self.env.process(self._lot_spawn_timer())
         self.env.process(self._pickup_event_timer())
         self.env.process(self._run_serial_flow())
@@ -748,7 +859,7 @@ class TBSSimulationEngine:
             if self._oht_spawn_seq >= self._max_oht_lots:
                 self._next_spawn_at = None
                 return
-            dt = self._timing.rand_lot_spawn_interval()
+            dt = self._presampled("spawn", self._timing.rand_lot_spawn_interval)
             try:
                 self._next_spawn_at = float(self.env.now) + float(dt)
             except Exception:
@@ -821,7 +932,7 @@ class TBSSimulationEngine:
             if self._total_lots > 0 and len(self.completed_lots) >= self._total_lots:
                 self._next_pickup_at = None
                 return
-            dt = self._timing.rand_pickup_event_interval()
+            dt = self._presampled("pickup", self._timing.rand_pickup_event_interval)
             try:
                 self._next_pickup_at = float(self.env.now) + float(dt)
             except Exception:
@@ -847,6 +958,9 @@ class TBSSimulationEngine:
         self._sim_budget_sec += float(sim_delta_sec)
         t_before = float(self.env.now)
         steps = 0
+        # "가상 sim time": 다음 이벤트가 멀리 있어 env.now가 안 움직이는 구간에서도,
+        # 누적된 sim budget만큼은 사용자에게 시간이 흐르는 것으로 보여야 한다(요구사항: 시작 직후부터 그래프 진행).
+        virtual_now = float(t_before)
         while self._running and not self._done:
             next_t = self.env.peek()
             if next_t == float("inf"):
@@ -854,6 +968,12 @@ class TBSSimulationEngine:
             cur_t = float(self.env.now)
             need = max(0.0, float(next_t) - cur_t)
             if need > self._sim_budget_sec + 1e-12:
+                # 아직 다음 이벤트까지 budget이 부족한 경우:
+                # env.now는 그대로지만, budget이 쌓인 만큼 가상 시간은 진행한다(단, next_t를 넘지 않게 캡).
+                try:
+                    virtual_now = float(cur_t) + float(min(self._sim_budget_sec, need))
+                except Exception:
+                    virtual_now = float(cur_t)
                 break
             # 같은 시각 이벤트(need=0)는 budget 소모 없이 연쇄 처리
             self._sim_budget_sec = max(0.0, self._sim_budget_sec - need)
@@ -863,34 +983,42 @@ class TBSSimulationEngine:
                 self._log("[SIM] 내부 step guard 발동")
                 break
         t_after = float(self.env.now)
+        try:
+            virtual_now = max(float(virtual_now), float(t_after))
+        except Exception:
+            virtual_now = float(t_after)
         ds = max(0.0, t_after - t_before)
         if ds > 1e-12:
             self._accumulate_sim_stats(ds)
             self._maybe_log_fault_transitions()
-            # 공정 사이 대기 구간에서도 EP 타임라인이 계속 증가하도록,
-            # sim_time 기준으로 주기적으로 progress(payload)만 emit 한다.
-            try:
-                now = float(self.env.now) if self.env is not None else 0.0
-            except Exception:
-                now = 0.0
-            try:
-                if now - float(getattr(self, "_progress_timeline_last_emit_t", -999.0) or -999.0) >= 0.5:
-                    self._progress_timeline_last_emit_t = float(now)
-                    # label이 비어있으면 UI가 갱신을 스킵하므로, 최소 라벨을 넣는다.
-                    self._emit_progress(
-                        {
-                            # NOTE: 진행현황 텍스트를 덮어쓰지 않고 그래프만 갱신하기 위한 전용 플래그
-                            "timeline_only": "1",
-                            "label": "EP 타임라인",
-                            "detail": "",
-                            "status": "RUNNING",
-                            "elapsed": "0.0",
-                            "total": "0.0",
-                            "percent": "0",
-                        }
-                    )
-            except Exception:
-                pass
+
+        # 공정 사이 대기 구간에서도 EP 타임라인이 계속 증가하도록,
+        # "가상 sim time(virtual_now)" 기준으로 주기적으로 progress(payload)만 emit 한다.
+        try:
+            now_v = float(virtual_now if virtual_now is not None else (float(self.env.now) if self.env is not None else 0.0))
+        except Exception:
+            now_v = 0.0
+        try:
+            # 시작 직후 체감이 "멈춤"처럼 보이지 않게 0.1s 단위로 갱신
+            if now_v - float(getattr(self, "_progress_timeline_last_emit_t", -999.0) or -999.0) >= 0.1:
+                self._progress_timeline_last_emit_t = float(now_v)
+                # label이 비어있으면 UI가 갱신을 스킵하므로, 최소 라벨을 넣는다.
+                # NOTE: sim_time은 _emit_progress가 덮어쓰지 않도록 payload에 직접 넣는다.
+                self._emit_progress(
+                    {
+                        "sim_time": f"{float(now_v):.2f}",
+                        # NOTE: 진행현황 텍스트를 덮어쓰지 않고 그래프만 갱신하기 위한 전용 플래그
+                        "timeline_only": "1",
+                        "label": "EP 타임라인",
+                        "detail": "",
+                        "status": "RUNNING",
+                        "elapsed": "0.0",
+                        "total": "0.0",
+                        "percent": "0",
+                    }
+                )
+        except Exception:
+            pass
 
         if not self._done and self.env.peek() == float("inf"):
             self._deadlock = True
@@ -1103,7 +1231,7 @@ class TBSSimulationEngine:
 
     def _load_lot_to_ep_direct(self, lot: Lot, ep_port: str):
         """OHT 대기열 LOT을 EP에 직접 투입(ARRIVED + 대기 후 _set_port)."""
-        oht_time = self._timing.rand_oht_to_bp1()
+        oht_time = self._presampled("oht_to_bp1", self._timing.rand_oht_to_bp1)
         anim_wait = self._request_gate({
             # 요구사항: OHT 이동 애니는 ARRIVED에서만 실행(=MOVE 애니 불필요).
             # gate는 이벤트 발생마다 UI에서 뜨도록 변경 예정이므로, 여기서는 시간 추정만 반환받는다.
@@ -1157,7 +1285,7 @@ class TBSSimulationEngine:
     def _load_lot_to_inout(self, lot: Lot):
         """OHT 대기열 LOT을 IN/OUT으로 투입(ARRIVED 이벤트·대기 후 IN/OUT 안착, 이어서 버퍼로 이송)."""
         self._oht_loading_bp1 = True
-        oht_time = self._timing.rand_oht_to_bp1()
+        oht_time = self._presampled("oht_to_bp1", self._timing.rand_oht_to_bp1)
         # 각 공정 확인(on_gate): UI 확인 팝업과 동기화되는 블로킹 게이트
         anim_wait = self._request_gate({
             "seq": "ARRIVED",
@@ -1216,7 +1344,7 @@ class TBSSimulationEngine:
         self._lock_port(target_bp)
         self._route_mark(lot.lot_id, "bp1_to_bp_from", INOUT_PORT)
         self._route_mark(lot.lot_id, "bp1_to_bp_to", target_bp)
-        move_time = self._timing.rand_bp1_to_bp()
+        move_time = self._presampled("bp1_to_bp", self._timing.rand_bp1_to_bp)
         anim_wait = self._request_gate({
             "seq": "MOVE_TRANSFERING",
             "from_port_id": INOUT_PORT,
@@ -1333,7 +1461,7 @@ class TBSSimulationEngine:
 
     def _move_bp_to_ep(self, bp_port: str, ep_port: str, lot: Lot):
         """버퍼→EP 이송(MOVE_REQ). 점유는 완료 시점에만 이동시키고, 중복 선택 방지용으로 잠금."""
-        move_time = self._timing.rand_bp_to_ep()
+        move_time = self._presampled("bp_to_ep", self._timing.rand_bp_to_ep)
         # 요구사항: BP->EP 이동 애니는 별도 시퀀스(EISEAP_PORT_MOVE_REQ)로 실행.
         anim_wait = self._request_gate({
             "seq": "MOVE_REQ",
@@ -1408,7 +1536,7 @@ class TBSSimulationEngine:
             self._ep_awaiting_pickup[ep_port] = False
             return
         self._ep_awaiting_pickup[ep_port] = False
-        unload_time = self._timing.rand_ep_to_oht()
+        unload_time = self._presampled("ep_to_oht", self._timing.rand_ep_to_oht)
         self._request_gate(
             {
                 "seq": "READYTOUNLOAD",
@@ -1711,10 +1839,12 @@ class TBSSimulationEngine:
     def _emit_progress(self, payload: Dict[str, str]) -> None:
         """UI 진행률 바/상세: sim_time을 붙여 on_progress 콜백으로 전달."""
         payload = dict(payload or {})
-        try:
-            payload["sim_time"] = f"{float(self.env.now):.2f}" if self.env is not None else "0.00"
-        except Exception:
-            payload["sim_time"] = "0.00"
+        # 호출자가 sim_time을 명시한 경우(가상 sim time 등)에는 덮어쓰지 않는다.
+        if "sim_time" not in payload:
+            try:
+                payload["sim_time"] = f"{float(self.env.now):.2f}" if self.env is not None else "0.00"
+            except Exception:
+                payload["sim_time"] = "0.00"
         # 진행현황 막대그래프용 EP 점유 스냅샷(시뮬 시간 기준)
         try:
             ep_ports = list(getattr(self, "_ep_ports", []) or [])
