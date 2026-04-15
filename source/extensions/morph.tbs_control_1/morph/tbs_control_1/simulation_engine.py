@@ -364,6 +364,8 @@ class TBSSimulationEngine:
         self._done = False
         self._deadlock = False
         self._sim_budget_sec = 0.0
+        # 진행현황 타임라인 고정 스케일(총 시뮬 예상 시간)
+        self._sim_total_est_sec: float = 0.0
 
         self.env = simpy.Environment() if simpy else None
         ep_count = int(getattr(self._init_cfg, "ep_count", 2) or 2)
@@ -413,8 +415,52 @@ class TBSSimulationEngine:
         self._faulty_ports_supplier: Optional[Callable[[], Set[str]]] = None
         self._idle_sec: Dict[str, float] = {}
         self._faulty_sec: Dict[str, float] = {}
+        # EP 점유 기반 통계(요구사항: EP별 비어있던 시간 + 모든 EP가 동시에 비어있던 시간)
+        self._ep_empty_sec: Dict[str, float] = {}
+        self._all_ep_empty_sec: float = 0.0
         self._fault_prev_snapshot: frozenset = frozenset()
         self._last_report_text: str = ""
+        # 진행현황 그래프(EP 타임라인)용: 공정 사이 대기에도 일정 주기로 progress emit
+        self._progress_timeline_last_emit_t: float = -999.0
+
+        # 총 시뮬 예상 시간(고정 길이 막대그래프용) — 실행 전 간단 추정.
+        try:
+            init_full = len(list(getattr(self._init_cfg, "initial_full_ports", None) or []))
+        except Exception:
+            init_full = 0
+        total_lots_est = max(0, int(self._max_oht_lots) + int(init_full))
+
+        def _avg(a: float, b: float) -> float:
+            try:
+                x = float(a)
+                y = float(b)
+            except Exception:
+                return 0.0
+            lo, hi = (x, y) if x <= y else (y, x)
+            return max(0.01, (lo + hi) * 0.5)
+
+        try:
+            avg_move = (
+                _avg(self._timing.oht_to_bp1_min, self._timing.oht_to_bp1_max)
+                + _avg(self._timing.bp1_to_bp_min, self._timing.bp1_to_bp_max)
+                + _avg(self._timing.bp_to_ep_min, self._timing.bp_to_ep_max)
+                + _avg(self._timing.ep_to_oht_min, self._timing.ep_to_oht_max)
+            )
+        except Exception:
+            avg_move = 20.0
+        try:
+            avg_pickup = _avg(self._timing.pickup_event_interval_min, self._timing.pickup_event_interval_max)
+        except Exception:
+            avg_pickup = 60.0
+        try:
+            avg_spawn = _avg(self._timing.lot_spawn_interval_min, self._timing.lot_spawn_interval_max)
+        except Exception:
+            avg_spawn = 20.0
+        # 보수적 추정: LOT당 이동 평균 + 회수 티켓 평균, 스폰 지연 일부 반영.
+        self._sim_total_est_sec = max(
+            10.0,
+            (avg_move + avg_pickup) * max(1, total_lots_est) + avg_spawn * max(0, int(self._max_oht_lots)),
+        )
 
     def set_runtime_hooks(
         self,
@@ -483,6 +529,25 @@ class TBSSimulationEngine:
         for p in faulty:
             if p in self._all_ports:
                 self._faulty_sec[p] = self._faulty_sec.get(p, 0.0) + dt
+
+        # EP 통계(점유/비점유)
+        try:
+            ep_ports = list(getattr(self, "_ep_ports", []) or [])
+        except Exception:
+            ep_ports = []
+        if ep_ports:
+            all_empty = True
+            for ep in ep_ports:
+                try:
+                    empty = self.ports.get(ep) is None
+                except Exception:
+                    empty = True
+                if empty:
+                    self._ep_empty_sec[ep] = self._ep_empty_sec.get(ep, 0.0) + dt
+                else:
+                    all_empty = False
+            if all_empty:
+                self._all_ep_empty_sec += dt
 
     def _maybe_log_fault_transitions(self) -> None:
         cur = frozenset(sorted(self._get_faulty_set()))
@@ -802,6 +867,30 @@ class TBSSimulationEngine:
         if ds > 1e-12:
             self._accumulate_sim_stats(ds)
             self._maybe_log_fault_transitions()
+            # 공정 사이 대기 구간에서도 EP 타임라인이 계속 증가하도록,
+            # sim_time 기준으로 주기적으로 progress(payload)만 emit 한다.
+            try:
+                now = float(self.env.now) if self.env is not None else 0.0
+            except Exception:
+                now = 0.0
+            try:
+                if now - float(getattr(self, "_progress_timeline_last_emit_t", -999.0) or -999.0) >= 0.5:
+                    self._progress_timeline_last_emit_t = float(now)
+                    # label이 비어있으면 UI가 갱신을 스킵하므로, 최소 라벨을 넣는다.
+                    self._emit_progress(
+                        {
+                            # NOTE: 진행현황 텍스트를 덮어쓰지 않고 그래프만 갱신하기 위한 전용 플래그
+                            "timeline_only": "1",
+                            "label": "EP 타임라인",
+                            "detail": "",
+                            "status": "RUNNING",
+                            "elapsed": "0.0",
+                            "total": "0.0",
+                            "percent": "0",
+                        }
+                    )
+            except Exception:
+                pass
 
         if not self._done and self.env.peek() == float("inf"):
             self._deadlock = True
@@ -1626,6 +1715,31 @@ class TBSSimulationEngine:
             payload["sim_time"] = f"{float(self.env.now):.2f}" if self.env is not None else "0.00"
         except Exception:
             payload["sim_time"] = "0.00"
+        # 진행현황 막대그래프용 EP 점유 스냅샷(시뮬 시간 기준)
+        try:
+            ep_ports = list(getattr(self, "_ep_ports", []) or [])
+        except Exception:
+            ep_ports = []
+        try:
+            # UI 타임라인이 "EP 줄"을 안정적으로 만들 수 있도록 포트 목록도 함께 보낸다.
+            payload["ep_ports"] = list(ep_ports)
+            ep_occ: Dict[str, str] = {}
+            all_empty = True
+            for ep in ep_ports:
+                is_empty = self.ports.get(ep) is None
+                ep_occ[str(ep)] = "EMPTY" if is_empty else "FULL"
+                if not is_empty:
+                    all_empty = False
+            payload["ep_occ"] = ep_occ
+            payload["all_ep_empty"] = "1" if (bool(ep_ports) and all_empty) else "0"
+        except Exception:
+            payload["ep_ports"] = []
+            payload["ep_occ"] = {}
+            payload["all_ep_empty"] = "0"
+        try:
+            payload["sim_total_est_sec"] = f"{float(getattr(self, '_sim_total_est_sec', 0.0) or 0.0):.2f}"
+        except Exception:
+            payload["sim_total_est_sec"] = "0.00"
         if self._on_progress:
             try:
                 merged = dict(payload or {})
@@ -1710,6 +1824,17 @@ class TBSSimulationEngine:
         lines.append("[SUMMARY] 포트별 고장(비가동) 누적(초)")
         for p in self._all_ports:
             lines.append(f"  - {p}: {float(self._faulty_sec.get(p, 0.0)):.2f}")
+
+        # EP 점유 타임라인 요약(요구사항)
+        try:
+            ep_ports = list(getattr(self, "_ep_ports", []) or [])
+        except Exception:
+            ep_ports = []
+        if ep_ports:
+            lines.append("[SUMMARY] EP별 비어있던 시간(초) + 전체 EP 모두 비어있던 시간(초)")
+            for ep in ep_ports:
+                lines.append(f"  - {ep}_EMPTY: {float(self._ep_empty_sec.get(ep, 0.0)):.2f}")
+            lines.append(f"  - ALL_EP_EMPTY: {float(getattr(self, '_all_ep_empty_sec', 0.0) or 0.0):.2f}")
 
         text = "\n".join(lines)
         self._last_report_text = text

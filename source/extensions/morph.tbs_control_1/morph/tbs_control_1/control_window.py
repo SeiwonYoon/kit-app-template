@@ -1695,9 +1695,29 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
                             style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
                         )
                         ch["port_ep3_cell"] = ui.Label("EP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-    ch["progress_frame"] = ui.ScrollingFrame(height=168)
+            pass
+    # EP 타임라인 전용 영역(포트상태 바로 아래, 스크롤 밖 고정)
+    # - 진행현황/이력과 독립적으로 항상 보이게 별도 영역으로 둔다.
+    # NOTE: ui.Frame(height=..) 가 일부 Kit 버전에서 레이아웃에 의해 축소/클리핑되는 사례가 있어,
+    # 고정 높이가 확실한 ScrollingFrame을 사용한다(스크롤바는 숨김).
+    ch["ep_timeline_host"] = ui.ScrollingFrame(
+        height=160,
+        horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
+        vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
+        style={"background_color": 0x221A1E26},
+    )
+    with ch["ep_timeline_host"]:
+        ui.Label("", height=1)  # placeholder to stabilize layout
+    ch["ep_timeline_widget"] = None
+    # 진행현황: 텍스트 + EP 점유 타임라인(막대그래프)
+    # 진행현황은 "로그 텍스트" 중심으로 유지. (그래프는 포트상태 아래 전용 영역으로 분리됨)
+    ch["progress_frame"] = ui.ScrollingFrame(height=190)
     with ch["progress_frame"]:
-        ch["progress_label"] = ui.Label("", word_wrap=True, height=160, style={"color": 0xFFFFFFFF})
+        with ui.VStack(spacing=6):
+            ch["progress_label"] = ui.Label("", word_wrap=True, height=170, style={"color": 0xFFFFFFFF})
+            # 진행현황 영역에서는 그래프를 표시하지 않는다(포트상태 아래 전용 영역으로 분리).
+            ch["progress_ep_timeline_host"] = None
+            ch["progress_ep_timeline_widget"] = None
     ch["history_frame"] = ui.ScrollingFrame(height=118)
     with ch["history_frame"]:
         ch["history_label"] = ui.Label("", word_wrap=True, height=114, style={"color": 0xFFFFFFFF})
@@ -2661,6 +2681,166 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
         ep3_cell.text = f"EP3:{_compact_cell_value(ep3)}"
         _set_port_box_style(ext, "EP3", ep3, boxes)
 
+    # 포트상태 아래 EP 타임라인(전용 영역) 갱신
+    try:
+        if ch is not None:
+            _update_ep_timeline_under_port_state(ext, ch, occ, t)
+    except Exception:
+        pass
+
+
+def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict[str, Any], sim_time_text: str) -> None:
+    """포트상태 영역 바로 아래의 EP 타임라인 3줄(EP1/EP2(/EP3)/ALL_EP) + 시간 라벨."""
+    host = ch.get("ep_timeline_host")
+    if host is None:
+        return
+    try:
+        screen = int(ch.get("screen", 1))
+    except Exception:
+        screen = 1
+    scr_key = str(screen)
+    try:
+        t_now = float(str(sim_time_text or "0").strip() or "0.0")
+    except Exception:
+        return
+
+    st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
+    if not isinstance(st_by, dict):
+        st_by = {}
+        ext._sim_ep_occ_timeline_state_by_screen = st_by
+    st = st_by.get(scr_key)
+    if not isinstance(st, dict):
+        st = {"t_last": None, "rows": {}, "total_est": None}
+        st_by[scr_key] = st
+    t_last = st.get("t_last", None)
+    st["t_last"] = t_now
+    if t_last is None:
+        # 첫 프레임은 누적 없이 렌더만
+        dt = 0.0
+    else:
+        dt = max(0.0, float(t_now) - float(t_last))
+
+    # EP 줄은 항상 EP1/EP2를 표시하고, EP3는 설정(EP count=3)일 때만 추가한다.
+    eps = ["EP1", "EP2"]
+    try:
+        ep_idx = int(getattr(ext, "_sim_ep_count_combo", None).model.get_item_value_model().as_int)  # type: ignore[union-attr]
+    except Exception:
+        ep_idx = 0
+    if ep_idx != 0:
+        eps.append("EP3")
+    rows = list(eps) + ["ALL_EP"]
+
+    rows_state = st.get("rows", {})
+    if not isinstance(rows_state, dict):
+        rows_state = {}
+        st["rows"] = rows_state
+    for r in rows:
+        if r not in rows_state or not isinstance(rows_state.get(r), list):
+            rows_state[r] = []
+
+    def _is_empty_port(ep: str) -> bool:
+        v = occ.get(ep, "")
+        return not bool(str(v or "").strip())
+
+    all_empty = True
+    for ep in eps:
+        empty = _is_empty_port(ep)
+        if not empty:
+            all_empty = False
+        if dt > 1e-9:
+            segs = rows_state[ep]
+            if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(empty):
+                segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dt)
+            else:
+                segs.append({"empty": bool(empty), "dur": float(dt)})
+            if len(segs) > 220:
+                del segs[:-200]
+    if dt > 1e-9:
+        segs = rows_state["ALL_EP"]
+        if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(all_empty):
+            segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dt)
+        else:
+            segs.append({"empty": bool(all_empty), "dur": float(dt)})
+        if len(segs) > 220:
+            del segs[:-200]
+
+    # total_est(고정 스케일): progress payload에서 최신 값을 저장해둔 게 있으면 사용, 없으면 현재 t_now*1.2로 추정
+    total_est = None
+    try:
+        last_by = getattr(ext, "_sim_last_total_est_by_screen", None)
+        if isinstance(last_by, dict):
+            total_est = float(last_by.get(scr_key) or 0.0)
+    except Exception:
+        total_est = None
+    if not total_est or total_est <= 0.0:
+        total_est = max(30.0, t_now * 1.2)
+
+    # UI 렌더(고정 폭)
+    old = ch.get("ep_timeline_widget", None)
+    if old is not None:
+        try:
+            old.destroy()
+        except Exception:
+            pass
+        ch["ep_timeline_widget"] = None
+
+    BAR_W = 420
+    BAR_H = 14
+    NAME_W = 64
+    tick_step = max(10.0, float(int((((float(total_est) / 8.0) + 9.999) // 10.0) * 10.0)))
+
+    def _color(empty: bool) -> int:
+        return 0xFF0000FF if empty else 0xFF00FF00
+
+    with host:
+        ch["ep_timeline_widget"] = ui.VStack(spacing=6)
+        with ui.Frame(style={"padding": 6}):
+            with ui.VStack(spacing=6):
+                # 시간 라벨(너무 촘촘하면 안 보이므로 최대 8개 정도만)
+                with ui.HStack(height=14, spacing=0):
+                    ui.Spacer(width=NAME_W)
+                    with ui.HStack(width=BAR_W, height=14, spacing=0):
+                        ticks = max(1, int(float(total_est) // float(tick_step)))
+                        # 라벨 수만큼 균등 분할
+                        for i in range(ticks + 1):
+                            t_lbl = int(round(i * tick_step))
+                            ui.Label(
+                                f"{t_lbl}",
+                                width=max(20, int(round(BAR_W / max(1, ticks)))),
+                                height=14,
+                                style={"color": 0xFFE0E6F0, "font_size": 10},
+                            )
+                # 막대(EP1/EP2(/EP3)/ALL_EP) — 줄은 항상 렌더된다.
+                for r in rows:
+                    with ui.HStack(height=BAR_H, spacing=6):
+                        ui.Label(r, width=NAME_W, height=BAR_H, style={"color": 0xFFBFC7D5, "font_size": 11})
+                        with ui.ZStack(width=BAR_W, height=BAR_H):
+                            ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
+                            segs = rows_state.get(r, []) or []
+                            with ui.HStack(height=BAR_H, spacing=0):
+                                used = 0
+                                for s in segs:
+                                    try:
+                                        dur = float((s or {}).get("dur", 0.0))
+                                    except Exception:
+                                        dur = 0.0
+                                    if dur <= 1e-9:
+                                        continue
+                                    w = int(round((dur / float(total_est)) * BAR_W))
+                                    w = max(1, w)
+                                    if used + w > BAR_W:
+                                        w = max(1, BAR_W - used)
+                                    used += w
+                                    ui.Rectangle(
+                                        width=w,
+                                        height=BAR_H,
+                                        style={"background_color": _color(bool((s or {}).get("empty", False)))},
+                                    )
+                                    if used >= BAR_W:
+                                        break
+                                if used < BAR_W:
+                                    ui.Spacer(width=(BAR_W - used))
+
 
 def _enqueue_sim_log(ext: Any, line: str) -> None:
     q = getattr(ext, "_sim_log_queue", None)
@@ -2978,6 +3158,15 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     occ = p.get("ports_occupancy", {})
     if not isinstance(occ, dict):
         occ = {}
+    # EP 타임라인(대기 구간 포함) 갱신을 위해 마지막 점유 스냅샷을 화면별로 저장
+    try:
+        by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_last_ports_occupancy_by_screen = by
+        by[str(scr)] = dict(occ)
+    except Exception:
+        pass
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
     try:
         apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
@@ -3402,6 +3591,36 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     - RUNNING 일 때 동일 내용 반복 갱신을 줄이기 위해 ``_sim_progress_last_key`` 로 디듀프한다.
     """
     label = str(payload.get("label", "")).strip()
+    # EP 타임라인 전용 업데이트는 텍스트를 덮어쓰지 않고 그래프만 갱신한다.
+    try:
+        if str(payload.get("timeline_only", "")).strip() in ("1", "true", "True", "ON", "on"):
+            chans2 = getattr(ext, "_sim_monitor_channels", None)
+            panel_slot = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
+            # 포트상태 아래 전용 EP 타임라인을 대기 구간에도 전진시키기 위해
+            # 마지막 ports_occupancy 스냅샷을 사용한다.
+            try:
+                last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+                last_occ = last_by.get(str(panel_slot)) if isinstance(last_by, dict) else None
+            except Exception:
+                last_occ = None
+            if isinstance(chans2, list) and len(chans2) > 1:
+                try:
+                    pslot_i = int(str(panel_slot or "1").strip() or "1")
+                except Exception:
+                    pslot_i = 1
+                pslot_i = max(1, min(len(chans2), pslot_i))
+                chp = chans2[pslot_i - 1]
+                if isinstance(chp, dict):
+                    if isinstance(last_occ, dict):
+                        _update_ep_timeline_under_port_state(ext, chp, last_occ, str(payload.get("sim_time", "")))
+            elif isinstance(chans2, list) and len(chans2) == 1:
+                chp0 = chans2[0]
+                if isinstance(chp0, dict):
+                    if isinstance(last_occ, dict):
+                        _update_ep_timeline_under_port_state(ext, chp0, last_occ, str(payload.get("sim_time", "")))
+            return
+    except Exception:
+        pass
     if not label:
         return
     status = str(payload.get("status", "RUNNING"))
@@ -3415,6 +3634,8 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     proc_sec = str(payload.get("proc_sec", "")).strip()
     anim_sec = str(payload.get("anim_sec", "")).strip()
     proc_pri = str(payload.get("process_time_priority", "")).strip()
+    ep_occ = payload.get("ep_occ", {})
+    all_ep_empty = str(payload.get("all_ep_empty", "")).strip()
 
     anim_key = _sim_anim_status_key(ext)
     try:
@@ -3422,6 +3643,22 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     except Exception:
         panel_slot = "1"
     dedupe_key = f"_panel_{panel_slot}"
+    # total_est는 포트상태 아래 전용 그래프에서도 사용하므로 화면별로 저장
+    try:
+        pslot_g = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
+        try:
+            te = float(str(payload.get("sim_total_est_sec", "")).strip() or "0.0")
+        except Exception:
+            te = 0.0
+        if te > 0.0:
+            by = getattr(ext, "_sim_last_total_est_by_screen", None)
+            if not isinstance(by, dict):
+                by = {}
+                ext._sim_last_total_est_by_screen = by
+            by[str(pslot_g)] = float(te)
+    except Exception:
+        pass
+
     if status == "RUNNING":
         try:
             last_key = getattr(ext, "_sim_progress_last_key", None)
@@ -3487,10 +3724,18 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
             chp = chans2[pslot_i - 1]
             if isinstance(chp, dict) and chp.get("progress_label") is not None:
                 chp["progress_label"].text = text
+                try:
+                    _update_progress_ep_timeline_widget(ext, chp, payload if isinstance(payload, dict) else {})
+                except Exception:
+                    pass
         elif isinstance(chans2, list) and len(chans2) == 1:
             chp0 = chans2[0]
             if isinstance(chp0, dict) and chp0.get("progress_label") is not None:
                 chp0["progress_label"].text = text
+                try:
+                    _update_progress_ep_timeline_widget(ext, chp0, payload if isinstance(payload, dict) else {})
+                except Exception:
+                    pass
     except Exception:
         pass
     try:
@@ -3504,6 +3749,193 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
             pass
     if getattr(ext, "_sim_progress_label", None) is not None:
         ext._sim_progress_label.text = text
+
+
+def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    """
+    진행현황 패널 하단: EP 점유 상태를 시뮬 시간 기준으로 누적 막대그래프로 표현한다.
+    - EP1/EP2(/EP3) + ALL_EP(모든 EP empty) 1줄씩
+    - EMPTY=빨강, FULL=초록
+    """
+    host = ch.get("progress_ep_timeline_host")
+    if host is None:
+        return
+    try:
+        screen = int(ch.get("screen", 1))
+    except Exception:
+        screen = 1
+    scr_key = str(screen)
+    # 상태 저장소
+    st_by = getattr(ext, "_sim_ep_timeline_state_by_screen", None)
+    if not isinstance(st_by, dict):
+        st_by = {}
+        ext._sim_ep_timeline_state_by_screen = st_by
+    st = st_by.get(scr_key)
+    if not isinstance(st, dict):
+        st = {"t_last": None, "rows": {}}
+        st_by[scr_key] = st
+
+    sim_time = None
+    try:
+        sim_time = float(str(payload.get("sim_time", "")).strip() or "0.0")
+    except Exception:
+        sim_time = None
+    if sim_time is None:
+        return
+    t_last = st.get("t_last", None)
+    st["t_last"] = sim_time
+    if t_last is None:
+        return
+    dt = max(0.0, float(sim_time) - float(t_last))
+    if dt <= 1e-9:
+        return
+
+    ep_occ = payload.get("ep_occ", {})
+    # 일부 경로에서 dict가 문자열로 들어올 수 있어(예: "{'EP1': 'EMPTY'}") 보정한다.
+    if not isinstance(ep_occ, dict):
+        if isinstance(ep_occ, str) and ep_occ.strip().startswith("{"):
+            try:
+                import ast
+
+                v = ast.literal_eval(ep_occ)
+                ep_occ = v if isinstance(v, dict) else {}
+            except Exception:
+                ep_occ = {}
+        else:
+            ep_occ = {}
+    all_ep_empty = str(payload.get("all_ep_empty", "0")).strip() in ("1", "true", "True", "ON", "on")
+
+    # EP 라인 결정: 엔진이 보낸 ep_ports를 최우선으로 사용한다(가장 안정적).
+    eps: List[str] = []
+    ep_ports = payload.get("ep_ports", [])
+    if isinstance(ep_ports, list) and ep_ports:
+        eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
+    if not eps:
+        # 폴백: occ 키
+        eps = [str(k).strip().upper() for k in ep_occ.keys() if str(k).strip().upper().startswith("EP")]
+    eps = sorted(eps, key=lambda x: int(str(x).upper().replace("EP", "") or "0"))
+    if not eps:
+        # 최후 폴백: 최소 2포트는 항상 보여준다(요구사항)
+        eps = ["EP1", "EP2"]
+    rows = list(eps) + ["ALL_EP"]
+
+    rows_state = st.get("rows", {})
+    if not isinstance(rows_state, dict):
+        rows_state = {}
+        st["rows"] = rows_state
+
+    def _push(row: str, empty: bool, dur: float):
+        segs = rows_state.get(row)
+        if not isinstance(segs, list):
+            segs = []
+            rows_state[row] = segs
+        if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(empty):
+            segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dur)
+        else:
+            segs.append({"empty": bool(empty), "dur": float(dur)})
+        # 너무 길어지면 앞부분을 잘라 메모리/렌더 부담 완화(최근 200세그먼트 유지)
+        if len(segs) > 220:
+            del segs[:-200]
+
+    # rows_state에 키를 미리 만들어, 렌더 시 줄이 항상 나오게 한다.
+    for r in rows:
+        if r not in rows_state or not isinstance(rows_state.get(r), list):
+            rows_state[r] = []
+
+    for ep in eps:
+        v = str(ep_occ.get(ep, "EMPTY")).strip().upper()
+        _push(ep, empty=(v == "EMPTY"), dur=dt)
+    _push("ALL_EP", empty=bool(all_ep_empty), dur=dt)
+
+    # 위젯 재구성(진행 로그 갱신 주기 수준이라 rebuild 비용 OK)
+    old = ch.get("progress_ep_timeline_widget", None)
+    if old is not None:
+        try:
+            old.destroy()
+        except Exception:
+            pass
+        ch["progress_ep_timeline_widget"] = None
+
+    # 요구사항: 막대 전체 길이를 "총 시뮬레이션 시간(예상)"으로 고정하고,
+    # 그 안에서 비율만큼 채워지게 한다(슬라이딩 윈도우 금지).
+    BAR_W = 320         # 진행현황 컬럼 기본 폭(창 너비에 맞게 짧게)
+    BAR_H = 14
+    NAME_W = 56
+
+    t_end = float(sim_time)
+    try:
+        total_est = float(str(payload.get("sim_total_est_sec", "")).strip() or "0.0")
+    except Exception:
+        total_est = 0.0
+    total_est = max(10.0, total_est)
+    t_start = 0.0
+
+    # 라벨이 너무 많으면(폭이 1px) 안 보이므로, 화면에 보일 만큼만 샘플링한다.
+    # 목표: 최대 7~9개 정도만 표시.
+    try:
+        max_labels = 8
+        raw_step = max(10.0, float(total_est) / float(max_labels))
+        # 10초 단위로 올림
+        tick_step = float(int(((raw_step + 9.999) // 10.0) * 10.0))
+    except Exception:
+        tick_step = 10.0
+    tick_step = max(10.0, tick_step)
+
+    def _color(empty: bool) -> int:
+        # omni.ui 정수 색상 해석 이슈를 피하기 위해 명시값 사용
+        return 0xFF0000FF if empty else 0xFF00FF00  # 빨강 / 초록
+
+    with host:
+        ch["progress_ep_timeline_widget"] = ui.VStack(spacing=4)
+
+        # 상단 눈금(가독성 위해 최대 8개 내)
+        with ui.HStack(height=12, spacing=0):
+            ui.Spacer(width=NAME_W)
+            with ui.ZStack(width=BAR_W, height=12):
+                ui.Rectangle(width=BAR_W, height=12, style={"background_color": 0x441A1E26})
+                # 눈금 라벨을 절대좌표로 배치(겹침/폭 축소로 안 보이는 문제 방지)
+                try:
+                    ticks = int(total_est // tick_step)
+                    ticks = max(1, ticks)
+                except Exception:
+                    ticks = 1
+                for i in range(ticks + 1):
+                    t_lbl = int(round(t_start + i * tick_step))
+                    x = int(round((float(t_lbl) / float(total_est)) * float(BAR_W)))
+                    x = max(0, min(BAR_W - 1, x))
+                    with ui.Placer(offset_x=x, offset_y=0):
+                        ui.Label(
+                            f"{t_lbl}",
+                            width=36,
+                            height=12,
+                            style={"color": 0xFFE0E6F0, "font_size": 10},
+                        )
+
+        for row in rows:
+            with ui.HStack(height=BAR_H, spacing=6):
+                ui.Label(str(row), width=NAME_W, height=BAR_H, style={"color": 0xFFBFC7D5})
+                with ui.ZStack(width=BAR_W, height=BAR_H):
+                    ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
+                    # 막대 세그먼트
+                    segs = rows_state.get(row, [])
+                    if not isinstance(segs, list):
+                        segs = []
+                    with ui.HStack(height=BAR_H, spacing=0):
+                        used = 0
+                        for s in (segs or []):
+                            dur = float((s or {}).get("dur", 0.0))
+                            if dur <= 1e-9:
+                                continue
+                            # total_est가 큰 경우 w가 0으로 반올림되어 막대가 안 보일 수 있어 최소 1px 보장
+                            w = int(round((dur / total_est) * BAR_W))
+                            w = max(1, w)
+                            if w <= 0:
+                                continue
+                            used += w
+                            ui.Rectangle(width=w, height=BAR_H, style={"background_color": _color(bool(s.get("empty", False)))})
+                        # 남은 폭 채우기(빈 공간)
+                        if used < BAR_W:
+                            ui.Spacer(width=(BAR_W - used))
 
 
 def _on_sim_event(ext: Any, payload: Dict[str, str]) -> None:
@@ -4715,6 +5147,41 @@ def on_sim_stop_clicked(ext: Any) -> None:
                     pass
     except Exception:
         pass
+    # EP 타임라인 그래프 상태/위젯 초기화(리셋/정지 후 누적 잔상 방지)
+    try:
+        ext._sim_ep_timeline_state_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_ep_occ_timeline_state_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_last_ports_occupancy_by_screen = {}
+    except Exception:
+        pass
+    try:
+        chans = getattr(ext, "_sim_monitor_channels", None)
+        if isinstance(chans, list):
+            for ch in chans:
+                if not isinstance(ch, dict):
+                    continue
+                w = ch.get("progress_ep_timeline_widget", None)
+                if w is not None:
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
+                    ch["progress_ep_timeline_widget"] = None
+                w2 = ch.get("ep_timeline_widget", None)
+                if w2 is not None:
+                    try:
+                        w2.destroy()
+                    except Exception:
+                        pass
+                    ch["ep_timeline_widget"] = None
+    except Exception:
+        pass
     try:
         ext._sim_engines = []
     except Exception:
@@ -4801,6 +5268,11 @@ def on_sim_reset_clicked(ext: Any) -> None:
     ext._sim_progress_rows = {}
     ext._sim_progress_history = []
     ext._sim_progress_start_times = {}
+    # EP 타임라인도 완전 초기화
+    try:
+        ext._sim_ep_timeline_state_by_screen = {}
+    except Exception:
+        pass
     # 최근 요약/대기 토큰 초기화
     try:
         ext._sim_recent_story_blocks = []
