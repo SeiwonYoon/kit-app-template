@@ -1644,7 +1644,7 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     ch: Dict[str, Any] = {"screen": int(screen)}
     ch["port_cells"] = {}
     ch["port_cell_boxes"] = {}
-    ch["port_frame"] = ui.ScrollingFrame(height=112)
+    ch["port_frame"] = ui.ScrollingFrame(height=112, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
     with ch["port_frame"]:
         with ui.VStack(spacing=4):
             ch["port_header"] = ui.Label(
@@ -1704,21 +1704,21 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
         height=160,
         horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
         vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
-        style={"background_color": 0x221A1E26},
+        style={"background_color": 0x221A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
     )
     with ch["ep_timeline_host"]:
         ui.Label("", height=1)  # placeholder to stabilize layout
     ch["ep_timeline_widget"] = None
     # 진행현황: 텍스트 + EP 점유 타임라인(막대그래프)
     # 진행현황은 "로그 텍스트" 중심으로 유지. (그래프는 포트상태 아래 전용 영역으로 분리됨)
-    ch["progress_frame"] = ui.ScrollingFrame(height=190)
+    ch["progress_frame"] = ui.ScrollingFrame(height=190, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
     with ch["progress_frame"]:
         with ui.VStack(spacing=6):
             ch["progress_label"] = ui.Label("", word_wrap=True, height=170, style={"color": 0xFFFFFFFF})
             # 진행현황 영역에서는 그래프를 표시하지 않는다(포트상태 아래 전용 영역으로 분리).
             ch["progress_ep_timeline_host"] = None
             ch["progress_ep_timeline_widget"] = None
-    ch["history_frame"] = ui.ScrollingFrame(height=118)
+    ch["history_frame"] = ui.ScrollingFrame(height=118, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
     with ch["history_frame"]:
         ch["history_label"] = ui.Label("", word_wrap=True, height=114, style={"color": 0xFFFFFFFF})
     ch["history_label"].text = "[SIM] 대기 중" if screen == 1 else f"[SIM·화면{screen}] 대기 중"
@@ -2287,7 +2287,13 @@ def build_control_window(ext: Any) -> None:
                         ext._sync_sim_per_screen_rows_fn = lambda: _refresh_sim_per_screen_rows(ext)
                         with ui.HStack(spacing=8, height=24):
                             ui.Button("진행현황+Sim로그 복사", width=160, clicked_fn=lambda: on_copy_sim_progress(ext))
-                        ext._sim_monitor_split_host = ui.VStack(spacing=6)
+                        # 모니터 영역(포트/EP타임라인/진행/이력)은 높이가 커질 수 있어
+                        # 레이아웃 누적/확장 버그가 화면을 밀어내지 않도록 고정 높이 스크롤 컨테이너로 감싼다.
+                        ext._sim_monitor_split_host = ui.ScrollingFrame(
+                            height=520,
+                            horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
+                            vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_ON,
+                        )
                         ext._rebuild_sim_monitor_split_ui_fn = lambda: _rebuild_sim_monitor_split_ui(ext)
                         _rebuild_sim_monitor_split_ui(ext)
                         ext._sim_port_state_label = ui.Label("", word_wrap=False, width=0, height=0, visible=False)
@@ -2711,7 +2717,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         ext._sim_ep_occ_timeline_state_by_screen = st_by
     st = st_by.get(scr_key)
     if not isinstance(st, dict):
-        st = {"t_last": None, "rows": {}, "total_est": None}
+        st = {"t_last": None, "rows": {}, "total_est_fixed": None}
         st_by[scr_key] = st
     t_last = st.get("t_last", None)
     st["t_last"] = t_now
@@ -2744,6 +2750,12 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         return not bool(str(v or "").strip())
 
     all_empty = True
+    # empty_acc:
+    # - UI 막대그래프 우측에 "현재까지 누적된 EMPTY 시간(초)"을 상시 표시하기 위한 값.
+    # - 이 값은 막대그래프용 rows_state(세그먼트 dur 합)에서 계산한다.
+    # - 시뮬 종료 후 요약 로그에 찍히는 EP_EMPTY/ALL_EP_EMPTY는 simulation_engine.py에서
+    #   tick 기반으로 별도로 누적(_ep_empty_sec/_all_ep_empty_sec)되며, 개념적으로 동일한 통계다.
+    empty_acc: Dict[str, float] = {}
     for ep in eps:
         empty = _is_empty_port(ep)
         if not empty:
@@ -2756,6 +2768,11 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                 segs.append({"empty": bool(empty), "dur": float(dt)})
             if len(segs) > 220:
                 del segs[:-200]
+        # 현재까지 "EMPTY" 누적(세그먼트 합)
+        try:
+            empty_acc[ep] = sum(float(s.get("dur", 0.0)) for s in rows_state.get(ep, []) if isinstance(s, dict) and bool(s.get("empty", False)))
+        except Exception:
+            empty_acc[ep] = 0.0
     if dt > 1e-9:
         segs = rows_state["ALL_EP"]
         if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(all_empty):
@@ -2764,17 +2781,31 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
             segs.append({"empty": bool(all_empty), "dur": float(dt)})
         if len(segs) > 220:
             del segs[:-200]
-
-    # total_est(고정 스케일): progress payload에서 최신 값을 저장해둔 게 있으면 사용, 없으면 현재 t_now*1.2로 추정
-    total_est = None
     try:
-        last_by = getattr(ext, "_sim_last_total_est_by_screen", None)
-        if isinstance(last_by, dict):
-            total_est = float(last_by.get(scr_key) or 0.0)
+        empty_acc["ALL_EP"] = sum(float(s.get("dur", 0.0)) for s in rows_state.get("ALL_EP", []) if isinstance(s, dict) and bool(s.get("empty", False)))
+    except Exception:
+        empty_acc["ALL_EP"] = 0.0
+
+    # total_est(고정 스케일): "한 번 정해지면 실행 중에는 바뀌지 않게" 고정한다.
+    # (시작 직후 폴백 30초로 그려졌다가, 첫 공정에서 total_est가 들어오며 스케일이 바뀌는 현상 방지)
+    total_est = st.get("total_est_fixed", None)
+    try:
+        total_est = float(total_est) if total_est is not None else None
     except Exception:
         total_est = None
-    if not total_est or total_est <= 0.0:
-        total_est = max(30.0, t_now * 1.2)
+    if total_est is None or total_est <= 0.0:
+        cand = None
+        try:
+            last_by = getattr(ext, "_sim_last_total_est_by_screen", None)
+            if isinstance(last_by, dict):
+                cand = float(last_by.get(scr_key) or 0.0)
+        except Exception:
+            cand = None
+        if cand is not None and cand > 0.0:
+            total_est = cand
+        else:
+            total_est = max(30.0, t_now * 1.2)
+        st["total_est_fixed"] = float(total_est)
 
     # UI 렌더(고정 폭)
     old = ch.get("ep_timeline_widget", None)
@@ -2841,6 +2872,17 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                                         break
                                 if used < BAR_W:
                                     ui.Spacer(width=(BAR_W - used))
+                        # 우측: 누적 EMPTY 시간(초) 표시
+                        try:
+                            v = float(empty_acc.get(r, 0.0) or 0.0)
+                        except Exception:
+                            v = 0.0
+                        ui.Label(
+                            f"{v:.1f}s",
+                            width=56,
+                            height=BAR_H,
+                            style={"color": 0xFFDDDDDD, "font_size": 11},
+                        )
 
 
 def _enqueue_sim_log(ext: Any, line: str) -> None:
@@ -4372,6 +4414,21 @@ def on_sim_start_clicked(ext: Any) -> None:
       기존 ``_tick_loop`` 스레드 한 개. N>1 이면 화면별 스냅샷으로 N 개 엔진을 만들고
       ``_sim_multi_engine_tick_worker`` 를 **화면마다 한 스레드씩** 띄운다(게이트·pause 독립).
     - 시작 전 ``on_sim_stop_clicked`` 로 이전 스레드·엔진을 정리한다.
+
+    데이터/상태의 큰 흐름(추적용):
+    - (UI) 이 함수에서 run 세대 토큰 ``ext._sim_run_gen`` 을 증가시킨다.
+      - 목적: stop/reset 이후 큐에 남은 UI 업데이트/애니 이벤트가 "이전 실행" 것이라면 무시하도록 하기 위함.
+    - (UI→엔진) `simulation_engine.py`의 ``TBSSimulationEngine``(또는 멀티 엔진 리스트)을 생성하고,
+      엔진이 emit 하는 on_log/on_progress/on_anim_event 콜백을 `control_window.py`의 UI sink로 연결한다.
+    - (엔진→UI) 엔진이 emit 한 progress payload에는 `ep_occ`, `all_ep_empty`, `sim_total_est_sec` 등이 포함되고,
+      이는 아래 EP 타임라인 그래프/우측 누적 시간 표시로 연결된다.
+      - 종료 요약(`[SUMMARY] EPn_EMPTY / ALL_EP_EMPTY`)은 엔진(`simulation_engine.py`)에서 계산/출력한다.
+      - UI 막대 우측의 초 표시는 UI가 가진 그래프 세그먼트(rows_state) 합산값이다(개념/정의는 동일).
+
+    스레드/구독(중요):
+    - tick 스레드: 시뮬 시간을 실제로 전진시키는 워커(단일 1개 또는 화면별 N개).
+    - UI update 구독: EP 타임라인은 "첫 공정 이벤트 전"에도 막대가 진행되게 해야 하므로,
+      UI 스레드에서 wall dt * speed 로 가상 sim_time을 누적하는 subscription(``_sim_ep_timeline_ui_sub``)를 추가로 사용한다.
     """
     try:
         n_ch = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
@@ -4379,6 +4436,13 @@ def on_sim_start_clicked(ext: Any) -> None:
         n_ch = 1
 
     on_sim_stop_clicked(ext)
+    # 시작을 반복할 때 모니터 UI(포트/그래프/진행/이력) 영역에 위젯이 누적되어
+    # 버튼 아래의 빈 공간이 점점 커지는 현상이 발생할 수 있어,
+    # 시작 시점에 모니터 영역을 한 번 깨끗하게 재빌드한다.
+    try:
+        _rebuild_sim_monitor_split_ui(ext)
+    except Exception:
+        pass
     # 실행 세대 토큰: stop/reset 후 남은 이벤트/애니 job을 무시하기 위해 사용
     try:
         ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
@@ -5131,6 +5195,35 @@ def on_sim_start_clicked(ext: Any) -> None:
 
 
 def on_sim_stop_clicked(ext: Any) -> None:
+    """
+    시뮬레이션 중지(Stop).
+
+    목표(요구사항):
+    - stop/reset 후 "다음 스텝에서 다시 이어서 진행되는" 잔여 실행을 방지한다.
+    - 멀티 화면에서 화면별 runner/큐/인터럽트/일시정지(pause) 상태가 남아
+      다음 실행이 깨지는 회귀(애니가 있는데 재생이 안 됨, 진행률 0% 교착 등)를 방지한다.
+
+    주요 동작 요약(추적용):
+    - (세대 토큰) ``ext._sim_run_gen`` 증가:
+      - UI 큐/애니 이벤트 처리부가 이전 실행의 payload를 무시하도록 만드는 "세대" 구분자.
+    - (엔진 stop) ``TBSSimulationEngine.stop()`` 호출:
+      - 단일 엔진: ``ext._sim_engine.stop()``
+      - 멀티 엔진: ``ext._sim_engines[*].stop()``
+      - 엔진 내부에서는 simpy 프로세스 종료, 진행 emit 중단, 최종 상태 정리 등이 수행된다.
+    - (UI 업데이트 detach) ``_detach_sim_update(ext)``:
+      - 엔진/워커가 올리던 UI 업데이트 subscription(로그/진행현황 drain)을 해제한다.
+    - (화면별 애니 상태 정리) ``_sim_runners_by_screen`` 및 아래 dict들을 전부 초기화/clear:
+      - pending/active: ``_sim_anim_pending_by_screen``, ``_sim_anim_active_by_screen``
+      - pause: ``_sim_tick_pause_events_by_screen``, ``_sim_tick_pause_until_wall_by_screen``
+      - interrupt(공정시간우선): ``_sim_interrupt_anim_event_by_screen``
+    - (게이트/일시정지 해제) ``_sim_tick_pause_event``, ``_sim_gate_pause_event`` clear +
+      공정확인 다이얼로그(``_sim_gate_dialog``) 강제 destroy
+    - (EP 타임라인 리셋) 그래프 상태/위젯 파기:
+      - state dict: ``_sim_ep_timeline_state_by_screen``, ``_sim_ep_occ_timeline_state_by_screen``,
+        ``_sim_last_ports_occupancy_by_screen``
+      - UI ticker subscription: ``_sim_ep_timeline_ui_sub`` unsubscribe
+      - widget: 채널별 ``ep_timeline_widget`` destroy
+    """
     # stop/reset 이후 남아있는 큐 아이템을 무시하기 위한 세대 토큰 증가
     try:
         ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
@@ -5308,6 +5401,21 @@ def on_sim_stop_clicked(ext: Any) -> None:
 
 
 def on_sim_reset_clicked(ext: Any) -> None:
+    """
+    시뮬레이션 리셋(Reset).
+
+    Stop과의 차이(추적용):
+    - 먼저 ``on_sim_stop_clicked(ext)``를 호출하여 "실행 중인 것"을 완전히 끊는다.
+    - 그 다음, UI 텍스트/포트 박스/그래프 등을 "초기 화면" 상태로 되돌린다.
+    - 추가로, 포트 LOT authoring 캐시를 clear 하여 다음 실행에서 경로/프림/표시가
+      이전 실행의 잔여 데이터에 영향을 받지 않게 한다.
+
+    이 함수가 만지는 대표 상태:
+    - 엔진/러너 참조: ``ext._sim_engine = None`` 및 ``ext._sim_engines = []``
+    - UI 텍스트: history/progress/port_state 라벨 텍스트 초기화
+    - 포트 박스: 각 포트를 '-'로 표기하고 스타일을 초기화
+    - EP 타임라인: t=0.0 초기 렌더 + 관련 dict를 완전 초기화
+    """
     on_sim_stop_clicked(ext)
     try:
         clear_port_lot_authoring_cache()

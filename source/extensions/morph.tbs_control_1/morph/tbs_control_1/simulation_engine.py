@@ -415,7 +415,10 @@ class TBSSimulationEngine:
         self._faulty_ports_supplier: Optional[Callable[[], Set[str]]] = None
         self._idle_sec: Dict[str, float] = {}
         self._faulty_sec: Dict[str, float] = {}
-        # EP 점유 기반 통계(요구사항: EP별 비어있던 시간 + 모든 EP가 동시에 비어있던 시간)
+        # EP 점유 기반 통계(요구사항)
+        # - UI(진행현황 창) 막대그래프 우측에 표시되는 "EMPTY 누적 초"의 원천 데이터.
+        # - 누적은 _accumulate_sim_stats()에서 매 tick(경과 dt)마다 갱신된다.
+        # - 시뮬 종료 시 _log_final_summary()에서 요약 로그로 출력된다.
         self._ep_empty_sec: Dict[str, float] = {}
         self._all_ep_empty_sec: float = 0.0
         self._fault_prev_snapshot: frozenset = frozenset()
@@ -611,7 +614,11 @@ class TBSSimulationEngine:
             if p in self._all_ports:
                 self._faulty_sec[p] = self._faulty_sec.get(p, 0.0) + dt
 
-        # EP 통계(점유/비점유)
+        # EP 통계(점유/비점유) 누적
+        # - self.ports[ep] is None  => EMPTY (비어있음)
+        # - self.ports[ep] not None => FULL  (점유됨)
+        # - dt는 "이번 tick에서 흐른 시뮬레이션 시간(초)"이며, 배속/일시정지 정책을 모두 반영한 후의 값이어야 한다.
+        # - 이 누적값은 UI 막대그래프의 우측 숫자 및 종료 요약 로그에 동일하게 사용된다.
         try:
             ep_ports = list(getattr(self, "_ep_ports", []) or [])
         except Exception:
@@ -1956,6 +1963,10 @@ class TBSSimulationEngine:
             lines.append(f"  - {p}: {float(self._faulty_sec.get(p, 0.0)):.2f}")
 
         # EP 점유 타임라인 요약(요구사항)
+        # - UI 막대그래프 우측의 누적 EMPTY 시간과 "같은 원천 데이터"를 사용한다.
+        # - 출력 키:
+        #   - {EP}_EMPTY: 해당 EP가 비어있던 누적 시간(초)
+        #   - ALL_EP_EMPTY: 모든 EP가 동시에 비어있던 누적 시간(초)
         try:
             ep_ports = list(getattr(self, "_ep_ports", []) or [])
         except Exception:
