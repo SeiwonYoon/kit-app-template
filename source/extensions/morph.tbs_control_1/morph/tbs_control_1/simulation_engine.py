@@ -1031,7 +1031,6 @@ class TBSSimulationEngine:
         self._log_brief_step(lot.lot_id, f"OHT→{ep_port}", oht_time, aw_u)
         # 요구사항: OHT 이동은 ARRIVED(도착/안착) 이벤트로 통일. from/to를 포함해 UI 매핑에 사용.
         self._emit_event({"seq": "ARRIVED", "from_port_id": "OHT", "to_port_id": ep_port, "port_id": ep_port, "lot_id": lot.lot_id})
-        self._interrupt_anim_proc_priority()
         _ep_aj = _log_anim_arrived_ep_json(ep_port)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
@@ -1050,6 +1049,8 @@ class TBSSimulationEngine:
                 total_sec=total_wait,
                 label=f"OHT->{ep_port} {lot.lot_id}",
                 detail=f"{lot.lot_id} OHT->{ep_port} 직접투입(도착포트={ep_port}) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
+                proc_sec=oht_time,
+                anim_sec=float(anim_wait),
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
                 linked_anim_json=_ep_aj,
@@ -1082,7 +1083,6 @@ class TBSSimulationEngine:
         # 요구사항 반영:
         # OHT->IN/OUT 단계는 MOVE가 아니라 ARRIVED(포트 안착 이벤트)로 애니메이션을 구동한다.
         self._emit_event({"seq": "ARRIVED", "port_id": INOUT_PORT, "lot_id": lot.lot_id})
-        self._interrupt_anim_proc_priority()
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
             if self._process_time_priority
@@ -1100,6 +1100,8 @@ class TBSSimulationEngine:
                 total_sec=total_wait,
                 label=f"OHT->{INOUT_PORT} {lot.lot_id}",
                 detail=f"{lot.lot_id} OHT->IN/OUT 이동(도착포트=IN/OUT) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
+                proc_sec=oht_time,
+                anim_sec=float(anim_wait),
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
                 linked_anim_json="arrived_inout.json",
@@ -1138,7 +1140,6 @@ class TBSSimulationEngine:
         self._stage_mark(lot.lot_id, "inout_to_bp_start")
         # 요구사항: IN/OUT->BP 이동 애니는 EAPEIS_PORT_MOVE_TRANSFERING(=MOVE_TRANSFERING)만 실행.
         self._emit_event({"seq": "MOVE_TRANSFERING", "from_port_id": INOUT_PORT, "to_port_id": target_bp, "lot_id": lot.lot_id})
-        self._interrupt_anim_proc_priority()
         _mv_aj = _log_anim_move_transfer_json(INOUT_PORT, target_bp)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
@@ -1159,6 +1160,8 @@ class TBSSimulationEngine:
                     total_sec=total_wait,
                     label=f"IN/OUT->{target_bp} {lot.lot_id}",
                     detail=f"{lot.lot_id} IN/OUT->{target_bp} 이동(출발포트=IN/OUT, 도착포트={target_bp}) | 공정={move_time:.1f}s 애니={aw_u:.1f}s",
+                    proc_sec=move_time,
+                    anim_sec=float(anim_wait),
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_TRANSFERING",
                     linked_anim_json=_mv_aj,
@@ -1259,7 +1262,6 @@ class TBSSimulationEngine:
         self._lock_port(bp_port)
         self._lock_port(ep_port)
         self._emit_event({"seq": "MOVE_REQ", "from_port_id": bp_port, "to_port_id": ep_port, "lot_id": lot.lot_id})
-        self._interrupt_anim_proc_priority()
         _req_aj = _log_anim_move_req_json(bp_port, ep_port)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
@@ -1280,6 +1282,8 @@ class TBSSimulationEngine:
                     total_sec=total_wait,
                     label=f"{bp_port}->{ep_port} {lot.lot_id}",
                     detail=f"{lot.lot_id} {bp_port}->{ep_port} 이송(출발포트={bp_port}, 도착포트={ep_port}) | 공정={move_time:.1f}s 애니={aw_u:.1f}s",
+                    proc_sec=move_time,
+                    anim_sec=float(anim_wait),
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_REQ",
                     linked_anim_json=_req_aj,
@@ -1351,7 +1355,6 @@ class TBSSimulationEngine:
         self._route_mark(lot.lot_id, "ep_to_oht_from", ep_port)
         self._route_mark(lot.lot_id, "ep_to_oht_to", "OHT")
         self._emit_event({"seq": "REMOVED", "port_id": ep_port, "lot_id": lot.lot_id})
-        self._interrupt_anim_proc_priority()
         _rm_aj = _log_anim_removed_ep_json(ep_port)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
@@ -1370,6 +1373,8 @@ class TBSSimulationEngine:
                 total_sec=total_wait,
                 label=f"{ep_port}->OHT {lot.lot_id}",
                 detail=f"{lot.lot_id} {ep_port}->OHT 회수(출발포트={ep_port}, 도착포트=OHT) | 공정={unload_time:.1f}s 애니={aw_u:.1f}s",
+                proc_sec=unload_time,
+                anim_sec=float(anim_wait),
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="REMOVED",
                 linked_anim_json=_rm_aj,
@@ -1484,6 +1489,8 @@ class TBSSimulationEngine:
         total_sec: float,
         label: str,
         detail: str,
+        proc_sec: float = 0.0,
+        anim_sec: float = 0.0,
         progress_interval: float = 5.0,
         event_seq: str = "",
         linked_anim_json: str = "",
@@ -1497,16 +1504,22 @@ class TBSSimulationEngine:
           (요구사항: 설정한 초마다 %만 반영되도록)
         - linked_anim_json: UI 진행현황에 표시할 ``data/sim_sequences`` 기준 파일명(로그 anim_line 과 동일).
         """
-        self._interrupt_anim_proc_priority()
         total = max(0.01, float(total_sec))
         interval = self._progress_emit_policy.normalize_interval(float(progress_interval))
         ev = str(event_seq or "").strip()
         aj = str(linked_anim_json or "").strip()
+        psec = max(0.0, float(proc_sec))
+        asec = max(0.0, float(anim_sec))
+        # UI 표시용: 공정/애니 시간을 각각 제공한다.
+        # total_sec은 호출자가 (공정시간우선 ON이면 공정, OFF면 max(공정,애니)) 규칙으로 이미 결정한다.
         self._emit_progress({
             "label": label,
             "detail": detail,
             "event_seq": ev,
             "linked_anim_json": aj,
+            "proc_sec": self._progress_emit_policy.format_sec_1(psec),
+            "anim_sec": self._progress_emit_policy.format_sec_1(asec),
+            "process_time_priority": "1" if self._process_time_priority else "0",
             "status": "RUNNING",
             "elapsed": "0.0",
             "total": self._progress_emit_policy.format_sec_1(total),
@@ -1520,12 +1533,28 @@ class TBSSimulationEngine:
                 "detail": detail,
                 "event_seq": ev,
                 "linked_anim_json": aj,
+                "proc_sec": self._progress_emit_policy.format_sec_1(psec),
+                "anim_sec": self._progress_emit_policy.format_sec_1(asec),
+                "process_time_priority": "1" if self._process_time_priority else "0",
                 "status": "DONE",
                 "elapsed": self._progress_emit_policy.format_sec_1(total),
                 "total": self._progress_emit_policy.format_sec_1(total),
                 "percent": "100",
             })
             self._log_wait_step_done(label, total)
+            # 공정시간우선 ON이고 공정이 애니보다 짧으면, 100% 시점에 애니를 즉시 중단/초기화한다.
+            if self._process_time_priority and asec > psec + 1e-6:
+                cb = getattr(self, "_interrupt_anim_cb", None)
+                if cb is not None:
+                    try:
+                        cb(self._event_tags)  # type: ignore[misc]
+                    except TypeError:
+                        try:
+                            cb()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
             return
         elapsed = 0.0
         while elapsed + 1e-9 < total:
@@ -1539,12 +1568,27 @@ class TBSSimulationEngine:
                 "detail": detail,
                 "event_seq": ev,
                 "linked_anim_json": aj,
+                "proc_sec": self._progress_emit_policy.format_sec_1(psec),
+                "anim_sec": self._progress_emit_policy.format_sec_1(asec),
+                "process_time_priority": "1" if self._process_time_priority else "0",
                 "status": "DONE" if remain <= 1e-9 else "RUNNING",
                 "elapsed": self._progress_emit_policy.format_sec_1(elapsed),
                 "total": self._progress_emit_policy.format_sec_1(total),
                 "percent": self._progress_emit_policy.format_percent(pct),
             })
         self._log_wait_step_done(label, total)
+        if self._process_time_priority and asec > psec + 1e-6:
+            cb = getattr(self, "_interrupt_anim_cb", None)
+            if cb is not None:
+                try:
+                    cb(self._event_tags)  # type: ignore[misc]
+                except TypeError:
+                    try:
+                        cb()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
     def _log_brief_step(self, lot_id: str, route: str, proc_sec: float, anim_sec: float) -> None:
         """이력용 한 줄 요약(진행현황 detail과 동일 톤)."""

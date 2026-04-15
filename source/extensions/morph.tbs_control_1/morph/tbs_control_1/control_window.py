@@ -3057,6 +3057,29 @@ def _drain_sim_log_queue(ext: Any) -> None:
         # 공정설정 시간 우선 모드에서의 애니 중단은 tick 스레드가 아니라 UI(메인) 스레드에서만 수행한다.
         # tick 스레드에서 stop_all_* / runner.stop() 등을 호출하면 Kit 내부가 스레드-unsafe로 크래시할 수 있다.
         try:
+            # 화면별 interrupt 우선 처리
+            by = getattr(ext, "_sim_interrupt_anim_event_by_screen", None)
+            fn_by = getattr(ext, "_sim_interrupt_anim_apply_fn_by_screen", None)
+            if isinstance(by, dict) and isinstance(fn_by, dict):
+                for scr, ev in list(by.items()):
+                    try:
+                        if ev is None or not hasattr(ev, "is_set") or not ev.is_set():
+                            continue
+                        try:
+                            ev.clear()
+                        except Exception:
+                            pass
+                        fn = fn_by.get(str(scr))
+                        if callable(fn):
+                            try:
+                                fn()
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        try:
             ie = getattr(ext, "_sim_interrupt_anim_event", None)
             if ie is not None and hasattr(ie, "is_set") and ie.is_set():
                 try:
@@ -3389,6 +3412,9 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     detail = str(payload.get("detail", ""))
     event_seq = str(payload.get("event_seq") or payload.get("sequence_name") or "").strip()
     linked_anim = str(payload.get("linked_anim_json") or "").strip()
+    proc_sec = str(payload.get("proc_sec", "")).strip()
+    anim_sec = str(payload.get("anim_sec", "")).strip()
+    proc_pri = str(payload.get("process_time_priority", "")).strip()
 
     anim_key = _sim_anim_status_key(ext)
     try:
@@ -3399,7 +3425,22 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     if status == "RUNNING":
         try:
             last_key = getattr(ext, "_sim_progress_last_key", None)
-            key = (panel_slot, str(percent), str(elapsed), str(total), str(status), label, event_seq, linked_anim, anim_key)
+            # 진행현황 디듀프 키에는 실제 표시 문자열에 영향을 주는 값들을 포함해야 한다.
+            # (proc_sec/anim_sec/priority가 바뀌었는데도 elapsed/total이 같으면 UI가 갱신되지 않는 문제 방지)
+            key = (
+                panel_slot,
+                str(percent),
+                str(elapsed),
+                str(total),
+                str(status),
+                label,
+                event_seq,
+                linked_anim,
+                anim_key,
+                proc_sec,
+                anim_sec,
+                proc_pri,
+            )
             if isinstance(last_key, dict) and last_key.get(dedupe_key) == key:
                 return
             if isinstance(last_key, dict):
@@ -3417,10 +3458,15 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     head = "[진행현황] 단계 완료" if status == "DONE" else "[진행현황] 진행 중"
     ev_line = f"이벤트: {event_seq}\n" if event_seq else ""
     anim_footer = _format_progress_anim_footer(ext, payload if isinstance(payload, dict) else {})
+    sec_line = ""
+    if proc_sec or anim_sec:
+        pri_txt = "ON" if proc_pri in ("1", "true", "True", "ON", "on") else "OFF"
+        sec_line = f"시간: 공정={proc_sec or '-'}s | 애니={anim_sec or '-'}s | 공정시간우선={pri_txt}\n"
     text = (
         f"{head} | t(sim)={sim_time}s\n"
         f"{ev_line}"
         f"{label}\n"
+        f"{sec_line}"
         f"진행률: {percent}% ({elapsed} / {total}s)\n"
         f"{detail}\n"
         f"---\n"
@@ -4052,21 +4098,45 @@ def on_sim_start_clicked(ext: Any) -> None:
     ext._sim_anim_active = {}
     ext._sim_anim_pending = []
 
-    def _interrupt_anim_for_proc_priority() -> None:
+    def _interrupt_anim_for_proc_priority(screen: Optional[str] = None) -> None:
         """
         공정설정 시간 우선 모드에서 '애니가 재생 중이어도 끊고 다음 단계로 진행'을 위해 호출.
         - 시뮬 tick pause 플래그를 해제하고
         - 시퀀스 러너/개별 애니메이션을 stop 한다.
         """
         try:
+            scr = str(screen or "").strip() or None
             # pending 큐 비우기(현재 모드에서는 애니 길이를 기다리지 않음)
-            ext._sim_anim_pending = []
+            if scr is not None:
+                pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                if isinstance(pending_by, dict):
+                    pending_by[str(scr)] = []
+            else:
+                ext._sim_anim_pending = []
         except Exception:
             pass
         try:
-            runner = getattr(ext, "_sim_runner", None)
-            if runner is not None:
-                runner.stop()
+            # 멀티 화면: 화면별 runner가 있으면 전부 정리.
+            runners = getattr(ext, "_sim_runners_by_screen", None)
+            if isinstance(runners, dict) and runners:
+                if scr is not None:
+                    r = runners.get(str(scr))
+                    try:
+                        if r is not None:
+                            r.stop()
+                    except Exception:
+                        pass
+                else:
+                    for r in list(runners.values()):
+                        try:
+                            if r is not None:
+                                r.stop()
+                        except Exception:
+                            pass
+            else:
+                runner = getattr(ext, "_sim_runner", None)
+                if runner is not None:
+                    runner.stop()
         except Exception:
             pass
         try:
@@ -4095,12 +4165,38 @@ def on_sim_start_clicked(ext: Any) -> None:
     # tick 스레드 -> UI 스레드 마샬링: 중단 요청 플래그만 세팅하고, 실제 stop은 _drain_sim_log_queue에서 처리.
     try:
         ext._sim_interrupt_anim_event = threading.Event()
-        ext._sim_interrupt_anim_apply_fn = _interrupt_anim_for_proc_priority
+        ext._sim_interrupt_anim_apply_fn = lambda: _interrupt_anim_for_proc_priority(None)
+        # 화면별 interrupt (멀티 시뮬에서 해당 화면만 중단)
+        ext._sim_interrupt_anim_event_by_screen = {}
+        ext._sim_interrupt_anim_apply_fn_by_screen = {}
+        try:
+            n_ch2 = int(getattr(ext, "_sim_split_channels", 1) or 1)
+        except Exception:
+            n_ch2 = 1
+        n_ch2 = max(1, n_ch2)
+        for i in range(n_ch2):
+            scr = str(i + 1)
+            ext._sim_interrupt_anim_event_by_screen[scr] = threading.Event()
+            ext._sim_interrupt_anim_apply_fn_by_screen[scr] = (lambda s=scr: _interrupt_anim_for_proc_priority(s))
     except Exception:
         ext._sim_interrupt_anim_event = None
         ext._sim_interrupt_anim_apply_fn = None
+        ext._sim_interrupt_anim_event_by_screen = None
+        ext._sim_interrupt_anim_apply_fn_by_screen = None
 
-    def _request_interrupt_anim_for_proc_priority() -> None:
+    def _request_interrupt_anim_for_proc_priority(tags: Optional[Dict[str, Any]] = None) -> None:
+        # 화면별 중단 지원: tbs_sim_screen이 있으면 해당 화면만 중단 요청.
+        try:
+            scr = "1"
+            if isinstance(tags, dict):
+                scr = str(tags.get("tbs_sim_screen", "1") or "1").strip() or "1"
+            # per-screen event가 있으면 그쪽을 우선
+            by = getattr(ext, "_sim_interrupt_anim_event_by_screen", None)
+            if isinstance(by, dict) and scr in by and by[scr] is not None:
+                by[scr].set()
+                return
+        except Exception:
+            pass
         try:
             ie = getattr(ext, "_sim_interrupt_anim_event", None)
             if ie is not None:
@@ -4521,6 +4617,19 @@ def on_sim_stop_clicked(ext: Any) -> None:
         except Exception:
             pass
     _detach_sim_update(ext)
+    # 화면별 runner/큐/상태를 모두 정리해야 stop/reset 후 재시작에서
+    # "애니가 있는데도 재생이 안 되는" 잔여 상태(구독/타이머/인터럽트) 회귀를 막을 수 있다.
+    try:
+        runners = getattr(ext, "_sim_runners_by_screen", None)
+        if isinstance(runners, dict):
+            for r in list(runners.values()):
+                try:
+                    if r is not None:
+                        r.stop()
+                except Exception:
+                    pass
+    except Exception:
+        pass
     runner = getattr(ext, "_sim_runner", None)
     if runner is not None:
         try:
@@ -4561,6 +4670,49 @@ def on_sim_stop_clicked(ext: Any) -> None:
         pass
     try:
         ext._sim_anim_pending = []
+    except Exception:
+        pass
+    try:
+        pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+        if isinstance(pending_by, dict):
+            for k in list(pending_by.keys()):
+                pending_by[k] = []
+    except Exception:
+        pass
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(active_by, dict):
+            for k in list(active_by.keys()):
+                active_by[k] = {}
+    except Exception:
+        pass
+    try:
+        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+        if isinstance(until_by, dict):
+            for k in list(until_by.keys()):
+                until_by[k] = None
+    except Exception:
+        pass
+    try:
+        pause_by = getattr(ext, "_sim_tick_pause_events_by_screen", None)
+        if isinstance(pause_by, dict):
+            for ev in list(pause_by.values()):
+                try:
+                    if ev is not None:
+                        ev.clear()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        ie_by = getattr(ext, "_sim_interrupt_anim_event_by_screen", None)
+        if isinstance(ie_by, dict):
+            for ev in list(ie_by.values()):
+                try:
+                    if ev is not None:
+                        ev.clear()
+                except Exception:
+                    pass
     except Exception:
         pass
     try:

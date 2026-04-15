@@ -1126,20 +1126,21 @@ class SequenceRunner:
             stop_world_pivot_rotate_animation()
         except Exception:
             pass
-        # 어떤 스텝이 진행 중이었는지(타이머/그룹 경합)와 관계없이,
-        # 실제 애니메이션 모듈이 돌고 있으면 무조건 전체 중지해야 "일시정지/정지"가 사용자 기대대로 동작한다.
-        try:
-            stop_all_translate_animations()
-        except Exception:
-            pass
-        try:
-            stop_all_rotate_animations()
-        except Exception:
-            pass
-        try:
-            stop_all_curve_animations()
-        except Exception:
-            pass
+        # 어떤 스텝이 진행 중이었는지와 무관하게 중지하되,
+        # 멀티 뷰(보조 USD context)에서는 전역 stop_all_*이 다른 화면 애니까지 끊을 수 있어 피한다.
+        if getattr(self, "_usd_context_name", None) is None:
+            try:
+                stop_all_translate_animations()
+            except Exception:
+                pass
+            try:
+                stop_all_rotate_animations()
+            except Exception:
+                pass
+            try:
+                stop_all_curve_animations()
+            except Exception:
+                pass
         # 진행 중인 코드 애니메이션은 안전하게 정리 (현재 그룹 전체)
         try:
             if self._current_group:
@@ -1165,8 +1166,8 @@ class SequenceRunner:
 
         # 타임라인 0으로 초기화 + 일시정지
         try:
-            usd_animation_control.stop_usd_animation()
-            usd_animation_control.reset_timeline_to_zero()
+            usd_animation_control.stop_usd_animation(getattr(self, "_usd_context_name", None))
+            usd_animation_control.reset_timeline_to_zero(getattr(self, "_usd_context_name", None))
         except Exception:
             pass
 
