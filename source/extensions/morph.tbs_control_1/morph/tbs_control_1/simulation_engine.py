@@ -1933,7 +1933,8 @@ class TBSSimulationEngine:
         """완료 LOT별로 _stage_mark/_route_mark 기록을 모아 구간별 소요 시간 로그 출력."""
         total_t = float(self.env.now) if self.env is not None else 0.0
         lines: List[str] = [
-            f"[SUMMARY] 전체 t={total_t:.2f}s | 공정설정 시간 우선={'ON' if self._process_time_priority else 'OFF'}"
+            f"[SUMMARY] 전체 t={total_t:.2f}s | 공정설정 시간 우선={'ON' if self._process_time_priority else 'OFF'}",
+            f"[SUMMARY] 총 공정시간={total_t:.2f}s (막대그래프 총 시간과 일치)",
         ]
         for lot_id in self.completed_lots:
             m = self._lot_stage_summary.get(lot_id, {})

@@ -3244,8 +3244,126 @@ def _sim_ui_sink_history_line(ext: Any, line: str, panel_mode: SimLogPanelMode) 
     _append_sim_log(ext, line)
 
 
+def _finalize_sim_timeline_on_done(ext: Any) -> None:
+    """
+    시뮬레이션이 자연 종료(완료)되었을 때, EP 타임라인 막대그래프 진행을 즉시 종료 상태로 고정한다.
+
+    목표(요구사항):
+    - 종료 후에도 UI 가상 시간 ticker가 계속 돌아 막대가 진행되는 현상 방지
+    - 요약 로그의 총 시간(=env.now)과 막대그래프의 총 길이(스케일)가 일치하도록 확정
+    """
+    # 1) UI 가상 시간 ticker 중단(종료 후 막대가 계속 전진하는 원인)
+    try:
+        sub = getattr(ext, "_sim_ep_timeline_ui_sub", None)
+        if sub is not None:
+            try:
+                sub.unsubscribe()
+            except Exception:
+                pass
+        ext._sim_ep_timeline_ui_sub = None
+    except Exception:
+        pass
+
+    # 2) 화면별 최종 sim_time(env.now)을 얻어 스케일/표시를 확정한다.
+    final_by_screen: Dict[str, float] = {}
+    try:
+        engs = list(getattr(ext, "_sim_engines", None) or [])
+    except Exception:
+        engs = []
+    if engs:
+        for i, eng in enumerate(engs):
+            if eng is None:
+                continue
+            scr_key = str(i + 1)
+            try:
+                t = float(getattr(getattr(eng, "env", None), "now", 0.0) or 0.0)
+            except Exception:
+                t = 0.0
+            final_by_screen[scr_key] = max(0.0, t)
+    else:
+        eng = getattr(ext, "_sim_engine", None)
+        if eng is not None:
+            try:
+                t = float(getattr(getattr(eng, "env", None), "now", 0.0) or 0.0)
+            except Exception:
+                t = 0.0
+            final_by_screen["1"] = max(0.0, t)
+
+    # 3) UI 그래프들이 사용하는 total_est / virtual_time / state를 최종값으로 덮어쓴다.
+    try:
+        by_te = getattr(ext, "_sim_last_total_est_by_screen", None)
+        if not isinstance(by_te, dict):
+            by_te = {}
+            ext._sim_last_total_est_by_screen = by_te
+        for scr_key, t in final_by_screen.items():
+            if t > 0.0:
+                by_te[str(scr_key)] = float(t)
+    except Exception:
+        pass
+    try:
+        vt_by = getattr(ext, "_sim_ep_timeline_virtual_time_by_screen", None)
+        if not isinstance(vt_by, dict):
+            vt_by = {}
+            ext._sim_ep_timeline_virtual_time_by_screen = vt_by
+        for scr_key, t in final_by_screen.items():
+            vt_by[str(scr_key)] = float(t)
+    except Exception:
+        pass
+    try:
+        st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
+        if not isinstance(st_by, dict):
+            st_by = {}
+            ext._sim_ep_occ_timeline_state_by_screen = st_by
+        for scr_key, t in final_by_screen.items():
+            st = st_by.get(str(scr_key))
+            if not isinstance(st, dict):
+                continue
+            # total_est_fixed는 포트상태 아래 타임라인의 "전체 길이(스케일)"로 사용된다.
+            st["total_est_fixed"] = float(max(0.0, t))
+            # 종료 시점 이후 추가 누적이 발생하지 않도록 t_last도 최종값으로 맞춘다.
+            st["t_last"] = float(max(0.0, t))
+    except Exception:
+        pass
+
+    # 4) 즉시 1회 재렌더(최종 시각/스케일 반영)
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if isinstance(chans, list) and chans:
+        last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        for ch in chans:
+            if not isinstance(ch, dict):
+                continue
+            try:
+                scr_key = str(int(ch.get("screen", 1) or 1))
+            except Exception:
+                scr_key = "1"
+            t_final = float(final_by_screen.get(scr_key, final_by_screen.get("1", 0.0)) or 0.0)
+            occ = None
+            try:
+                occ = last_by.get(str(scr_key)) if isinstance(last_by, dict) else None
+            except Exception:
+                occ = None
+            if isinstance(occ, dict):
+                try:
+                    _update_ep_timeline_under_port_state(ext, ch, occ, f"{t_final:.2f}")
+                except Exception:
+                    pass
+                try:
+                    # 진행현황 패널 하단 EP 타임라인도 최종 total로 맞춘다.
+                    payload = {
+                        "sim_time": f"{t_final:.2f}",
+                        "sim_total_est_sec": f"{t_final:.2f}",
+                        "ep_ports": [k for k in ("EP1", "EP2", "EP3") if k in occ],
+                        "ep_occ": {k: ("EMPTY" if not str(occ.get(k, "") or "").strip() else "FULL") for k in ("EP1", "EP2", "EP3")},
+                        "all_ep_empty": "1" if all(not str(occ.get(k, "") or "").strip() for k in ("EP1", "EP2", "EP3") if k in occ) else "0",
+                    }
+                    _update_progress_ep_timeline_widget(ext, ch, payload)
+                except Exception:
+                    pass
+
+
 def _sim_ui_sink_action(ext: Any, payload: Any) -> None:
     if str(payload) == SimUiControlAction.EXPORT_XLSX.value:
+        _finalize_sim_timeline_on_done(ext)
         _export_sim_logs_to_xlsx(ext)
 
 
