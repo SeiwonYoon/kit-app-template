@@ -375,14 +375,14 @@ def play_usd_animation(
                             tl.set_current_time(end_time)
                         except Exception:
                             pass
-                        global _complete_sub
-                        if _complete_sub is not None:
+                        # 이 함수는 usd_context별 state dict(st)로 subscription을 관리한다.
+                        # 전역 변수(_complete_sub/_end_fix_sub)는 사용하지 않는다(정의되지 않거나 컨텍스트가 섞일 수 있음).
+                        if st.get("_complete_sub") is not None:
                             try:
-                                _complete_sub.unsubscribe()
+                                st["_complete_sub"].unsubscribe()
                             except Exception:
                                 pass
-                            _complete_sub = None
-                        global _end_fix_sub
+                            st["_complete_sub"] = None
                         try:
                             import omni.kit.app as app
                             def _fix(_e=None):

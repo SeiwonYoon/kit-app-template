@@ -1744,7 +1744,7 @@ class SequenceRunner:
                         _apply_world_space_offset_correction(paths_for_offset, start)
                 except Exception:
                     pass
-            usd_animation_control.play_usd_animation(
+            ok = usd_animation_control.play_usd_animation(
                 start_frame=start,
                 end_frame=end,
                 loop=False,
@@ -1752,6 +1752,8 @@ class SequenceRunner:
                 usd_context_name=getattr(self, "_usd_context_name", None),
                 speed_scale=float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0)),
             )
+            if not ok:
+                _done()
             return
 
         if t == "DELAY":
