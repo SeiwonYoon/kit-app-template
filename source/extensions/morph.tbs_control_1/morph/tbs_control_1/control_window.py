@@ -5763,6 +5763,27 @@ def on_sim_ep_count_changed(ext: Any) -> None:
     except Exception:
         idx = 0
     is_ep3 = idx == 1
+
+    # 멀티 분할 시 포트 패널은 화면별 스냅샷(_sim_per_screen_snapshots)의 ep_count_idx를 우선 사용한다.
+    # 시작 시 자동 채움된 스냅샷이 존재하면 콤보 변경이 "반영되지 않는" 것처럼 보일 수 있어,
+    # 콤보 변경 시점에 현재 값(ep_count_idx)을 스냅샷에도 즉시 동기화한다.
+    try:
+        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
+        changed = False
+        while len(snaps) < 4:
+            snaps.append(None)
+        snaps = snaps[:4]
+        for i in range(len(snaps)):
+            s = snaps[i]
+            if isinstance(s, dict):
+                if int(s.get("ep_count_idx", -1)) != int(idx):
+                    s["ep_count_idx"] = int(idx)
+                    changed = True
+        if changed:
+            ext._sim_per_screen_snapshots = snaps
+    except Exception:
+        pass
+
     if getattr(ext, "_sim_init_bp4_row", None) is not None:
         ext._sim_init_bp4_row.visible = is_ep3
     if not is_ep3 and getattr(ext, "_sim_init_bp4_model", None) is not None:
