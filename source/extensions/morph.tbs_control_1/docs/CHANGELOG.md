@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **리팩터링(1~4단계)**: `control_window.py`에서 분리 — `control_paths.py`, `control_sim_ui_posts.py`, `control_sim_event_rules.py`, `control_sim_tick_workers.py`, **`control_sim_monitor_ui.py`**(분할 모니터 채널·포트 패널·EP 타임라인·SIM 이력 로그·진행 패널 EP 막대). 단계·검증은 `docs/refactor_tbs_control_1_phases.md` 참고.
 - **EP 타임라인 시계 정합** (`simulation_engine.py`): `timeline_only` progress의 `sim_time`을 내부 `virtual_now`가 아니라 SimPy **`env.now`**로 emit. 진행현황 `t(sim)`·포트 아래 막대 축이 같은 시계를 쓰며, 분할/단일 모두에서 “막대만 더 빨리 가는” 현상을 막는다.
 - **Kit EP 막대(포트 아래)** (`control_window.py`):
   - 단일 모니터: 동일 시뮼 시각·레이아웃이면 VStack 전체 destroy/rebuild를 생략해 재생 시 깜빡임 완화.
