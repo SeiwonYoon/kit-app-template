@@ -3761,9 +3761,17 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
             # 마지막 ports_occupancy 스냅샷을 사용한다.
             try:
                 last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-                last_occ = last_by.get(str(panel_slot)) if isinstance(last_by, dict) else None
+                if not isinstance(last_by, dict):
+                    last_by = {}
+                    ext._sim_last_ports_occupancy_by_screen = last_by
+                sk_occ = str(panel_slot or "1").strip() or "1"
+                last_occ = last_by.get(sk_occ)
+                if not isinstance(last_occ, dict):
+                    # 시작 직후·첫 이벤트 전: 이벤트로 점유 스냅샷이 아직 없어도 EP 타임라인은 진행되어야 한다.
+                    last_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+                    last_by[sk_occ] = dict(last_occ)
             except Exception:
-                last_occ = None
+                last_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
             if isinstance(chans2, list) and len(chans2) > 1:
                 try:
                     pslot_i = int(str(panel_slot or "1").strip() or "1")
@@ -3772,13 +3780,13 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 pslot_i = max(1, min(len(chans2), pslot_i))
                 chp = chans2[pslot_i - 1]
                 if isinstance(chp, dict):
-                    if isinstance(last_occ, dict):
-                        _update_ep_timeline_under_port_state(ext, chp, last_occ, str(payload.get("sim_time", "")))
+                    sim_t = str(payload.get("sim_time", ""))
+                    _update_ep_timeline_under_port_state(ext, chp, last_occ, sim_t)
             elif isinstance(chans2, list) and len(chans2) == 1:
                 chp0 = chans2[0]
                 if isinstance(chp0, dict):
-                    if isinstance(last_occ, dict):
-                        _update_ep_timeline_under_port_state(ext, chp0, last_occ, str(payload.get("sim_time", "")))
+                    sim_t = str(payload.get("sim_time", ""))
+                    _update_ep_timeline_under_port_state(ext, chp0, last_occ, sim_t)
             return
     except Exception:
         pass
@@ -4545,8 +4553,8 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     스레드/구독(중요):
     - tick 스레드: 시뮬 시간을 실제로 전진시키는 워커(단일 1개 또는 화면별 N개).
-    - UI update 구독: EP 타임라인은 "첫 공정 이벤트 전"에도 막대가 진행되게 해야 하므로,
-      UI 스레드에서 wall dt * speed 로 가상 sim_time을 누적하는 subscription(``_sim_ep_timeline_ui_sub``)를 추가로 사용한다.
+    - EP 타임라인(포트상태 아래)은 **엔진의 ``virtual_now``를 ``timeline_only`` progress로 전달받아** 갱신한다.
+      (wall-clock UI ticker와 엔진 시간을 섞으면 소수 초 단위로 어긋날 수 있어 사용하지 않는다.)
     """
     try:
         n_ch = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
@@ -4658,8 +4666,11 @@ def on_sim_start_clicked(ext: Any) -> None:
         ext._sim_last_ports_occupancy_by_screen = {}
     except Exception:
         pass
-    # EP 타임라인: "이벤트 대기" 구간에서도 즉시 진행되도록
-    # UI 스레드에서 wall dt * speed 로 가상 sim_time을 누적해 그래프를 갱신한다.
+    # 종료 시점(env.now)과의 정합을 위해 유지(엔진 timeline_only 경로와는 별개)
+    try:
+        ext._sim_ep_timeline_virtual_time_by_screen = {}
+    except Exception:
+        pass
     try:
         sub = getattr(ext, "_sim_ep_timeline_ui_sub", None)
         if sub is not None:
@@ -4670,51 +4681,6 @@ def on_sim_start_clicked(ext: Any) -> None:
         ext._sim_ep_timeline_ui_sub = None
     except Exception:
         pass
-    try:
-        import omni.kit.app as kit_app
-        _state = {"last_wall": time.perf_counter()}
-        ext._sim_ep_timeline_virtual_time_by_screen = {}
-
-        def _tick_ep_timeline(_e=None):
-            try:
-                now = time.perf_counter()
-                dtw = max(0.0, now - float(_state.get("last_wall", now)))
-                _state["last_wall"] = now
-                try:
-                    sp = max(0.1, float(ext._sim_speed_model.get_value_as_float()))
-                except Exception:
-                    sp = 1.0
-                dts = float(dtw) * float(sp)
-                chans = getattr(ext, "_sim_monitor_channels", None)
-                if not isinstance(chans, list) or not chans:
-                    return
-                last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-                if not isinstance(last_by, dict):
-                    last_by = {}
-                vt_by = getattr(ext, "_sim_ep_timeline_virtual_time_by_screen", None)
-                if not isinstance(vt_by, dict):
-                    vt_by = {}
-                    ext._sim_ep_timeline_virtual_time_by_screen = vt_by
-                for ch in chans:
-                    if not isinstance(ch, dict):
-                        continue
-                    scr = str(int(ch.get("screen", 1) or 1))
-                    vt = float(vt_by.get(scr, 0.0) or 0.0) + dts
-                    vt_by[scr] = vt
-                    occ = last_by.get(scr)
-                    if not isinstance(occ, dict):
-                        occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
-                        last_by[scr] = dict(occ)
-                    _update_ep_timeline_under_port_state(ext, ch, occ, f"{vt:.2f}")
-            except Exception:
-                pass
-
-        ext._sim_ep_timeline_ui_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
-            _tick_ep_timeline,
-            name="morph.tbs_control_1:ep_timeline_ui_tick",
-        )
-    except Exception:
-        ext._sim_ep_timeline_ui_sub = None
     try:
         ext._sim_aux_anim_notice_screens = set()
     except Exception:
@@ -4778,6 +4744,19 @@ def on_sim_start_clicked(ext: Any) -> None:
                 cells[port].text = "IN/OUT:-" if port == "INOUT" else f"{port}:-"
         if getattr(ext, "_sim_port_ep3_cell", None) is not None:
             ext._sim_port_ep3_cell.text = "EP3:-"
+        # 단일(또는 모니터 채널 1개) 모드: 시작 직후 timeline_only 가 last_occ 없이 스킵되지 않도록 시드
+        try:
+            occ0 = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+            by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+            if not isinstance(by, dict):
+                by = {}
+                ext._sim_last_ports_occupancy_by_screen = by
+            by["1"] = dict(occ0)
+            chans_s = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chans_s, list) and len(chans_s) >= 1 and isinstance(chans_s[0], dict):
+                _update_ep_timeline_under_port_state(ext, chans_s[0], occ0, "0.0")
+        except Exception:
+            pass
     ext._sim_progress_rows = {}
     ext._sim_progress_history = []
     ext._sim_progress_start_times = {}
@@ -5339,7 +5318,7 @@ def on_sim_stop_clicked(ext: Any) -> None:
     - (EP 타임라인 리셋) 그래프 상태/위젯 파기:
       - state dict: ``_sim_ep_timeline_state_by_screen``, ``_sim_ep_occ_timeline_state_by_screen``,
         ``_sim_last_ports_occupancy_by_screen``
-      - UI ticker subscription: ``_sim_ep_timeline_ui_sub`` unsubscribe
+      - (레거시) 혹시 남아있으면 ``_sim_ep_timeline_ui_sub`` unsubscribe
       - widget: 채널별 ``ep_timeline_widget`` destroy
     """
     # stop/reset 이후 남아있는 큐 아이템을 무시하기 위한 세대 토큰 증가

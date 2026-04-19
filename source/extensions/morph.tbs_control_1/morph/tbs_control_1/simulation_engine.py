@@ -423,7 +423,8 @@ class TBSSimulationEngine:
         self._all_ep_empty_sec: float = 0.0
         self._fault_prev_snapshot: frozenset = frozenset()
         self._last_report_text: str = ""
-        # 진행현황 그래프(EP 타임라인)용: 공정 사이 대기에도 일정 주기로 progress emit
+        # 진행현황 그래프(EP 타임라인)용: ``virtual_now`` 가 변할 때마다 progress(timeline_only)를 emit
+        # (UI에서 wall-clock 보간과 섞이면 시뮬 시간과 미세하게 어긋날 수 있어, 엔진 값을 단일 소스로 둔다.)
         self._progress_timeline_last_emit_t: float = -999.0
 
         # 총 시뮬 예상 시간(고정 길이 막대그래프용) — 실행 전 간단 추정.
@@ -829,7 +830,8 @@ class TBSSimulationEngine:
         try:
             self._emit_progress(
                 {
-                    "sim_time": "0.00",
+                    # EP 타임라인 누적(dt) 정밀도: centi-second 반올림로는 작은 진행이 누락될 수 있어 raw를 넉넉히 둔다.
+                    "sim_time": "0.000000",
                     "timeline_only": "1",
                     "label": "EP 타임라인",
                     "detail": "",
@@ -1006,14 +1008,15 @@ class TBSSimulationEngine:
         except Exception:
             now_v = 0.0
         try:
-            # 시작 직후 체감이 "멈춤"처럼 보이지 않게 0.1s 단위로 갱신
-            if now_v - float(getattr(self, "_progress_timeline_last_emit_t", -999.0) or -999.0) >= 0.1:
+            last_emit = float(getattr(self, "_progress_timeline_last_emit_t", -999.0) or -999.0)
+            # 첫 emit(시작 직후) 또는 가상 시간이 실제로 전진한 경우에만 emit (중복 dt 누적 방지)
+            if (last_emit < -900.0) or (float(now_v) > float(last_emit) + 1e-7):
                 self._progress_timeline_last_emit_t = float(now_v)
                 # label이 비어있으면 UI가 갱신을 스킵하므로, 최소 라벨을 넣는다.
                 # NOTE: sim_time은 _emit_progress가 덮어쓰지 않도록 payload에 직접 넣는다.
                 self._emit_progress(
                     {
-                        "sim_time": f"{float(now_v):.2f}",
+                        "sim_time": f"{float(now_v):.6f}",
                         # NOTE: 진행현황 텍스트를 덮어쓰지 않고 그래프만 갱신하기 위한 전용 플래그
                         "timeline_only": "1",
                         "label": "EP 타임라인",
