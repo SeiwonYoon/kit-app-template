@@ -992,9 +992,14 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 proc_priority = False
 
-            # 배속>1일 때: 애니메이션이 실제로 진행되는 동안 tick이 너무 앞서가면
-            # 다음 공정이 애니 종료 전 시작될 수 있어, (공정시간 우선 OFF인 경우에만) tick을 잠시 멈춘다.
-            if (not proc_priority) and sp > 1.0 and pause_evt is not None:
+            # 배속>1일 때: 단일 화면에서만 애니·sim tick 동기를 위해 pause 사용.
+            # 분할 N>1에서는 한 화면 애니가 다른 화면 엔진 틱까지 멈추어 공정시간·막대가 끊겨 보이므로 적용하지 않는다.
+            if (
+                (not proc_priority)
+                and sp > 1.0
+                and pause_evt is not None
+                and (not _is_multi_viewport_sim(ext))
+            ):
                 try:
                     pause_evt.set()
                 except Exception:
@@ -1633,6 +1638,43 @@ def _snapshot_monitor_channel_texts(ext: Any) -> Tuple[Dict[int, str], Dict[int,
     return saved_h, saved_p
 
 
+def _ep_occ_timeline_layout_dims(ext: Any) -> Tuple[int, int, int, int, int]:
+    """
+    포트 아래 EP 타임라인(막대) Kit 가로 레이아웃.
+    뷰포트 분할 시 열당 폭이 매우 좁아져, 막대·라벨·패딩을 함께 줄인다.
+
+    Returns:
+        (bar_w, name_w, val_w, frame_pad, row_sp) — 우측 누적 초 라벨 폭=val_w.
+    """
+    try:
+        nsp = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
+    except Exception:
+        nsp = 1
+    if nsp <= 1:
+        return (420, 64, 56, 6, 6)
+    if nsp == 2:
+        # 약 ~270px 행 폭 목표(이름+막대+초+간격+프레임 여유)
+        return (168, 48, 44, 3, 4)
+    if nsp == 3:
+        return (120, 44, 40, 2, 3)
+    return (88, 40, 36, 2, 2)
+
+
+def _ep_timeline_host_horizontal_scroll_policy(ext: Any) -> Any:
+    """분할 시 막대 행이 열보다 넓으면 가로 스크롤로 잘림을 피한다."""
+    try:
+        nsp = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
+    except Exception:
+        nsp = 1
+    if nsp <= 1:
+        return ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF
+    for name in ("SCROLLBAR_AS_NEEDED", "SCROLLBAR_AUTO", "SCROLLBAR_ALWAYS_ON"):
+        pol = getattr(ui.ScrollBarPolicy, name, None)
+        if pol is not None:
+            return pol
+    return ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF
+
+
 def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     """
     단일 화면(채널)용 모니터 UI 블록을 만든다.
@@ -1702,7 +1744,7 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     # 고정 높이가 확실한 ScrollingFrame을 사용한다(스크롤바는 숨김).
     ch["ep_timeline_host"] = ui.ScrollingFrame(
         height=160,
-        horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
+        horizontal_scrollbar_policy=_ep_timeline_host_horizontal_scroll_policy(ext),
         vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
         style={"background_color": 0x221A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
     )
@@ -2431,22 +2473,41 @@ def _append_sim_log(ext: Any, line: str) -> None:
     """
     UI 스레드 전용: 이력 로그 패널에 줄 추가. 시뮬 워커는 ``post_sim_history_line`` 로 큐에 넣는다.
 
-    - 멀티(``_sim_monitor_channels`` 길이>1)이면 ``[화면N]`` 접두가 있으면 해당 채널로, 없으면 화면1로 라우팅.
+    - 멀티(``_sim_monitor_channels`` 길이>1)이면 원문의 ``[화면N]`` 접두(엔진 on_log)로 채널을 고른 뒤,
+      **접두 뒤 본문만** ``_format_history_line`` 한다. (포맷 단계에서 줄 앞에 이모지가 붙으면
+      줄 처음의 ``[화면N]`` 패턴 매칭이 깨져 전부 화면1로 가는 문제를 피한다.)
+    - 접두가 없으면 전역 메시지로 보고 화면1에만 붙인다.
     - 단일 모드는 ``_sim_history_text`` / ``_sim_history_label`` 레거시 경로.
     """
-    msg = _format_history_line((line or "").strip())
-    if not msg:
+    raw = (line or "").strip()
+    if not raw:
         return
     chans = getattr(ext, "_sim_monitor_channels", None)
-    m = re.match(r"^\[화면(\d+)\]\s*", msg)
     if isinstance(chans, list) and len(chans) > 1:
-        if m:
-            si = int(m.group(1))
-            rest = msg[m.end() :].strip() if m.end() <= len(msg) else msg
-            body = rest if rest else msg
-            _append_sim_log_channel(ext, si, body)
+        m0 = re.match(r"^\[화면(\d+)\]\s*", raw)
+        if m0:
+            try:
+                si = int(m0.group(1))
+            except Exception:
+                si = 1
+            try:
+                si = max(1, min(len(chans), si))
+            except Exception:
+                si = 1
+            rest = raw[m0.end() :].strip() if m0.end() <= len(raw) else raw
+            msg = _format_history_line(rest)
+            if not msg:
+                return
+            _append_sim_log_channel(ext, si, msg)
+            return
+        msg = _format_history_line(raw)
+        if not msg:
             return
         _append_sim_log_channel(ext, 1, msg)
+        return
+
+    msg = _format_history_line(raw)
+    if not msg:
         return
     prev = ext._sim_history_text.as_string if getattr(ext, "_sim_history_text", None) else ""
     merged = f"{prev}\n{msg}".strip() if prev else msg
@@ -2688,10 +2749,10 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
         ep3_cell.text = f"EP3:{_compact_cell_value(ep3)}"
         _set_port_box_style(ext, "EP3", ep3, boxes)
 
-    # 포트상태 아래 EP 타임라인(전용 영역) 갱신
+    # 포트상태 아래 EP 타임라인(전용 영역) 갱신 — 멀티 채널 UI가 없어도(USD 미로드 등) 스냅샷/웹 막대용 상태는 누적
     try:
-        if ch is not None:
-            _update_ep_timeline_under_port_state(ext, ch, occ, t)
+        ch_tl = ch if ch is not None else {"screen": int(screen), "ep_timeline_host": None}
+        _update_ep_timeline_under_port_state(ext, ch_tl, occ, t)
     except Exception:
         pass
 
@@ -2699,8 +2760,6 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
 def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict[str, Any], sim_time_text: str) -> None:
     """포트상태 영역 바로 아래의 EP 타임라인 3줄(EP1/EP2(/EP3)/ALL_EP) + 시간 라벨."""
     host = ch.get("ep_timeline_host")
-    if host is None:
-        return
     try:
         screen = int(ch.get("screen", 1))
     except Exception:
@@ -2786,29 +2845,65 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     except Exception:
         empty_acc["ALL_EP"] = 0.0
 
-    # total_est(고정 스케일): "한 번 정해지면 실행 중에는 바뀌지 않게" 고정한다.
-    # (시작 직후 폴백 30초로 그려졌다가, 첫 공정에서 total_est가 들어오며 스케일이 바뀌는 현상 방지)
+    # total_est(막대 스케일): 폴백 max(30,t*1.2)로 먼저 고정된 뒤 엔진 sim_total_est 가 늦게 들어오면
+    # 이전에는 상향이 안 되어 30칸이 전부 빨간 EMPTY 세그로만 채워진 것처럼 보였다 → 확정값이 더 크면 상향만 허용.
     total_est = st.get("total_est_fixed", None)
     try:
         total_est = float(total_est) if total_est is not None else None
     except Exception:
         total_est = None
-    if total_est is None or total_est <= 0.0:
+    cand: Optional[float] = None
+    try:
+        last_te = getattr(ext, "_sim_last_total_est_by_screen", None)
+        if isinstance(last_te, dict):
+            cand = float(last_te.get(scr_key) or 0.0)
+    except Exception:
         cand = None
-        try:
-            last_by = getattr(ext, "_sim_last_total_est_by_screen", None)
-            if isinstance(last_by, dict):
-                cand = float(last_by.get(scr_key) or 0.0)
-        except Exception:
-            cand = None
-        if cand is not None and cand > 0.0:
+    if cand is not None and cand <= 0.0:
+        cand = None
+    if total_est is None or total_est <= 0.0:
+        if cand is not None:
             total_est = cand
         else:
             total_est = max(30.0, t_now * 1.2)
         st["total_est_fixed"] = float(total_est)
+    elif cand is not None and cand > float(total_est) + 1e-3:
+        st["total_est_fixed"] = float(cand)
+
+    # ep_timeline_host 없음(레거시 단일 패널·웹 스냅샷만): 상태만 갱신하고 omni.ui 는 건너뜀
+    if host is None:
+        return
+
+    BAR_W, NAME_W, VAL_W, frame_pad, row_sp = _ep_occ_timeline_layout_dims(ext)
+    cur_layout = (int(BAR_W), int(NAME_W), int(VAL_W), int(frame_pad), int(row_sp))
+
+    # 동일 시뮼 시각(dt=0)·막대 스케일·EP 점유가 같으면 VStack 전체 destroy/rebuild 생략.
+    # (매 tick마다 트리를 갈아엎으면 단일 모니터에서 막대 영역 전체가 깜빡인다.)
+    try:
+        te_snap = float(total_est)
+    except Exception:
+        te_snap = 0.0
+    try:
+        occ_fp = tuple((str(ep), bool(_is_empty_port(ep))) for ep in eps) + (bool(all_empty),)
+    except Exception:
+        occ_fp = ()
+    old = ch.get("ep_timeline_widget", None)
+    last_te = st.get("_ep_tl_last_ui_te")
+    last_fp = st.get("_ep_tl_last_ui_occ_fp")
+    last_layout = st.get("_ep_tl_last_ui_layout")
+    if (
+        old is not None
+        and dt <= 1e-9
+        and isinstance(last_te, (int, float))
+        and abs(float(last_te) - te_snap) <= 1e-2
+        and last_fp == occ_fp
+        and isinstance(last_layout, tuple)
+        and len(last_layout) == 5
+        and tuple(int(x) for x in last_layout) == cur_layout
+    ):
+        return
 
     # UI 렌더(고정 폭)
-    old = ch.get("ep_timeline_widget", None)
     if old is not None:
         try:
             old.destroy()
@@ -2816,9 +2911,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
             pass
         ch["ep_timeline_widget"] = None
 
-    BAR_W = 420
     BAR_H = 14
-    NAME_W = 64
     tick_step = max(10.0, float(int((((float(total_est) / 8.0) + 9.999) // 10.0) * 10.0)))
 
     def _color(empty: bool) -> int:
@@ -2826,7 +2919,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
 
     with host:
         ch["ep_timeline_widget"] = ui.VStack(spacing=6)
-        with ui.Frame(style={"padding": 6}):
+        with ui.Frame(style={"padding": int(frame_pad)}):
             with ui.VStack(spacing=6):
                 # 시간 라벨(너무 촘촘하면 안 보이므로 최대 8개 정도만)
                 with ui.HStack(height=14, spacing=0):
@@ -2844,7 +2937,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                             )
                 # 막대(EP1/EP2(/EP3)/ALL_EP) — 줄은 항상 렌더된다.
                 for r in rows:
-                    with ui.HStack(height=BAR_H, spacing=6):
+                    with ui.HStack(height=BAR_H, spacing=int(row_sp)):
                         ui.Label(r, width=NAME_W, height=BAR_H, style={"color": 0xFFBFC7D5, "font_size": 11})
                         with ui.ZStack(width=BAR_W, height=BAR_H):
                             ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
@@ -2879,10 +2972,53 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                             v = 0.0
                         ui.Label(
                             f"{v:.1f}s",
-                            width=56,
+                            width=int(VAL_W),
                             height=BAR_H,
                             style={"color": 0xFFDDDDDD, "font_size": 11},
                         )
+
+    try:
+        st["_ep_tl_last_ui_te"] = float(te_snap)
+        st["_ep_tl_last_ui_occ_fp"] = occ_fp
+        st["_ep_tl_last_ui_layout"] = cur_layout
+    except Exception:
+        pass
+
+
+def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
+    """
+    멀티 시뮬에서 한 화면의 ANIM/큐 폭주로 다른 화면의 ``timeline_only`` 가 밀리면
+    포트 아래 EP 막대가 멈춘 것처럼 보인다. 각 엔진 ``env.now`` 와 마지막 점유 스냅샷으로 전 화면을 한 번에 맞춘다.
+    """
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    engs = getattr(ext, "_sim_engines", None)
+    if not isinstance(chans, list) or len(chans) < 2:
+        return
+    if not isinstance(engs, list) or len(engs) < 2:
+        return
+    last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+    if not isinstance(last_by, dict):
+        last_by = {}
+    empty_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+    for i, ch in enumerate(chans):
+        if not isinstance(ch, dict):
+            continue
+        si = i + 1
+        sk = str(si)
+        eng = engs[i] if i < len(engs) else None
+        if eng is None or bool(getattr(eng, "is_done", False)):
+            continue
+        try:
+            t_now = float(getattr(getattr(eng, "env", None), "now", 0.0) or 0.0)
+        except Exception:
+            t_now = 0.0
+        occ = last_by.get(sk) if isinstance(last_by.get(sk), dict) else None
+        if occ is None:
+            occ = dict(empty_occ)
+        try:
+            _update_ep_timeline_under_port_state(ext, ch, occ, f"{t_now:.2f}")
+        except Exception:
+            pass
 
 
 def _enqueue_sim_log(ext: Any, line: str) -> None:
@@ -2948,6 +3084,18 @@ def _show_sim_gate_dialog(ext: Any, payload: Dict[str, Any]) -> None:
     title = str(payload.get("title", "공정 확인"))
     msg = str(payload.get("message", "다음 공정을 진행할까요?"))
     done = payload.get("_done_event", None)
+    # 웹(HTTP 브리지)에서 공정 확인을 대신 처리할 수 있도록 직렬화 가능한 요약 + done 이벤트 참조를 남긴다.
+    try:
+        ext._sim_web_gate_pending = {
+            "title": title,
+            "message": msg,
+            "gate_seq_raw": str(payload.get("gate_seq_raw", "") or "").strip(),
+            "gate_seq_canonical": str(payload.get("gate_seq_canonical", "") or "").strip(),
+            "gate_xml_sequence_name": str(payload.get("gate_xml_sequence_name", "") or "").strip(),
+        }
+        ext._sim_web_gate_done_event = done
+    except Exception:
+        pass
     g_raw = str(payload.get("gate_seq_raw", "")).strip()
     g_can = str(payload.get("gate_seq_canonical", "")).strip()
     g_xml = str(payload.get("gate_xml_sequence_name", "")).strip()
@@ -3005,6 +3153,11 @@ def _close_sim_gate_dialog(ext: Any, done_event: Any) -> None:
     try:
         if done_event is not None:
             done_event.set()
+    except Exception:
+        pass
+    try:
+        ext._sim_web_gate_pending = None
+        ext._sim_web_gate_done_event = None
     except Exception:
         pass
 
@@ -3234,6 +3387,11 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     # 화면별 보조 USD 컨텍스트에서도 MOVE 등 JSON 시퀀스가 대상 스테이지에 적용되도록
     # `_execute_mapped_sequence_stub` → `SequenceRunner.run(usd_context_name=...)` 경로를 탄다.
     handle_sim_event_for_animation(ext, p, verbose=verbose)
+    # 한 화면 이벤트 처리 중 UI 큐에 다른 화면 timeline_only 가 밀릴 수 있어, 엔진 시각으로 전 열 EP 막대 동기화
+    try:
+        _sync_all_ep_occ_timelines_from_engines(ext)
+    except Exception:
+        pass
 
 
 def _sim_ui_sink_history_line(ext: Any, line: str, panel_mode: SimLogPanelMode) -> None:
@@ -3499,12 +3657,40 @@ def _sim_active_anim_owner_screen(ext: Any) -> int:
     return 1
 
 
+def _ensure_tick_pause_map_for_multi(ext: Any, n_ch: int) -> None:
+    """분할 N>1 시 화면마다 독립 Event — 없으면 전역 pause 로 떨어져 전 엔진 틱이 같이 멈출 수 있다."""
+    if n_ch <= 1:
+        return
+    try:
+        m: Dict[str, threading.Event] = {}
+        for i in range(1, n_ch + 1):
+            m[str(i)] = threading.Event()
+        ext._sim_tick_pause_events_by_screen = m
+        ub: Dict[str, Any] = {str(i): None for i in range(1, n_ch + 1)}
+        ext._sim_tick_pause_until_wall_by_screen = ub
+    except Exception:
+        pass
+
+
+def _is_multi_viewport_sim(ext: Any) -> bool:
+    try:
+        nsp = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
+        return nsp > 1
+    except Exception:
+        return False
+
+
 def _pause_event_for_screen(ext: Any, screen_idx: int) -> Optional[threading.Event]:
     try:
         m = getattr(ext, "_sim_tick_pause_events_by_screen", None)
         if not isinstance(m, dict):
             return getattr(ext, "_sim_tick_pause_event", None)
-        return m.get(str(max(1, int(screen_idx))))
+        key = str(max(1, int(screen_idx)))
+        ev = m.get(key)
+        if ev is None:
+            ev = threading.Event()
+            m[key] = ev
+        return ev
     except Exception:
         return getattr(ext, "_sim_tick_pause_event", None)
 
@@ -3575,8 +3761,9 @@ def _sim_multi_engine_tick_worker(
                 gate_pause_evt.clear()
             except Exception:
                 pass
-        # 화면별 pause 이벤트가 켜져 있으면 해당 화면 tick만 잠시 멈춘다.
-        if pause_evt is not None and pause_evt.is_set():
+        # 화면별 pause: 분할 N>1 에서는 애니 동기용 tick 정지를 쓰지 않는다(각 엔진 sim 시간이 끊기지 않게).
+        multi_vp = _is_multi_viewport_sim(ext)
+        if (not multi_vp) and pause_evt is not None and pause_evt.is_set():
             # fail-safe 1) 예상 애니 길이(벽시계) 경과 시 자동 해제
             try:
                 until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
@@ -3787,6 +3974,11 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 if isinstance(chp0, dict):
                     sim_t = str(payload.get("sim_time", ""))
                     _update_ep_timeline_under_port_state(ext, chp0, last_occ, sim_t)
+            if isinstance(chans2, list) and len(chans2) > 1:
+                try:
+                    _sync_all_ep_occ_timelines_from_engines(ext)
+                except Exception:
+                    pass
             return
     except Exception:
         pass
@@ -4553,8 +4745,8 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     스레드/구독(중요):
     - tick 스레드: 시뮬 시간을 실제로 전진시키는 워커(단일 1개 또는 화면별 N개).
-    - EP 타임라인(포트상태 아래)은 **엔진의 ``virtual_now``를 ``timeline_only`` progress로 전달받아** 갱신한다.
-      (wall-clock UI ticker와 엔진 시간을 섞으면 소수 초 단위로 어긋날 수 있어 사용하지 않는다.)
+    - EP 타임라인(포트상태 아래)은 **엔진의 SimPy ``env.now``를 ``timeline_only`` progress의 ``sim_time``으로** 갱신한다.
+      (내부 ``virtual_now`` 예산 보간은 막대 축에 쓰지 않아, 진행현황 t(sim)과 동일한 시계를 유지한다.)
     """
     try:
         n_ch = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
@@ -4575,6 +4767,11 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception:
         ext._sim_run_gen = 1
     _auto_fill_per_screen_snapshots_on_start(ext)
+    if n_ch > 1:
+        try:
+            _ensure_tick_pause_map_for_multi(ext, n_ch)
+        except Exception:
+            pass
 
     ep_count = 2
     initial_full_ports: List[str] = []
@@ -5035,24 +5232,23 @@ def on_sim_start_clicked(ext: Any) -> None:
             pass
         ext._sim_engine = engine
         ext._sim_engines = []
-        if not engine.start():
-            _append_sim_log(ext, "[SIM] 시작 실패")
-            return
-        # EP 타임라인 스케일(총 예상 시간)을 시작 시점에 미리 주입해,
-        # 첫 공정/첫 progress 전에 30초 폴백으로 차오르다가 스케일이 바뀌는 현상을 방지한다.
+        # start() 직전에 스케일 주입: 시작 직후 이벤트가 큐에 들어가도 30초 폴백에 고정되지 않게 한다.
         try:
-            te = float(getattr(engine, "_sim_total_est_sec", 0.0) or 0.0)
+            te0 = float(getattr(engine, "_sim_total_est_sec", 0.0) or 0.0)
         except Exception:
-            te = 0.0
-        if te > 0.0:
+            te0 = 0.0
+        if te0 > 0.0:
             try:
                 by = getattr(ext, "_sim_last_total_est_by_screen", None)
                 if not isinstance(by, dict):
                     by = {}
                     ext._sim_last_total_est_by_screen = by
-                by["1"] = float(te)
+                by["1"] = float(te0)
             except Exception:
                 pass
+        if not engine.start():
+            _append_sim_log(ext, "[SIM] 시작 실패")
+            return
     else:
         try:
             snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
@@ -5097,6 +5293,24 @@ def on_sim_start_clicked(ext: Any) -> None:
             except Exception:
                 pass
             engines.append(eng)
+
+        # 멀티: start() 전에 화면별 총 예상 시간을 넣어 두어 첫 타임라인 갱신이 30초 스케일에 묶이지 않게 한다.
+        try:
+            by_pre = getattr(ext, "_sim_last_total_est_by_screen", None)
+            if not isinstance(by_pre, dict):
+                by_pre = {}
+                ext._sim_last_total_est_by_screen = by_pre
+            for i_pre, eng_pre in enumerate(engines):
+                if eng_pre is None:
+                    continue
+                try:
+                    te_pre = float(getattr(eng_pre, "_sim_total_est_sec", 0.0) or 0.0)
+                except Exception:
+                    te_pre = 0.0
+                if te_pre > 0.0:
+                    by_pre[str(i_pre + 1)] = float(te_pre)
+        except Exception:
+            pass
 
         started: List[Any] = []
         for eng in engines:
@@ -5216,7 +5430,7 @@ def on_sim_start_clicked(ext: Any) -> None:
                 if confirm_each and gate_pause_evt is not None and gate_pause_evt.is_set():
                     time.sleep(0.02)
                     continue
-                if pause_evt is not None and pause_evt.is_set():
+                if (not _is_multi_viewport_sim(ext)) and pause_evt is not None and pause_evt.is_set():
                     # 원칙: JSON 애니메이션이 실제로 진행 중이면(sim 모듈의 활성 상태가 있으면) 절대 tick 재개하지 않는다.
                     try:
                         anim_running = bool(

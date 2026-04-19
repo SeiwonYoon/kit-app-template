@@ -423,8 +423,8 @@ class TBSSimulationEngine:
         self._all_ep_empty_sec: float = 0.0
         self._fault_prev_snapshot: frozenset = frozenset()
         self._last_report_text: str = ""
-        # 진행현황 그래프(EP 타임라인)용: ``virtual_now`` 가 변할 때마다 progress(timeline_only)를 emit
-        # (UI에서 wall-clock 보간과 섞이면 시뮬 시간과 미세하게 어긋날 수 있어, 엔진 값을 단일 소스로 둔다.)
+        # 진행현황 그래프(EP 타임라인)용: SimPy ``env.now`` 가 전진할 때만 progress(timeline_only)를 emit
+        # (virtual_now는 이벤트 사이 예산 보간용이라, 막대 축은 env.now와 맞춰 진행 패널 t(sim)과 어긋나지 않게 한다.)
         self._progress_timeline_last_emit_t: float = -999.0
 
         # 총 시뮬 예상 시간(고정 길이 막대그래프용) — 실행 전 간단 추정.
@@ -1001,22 +1001,22 @@ class TBSSimulationEngine:
             self._accumulate_sim_stats(ds)
             self._maybe_log_fault_transitions()
 
-        # 공정 사이 대기 구간에서도 EP 타임라인이 계속 증가하도록,
-        # "가상 sim time(virtual_now)" 기준으로 주기적으로 progress(payload)만 emit 한다.
+        # EP 타임라인 막대의 시각 축은 SimPy ``env.now`` 와 동일(진행현황 t(sim)과 단일 소스).
+        # (virtual_now는 내부 step 예산/스케줄용이며, UI 막대에 쓰면 대기 구간에서 시뮬 시각보다 빨리 진행된다.)
         try:
-            now_v = float(virtual_now if virtual_now is not None else (float(self.env.now) if self.env is not None else 0.0))
+            now_sim = float(self.env.now) if self.env is not None else 0.0
         except Exception:
-            now_v = 0.0
+            now_sim = 0.0
         try:
             last_emit = float(getattr(self, "_progress_timeline_last_emit_t", -999.0) or -999.0)
-            # 첫 emit(시작 직후) 또는 가상 시간이 실제로 전진한 경우에만 emit (중복 dt 누적 방지)
-            if (last_emit < -900.0) or (float(now_v) > float(last_emit) + 1e-7):
-                self._progress_timeline_last_emit_t = float(now_v)
+            # 첫 emit(시작 직후) 또는 시뮬 시각이 실제로 전진한 경우에만 emit (중복 dt 누적 방지)
+            if (last_emit < -900.0) or (float(now_sim) > float(last_emit) + 1e-7):
+                self._progress_timeline_last_emit_t = float(now_sim)
                 # label이 비어있으면 UI가 갱신을 스킵하므로, 최소 라벨을 넣는다.
                 # NOTE: sim_time은 _emit_progress가 덮어쓰지 않도록 payload에 직접 넣는다.
                 self._emit_progress(
                     {
-                        "sim_time": f"{float(now_v):.6f}",
+                        "sim_time": f"{float(now_sim):.6f}",
                         # NOTE: 진행현황 텍스트를 덮어쓰지 않고 그래프만 갱신하기 위한 전용 플래그
                         "timeline_only": "1",
                         "label": "EP 타임라인",

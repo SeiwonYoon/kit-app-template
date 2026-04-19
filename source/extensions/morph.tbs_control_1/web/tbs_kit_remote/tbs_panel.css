@@ -195,3 +195,136 @@ button:disabled {
   background: var(--border);
   margin: 12px 0;
 }
+
+/* USD 미로드 등 레거시 단일 패널일 때 포트 아래 EP 막대 (API ep_timeline) */
+.legacy-ep-timeline {
+  margin-top: 6px;
+}
+.legacy-ep-timeline:empty {
+  display: none;
+}
+
+/* 뷰포트 분할 · 멀티 모니터 · EP 막대 · 웹 공정 확인 (Kit HTTP 스냅샷과 동기) */
+.sim-columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+}
+.sim-col {
+  flex: 1 1 300px;
+  min-width: 260px;
+  max-width: 520px;
+  border: 1px solid #4a5568;
+  border-radius: 8px;
+  padding: 10px;
+  background: #171b22;
+}
+.ph-sm {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 12px;
+}
+.log-h {
+  margin: 8px 0 4px;
+  color: #888;
+  font-size: 11px;
+}
+.log-sm {
+  border: 1px solid #5a6570;
+  border-radius: 4px;
+  background: #0d0f12;
+  padding: 6px;
+  min-height: 60px;
+  max-height: 100px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: Consolas, monospace;
+  font-size: 10px;
+  color: #e8e8e8;
+}
+.ep-timeline {
+  margin: 8px 0;
+  padding: 6px 0;
+  border-top: 1px solid #333;
+  border-bottom: 1px solid #333;
+}
+.ep-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+.ep-n {
+  width: 52px;
+  font-size: 11px;
+  color: #bfc7d5;
+  flex-shrink: 0;
+}
+.ep-track {
+  display: flex;
+  flex-direction: row;
+  width: 420px;
+  height: 14px;
+  background: #1a1e26;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.ep-seg-e {
+  background: #e53935;
+  flex-shrink: 0;
+  height: 14px;
+}
+.ep-seg-f {
+  background: #2ecc71;
+  flex-shrink: 0;
+  height: 14px;
+}
+.ep-spacer {
+  min-width: 0;
+}
+.ep-a {
+  width: 48px;
+  text-align: right;
+  font-size: 11px;
+  color: #ddd;
+  flex-shrink: 0;
+}
+
+.gate-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.gate-modal {
+  background: #23262b;
+  border: 1px solid #5a6a80;
+  border-radius: 10px;
+  max-width: 640px;
+  width: 100%;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 16px;
+}
+.gate-modal h3 {
+  margin: 0 0 10px;
+  color: var(--accent);
+}
+.gate-modal pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  background: #0d0f12;
+  padding: 10px;
+  border-radius: 6px;
+  max-height: 50vh;
+  overflow: auto;
+}
+.gate-modal button {
+  margin-top: 12px;
+}

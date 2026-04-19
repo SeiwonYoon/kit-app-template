@@ -29,13 +29,14 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import omni.kit.app as app
 
-from . import load_window
+from . import load_window, sim_multi_view
 from .kit_chrome_visibility import apply_kit_chrome_hidden, is_kit_chrome_hidden
 from .control_window import (
-    SimLogPanelMode,
+    _close_sim_gate_dialog,
+    _ep_count_idx_for_port_panel,
+    _on_save_sim_settings_to_screen,
     on_copy_sim_progress,
     on_sim_ep_count_changed,
-    on_sim_log_view_changed,
     on_sim_reset_clicked,
     on_sim_start_clicked,
     on_sim_stop_clicked,
@@ -82,6 +83,208 @@ def _pump_main_queue(_e: Any) -> None:
             run()
         except Exception:
             pass
+
+
+def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
+    """포트 아래 EP 타임라인(막대) 상태 — Kit ``_update_ep_timeline_under_port_state`` rows 와 동일."""
+    st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
+    st = st_by.get(str(scr_key)) if isinstance(st_by, dict) else None
+    try:
+        si = int(str(scr_key).strip() or "1")
+    except Exception:
+        si = 1
+    ep_idx = int(_ep_count_idx_for_port_panel(ext, si))
+    eps = ["EP1", "EP2"]
+    if ep_idx != 0:
+        eps.append("EP3")
+    row_order = list(eps) + ["ALL_EP"]
+    if not isinstance(st, dict):
+        return {
+            "t_now": 0.0,
+            "total_est": 30.0,
+            "rows": {},
+            "empty_acc": {k: 0.0 for k in row_order},
+            "row_order": row_order,
+        }
+    t_last = st.get("t_last")
+    try:
+        t_now = float(t_last) if t_last is not None else 0.0
+    except Exception:
+        t_now = 0.0
+    total_est = st.get("total_est_fixed")
+    try:
+        total_est_f = float(total_est) if total_est is not None else 0.0
+    except Exception:
+        total_est_f = 0.0
+    if total_est_f <= 0.0:
+        total_est_f = max(30.0, t_now * 1.2)
+    rows_state = st.get("rows", {})
+    rows_out: Dict[str, List[Dict[str, Any]]] = {}
+    if isinstance(rows_state, dict):
+        for rk in row_order:
+            segs = rows_state.get(rk, [])
+            if not isinstance(segs, list):
+                rows_out[rk] = []
+                continue
+            rows_out[rk] = [
+                {"empty": bool(x.get("empty")), "dur": float(x.get("dur", 0.0))}
+                for x in segs
+                if isinstance(x, dict)
+            ]
+    empty_acc: Dict[str, float] = {k: 0.0 for k in row_order}
+    for ep in eps:
+        try:
+            empty_acc[ep] = sum(
+                float(s.get("dur", 0.0)) for s in rows_out.get(ep, []) if bool(s.get("empty", False))
+            )
+        except Exception:
+            empty_acc[ep] = 0.0
+    try:
+        empty_acc["ALL_EP"] = sum(
+            float(s.get("dur", 0.0)) for s in rows_out.get("ALL_EP", []) if bool(s.get("empty", False))
+        )
+    except Exception:
+        empty_acc["ALL_EP"] = 0.0
+    return {
+        "t_now": float(t_now),
+        "total_est": float(total_est_f),
+        "rows": rows_out,
+        "empty_acc": empty_acc,
+        "row_order": row_order,
+    }
+
+
+def _channel_snapshot_from_ch(ext: Any, ch: Dict[str, Any]) -> Dict[str, Any]:
+    si = int(ch.get("screen", 1) or 1)
+    sk = str(si)
+    port_header = "[포트상태]"
+    try:
+        ph = ch.get("port_header")
+        if ph is not None:
+            port_header = str(ph.text or port_header)
+    except Exception:
+        pass
+    ports: Dict[str, str] = {}
+    cells = ch.get("port_cells") or {}
+    for name in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"):
+        lbl = cells.get(name)
+        try:
+            if lbl is not None:
+                raw = (lbl.text or "").strip()
+                if ":" in raw:
+                    ports[name] = raw.split(":", 1)[-1].strip() or "-"
+                else:
+                    ports[name] = raw or "-"
+            else:
+                ports[name] = "-"
+        except Exception:
+            ports[name] = "-"
+    ep3_visible = True
+    try:
+        c = ch.get("port_ep3_cell_container")
+        if c is not None:
+            ep3_visible = bool(c.visible)
+    except Exception:
+        pass
+    bp4_visible = True
+    try:
+        c = ch.get("port_bp4_cell_container")
+        if c is not None:
+            bp4_visible = bool(c.visible)
+    except Exception:
+        pass
+    progress = ""
+    try:
+        pl = ch.get("progress_label")
+        if pl is not None:
+            progress = str(pl.text or "")
+    except Exception:
+        pass
+    history = ""
+    try:
+        hl = ch.get("history_label")
+        if hl is not None:
+            history = str(hl.text or "")
+    except Exception:
+        pass
+    return {
+        "screen": si,
+        "port_header": port_header,
+        "ports": ports,
+        "ep3_visible": ep3_visible,
+        "bp4_visible": bp4_visible,
+        "progress": progress,
+        "history": history,
+        "ep_timeline": _serialize_ep_timeline_for_screen(ext, sk),
+    }
+
+
+def _apply_per_screen_snapshot(ext: Any, snap: Dict[str, Any]) -> None:
+    """멀티 화면 스냅샷 dict → 제어창 모델(``_apply_web_fields`` 키 규격)."""
+    if not isinstance(snap, dict) or not snap:
+        return
+    try:
+        ep_idx = int(snap.get("ep_count_idx", 0) or 0)
+    except Exception:
+        ep_idx = 0
+    try:
+        lc = max(1, int(snap.get("lot_count", 6) or 6))
+    except Exception:
+        lc = 6
+    try:
+        smin = max(0.1, float(snap.get("spawn_min", 15.0)))
+        smax = max(0.1, float(snap.get("spawn_max", 40.0)))
+    except Exception:
+        smin, smax = 15.0, 40.0
+    if smin > smax:
+        smin, smax = smax, smin
+    try:
+        pmin = max(0.1, float(snap.get("pue_min", 50.0)))
+        pmax = max(0.1, float(snap.get("pue_max", 70.0)))
+    except Exception:
+        pmin, pmax = 50.0, 70.0
+    if pmin > pmax:
+        pmin, pmax = pmax, pmin
+
+    def _g(key: str, default: float = 5.0) -> float:
+        try:
+            return max(0.1, float(snap.get(key, default)))
+        except Exception:
+            return default
+
+    f: Dict[str, Any] = {
+        "lot_count": lc,
+        "ep_count_index": ep_idx,
+        "lot_spawn_min": smin,
+        "lot_spawn_max": smax,
+        "pickup_min": pmin,
+        "pickup_max": pmax,
+        "oht_min": _g("oht_bp1_min"),
+        "oht_max": _g("oht_bp1_max"),
+        "bp1_bp_min": _g("bp1_bp_min"),
+        "bp1_bp_max": _g("bp1_bp_max"),
+        "bp_ep_min": _g("bp_ep_min"),
+        "bp_ep_max": _g("bp_ep_max"),
+        "ep_oht_min": _g("ep_oht_min"),
+        "ep_oht_max": _g("ep_oht_max"),
+        "init_inout": bool(snap.get("init_inout")),
+        "init_bp1": bool(snap.get("init_bp1")),
+        "init_bp2": bool(snap.get("init_bp2")),
+        "init_bp3": bool(snap.get("init_bp3")),
+        "init_bp4": bool(snap.get("init_bp4")),
+        "init_ep1": bool(snap.get("init_ep1")),
+        "init_ep2": bool(snap.get("init_ep2")),
+        "init_ep3": bool(snap.get("init_ep3")),
+        "fault_inout": bool(snap.get("fault_inout")),
+        "fault_bp1": bool(snap.get("fault_bp1")),
+        "fault_bp2": bool(snap.get("fault_bp2")),
+        "fault_bp3": bool(snap.get("fault_bp3")),
+        "fault_bp4": bool(snap.get("fault_bp4")),
+        "fault_ep1": bool(snap.get("fault_ep1")),
+        "fault_ep2": bool(snap.get("fault_ep2")),
+        "fault_ep3": bool(snap.get("fault_ep3")),
+    }
+    _apply_web_fields(ext, f)
 
 
 def _snapshot(ext: Any) -> Dict[str, Any]:
@@ -156,6 +359,58 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
     except Exception:
         pass
 
+    try:
+        n_split = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
+    except Exception:
+        n_split = 1
+    split_row_visible = False
+    try:
+        row = getattr(ext, "_sim_multi_split_row", None)
+        if row is not None:
+            split_row_visible = bool(row.visible)
+    except Exception:
+        pass
+
+    # 화면1 EP 막대(포트 점유 타임라인): USD 미로드·단일 모니터여도 시뮬 중 웹이 그릴 수 있게 항상 내려준다.
+    ep_timeline_root = _serialize_ep_timeline_for_screen(ext, "1")
+
+    # 멀티 모니터 스냅샷은 USD 로드 후 분할 행이 켜진 경우에만 내려준다(웹이 레거시 패널과 이중 표시되지 않도록).
+    channels: List[Dict[str, Any]] = []
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if split_row_visible:
+        if isinstance(chans, list) and chans:
+            for ch in chans:
+                if isinstance(ch, dict):
+                    channels.append(_channel_snapshot_from_ch(ext, ch))
+        else:
+            channels.append(
+                {
+                    "screen": 1,
+                    "port_header": port_header,
+                    "ports": dict(ports),
+                    "ep3_visible": ep3_visible,
+                    "bp4_visible": bp4_visible,
+                    "progress": progress,
+                    "history": history,
+                    "ep_timeline": ep_timeline_root,
+                }
+            )
+
+    snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
+    while len(snaps) < 4:
+        snaps.append(None)
+    snaps = snaps[:4]
+    per_screen_snapshots: List[Optional[Dict[str, Any]]] = []
+    for s in snaps:
+        if isinstance(s, dict):
+            per_screen_snapshots.append(dict(s))
+        else:
+            per_screen_snapshots.append(None)
+
+    gate_pending = getattr(ext, "_sim_web_gate_pending", None)
+    if not isinstance(gate_pending, dict):
+        gate_pending = None
+
     return {
         "usd_status": usd_status,
         "sim_line": sim_line,
@@ -167,6 +422,12 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
         "bp4_visible": bp4_visible,
         "kit_app": kit_app,
         "kit_chrome_hidden": is_kit_chrome_hidden(ext),
+        "viewport_split_count": int(n_split),
+        "sim_multi_split_row_visible": bool(split_row_visible),
+        "channels": channels,
+        "ep_timeline": ep_timeline_root,
+        "per_screen_snapshots": per_screen_snapshots,
+        "gate_pending": gate_pending,
     }
 
 
@@ -435,6 +696,38 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
                     m.set_value_as_bool(hidden)
         except Exception:
             pass
+        return {"ok": True}
+
+    if cmd == "sim_viewport_split":
+        try:
+            n = int(data.get("count", data.get("split_n", 1)) or 1)
+        except Exception:
+            n = 1
+        n = max(1, min(4, n))
+        sim_multi_view.apply_sim_viewport_split_layout(ext, n)
+        return {"ok": True, "count": n}
+
+    if cmd == "save_sim_screen":
+        try:
+            si = int(data.get("screen", 1) or 1)
+        except Exception:
+            si = 1
+        _on_save_sim_settings_to_screen(ext, si)
+        return {"ok": True, "screen": si}
+
+    if cmd == "apply_per_screen_snapshot":
+        snap = data.get("snapshot")
+        if isinstance(snap, dict):
+            _apply_per_screen_snapshot(ext, snap)
+            try:
+                on_sim_ep_count_changed(ext)
+            except Exception:
+                pass
+        return {"ok": True}
+
+    if cmd == "gate_confirm":
+        done = getattr(ext, "_sim_web_gate_done_event", None)
+        _close_sim_gate_dialog(ext, done)
         return {"ok": True}
 
     if cmd == "ui_windows":

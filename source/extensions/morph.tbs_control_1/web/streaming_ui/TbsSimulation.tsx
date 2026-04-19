@@ -9,6 +9,8 @@
  *   GET  /api/state
  *   GET  /api/resources
  *   POST /api/command  { cmd, ... }  — kit_chrome_hide: { hidden: boolean }
+ *   추가 cmd: sim_viewport_split { count:1-4 }, save_sim_screen { screen:1-4 },
+ *   apply_per_screen_snapshot { snapshot:{...} }, gate_confirm {}
  *
  * Vite(5173) + Kit 브리지(8720) 동시 사용:
  *   1) vite.config.ts 에서 /api 를 http://127.0.0.1:8720 으로 프록시 (vite.config.snippet.txt 참고)
@@ -94,6 +96,29 @@ export type WebFields = {
   resource_index: number;
 };
 
+export type EpSeg = { empty: boolean; dur: number };
+
+export type EpTimelineSnap = {
+  t_now: number;
+  total_est: number;
+  rows: Record<string, EpSeg[]>;
+  empty_acc: Record<string, number>;
+  row_order: string[];
+};
+
+export type ChannelSnap = {
+  screen: number;
+  port_header: string;
+  ports: Partial<Record<string, string>>;
+  ep3_visible?: boolean;
+  bp4_visible?: boolean;
+  progress: string;
+  history: string;
+  ep_timeline: EpTimelineSnap;
+};
+
+export type PerScreenSnap = Record<string, unknown> | null;
+
 type ApiState = {
   usd_status?: string;
   sim_line?: string;
@@ -106,6 +131,19 @@ type ApiState = {
   kit_app?: string;
   /** Kit 기본 메뉴·패널 숨김 (제어창「화면」체크박스와 동기) */
   kit_chrome_hidden?: boolean;
+  viewport_split_count?: number;
+  sim_multi_split_row_visible?: boolean;
+  channels?: ChannelSnap[];
+  /** 화면1 EP 막대 — channels 가 비어도(USD 미로드 등) 시뮬 중 웹 표시용 */
+  ep_timeline?: EpTimelineSnap;
+  per_screen_snapshots?: PerScreenSnap[];
+  gate_pending?: {
+    title?: string;
+    message?: string;
+    gate_seq_raw?: string;
+    gate_seq_canonical?: string;
+    gate_xml_sequence_name?: string;
+  } | null;
 };
 
 type ResourceItem = { name?: string; path?: string };
@@ -188,6 +226,194 @@ function portCellClass(v: string): string {
   if (u === "FULL") extra = ` ${styles.portCellFull}`;
   else if (v && v !== "-" && u !== "EMPTY") extra = ` ${styles.portCellLot}`;
   return `${styles.portCell}${extra}`;
+}
+
+const PORT_ORDER_CH = ["BP1", "BP2", "BP3", "BP4", "INOUT", "EP1", "EP2", "EP3"] as const;
+
+function perScreenSnapToWebFields(s: Record<string, unknown>): WebFields {
+  const g = (k: string, d: number) => {
+    const v = s[k];
+    return typeof v === "number" && !Number.isNaN(v) ? v : d;
+  };
+  const gb = (k: string) => Boolean(s[k]);
+  const gi = (k: string, d: number) => {
+    const v = s[k];
+    return typeof v === "number" ? Math.trunc(v) : d;
+  };
+  const epi = gi("ep_count_idx", 0);
+  return {
+    lot_count: Math.max(1, gi("lot_count", 6)),
+    ep_count_index: epi >= 1 ? 1 : 0,
+    lot_spawn_min: g("spawn_min", 15),
+    lot_spawn_max: g("spawn_max", 40),
+    pickup_min: g("pue_min", 50),
+    pickup_max: g("pue_max", 70),
+    speed: 1,
+    log_interval: 0,
+    confirm_each: false,
+    process_time_priority: false,
+    init_inout: gb("init_inout"),
+    init_bp1: gb("init_bp1"),
+    init_bp2: gb("init_bp2"),
+    init_bp3: gb("init_bp3"),
+    init_bp4: gb("init_bp4"),
+    init_ep1: gb("init_ep1"),
+    init_ep2: gb("init_ep2"),
+    init_ep3: gb("init_ep3"),
+    fault_inout: gb("fault_inout"),
+    fault_bp1: gb("fault_bp1"),
+    fault_bp2: gb("fault_bp2"),
+    fault_bp3: gb("fault_bp3"),
+    fault_bp4: gb("fault_bp4"),
+    fault_ep1: gb("fault_ep1"),
+    fault_ep2: gb("fault_ep2"),
+    fault_ep3: gb("fault_ep3"),
+    oht_min: g("oht_bp1_min", 5),
+    oht_max: g("oht_bp1_max", 10),
+    bp1_bp_min: g("bp1_bp_min", 5),
+    bp1_bp_max: g("bp1_bp_max", 10),
+    bp_ep_min: g("bp_ep_min", 5),
+    bp_ep_max: g("bp_ep_max", 10),
+    ep_oht_min: g("ep_oht_min", 5),
+    ep_oht_max: g("ep_oht_max", 10),
+    priority_prefix: "",
+    xml_seq_index: 0,
+    xml_from: 1,
+    xml_to: 6,
+    xml_port_id: 1,
+    usd_path: "",
+    resource_index: 0,
+  };
+}
+
+/** Kit 스냅샷 empty 플래그 — 문자열 "false" 가 truthy 로 남는 경우 방지 */
+function epSegIsEmpty(s: { empty?: unknown }): boolean {
+  const v = s.empty;
+  if (v === true || v === 1) return true;
+  if (v === false || v === 0 || v === null || v === undefined) return false;
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    return t === "true" || t === "1" || t === "yes";
+  }
+  return false;
+}
+
+function mergeSnapIntoWebForm(prev: WebFields, s: Record<string, unknown>): WebFields {
+  const m = perScreenSnapToWebFields(s);
+  return {
+    ...m,
+    speed: prev.speed,
+    log_interval: prev.log_interval,
+    confirm_each: prev.confirm_each,
+    process_time_priority: prev.process_time_priority,
+    priority_prefix: prev.priority_prefix,
+    xml_seq_index: prev.xml_seq_index,
+    xml_from: prev.xml_from,
+    xml_to: prev.xml_to,
+    xml_port_id: prev.xml_port_id,
+    usd_path: prev.usd_path,
+    resource_index: prev.resource_index,
+  };
+}
+
+function EpTimelinePanel({ tl }: { tl: EpTimelineSnap }) {
+  const BAR_W = 420;
+  const BAR_H = 14;
+  const NAME_W = 64;
+  const total = Math.max(0.01, Number(tl.total_est) || 30);
+  const tickStep = Math.max(10, Math.floor((total / 8 + 9.999) / 10) * 10);
+  const nTicks = Math.max(1, Math.floor(total / tickStep));
+  const tickLabels: number[] = [];
+  for (let i = 0; i <= nTicks; i++) tickLabels.push(Math.round(i * tickStep));
+  const rowOrder = Array.isArray(tl.row_order) && tl.row_order.length ? tl.row_order : ["EP1", "EP2", "ALL_EP"];
+
+  const renderBar = (rowKey: string) => {
+    const segs = (tl.rows && tl.rows[rowKey]) || [];
+    let used = 0;
+    const parts: React.ReactNode[] = [];
+    for (let idx = 0; idx < segs.length; idx++) {
+      const s = segs[idx];
+      const dur = Number(s.dur) || 0;
+      if (dur <= 1e-9) continue;
+      let w = Math.round((dur / total) * BAR_W);
+      w = Math.max(1, w);
+      if (used + w > BAR_W) w = Math.max(1, BAR_W - used);
+      used += w;
+      parts.push(
+        <div
+          key={`${rowKey}-${idx}`}
+          className={epSegIsEmpty(s) ? styles.epSegEmpty : styles.epSegFull}
+          style={{ width: w, minWidth: 1, height: BAR_H }}
+        />,
+      );
+      if (used >= BAR_W) break;
+    }
+    if (used < BAR_W) {
+      parts.push(<div key={`${rowKey}-sp`} className={styles.epSegSpacer} style={{ width: BAR_W - used }} />);
+    }
+    const acc = tl.empty_acc && typeof tl.empty_acc[rowKey] === "number" ? tl.empty_acc[rowKey] : 0;
+    return (
+      <div className={styles.epRow} key={rowKey}>
+        <div className={styles.epName} style={{ width: NAME_W }}>
+          {rowKey}
+        </div>
+        <div className={styles.epBarOuter} style={{ width: BAR_W, height: BAR_H }}>
+          <div className={styles.epBarTrack}>{parts}</div>
+        </div>
+        <div className={styles.epAcc}>{acc.toFixed(1)}s</div>
+      </div>
+    );
+  };
+
+  return (
+    <div className={styles.epTimeline}>
+      <div className={styles.epTickRow}>
+        <div style={{ width: NAME_W }} />
+        <div className={styles.epTicks} style={{ width: BAR_W }}>
+          {tickLabels.map((t, i) => (
+            <span key={i} className={styles.epTickLbl} style={{ flex: 1 }}>
+              {t}
+            </span>
+          ))}
+        </div>
+      </div>
+      {rowOrder.map((r) => renderBar(r))}
+    </div>
+  );
+}
+
+function SimMonitorColumn({ ch, styles: st }: { ch: ChannelSnap; styles: typeof styles }) {
+  const ep3 = ch.ep3_visible !== false;
+  const bp4 = ch.bp4_visible !== false;
+  const cells = PORT_ORDER_CH.map((name) => {
+    const raw = ch.ports && ch.ports[name] != null ? String(ch.ports[name]) : "-";
+    const prefix = name === "INOUT" ? "IN/OUT" : name;
+    return (
+      <div key={name} className={portCellClass(raw)}>
+        {prefix}:{raw}
+      </div>
+    );
+  });
+  return (
+    <div className={st.simColumn}>
+      <p className={st.portHeaderSm}>{ch.port_header || `[포트·화면${ch.screen}]`}</p>
+      <div className={st.portGrid}>
+        <div className={st.portRow}>
+          {cells.slice(0, 3)}
+          <div className={bp4 ? undefined : st.hidden}>{cells[3]}</div>
+        </div>
+        <div className={st.portRow}>
+          {cells.slice(4, 7)}
+          <div className={ep3 ? undefined : st.hidden}>{cells[7]}</div>
+        </div>
+      </div>
+      {ch.ep_timeline ? <EpTimelinePanel tl={ch.ep_timeline} /> : null}
+      <p className={st.logTitle}>진행현황·화면{ch.screen}</p>
+      <div className={st.logPanelSm}>{ch.progress || ""}</div>
+      <p className={st.logTitle}>이력·화면{ch.screen}</p>
+      <div className={st.logPanelSm}>{ch.history || ""}</div>
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +553,19 @@ export default function TbsSimulation() {
   const showProgress = true;
   const showHistory = true;
 
+  const splitN = Math.max(1, Math.min(4, Number(snapshot.viewport_split_count) || 1));
+  const channels = useMemo((): ChannelSnap[] | null => {
+    const ch = snapshot.channels;
+    if (Array.isArray(ch) && ch.length > 0) return ch as ChannelSnap[];
+    return null;
+  }, [snapshot.channels]);
+  const snapSlots = useMemo(() => {
+    const a = snapshot.per_screen_snapshots;
+    if (Array.isArray(a) && a.length >= 4) return a.slice(0, 4) as PerScreenSnap[];
+    return [null, null, null, null] as PerScreenSnap[];
+  }, [snapshot.per_screen_snapshots]);
+  const hideLegacyProgressHistory = Boolean(channels && channels.length > 0);
+
   const ep3Port = snapshot.ep3_visible !== false;
   const bp4Port = snapshot.bp4_visible !== false;
   const ep3Enabled = form.ep_count_index !== 0;
@@ -350,6 +589,23 @@ export default function TbsSimulation() {
 
   return (
     <div className={styles.wrap}>
+      {snapshot.gate_pending ? (
+        <div className={styles.gateOverlay}>
+          <div className={styles.gateModal}>
+            <h3 className={styles.gateTitle}>{snapshot.gate_pending.title || "공정 확인"}</h3>
+            <pre className={styles.gatePre}>{snapshot.gate_pending.message || ""}</pre>
+            <button
+              type="button"
+              className={styles.gateOk}
+              disabled={busy}
+              onClick={() => runCmd(() => apiCommand({ cmd: "gate_confirm" }))}
+            >
+              확인
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className={`${styles.banner} ${banner.ok ? styles.bannerOk : styles.bannerWarn}`}>{banner.msg}</div>
 
       <section className={styles.section}>
@@ -382,6 +638,78 @@ export default function TbsSimulation() {
             }
           />
         </div>
+      </section>
+
+      <section className={styles.section}>
+        <h2>시뮼 뷰포트 분할 (Kit 제어창과 동일)</h2>
+        {snapshot.sim_multi_split_row_visible === true ? (
+          <>
+            <div className={styles.splitRow}>
+              {[1, 2, 3, 4].map((n) => (
+                <label key={n} className={styles.splitLbl}>
+                  <input
+                    type="radio"
+                    name="tbs_split"
+                    checked={splitN === n}
+                    disabled={busy}
+                    onChange={() =>
+                      runCmd(() =>
+                        apiCommand({
+                          cmd: "sim_viewport_split",
+                          count: n,
+                        }),
+                      )
+                    }
+                  />
+                  {n}화면
+                </label>
+              ))}
+            </div>
+            <div className={styles.row}>
+              {[1, 2, 3, 4]
+                .filter((n) => n <= splitN)
+                .map((n) => (
+                  <button
+                    key={`save-sc-${n}`}
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      runCmd(async () => {
+                        await apiCommand({ cmd: "apply_fields", fields: collectFields() });
+                        await apiCommand({ cmd: "save_sim_screen", screen: n });
+                      })
+                    }
+                  >
+                    화면{n}에 설정 저장
+                  </button>
+                ))}
+            </div>
+            <div className={styles.row}>
+              {[1, 2, 3, 4].map((n) => {
+                const slot = snapSlots[n - 1];
+                if (!slot || typeof slot !== "object") return null;
+                return (
+                  <button
+                    key={`load-sc-${n}`}
+                    type="button"
+                    disabled={busy}
+                    onClick={() =>
+                      runCmd(async () => {
+                        const sn = slot as Record<string, unknown>;
+                        setForm((prev) => mergeSnapIntoWebForm(prev, sn));
+                        await apiCommand({ cmd: "apply_per_screen_snapshot", snapshot: sn });
+                      })
+                    }
+                  >
+                    화면{n} 불러오기
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <p className={styles.hint}>USD 스테이지를 로드하면 분할·화면별 설정 저장/불러오기가 표시됩니다.</p>
+        )}
       </section>
 
       <section className={styles.section}>
@@ -739,29 +1067,39 @@ export default function TbsSimulation() {
           </button>
         </div>
 
-        <div id="tbs_panelPort">
-          <p className={styles.portHeader}>{snapshot.port_header || "[포트상태]"}</p>
-          <div className={styles.portGrid}>
-            <div className={styles.portRow}>
-              {portCells.slice(0, 3)}
-              <div className={bp4Port ? undefined : styles.hidden}>{portCells[3]}</div>
-            </div>
-            <div className={styles.portRow}>
-              {portCells.slice(4, 7)}
-              <div className={ep3Port ? undefined : styles.hidden}>{portCells[7]}</div>
-            </div>
+        {channels && channels.length > 0 ? (
+          <div className={styles.simColumns}>
+            {channels.map((c) => (
+              <SimMonitorColumn key={c.screen} ch={c} styles={styles} />
+            ))}
           </div>
-        </div>
+        ) : (
+          <>
+            <div id="tbs_panelPort">
+              <p className={styles.portHeader}>{snapshot.port_header || "[포트상태]"}</p>
+              <div className={styles.portGrid}>
+                <div className={styles.portRow}>
+                  {portCells.slice(0, 3)}
+                  <div className={bp4Port ? undefined : styles.hidden}>{portCells[3]}</div>
+                </div>
+                <div className={styles.portRow}>
+                  {portCells.slice(4, 7)}
+                  <div className={ep3Port ? undefined : styles.hidden}>{portCells[7]}</div>
+                </div>
+              </div>
+            </div>
+            {snapshot.ep_timeline ? <EpTimelinePanel tl={snapshot.ep_timeline} /> : null}
+          </>
+        )}
 
-        <div className={showProgress ? "" : styles.hidden}>
+        <div className={showProgress && !hideLegacyProgressHistory ? "" : styles.hidden}>
           <p className={styles.logTitle}>진행현황</p>
           <div className={styles.logPanel}>{snapshot.progress || ""}</div>
         </div>
-        <div className={showHistory ? "" : styles.hidden}>
+        <div className={showHistory && !hideLegacyProgressHistory ? "" : styles.hidden}>
           <p className={styles.logTitle}>이력로그</p>
           <div className={styles.logPanel}>{snapshot.history || ""}</div>
         </div>
-        <div className={styles.statusLine}>{snapshot.sim_line || ""}</div>
       </section>
     </div>
   );

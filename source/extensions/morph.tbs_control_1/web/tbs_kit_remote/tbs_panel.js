@@ -121,6 +121,7 @@
       speed: gf("f_speed"),
       log_interval: gf("f_log_interval"),
       confirm_each: gb("f_confirm_each"),
+      process_time_priority: gb("f_process_time_priority"),
       init_bp1: gb("f_init_bp1"),
       init_bp2: gb("f_init_bp2"),
       init_bp3: gb("f_init_bp3"),
@@ -196,6 +197,159 @@
    *   - port_header, ports, ep3_visible ← 포트 상태 패널(_sim_port_cells 등)
    * 시뮬 본체(simulation_engine)는 직접 읽지 않고, 이미 Kit omni.ui 에 반영된 텍스트를 복사한다.
    */
+  /** EMPTY(비어 있음)=빨강, 점유(차 있음)=녹색. 문자열 "false" 등 truthy 오인 방지. */
+  function epSegIsEmpty(sg) {
+    if (!sg || typeof sg !== "object") return false;
+    const v = sg.empty;
+    if (v === true || v === 1) return true;
+    if (v === false || v === 0 || v === null || v === undefined) return false;
+    if (typeof v === "string") {
+      const t = v.trim().toLowerCase();
+      return t === "true" || t === "1" || t === "yes";
+    }
+    return false;
+  }
+
+  function renderEpBarHtml(tl) {
+    if (!tl || !tl.row_order) return "";
+    const total = Math.max(0.01, parseFloat(tl.total_est) || 30);
+    const BAR_W = 420;
+    const cEmpty = "#e53935";
+    const cFull = "#2ecc71";
+    let html = '<div class="ep-timeline">';
+    for (const row of tl.row_order) {
+      const segs = (tl.rows && tl.rows[row]) || [];
+      let used = 0;
+      let bar = '<div class="ep-track">';
+      for (let i = 0; i < segs.length; i++) {
+        const sg = segs[i];
+        const dur = parseFloat(sg.dur) || 0;
+        if (dur <= 1e-9) continue;
+        let w = Math.round((dur / total) * BAR_W);
+        w = Math.max(1, w);
+        if (used + w > BAR_W) w = Math.max(1, BAR_W - used);
+        used += w;
+        const empty = epSegIsEmpty(sg);
+        const cls = empty ? "ep-seg-e" : "ep-seg-f";
+        const bg = empty ? cEmpty : cFull;
+        bar += '<div class="' + cls + '" style="width:' + w + "px;background-color:" + bg + '"></div>';
+        if (used >= BAR_W) break;
+      }
+      if (used < BAR_W) bar += '<div class="ep-spacer" style="flex:1"></div>';
+      bar += "</div>";
+      const acc = (tl.empty_acc && tl.empty_acc[row]) || 0;
+      html +=
+        '<div class="ep-row"><span class="ep-n">' +
+        row +
+        '</span>' +
+        bar +
+        '<span class="ep-a">' +
+        acc.toFixed(1) +
+        "s</span></div>";
+    }
+    html += "</div>";
+    return html;
+  }
+
+  function renderMultiSimHost(s) {
+    const host = $("multiSimHost");
+    if (!host) return;
+    const chans = s.channels || [];
+    if (!chans.length) {
+      host.classList.add("hidden");
+      host.innerHTML = "";
+      return;
+    }
+    host.classList.remove("hidden");
+    let html = '<div class="sim-columns">';
+    for (const ch of chans) {
+      const ports = ch.ports || {};
+      const names = ["BP1", "BP2", "BP3", "BP4", "INOUT", "EP1", "EP2", "EP3"];
+      const cells = [];
+      for (const p of names) {
+        const v = ports[p] != null ? String(ports[p]) : "-";
+        const label = p === "INOUT" ? "IN/OUT" : p;
+        const u = v.toUpperCase();
+        let cls = "port-cell";
+        if (u === "FULL") cls += " full";
+        else if (v && v !== "-" && u !== "EMPTY") cls += " lot";
+        if (p === "BP4" && ch.bp4_visible === false) cls += " hidden";
+        if (p === "EP3" && ch.ep3_visible === false) cls += " hidden";
+        cells.push('<div class="' + cls + '">' + label + ":" + v + "</div>");
+      }
+      const row1 = cells.slice(0, 4).join("");
+      const row2 = cells.slice(4, 8).join("");
+      html +=
+        '<div class="sim-col"><p class="ph-sm">' +
+        (ch.port_header || "") +
+        '</p><div class="port-grid"><div class="port-row">' +
+        row1 +
+        '</div><div class="port-row">' +
+        row2 +
+        "</div></div>" +
+        renderEpBarHtml(ch.ep_timeline) +
+        '<p class="log-h">진행·화면' +
+        ch.screen +
+        '</p><div class="log-sm">' +
+        (ch.progress || "").replace(/</g, "&lt;") +
+        '</div><p class="log-h">이력·화면' +
+        ch.screen +
+        '</p><div class="log-sm">' +
+        (ch.history || "").replace(/</g, "&lt;") +
+        "</div></div>";
+    }
+    html += "</div>";
+    host.innerHTML = html;
+  }
+
+  function syncSplitRadios(splitN) {
+    const host = $("splitRadios");
+    if (!host) return;
+    const radios = host.querySelectorAll('input[type="radio"]');
+    radios.forEach((r) => {
+      r.checked = parseInt(r.value, 10) === splitN;
+    });
+  }
+
+  function buildScreenSaveLoadRows(splitN, snaps) {
+    const sr = $("screenSaveRow");
+    const lr = $("screenLoadRow");
+    if (!sr || !lr) return;
+    sr.innerHTML = "";
+    lr.innerHTML = "";
+    const n = Math.max(1, Math.min(4, parseInt(splitN, 10) || 1));
+    for (let i = 1; i <= n; i++) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "화면" + i + "에 설정 저장";
+      b.addEventListener("click", async () => {
+        try {
+          await apiCommand({ cmd: "apply_fields", fields: collectFields() });
+          await apiCommand({ cmd: "save_sim_screen", screen: i });
+        } catch (e) {
+          alert(e.message);
+        }
+      });
+      sr.appendChild(b);
+    }
+    const sa = Array.isArray(snaps) ? snaps : [];
+    for (let i = 1; i <= 4; i++) {
+      const slot = sa[i - 1];
+      if (!slot || typeof slot !== "object") continue;
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = "화면" + i + " 불러오기";
+      b.addEventListener("click", async () => {
+        try {
+          await apiCommand({ cmd: "apply_per_screen_snapshot", snapshot: slot });
+        } catch (e) {
+          alert(e.message);
+        }
+      });
+      lr.appendChild(b);
+    }
+  }
+
   async function pollState() {
     try {
       const r = await fetch(apiUrl("/api/state"));
@@ -207,12 +361,53 @@
 
       // USD Load 창과 동일 의미의 상태 문자열
       $("usdStatus").textContent = s.usd_status || "";
-      // 제어창 이력 라벨과 동일 소스에서 온 한 덩어리 텍스트
-      $("simLine").textContent = s.sim_line || "";
+      // sim_line 은 Kit 스냅샷에서 이력과 동일 소스 → 이력로그 아래 중복 표시는 하지 않음(#simLine 은 HTML에서 hidden).
       // 진행현황 / 이력로그 스크롤 영역 (표시모드에 따라 Kit에서도 숨김 처리되지만 웹은 별도 토글)
       $("logProgress").textContent = s.progress || "";
       $("logHistory").textContent = s.history || "";
       $("portHeader").textContent = s.port_header || "[포트상태]";
+
+      const splitN = Math.max(1, Math.min(4, parseInt(String(s.viewport_split_count ?? "1"), 10) || 1));
+      syncSplitRadios(splitN);
+      buildScreenSaveLoadRows(splitN, s.per_screen_snapshots);
+      const splitOk = s.sim_multi_split_row_visible === true;
+      const secSplit = $("secViewportSplit");
+      if (secSplit) secSplit.classList.toggle("hidden", !splitOk);
+
+      const go = $("gateOverlay");
+      if (go && s.gate_pending && (s.gate_pending.message || s.gate_pending.title)) {
+        go.classList.remove("hidden");
+        const gt = $("gateTitle");
+        const gm = $("gateMsg");
+        if (gt) gt.textContent = s.gate_pending.title || "공정 확인";
+        if (gm) gm.textContent = s.gate_pending.message || "";
+      } else if (go) {
+        go.classList.add("hidden");
+      }
+
+      // 멀티 컬럼 분기보다 먼저: 레거시 패널 hidden 을 풀어 둔 뒤, useMulti 이면 다시 숨긴다.
+      applyLogModeVisibility(0);
+
+      const chans = Array.isArray(s.channels) ? s.channels : [];
+      const useMulti = splitOk && chans.length > 0;
+      if (useMulti) {
+        renderMultiSimHost(s);
+        $("panelPort")?.classList.add("hidden");
+        $("panelProgress")?.classList.add("hidden");
+        $("panelHistory")?.classList.add("hidden");
+      } else {
+        $("multiSimHost")?.classList.add("hidden");
+        if ($("multiSimHost")) $("multiSimHost").innerHTML = "";
+        $("panelPort")?.classList.remove("hidden");
+        $("panelProgress")?.classList.remove("hidden");
+        $("panelHistory")?.classList.remove("hidden");
+      }
+
+      const legEp = $("legacyEpTimeline");
+      if (legEp) {
+        if (useMulti) legEp.innerHTML = "";
+        else legEp.innerHTML = renderEpBarHtml(s.ep_timeline || null);
+      }
 
       // 포트 그리드: Kit 의 BP1/EP1… 라벨 텍스트와 동일한 occ 정보를 칸별로 표시
       const ports = s.ports || {};
@@ -238,9 +433,6 @@
       if (ep3c) {
         ep3c.classList.toggle("hidden", !(s.ep3_visible !== false));
       }
-
-      // 표시모드 제거: 항상 둘다
-      applyLogModeVisibility(0);
     } catch (e) {
       setBanner(
         "Kit 브리지에 연결할 수 없습니다. Kit가 실행 중인지, TBS_REMOTE_UI=0 등으로 브리지가 꺼지지 않았는지 확인하세요. (" + e.message + ")",
@@ -258,8 +450,8 @@
    * 사용자 경험을 맞춘다. (데이터는 pollState 가 계속 채우지만 보이는 영역만 제한.)
    */
   function applyLogModeVisibility(mode) {
-    const prog = $("panelProgress")?.parentElement;
-    const hist = $("panelHistory")?.parentElement;
+    const prog = $("panelProgress");
+    const hist = $("panelHistory");
     if (!prog || !hist) return;
     prog.classList.remove("hidden");
     hist.classList.remove("hidden");
@@ -356,7 +548,42 @@
    * - 샘플 USD 목록 로드
    * - 폴링 타이머 시작
    */
+  function buildSplitRadiosOnce() {
+    const host = $("splitRadios");
+    if (!host || host.dataset.wired) return;
+    host.dataset.wired = "1";
+    for (let n = 1; n <= 4; n++) {
+      const lab = document.createElement("label");
+      lab.style.marginRight = "14px";
+      const r = document.createElement("input");
+      r.type = "radio";
+      r.name = "tbs_split_web";
+      r.value = String(n);
+      const nn = n;
+      r.addEventListener("change", async () => {
+        if (!r.checked) return;
+        try {
+          await apiCommand({ cmd: "sim_viewport_split", count: nn });
+        } catch (e) {
+          alert(e.message);
+        }
+      });
+      lab.appendChild(r);
+      lab.appendChild(document.createTextNode(" " + n + "화면"));
+      host.appendChild(lab);
+    }
+  }
+
   async function init() {
+    buildSplitRadiosOnce();
+    $("gateOkBtn")?.addEventListener("click", async () => {
+      try {
+        await apiCommand({ cmd: "gate_confirm" });
+      } catch (e) {
+        alert(e.message);
+      }
+    });
+
     // EP 개수 변경 → EP3 초기적재 행 (control_window on_sim_ep_count_changed 와 대응)
     $("f_ep_count")?.addEventListener("change", syncEp3InitRow);
     syncEp3InitRow();

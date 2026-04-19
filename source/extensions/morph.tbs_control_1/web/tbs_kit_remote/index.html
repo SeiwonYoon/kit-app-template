@@ -117,6 +117,7 @@
           <label>로그주기(s)</label>
           <input type="number" id="f_log_interval" value="0" step="0.1" />
           <label><input type="checkbox" id="f_confirm_each" /> 각 공정 확인</label>
+          <label><input type="checkbox" id="f_process_time_priority" /> 공정설정 시간 우선</label>
         </div>
         <div class="toolbar">
           <button type="button" id="btnSimStart">시작</button>
@@ -126,6 +127,14 @@
         <div class="row">
           <button type="button" id="btnCopyProgress">진행현황+Sim로그 복사</button>
         </div>
+
+        <section id="secViewportSplit">
+          <h2>시뮼 뷰포트 분할 (Kit 동일)</h2>
+          <div class="row" id="splitRadios"></div>
+          <div class="row" id="screenSaveRow"></div>
+          <div class="row" id="screenLoadRow"></div>
+        </section>
+        <div id="multiSimHost" class="hidden"></div>
 
         <div id="panelPort">
           <p id="portHeader" style="margin: 10px 0 6px; color: #bfe7ff; font-size: 13px">[포트상태]</p>
@@ -145,6 +154,8 @@
           </div>
         </div>
 
+        <div id="legacyEpTimeline" class="legacy-ep-timeline"></div>
+
         <div id="panelProgress">
           <p style="margin: 10px 0 4px; color: #888; font-size: 12px">진행현황</p>
           <div class="log-panel" id="logProgress"></div>
@@ -153,7 +164,8 @@
           <p style="margin: 10px 0 4px; color: #888; font-size: 12px">이력로그</p>
           <div class="log-panel" id="logHistory"></div>
         </div>
-        <div class="status-line" id="simLine"></div>
+        <!-- sim_line 은 이력로그와 동일 소스라 중복 표시하지 않음 -->
+        <div class="status-line hidden" id="simLine" aria-hidden="true"></div>
       </section>
 
       <section>
@@ -169,6 +181,13 @@
           prim 드롭다운 목록은 Kit 제어창과 동기화됩니다. 새로고침 후 Kit 창에서 확인할 수 있습니다.
         </p>
       </section>
+    </div>
+    <div id="gateOverlay" class="gate-overlay hidden">
+      <div class="gate-modal">
+        <h3 id="gateTitle">공정 확인</h3>
+        <pre id="gateMsg"></pre>
+        <button type="button" id="gateOkBtn">확인</button>
+      </div>
     </div>
     <script src="tbs_panel.js"></script>
   </body>
