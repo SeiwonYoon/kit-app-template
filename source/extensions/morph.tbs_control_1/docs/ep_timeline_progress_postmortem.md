@@ -8,7 +8,7 @@
 - **3줄 고정**: EP가 2개면 `EP1`, `EP2`, `ALL_EP`가 항상 보여야 한다.
 - **색상**: 비어있음(EMPTY)=빨강, 차있음(FULL)=초록.
 - **시간 기준**: wall time이 아니라 **sim time** 기준으로 진행(배속에도 맞게).
-- **대기 구간**에서도 막대가 멈추지 않고 일정하게 증가.
+- **대기 구간**에서의 막대 진행: 초기에는 `virtual_now` 보간으로 “흐름”을 주려 했으나, **현행은 `env.now` 축**으로 진행현황과 정합(아래 “현행 정책 보정” 참고).
 - **Stop/Reset** 후에는 그래프 누적이 남지 않고 완전히 초기화.
 - 시뮬 종료 시 요약 로그에 `EPn_EMPTY`, `ALL_EP_EMPTY` 누적(초) 출력.
 
@@ -59,10 +59,18 @@
 
 ### 대기 구간에서의 지속 증가
 
-공정 사이에 포트 점유가 변하지 않아도 그래프는 시간에 따라 증가해야 하므로,
-시뮬 tick 루프에서 주기적으로 “timeline_only” progress를 emit 하고,
-UI는 마지막 `ports_occupancy` 스냅샷을 이용해 그래프만 전진시킨다.
-(진행현황 텍스트를 건드리지 않도록 `timeline_only`로 분리)
+초기 설계에서는 공정 사이에 포트 점유가 변하지 않아도 그래프가 “흐르는 것처럼” 보이게 하려고,
+시뮬 tick 루프의 `timeline_only` payload에 **가상 시각(`virtual_now`)**을 실어 보내는 경로가 있었다.
+(진행현황 텍스트는 건드리지 않도록 `timeline_only`로 분리)
+
+### 현행 정책 보정 (2026-04)
+
+- **Kit/웹 포트 아래 막대의 시간 축**은 진행현황 `t(sim)`과 동일하게 보이도록,
+  `timeline_only`의 **`sim_time`을 SimPy `env.now`만** 사용한다 (`simulation_engine.py` `tick()`).
+- 내부 스텝 예산용 `virtual_now`는 엔진 동작에 남기되, **막대 축에는 쓰지 않는다.**
+  그 결과 SimPy가 다음 이벤트까지 `env.now`를 전진시키지 않는 구간에서는 막대도 같은 시각에서 멈춘다(“표시 시뮼 시각”과의 정합 우선).
+- **단일 모니터 깜빡임 완화**: `control_window._update_ep_timeline_under_port_state`에서 동일 시각·동일 레이아웃·동일 점유면 전체 위젯 재빌드를 생략한다.
+- **뷰포트 분할**: `_ep_occ_timeline_layout_dims`로 막대/라벨/패딩을 줄이고, `ep_timeline_host`에 가로 스크롤 정책을 허용해 잘림을 줄인다.
 
 ### Stop/Reset 초기화
 

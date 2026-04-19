@@ -180,3 +180,26 @@ MOVE/ROTATE/USD_TIMELINE 등이 해당 화면의 stage에 정상 적용된다.
 - 기본값(파일 복제 + session layer)을 유지하는 것을 권장
 - 대용량 파일로 복제가 부담되면 `TBS_MULTI_SPLIT_FILE_CLONE=0`을 검토하되,
   레이어 공유로 인한 부작용 가능성을 함께 고려해야 한다.
+
+---
+
+## 7) 제어창 시뮼 모니터(이력 로그·EP 막대) 분할 시 (2026-04 정리)
+
+**이력 로그(화면별 SIM 이력 패널)**
+
+- 멀티 엔진 실행 시 각 엔진 `on_log`는 `[화면1] `, `[화면2] ` 형태로 한 줄을 보낸다.
+- UI `_append_sim_log`는 **`_format_history_line` 호출 전**에 원문에서만 `[화면N]` 접두를 파싱해,
+  해당 채널의 `history_label`에만 붙인다.
+- 이유: `_format_history_line`이 줄 앞에 이모지(가독성)를 붙이면, 포맷 **후** 문자열에서는 `^\[화면…` 매칭이 깨져
+  전 로그가 화면1에만 쌓이는 회귀가 생길 수 있다.
+
+**EP 타임라인 막대(포트 상태 바로 아래)**
+
+- 분할 수(`ext._sim_viewport_split_count`)에 따라 `control_window._ep_occ_timeline_layout_dims`가
+  막대 폭·행 라벨 폭·프레임 패딩 등을 줄인다.
+- 열 폭이 매우 좁을 수 있어 `ep_timeline_host`(ScrollingFrame)는 분할 시 **가로 스크롤**을 허용한다
+  (`_ep_timeline_host_horizontal_scroll_policy`: 환경에 따라 AS_NEEDED / AUTO / ALWAYS_ON 순 선택).
+
+**EP 막대 시간 축**
+
+- 엔진 `timeline_only`의 `sim_time`은 **`env.now`**(진행현황 `t(sim)`과 동일 시계). 상세는 `ep_timeline_progress_postmortem.md`의 “현행 정책 보정” 절 참고.
