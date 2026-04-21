@@ -254,6 +254,13 @@ from .translate_animation import (
     stop_prim_translate_animation,
 )
 
+from .control_sim_prerun_playback import (
+    PlaybackEngine,
+    SimPreRunResult,
+    SimTimelinePlayer,
+    prerun_engine_to_timeline,
+)
+
 MAX_PRIMS_DISPLAY = 80
 DEFAULT_PRIORITY_NAME_PREFIX = "Mesh_"
 CHECKBOX_WHITE_STYLE = {
@@ -2924,17 +2931,46 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                 # 시간 라벨(너무 촘촘하면 안 보이므로 최대 8개 정도만)
                 with ui.HStack(height=14, spacing=0):
                     ui.Spacer(width=NAME_W)
-                    with ui.HStack(width=BAR_W, height=14, spacing=0):
-                        ticks = max(1, int(float(total_est) // float(tick_step)))
-                        # 라벨 수만큼 균등 분할
+                    with ui.ZStack(width=BAR_W, height=14):
+                        ui.Rectangle(width=BAR_W, height=14, style={"background_color": 0x441A1E26})
+                        # 50단위(또는 tick_step) 눈금 + 마지막에 실제 총시간(예: 342)을 끝에 추가
+                        try:
+                            ticks = max(1, int(float(total_est) // float(tick_step)))
+                        except Exception:
+                            ticks = 1
                         for i in range(ticks + 1):
-                            t_lbl = int(round(i * tick_step))
-                            ui.Label(
-                                f"{t_lbl}",
-                                width=max(20, int(round(BAR_W / max(1, ticks)))),
-                                height=14,
-                                style={"color": 0xFFE0E6F0, "font_size": 10},
-                            )
+                            try:
+                                t_lbl = float(i) * float(tick_step)
+                            except Exception:
+                                t_lbl = 0.0
+                            x = int(round((float(t_lbl) / float(total_est)) * float(BAR_W))) if total_est > 1e-9 else 0
+                            x = max(0, min(BAR_W - 1, x))
+                            with ui.Placer(offset_x=x, offset_y=0):
+                                ui.Label(
+                                    f"{int(round(t_lbl))}",
+                                    width=36,
+                                    height=14,
+                                    style={"color": 0xFFE0E6F0, "font_size": 10},
+                                )
+                    # 끝값(정확한 총시간) 라벨은 막대 오른쪽 바깥으로 빼서(더 우측),
+                    # 마지막 눈금(예: 350)과 겹치지 않게 한다.
+                    try:
+                        t_end_lbl = float(total_est)
+                        end_txt = (
+                            f"{int(round(t_end_lbl))}"
+                            if abs(float(t_end_lbl) - float(int(round(t_end_lbl)))) < 1e-6
+                            else f"{float(t_end_lbl):.1f}"
+                        )
+                    except Exception:
+                        end_txt = f"{total_est:.1f}"
+                    ui.Spacer(width=6)
+                    ui.Label(
+                        end_txt,
+                        width=44,
+                        height=14,
+                        alignment=ui.Alignment.RIGHT_CENTER,
+                        style={"color": 0xFFE0E6F0, "font_size": 10},
+                    )
                 # 막대(EP1/EP2(/EP3)/ALL_EP) — 줄은 항상 렌더된다.
                 for r in rows:
                     with ui.HStack(height=BAR_H, spacing=int(row_sp)):
@@ -3558,6 +3594,127 @@ def _dispatch_sim_ui_queue_item(ext: Any, kind: str, payload: Any, panel_mode: S
 
 def _drain_sim_log_queue(ext: Any) -> None:
     try:
+        # 프리런 완료 시점에 타임라인 플레이어를 시작한다(메인 스레드에서만).
+        try:
+            ev = getattr(ext, "_sim_prerun_done_evt", None)
+            started = bool(getattr(ext, "_sim_playback_started", False))
+            if (not started) and ev is not None and hasattr(ev, "is_set") and ev.is_set():
+                results = getattr(ext, "_sim_prerun_results_by_screen", None)
+                if isinstance(results, dict) and results:
+                    try:
+                        ext._sim_playback_started = True
+                    except Exception:
+                        pass
+
+                    # 화면별 총 시뮬 시간 확정(막대 스케일/표시)
+                    try:
+                        by = getattr(ext, "_sim_last_total_est_by_screen", None)
+                        if not isinstance(by, dict):
+                            by = {}
+                            ext._sim_last_total_est_by_screen = by
+                        for scr, res in results.items():
+                            try:
+                                by[str(int(scr))] = float(res.final_sim_time)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                    # UI 그래프 동기화용 playback 엔진 생성
+                    playback_engs: List[Any] = []
+                    try:
+                        max_scr = max(int(s) for s in results.keys())
+                    except Exception:
+                        max_scr = 1
+                    for i in range(1, max_scr + 1):
+                        rr = results.get(int(i))
+                        if rr is None:
+                            continue
+                        playback_engs.append(PlaybackEngine(final_sim_time=float(rr.final_sim_time)))
+                    try:
+                        ext._sim_engines = playback_engs
+                        ext._sim_engine = playback_engs[0] if playback_engs else None
+                    except Exception:
+                        pass
+
+                    def _emit(kind: str, payload: Any, screen: int) -> None:
+                        # 재생 중에는 payload에 실제 총 시간을 주입해 진행/막대 스케일을 확정한다.
+                        if isinstance(payload, dict):
+                            try:
+                                rr2 = results.get(int(screen))
+                                if rr2 is not None:
+                                    payload = dict(payload)
+                                    payload["sim_total_est_sec"] = f"{float(rr2.final_sim_time):.2f}"
+                            except Exception:
+                                pass
+                        if kind == "log":
+                            line = payload if isinstance(payload, str) else str(payload)
+                            if int(screen) > 1:
+                                line = f"[화면{int(screen)}] {line}"
+                            post_sim_history_line(ext, line)
+                        elif kind == "event":
+                            if isinstance(payload, dict):
+                                post_sim_anim_event(ext, payload)
+                        elif kind == "progress":
+                            if isinstance(payload, dict):
+                                post_sim_progress_update(ext, payload)
+
+                    def _speed() -> float:
+                        try:
+                            m = getattr(ext, "_sim_speed_model", None)
+                            return float(m.get_value_as_float()) if m is not None else 1.0
+                        except Exception:
+                            return 1.0
+
+                    player = SimTimelinePlayer(results_by_screen=results, emit_fn=_emit, speed_supplier=_speed)
+                    player.start()
+                    try:
+                        ext._sim_playback_player = player
+                    except Exception:
+                        pass
+                    # 첫 공정(첫 이벤트) 전에도 진행현황/시간이 계속 증가하도록 초기 payload를 즉시 세팅한다.
+                    try:
+                        for scr, rr in results.items():
+                            try:
+                                scr_i = int(scr)
+                            except Exception:
+                                scr_i = 1
+                            p0 = {
+                                "tbs_sim_screen": str(scr_i),
+                                "sim_time": "0.00",
+                                "sim_total_est_sec": f"{float(rr.final_sim_time):.2f}",
+                                "label": "대기",
+                                "detail": "",
+                                "status": "RUNNING",
+                                "elapsed": "0.0",
+                                "total": "0.0",
+                                "percent": "0",
+                            }
+                            _update_sim_progress(ext, p0)
+                    except Exception:
+                        pass
+
+                    # UI update stream에서 재생 tick
+                    try:
+                        sub = getattr(ext, "_sim_playback_ui_sub", None)
+                        if sub is not None:
+                            try:
+                                sub.unsubscribe()
+                            except Exception:
+                                pass
+                        ext._sim_playback_ui_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
+                            lambda _e: _tick_playback(ext),
+                            name="morph.tbs_control_1:sim_playback_tick",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        _append_sim_log(ext, "[SIM] 프리런 완료: 결과 타임라인을 재생합니다.")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         q = getattr(ext, "_sim_log_queue", None)
         if q is None:
             return
@@ -3638,6 +3795,154 @@ def _drain_sim_log_queue(ext: Any) -> None:
     except Exception as e:
         # UI 드레인 예외가 발생해도 구독이 끊기지 않도록 보호
         print(f"[SIM UI] 로그 드레인 예외: {e}", flush=True)
+
+
+def _tick_playback(ext: Any) -> None:
+    """프리런 타임라인 플레이어 1프레임 tick + env.now 동기화."""
+    try:
+        player = getattr(ext, "_sim_playback_player", None)
+        if player is None:
+            return
+        if not getattr(player, "is_playing", lambda: False)():
+            return
+        player.tick()
+        # env.now는 UI 막대 동기화에 사용되므로 화면별로 업데이트한다.
+        engs = getattr(ext, "_sim_engines", None)
+        results = getattr(ext, "_sim_prerun_results_by_screen", None)
+        if isinstance(engs, list):
+            # 막대가 끊기지 않도록 timeline_only progress를 일정 주기로 합성 emit한다.
+            try:
+                hb = getattr(ext, "_sim_playback_timeline_hb", None)
+                if not isinstance(hb, dict):
+                    hb = {}
+                    ext._sim_playback_timeline_hb = hb
+                now_wall = time.perf_counter()
+            except Exception:
+                hb = {}
+                now_wall = time.perf_counter()
+            for i, eng in enumerate(engs):
+                if eng is None:
+                    continue
+                scr = i + 1
+                try:
+                    tnow = float(player.sim_now(scr))
+                except Exception:
+                    tnow = 0.0
+                try:
+                    if hasattr(eng, "_set_now"):
+                        eng._set_now(tnow)  # type: ignore[attr-defined]
+                    elif hasattr(eng, "env") and eng.env is not None:
+                        eng.env.now = float(tnow)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                # 10Hz emit (screen별)
+                try:
+                    last = float(hb.get(str(scr), 0.0) or 0.0)
+                except Exception:
+                    last = 0.0
+                if (now_wall - last) >= 0.10:
+                    try:
+                        hb[str(scr)] = float(now_wall)
+                    except Exception:
+                        pass
+                    # last ports snapshot 기반으로 EP 타임라인만 전진(timeline_only)
+                    try:
+                        te = None
+                        if isinstance(results, dict) and results.get(int(scr)) is not None:
+                            te = float(results[int(scr)].final_sim_time)
+                        payload = {
+                            "tbs_sim_screen": str(scr),
+                            "sim_time": f"{float(tnow):.6f}",
+                            "timeline_only": "1",
+                            "label": "EP 타임라인",
+                            "detail": "",
+                            "status": "RUNNING",
+                            "elapsed": "0.0",
+                            "total": "0.0",
+                            "percent": "0",
+                        }
+                        if isinstance(te, (float, int)) and float(te) > 0.0:
+                            payload["sim_total_est_sec"] = f"{float(te):.2f}"
+                        post_sim_progress_update(ext, payload)
+                    except Exception:
+                        pass
+
+                # 단계완료(DONE) 상태에서도 t(sim)이 끊기지 않도록,
+                # 마지막 진행현황 payload를 복제해 sim_time만 주기적으로 갱신한다(텍스트 업데이트).
+                try:
+                    last2 = float(hb.get(f"prog_{scr}", 0.0) or 0.0)
+                except Exception:
+                    last2 = 0.0
+                if (now_wall - last2) >= 0.20:
+                    try:
+                        hb[f"prog_{scr}"] = float(now_wall)
+                    except Exception:
+                        pass
+                    try:
+                        by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+                        lp = by_lp.get(str(scr)) if isinstance(by_lp, dict) else None
+                        if isinstance(lp, dict) and str(lp.get("label", "") or "").strip():
+                            p3 = dict(lp)
+                            p3["tbs_sim_screen"] = str(scr)
+                            p3["sim_time"] = f"{float(tnow):.2f}"
+                            # 총시간은 유지/확정
+                            try:
+                                if isinstance(results, dict) and results.get(int(scr)) is not None:
+                                    p3["sim_total_est_sec"] = f"{float(results[int(scr)].final_sim_time):.2f}"
+                            except Exception:
+                                pass
+                            post_sim_progress_update(ext, p3)
+                    except Exception:
+                        pass
+
+            # 전체 종료 처리(마지막 공정 RUNNING 멈춤 방지)
+            try:
+                if isinstance(results, dict) and results:
+                    done_all = True
+                    for scr_k, res in results.items():
+                        try:
+                            if float(player.sim_now(int(scr_k))) < float(res.final_sim_time) - 1e-6:
+                                done_all = False
+                                break
+                        except Exception:
+                            done_all = False
+                            break
+                    if done_all and (not bool(getattr(ext, "_sim_playback_done", False))):
+                        ext._sim_playback_done = True
+                        # 그래프/스케일 종료 고정
+                        try:
+                            _finalize_sim_timeline_on_done(ext)
+                        except Exception:
+                            pass
+                        # 화면별 DONE 진행현황 1회 emit
+                        for scr_k, res in results.items():
+                            try:
+                                scr_i = int(scr_k)
+                            except Exception:
+                                scr_i = 1
+                            try:
+                                p_done = {
+                                    "tbs_sim_screen": str(scr_i),
+                                    "sim_time": f"{float(res.final_sim_time):.2f}",
+                                    "sim_total_est_sec": f"{float(res.final_sim_time):.2f}",
+                                    "label": "완료",
+                                    "detail": "",
+                                    "status": "DONE",
+                                    "elapsed": f"{float(res.final_sim_time):.1f}",
+                                    "total": f"{float(res.final_sim_time):.1f}",
+                                    "percent": "100",
+                                }
+                                post_sim_progress_update(ext, p_done)
+                            except Exception:
+                                pass
+                        try:
+                            _enqueue_control_action(ext, SimUiControlAction.EXPORT_XLSX.value)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _sim_active_anim_owner_screen(ext: Any) -> int:
@@ -4003,6 +4308,15 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
         panel_slot = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
     except Exception:
         panel_slot = "1"
+    # 화면별 마지막 진행현황 payload 저장(플레이백에서 DONE 상태에도 t(sim)을 부드럽게 갱신하기 위함)
+    try:
+        by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+        if not isinstance(by_lp, dict):
+            by_lp = {}
+            ext._sim_progress_last_payload_by_screen = by_lp
+        by_lp[str(panel_slot)] = dict(payload)
+    except Exception:
+        pass
     dedupe_key = f"_panel_{panel_slot}"
     # total_est는 포트상태 아래 전용 그래프에서도 사용하므로 화면별로 저장
     try:
@@ -4060,8 +4374,14 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     if proc_sec or anim_sec:
         pri_txt = "ON" if proc_pri in ("1", "true", "True", "ON", "on") else "OFF"
         sec_line = f"시간: 공정={proc_sec or '-'}s | 애니={anim_sec or '-'}s | 공정시간우선={pri_txt}\n"
+    te_txt = ""
+    try:
+        te_txt = str(payload.get("sim_total_est_sec", "") or "").strip()
+    except Exception:
+        te_txt = ""
+    total_head = f" | 총={te_txt}s" if te_txt else ""
     text = (
-        f"{head} | t(sim)={sim_time}s\n"
+        f"{head}{total_head} | t(sim)={sim_time}s\n"
         f"{ev_line}"
         f"{label}\n"
         f"{sec_line}"
@@ -4254,6 +4574,22 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
             ui.Spacer(width=NAME_W)
             with ui.ZStack(width=BAR_W, height=12):
                 ui.Rectangle(width=BAR_W, height=12, style={"background_color": 0x441A1E26})
+                # 막대 끝(우측)에 총 시뮬 시간을 표시(요구사항)
+                try:
+                    with ui.Placer(offset_x=max(0, BAR_W - 72), offset_y=0):
+                        try:
+                            _end_txt = f"{int(round(total_est))}s" if abs(float(total_est) - float(int(round(total_est)))) < 1e-6 else f"{float(total_est):.1f}s"
+                        except Exception:
+                            _end_txt = f"{total_est:.1f}s"
+                        ui.Label(
+                            _end_txt,
+                            width=72,
+                            height=12,
+                            alignment=ui.Alignment.RIGHT_CENTER,
+                            style={"color": 0xFFBFC7D5, "font_size": 10},
+                        )
+                except Exception:
+                    pass
                 # 눈금 라벨을 절대좌표로 배치(겹침/폭 축소로 안 보이는 문제 방지)
                 try:
                     ticks = int(total_est // tick_step)
@@ -4271,6 +4607,27 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
                             height=12,
                             style={"color": 0xFFE0E6F0, "font_size": 10},
                         )
+                # 마지막 총시간 라벨(정확값)을 반드시 끝에 추가(50단위만 보이는 문제 방지)
+                try:
+                    t_end_lbl = float(total_est)
+                    try:
+                        _end_tick_txt = (
+                            f"{int(round(t_end_lbl))}"
+                            if abs(float(t_end_lbl) - float(int(round(t_end_lbl)))) < 1e-6
+                            else f"{float(t_end_lbl):.1f}"
+                        )
+                    except Exception:
+                        _end_tick_txt = f"{t_end_lbl:.1f}"
+                    with ui.Placer(offset_x=max(0, BAR_W - 36), offset_y=0):
+                        ui.Label(
+                            _end_tick_txt,
+                            width=36,
+                            height=12,
+                            alignment=ui.Alignment.RIGHT_CENTER,
+                            style={"color": 0xFFE0E6F0, "font_size": 10},
+                        )
+                except Exception:
+                    pass
 
         for row in rows:
             with ui.HStack(height=BAR_H, spacing=6):
@@ -5211,15 +5568,17 @@ def on_sim_start_clicked(ext: Any) -> None:
                 out.discard("BP4")
             return out
 
+        # 프리런/재생 모드에서는 엔진 콜백을 UI로 직접 보내지 않는다(프리런 수집 → 재생 단계에서만 UI로 emit).
         engine = TBSSimulationEngine(
             lots=lots,
             timing=timing,
             log_config=log_cfg,
             init_config=init_cfg,
-            on_log=lambda line: post_sim_history_line(ext, line),
-            on_event=lambda payload: post_sim_anim_event(ext, payload),
-            on_progress=lambda payload: post_sim_progress_update(ext, payload),
-            on_gate=_on_gate,
+            on_log=lambda _line: None,
+            on_event=lambda _payload: None,
+            on_progress=lambda _payload: None,
+            # 프리런은 사용자 확인 UI 없이 자동 통과 + 애니 길이만 반영
+            on_gate=lambda payload: float(_estimate_anim_duration_for_gate_payload(ext, payload or {})),
             print_to_console=(not _is_progress_only_mode(ext)),
             event_tags={"tbs_sim_screen": "1"},
         )
@@ -5273,15 +5632,16 @@ def on_sim_start_clicked(ext: Any) -> None:
             snap_frozen = copy.deepcopy(snap_i)
             ep_i = int(getattr(init_i, "ep_count", 2) or 2)
             ep_i = 3 if ep_i >= 3 else 2
+            # 프리런/재생 모드: 콜백은 프리런 수집 단계에서만 사용(여기선 노옵 주입).
             eng = TBSSimulationEngine(
                 lots=lots,
                 timing=timing_i,
                 log_config=log_cfg,
                 init_config=init_i,
-                on_log=lambda line, st=screen_tag: post_sim_history_line(ext, f"[화면{st}] {line}"),
-                on_event=lambda payload: post_sim_anim_event(ext, payload),
-                on_progress=lambda payload: post_sim_progress_update(ext, payload),
-                on_gate=_on_gate,
+                on_log=lambda _line: None,
+                on_event=lambda _payload: None,
+                on_progress=lambda _payload: None,
+                on_gate=lambda payload: float(_estimate_anim_duration_for_gate_payload(ext, payload or {})),
                 print_to_console=(not _is_progress_only_mode(ext)),
                 event_tags={"tbs_sim_screen": screen_tag},
             )
@@ -5354,6 +5714,11 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             pass
 
+    # --- 프리런(오프라인) → 타임라인 재생 모드 ---
+    # 요구사항:
+    # - 사용자가 Start를 누르면 UI는 기존과 동일하게 "시뮬이 진행"되는 것처럼 보이되,
+    #   내부적으로는 먼저 가능한 빠르게 시뮬을 끝까지 계산(prerun)하고 그 결과를 재생한다.
+    # - 이 모드에서는 실시간 tick thread를 띄우지 않는다.
     tick_state = {"count": 0}
     stop_evt = threading.Event()
     ext._sim_thread_stop = stop_evt
@@ -5362,7 +5727,7 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception:
         pass
     speed_value = max(0.1, ext._sim_speed_model.get_value_as_float())
-    _append_sim_log(ext, f"[SIM] tick thread 준비 (speed={speed_value:.2f}x)")
+    _append_sim_log(ext, "[SIM] 프리런 시작: 내부적으로 전체 시뮬을 먼저 계산합니다...")
     try:
         ext._sim_log_ui_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
             lambda e: _drain_sim_log_queue(ext),
@@ -5371,37 +5736,73 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception as e:
         _append_sim_log(ext, f"[SIM UI] 로그 큐 드레인 구독 실패: {e}")
 
-    eng_list_outer = getattr(ext, "_sim_engines", None)
-    if isinstance(eng_list_outer, list) and len(eng_list_outer) > 1:
+    # prerun 결과/플레이어 상태 초기화
+    try:
+        ext._sim_prerun_done_evt = threading.Event()
+        ext._sim_prerun_results_by_screen = None
+        ext._sim_playback_player = None
+        ext._sim_playback_ui_sub = None
+    except Exception:
+        pass
+
+    def _prerun_thread_body(run_gen: int) -> None:
         try:
-            ext._sim_multi_export_done = False
-            ext._sim_multi_tick_shutdown = False
-        except Exception:
-            pass
-        export_lock = threading.Lock()
-        threads: List[threading.Thread] = []
-        for i, sim in enumerate(eng_list_outer):
-            if sim is None:
-                continue
-            si = i + 1
-            t = threading.Thread(
-                target=_sim_multi_engine_tick_worker,
-                args=(ext, sim, si, stop_evt, export_lock),
-                name=f"morph.tbs_control_1.sim_tick.screen{si}",
-                daemon=True,
-            )
-            threads.append(t)
-            t.start()
-        try:
-            ext._sim_tick_threads = threads
-        except Exception:
-            pass
-        ext._sim_thread = None
-        try:
-            _append_sim_log(ext, f"[SIM] 멀티 tick: 화면별 독립 스레드 ({len(threads)}개)")
-        except Exception:
-            pass
-        return
+            engs = []
+            # 단일은 ext._sim_engine, 멀티는 ext._sim_engines 를 사용
+            eng_list_outer = getattr(ext, "_sim_engines", None)
+            if isinstance(eng_list_outer, list) and len(eng_list_outer) > 0:
+                engs = list(eng_list_outer)
+            else:
+                e0 = getattr(ext, "_sim_engine", None)
+                engs = [e0] if e0 is not None else []
+
+            results: Dict[int, SimPreRunResult] = {}
+            for idx, eng in enumerate(engs):
+                if eng is None:
+                    continue
+                scr = idx + 1
+                # 세대가 바뀌었으면 중단
+                try:
+                    if int(getattr(ext, "_sim_run_gen", 0) or 0) != int(run_gen):
+                        return
+                except Exception:
+                    pass
+                try:
+                    res = prerun_engine_to_timeline(screen=scr, engine=eng)
+                    results[int(scr)] = res
+                except Exception:
+                    continue
+            try:
+                # 세대가 바뀌었으면 버린다
+                if int(getattr(ext, "_sim_run_gen", 0) or 0) != int(run_gen):
+                    return
+            except Exception:
+                pass
+            try:
+                ext._sim_prerun_results_by_screen = results
+            except Exception:
+                pass
+        finally:
+            try:
+                ev = getattr(ext, "_sim_prerun_done_evt", None)
+                if ev is not None:
+                    ev.set()
+            except Exception:
+                pass
+
+    try:
+        run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0)
+    except Exception:
+        run_gen = 0
+    th_pr = threading.Thread(
+        target=_prerun_thread_body,
+        args=(run_gen,),
+        name="morph.tbs_control_1.sim_prerun",
+        daemon=True,
+    )
+    ext._sim_thread = th_pr
+    th_pr.start()
+    return
 
     def _tick_loop():
         """
@@ -5540,6 +5941,37 @@ def on_sim_stop_clicked(ext: Any) -> None:
         ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
     except Exception:
         ext._sim_run_gen = 1
+    # 프리런/재생 모드 정리
+    try:
+        p = getattr(ext, "_sim_playback_player", None)
+        if p is not None and hasattr(p, "stop"):
+            try:
+                p.stop()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        sub = getattr(ext, "_sim_playback_ui_sub", None)
+        if sub is not None:
+            try:
+                sub.unsubscribe()
+            except Exception:
+                pass
+        ext._sim_playback_ui_sub = None
+    except Exception:
+        pass
+    try:
+        ext._sim_playback_started = False
+    except Exception:
+        pass
+    try:
+        ev = getattr(ext, "_sim_prerun_done_evt", None)
+        if ev is not None and hasattr(ev, "clear"):
+            ev.clear()
+        ext._sim_prerun_results_by_screen = None
+    except Exception:
+        pass
     for eng in list(getattr(ext, "_sim_engines", None) or []):
         if eng is None:
             continue
