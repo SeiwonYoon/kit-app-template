@@ -46,6 +46,7 @@ sequence_editor.py — TBS 시퀀스 편집기 UI (별도 창)
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import omni.kit.app as app
@@ -86,6 +87,13 @@ class SequenceEditorWindow:
         self._start_from_current_model = ui.SimpleBoolModel(False)
         self._start_from_current_paths_model = ui.SimpleStringModel("")
 
+        # LAM animation library (folder -> json list -> play)
+        self._lam_dir_model = ui.SimpleStringModel(self._default_lam_dir_text())
+        self._lam_files: List[Path] = []
+        self._lam_selected_idx_model = ui.SimpleIntModel(0)
+        self._lam_row_container: Optional[ui.VStack] = None
+        self._lam_refresh_sub = None
+
         self._steps_frame: Optional[ui.VStack] = None
         self._refresh_pending = False
         self._refresh_sub = None
@@ -97,6 +105,161 @@ class SequenceEditorWindow:
         self._parallel_with_prev_models: Dict[int, ui.SimpleBoolModel] = {}
         self._step_delay_ms_models: Dict[int, ui.SimpleIntModel] = {}
         self._build()
+
+    def _default_lam_dir_text(self) -> str:
+        """
+        기본 LAM 애니메이션 폴더 텍스트.
+        - 절대경로/상대경로 모두 허용. 상대는 확장 루트 기준으로 해석한다.
+        """
+        try:
+            root = Path(__file__).resolve().parents[2]  # .../source/extensions/morph.tbs_control_1
+        except Exception:
+            root = Path(".")
+        return str((root / "data" / "lam_animation").resolve())
+
+    def _resolve_lam_dir(self) -> Path:
+        txt = ""
+        try:
+            txt = str(self._lam_dir_model.get_value_as_string() or "").strip()
+        except Exception:
+            txt = ""
+        if not txt:
+            return Path(self._default_lam_dir_text())
+        p = Path(txt)
+        if p.is_absolute():
+            return p
+        # relative -> extension root 기준
+        try:
+            root = Path(__file__).resolve().parents[2]
+        except Exception:
+            root = Path(".")
+        return (root / p).resolve()
+
+    def _scan_lam_json_files(self) -> List[Path]:
+        d = self._resolve_lam_dir()
+        try:
+            if not d.is_dir():
+                return []
+        except Exception:
+            return []
+        try:
+            out = sorted([p for p in d.glob("*.json") if p.is_file()], key=lambda x: x.name.lower())
+        except Exception:
+            out = []
+        return out
+
+    def _schedule_lam_refresh(self) -> None:
+        if self._lam_refresh_sub is not None:
+            return
+
+        def _do(_e=None):
+            try:
+                self._rebuild_lam_library_row()
+            finally:
+                if self._lam_refresh_sub is not None:
+                    try:
+                        self._lam_refresh_sub.unsubscribe()
+                    except Exception:
+                        pass
+                    self._lam_refresh_sub = None
+
+        try:
+            stream = app.get_app().get_post_update_event_stream()
+            self._lam_refresh_sub = stream.create_subscription_to_pop(_do, name="morph.tbs_control_1.sequence_editor.lam_refresh")
+        except Exception:
+            self._lam_refresh_sub = None
+            self._rebuild_lam_library_row()
+
+    def _rebuild_lam_library_row(self) -> None:
+        if self._lam_row_container is None:
+            return
+        self._lam_row_container.clear()
+        self._lam_files = self._scan_lam_json_files()
+
+        # selection clamp
+        try:
+            cur = int(self._lam_selected_idx_model.get_value_as_int())
+        except Exception:
+            cur = 0
+        if cur < 0:
+            cur = 0
+        if self._lam_files and cur >= len(self._lam_files):
+            cur = 0
+        try:
+            self._lam_selected_idx_model.set_value(cur)
+        except Exception:
+            pass
+
+        with self._lam_row_container:
+            ui.Label("LAM Animation Library", height=0)
+            with ui.HStack(spacing=8, height=28):
+                ui.Label("폴더", width=36)
+                ui.StringField(model=self._lam_dir_model, width=430, height=28, style=INPUT_FIELD_STYLE)
+                ui.Button("새로고침", width=90, height=28, clicked_fn=self._schedule_lam_refresh)
+            ui.Label("※ 절대경로/상대경로 모두 가능 (상대경로는 확장 루트 기준).", height=0, word_wrap=True)
+            with ui.HStack(spacing=8, height=28):
+                ui.Label("JSON", width=36)
+                if self._lam_files:
+                    names = [p.name for p in self._lam_files]
+                    cb = ui.ComboBox(int(cur), *names)
+
+                    def _on_change(_m=None):
+                        try:
+                            idx = int(cb.model.get_item_value_model().as_int)  # type: ignore[attr-defined]
+                        except Exception:
+                            try:
+                                idx = int(cb.model.get_item_value_model().get_value_as_int())  # type: ignore[attr-defined]
+                            except Exception:
+                                idx = 0
+                        try:
+                            self._lam_selected_idx_model.set_value(max(0, idx))
+                        except Exception:
+                            pass
+
+                    try:
+                        cb.model.add_item_changed_fn(lambda *_a: _on_change())  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                else:
+                    ui.Label("(json 없음)", width=340, height=28, style={"color": 0xFFBFC7D5})
+                ui.Button("선택 실행", width=110, height=28, clicked_fn=self._play_selected_lam_json)
+
+    def _selected_lam_json_path(self) -> Optional[Path]:
+        if not self._lam_files:
+            return None
+        try:
+            idx = int(self._lam_selected_idx_model.get_value_as_int())
+        except Exception:
+            idx = 0
+        if idx < 0 or idx >= len(self._lam_files):
+            idx = 0
+        try:
+            return self._lam_files[idx]
+        except Exception:
+            return None
+
+    def _play_selected_lam_json(self) -> None:
+        p = self._selected_lam_json_path()
+        if p is None:
+            return
+        try:
+            txt = p.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"[SEQUENCE] JSON read 실패: {p} err={e}", flush=True)  # noqa: T201
+            return
+        try:
+            self._json_model.set_value(txt)
+        except Exception:
+            pass
+        # 파일 내용을 편집기 steps로 로드한 뒤 즉시 실행
+        try:
+            self._load_steps_from_json()
+        except Exception:
+            pass
+        try:
+            self._run_steps()
+        except Exception:
+            pass
 
     def destroy(self) -> None:
         try:
@@ -125,6 +288,15 @@ class SequenceEditorWindow:
     def _build(self) -> None:
         with self._window.frame:
             with ui.VStack(padding=10, spacing=8):
+                # 최상단: LAM 애니메이션 라이브러리(폴더 경로 + json 선택 + 실행)
+                self._lam_row_container = ui.VStack(spacing=4)
+                # 경로가 바뀌면 다음 프레임에 목록 갱신
+                try:
+                    self._lam_dir_model.add_value_changed_fn(lambda _m: self._schedule_lam_refresh())
+                except Exception:
+                    pass
+                self._rebuild_lam_library_row()
+
                 with ui.HStack(spacing=8, height=28):
                     ui.Button("Step 추가", width=90, height=28, clicked_fn=self._add_step_default)
                     ui.Button("실행", width=80, height=28, clicked_fn=self._run_steps)
