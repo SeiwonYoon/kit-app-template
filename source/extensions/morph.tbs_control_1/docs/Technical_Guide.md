@@ -1,370 +1,329 @@
-# morph.tbs_control_1 기술 문서 (개발자용)
+# morph.tbs_control_1 기술 문서 (웹 개발자 친화 버전)
 
-이 문서는 `morph.tbs_control_1` 확장 기능을 **다른 프로그래머에게 “코드 예시까지 포함해” 설명할 수 있는 수준**으로 정리한 기술 문서입니다.
-
-목표:
-- **어떤 모듈/함수/변수**가 무엇을 담당하는지
-- 데이터가 **어떤 형식(payload/key)**으로 흘러가는지
-- 스레드/큐/메인(UI) 스레드 제약을 어떻게 해결하는지
-- 문서만 보고도 “간단한 시뮬/애니/웹 호출”을 **직접 작성**할 수 있는 수준의 예시 제공
+대상 독자: **JS만 사용해본 웹 개발자(파이썬/Omniverse/SimPy 처음)**
+목표: 이 문서만 보고도 “대략 어떤 구조인지” 이해하고, 작은 예제를 따라 하면서 **기능을 추가/수정할 수 있는 수준**까지 안내합니다.
 
 ---
 
-## 0) 빠른 파일 지도
+## 0) 이 확장은 무엇을 하는가? (30초 요약)
 
-- **시뮬레이션 UI/오케스트레이션**: `morph/tbs_control_1/control_window.py`
-- **프리런(오프라인)→재생(플레이백)**: `morph/tbs_control_1/control_sim_prerun_playback.py`
-- **시뮬 엔진(SimPy 기반)**: `morph/tbs_control_1/simulation_engine.py`
-- **이벤트→XML 생성/역파싱**: `morph/tbs_control_1/xml_generator.py`
-- **시퀀스 실행 엔진(JSON step 실행)**: `morph/tbs_control_1/sequence_engine.py`
-- **애니 편집 UI**: `morph/tbs_control_1/sequence_editor.py`
-- **웹/HTTP 브리지(로컬 서버)**: `morph/tbs_control_1/kit_remote_http_bridge.py` + `web/tbs_kit_remote/*`
+`morph.tbs_control_1`은 Kit(Omniverse) 안에서:
+- **시뮬레이션**을 돌려서(공정 이벤트가 언제 발생하는지 계산)
+- 그 이벤트에 맞춰 **애니메이션(JSON 시퀀스)** 을 실행하고
+- 진행현황/포트상태/로그를 UI에 보여주고
+- 웹 브라우저에서도 같은 기능을 호출할 수 있게(HTTP 브리지) 해주는 확장입니다.
+
+그리고 이 프로젝트의 큰 특징은:
+> Start를 누르면 “실시간으로 계산하면서 보여주는 방식”이 아니라, 먼저 **백그라운드에서 끝까지 계산(프리런)** 하고
+> 그 결과를 **재생(플레이백)** 해서 사용자에게 “시뮬이 진행되는 것처럼” 보여주는 구조라는 점입니다.
+
+웹 개발로 비유하면:
+- **프리런 = 녹화** (나중에 재생할 타임라인을 미리 만든다)
+- **재생 = 동영상 플레이어처럼 재생** (시간에 맞춰 이벤트를 순서대로 UI에 뿌린다)
 
 ---
 
-## 1) 시뮬레이션: “프리런(백그라운드) → 결과 재생” 구조
+## 1) 용어를 “웹 개발자 언어”로 번역
 
-### 1.1 한 줄 요약
+아래 5개만 이해하면 문서의 80%가 해결됩니다.
 
-Start 클릭 시, 실시간으로 `TBSSimulationEngine.tick(dt)`를 돌리는 대신:
+- **`env.now` (시뮬 시간)**
+  - JS로 치면 “게임 내부 시간” 같은 개념입니다.
+  - `Date.now()`처럼 진짜 시간이 아니라, **시뮬 안에서만 쓰는 시간**입니다.
 
-1) **백그라운드 스레드**에서 시뮬을 가능한 빠르게 끝까지 돌려(프리런)
-2) 그 결과(이벤트/진행/로그의 시간순 목록)를 `SimTimelinePlayer`가 **wall-clock에 맞춰 재생**하며
-3) 재생 중에는 기존 UI 파이프라인(`post_sim_*`)에 payload를 그대로 흘려보냅니다.
+- **`engine.tick(dt)`**
+  - JS 게임에서 `update(dt)` 같은 겁니다.
+  - “시뮬 시간(dt 만큼)”을 앞으로 진행시키는 호출입니다.
 
-핵심 장점:
-- 시작 시점에 **화면별 총 시뮬시간(=프리런 최종 env.now)** 를 확정할 수 있어 막대그래프 스케일/끝값이 정확해집니다.
-- 재현성이 높아지고(프리런 결과가 고정), UI 부하/스레드 타이밍 이슈가 줄어듭니다.
+- **콜백(callback)**
+  - JS의 `button.onclick = () => {}`와 동일합니다.
+  - 시뮬이 “이벤트 발생”하면 `on_event(payload)` 같은 함수를 호출하는 방식입니다.
 
-### 1.2 프리런 결과 데이터 구조
+- **`payload` (dict)**
+  - 파이썬 dict = JS object입니다.
+  - 예: `{"seq": "ARRIVED", "sim_time": "135.57", ...}`는 JS로 보면 `{ seq: "ARRIVED", sim_time: "135.57" }` 입니다.
 
-프리런 결과는 화면별로 `SimPreRunResult`로 저장됩니다.
+- **`SimTimelinePlayer.tick()`**
+  - 프리런 결과(타임라인 배열)를 “현재 재생 시간”에 맞춰 `emit()`하는 **플레이어 루프**입니다.
+  - 웹으로 치면 `setInterval(() => player.tick(), 16)` 같은 느낌입니다.
 
-```1:25:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_sim_prerun_playback.py
-@dataclass(frozen=True)
-class SimTimelineItem:
-    t: float
-    kind: str  # "log" | "event" | "progress"
-    payload: Any
+---
 
-@dataclass(frozen=True)
-class SimPreRunResult:
-    screen: int
-    final_sim_time: float
-    total_est_sec: float
-    items: Tuple[SimTimelineItem, ...]
+## 2) 가장 중요한 데이터: “타임라인(시간표) 배열”
+
+프리런의 결과는 결국 아래 같은 배열입니다.
+
+### 2.1 개념(의사 JSON)
+
+```json
+[
+  { "t": 0.00,   "kind": "progress", "payload": { "label": "대기", ... } },
+  { "t": 83.28,  "kind": "event",    "payload": { "seq": "ARRIVED", ... } },
+  { "t": 83.28,  "kind": "progress", "payload": { "status": "RUNNING", ... } },
+  { "t": 94.28,  "kind": "log",      "payload": "🟩 -> 완료 | ..." }
+]
 ```
 
-- **`t`**: 시뮬 시간(초). UI에서 `t(sim)`으로 표시하는 값.
-- **`kind`**: `"log" | "event" | "progress"` (UI에 어떤 sink로 보낼지 결정)
-- **`payload`**: 기존과 동일한 dict/문자열(엔진이 emit하던 그대로)
-- **`final_sim_time`**: 프리런 완료 시점의 `engine.env.now` (이 값이 “총 시뮬시간”)
+- `t`: **시뮬 시간(초)**
+- `kind`: 이 항목이 “무엇인지”
+  - `log`: 로그창에 찍을 문자열
+  - `event`: 애니 매핑/실행으로 이어질 이벤트 payload
+  - `progress`: 진행현황/막대그래프 갱신 payload
+- `payload`: 실제 데이터(JS object와 같은 구조)
 
-### 1.3 프리런(오프라인) 계산 방식
+### 2.2 왜 이게 좋은가?
 
-프리런은 엔진 콜백을 “UI로 직접 보내지 않고” 수집합니다. 구현은 `prerun_engine_to_timeline()`입니다.
+실시간 계산 방식에서는 “UI가 바쁠 때 이벤트가 밀려서” 애니가 몰아서 실행되는 문제가 생길 수 있는데,
+타임라인 배열이 있으면 **이미 정렬된 정답지**가 생기므로 재생이 훨씬 안정적입니다.
 
-```141:228:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_sim_prerun_playback.py
+웹 개발 비유:
+- 실시간 방식: 서버가 요청 받을 때마다 즉석에서 계산해서 응답하는데, 서버가 느리면 응답이 몰림
+- 타임라인 방식: 미리 계산해 둔 결과(JSON 배열)를 **정해진 시간에 맞춰** 순서대로 보여줌
+
+---
+
+## 3) 시뮬레이션(프리런 → 재생) 흐름을 “JS 이벤트 루프”로 이해하기
+
+### 3.1 전체 흐름(그림)
+
+```text
+[사용자] Start 클릭
+   |
+   v
+[프리런 스레드] 가능한 빨리 시뮬 끝까지 계산
+   |
+   v
+타임라인 배열(시간표) 완성  --->  (총 시뮬시간 = 마지막 t)
+   |
+   v
+[UI 메인 루프] 플레이어가 time에 맞춰 항목을 emit
+   |
+   +--> log 항목: 로그 패널에 출력
+   +--> progress 항목: 진행현황/막대 갱신
+   +--> event 항목: 애니 매핑 -> JSON 시퀀스 실행
+```
+
+### 3.2 프리런(prerun)은 무엇을 하는가?
+
+프리런은 “시뮬 엔진을 빨리 돌려서” 타임라인 배열을 만드는 단계입니다.
+
+JS로 비유한 의사코드:
+
+```js
+// (의사 코드) prerun: 시뮬을 끝까지 계산해 timeline을 만든다
+function prerun(engine) {
+  const timeline = [];
+
+  engine.onLog = (line) => timeline.push({ t: engine.simTime(), kind: "log", payload: line });
+  engine.onEvent = (payload) => timeline.push({ t: payload.sim_time, kind: "event", payload });
+  engine.onProgress = (payload) => timeline.push({ t: payload.sim_time, kind: "progress", payload });
+
+  // 매우 큰 dt로 tick을 반복해서 "가능한 빨리" 끝까지 감
+  while (!engine.isDone()) {
+    engine.tick(1_000_000);
+  }
+
+  timeline.sort((a, b) => a.t - b.t);
+  return { finalTime: engine.simTime(), timeline };
+}
+```
+
+파이썬 코드에서 이 역할은 `prerun_engine_to_timeline()`가 합니다.
+
+```141:229:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_sim_prerun_playback.py
 def prerun_engine_to_timeline(...):
-    items: List[SimTimelineItem] = []
-    ...
-    def on_event(payload: Dict[str, Any]) -> None:
-        items.append(SimTimelineItem(t=_t_from_payload(payload), kind="event", payload=dict(payload)))
-    def on_progress(payload: Dict[str, Any]) -> None:
-        items.append(SimTimelineItem(t=_t_from_payload(payload), kind="progress", payload=dict(payload)))
-    ...
-    engine._on_log = on_log
-    engine._on_event = on_event
-    engine._on_progress = on_progress
     ...
     while True:
         if getattr(engine, "is_done", False): break
         if not getattr(engine, "is_running", False): break
         engine.tick(1e6)
-        ...
     final_sim = float(getattr(engine.env, "now", 0.0) or 0.0)
     ...
-    items.sort(key=lambda it: (float(it.t), int(kind_prio.get(str(it.kind), 9))))
-    return SimPreRunResult(...)
 ```
 
-포인트:
-- `engine.tick(1e6)`처럼 **큰 sim_delta**를 반복 호출해서 가능한 빠르게 `env.step()`를 진행시킵니다.
-- 수집된 아이템은 `t` 기준으로 정렬하되, 동일 시각에서는 `log → event → progress` 순으로 정렬합니다.
+### 3.3 재생(playback)은 무엇을 하는가?
 
-### 1.4 재생(플레이백) 방식
+재생은 “타임라인 배열을 플레이”하는 단계입니다.
 
-재생은 `SimTimelinePlayer.tick()`이 담당합니다.
+JS 의사코드:
+
+```js
+// (의사 코드) player: timeline을 time 기준으로 emit한다
+function makePlayer(timeline, emit) {
+  let cursor = 0;
+  let t0 = performance.now();
+
+  return {
+    tick(speed = 1.0) {
+      const now = performance.now();
+      const simNow = ((now - t0) / 1000) * speed;  // wall-clock -> sim-time
+
+      while (cursor < timeline.length && timeline[cursor].t <= simNow) {
+        emit(timeline[cursor]);
+        cursor++;
+      }
+    }
+  };
+}
+```
+
+파이썬에서는 `SimTimelinePlayer.tick()`이 같은 역할을 합니다.
 
 ```60:138:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_sim_prerun_playback.py
 class SimTimelinePlayer:
     def tick(self) -> None:
-        with self._lock:
-            sp = max(0.05, float(self._speed()))
-            wall_dt = time.perf_counter() - float(self._t0_wall)
-            for scr, res in self._results.items():
-                t_sim = float(wall_dt) * float(sp)
-                t_sim = min(float(res.final_sim_time), float(t_sim))
-                self._sim_now_by_screen[scr] = float(t_sim)
-
-        for scr, res in self._results.items():
-            t_sim = self.sim_now(scr)
-            i = self._cursor_by_screen[scr]
-            while i < len(items) and float(items[i].t) <= float(t_sim) + 1e-9:
-                self._emit(items[i].kind, items[i].payload, int(scr))
-                i += 1
-            self._cursor_by_screen[scr] = i
-```
-
-- wall-clock 경과시간 × UI 속도(`_sim_speed_model`)로 `t_sim`을 계산해 커서를 전진
-- `t_sim` 이하의 아이템을 순서대로 emit → UI에 동일한 payload로 전달
-
-### 1.5 control_window에서의 “프리런 완료 감지 → 플레이어 시작”
-
-프리런이 끝나면 UI 메인 스레드에서 `_drain_sim_log_queue()`가 이를 감지하고 플레이어를 시작합니다.
-
-```3595:3714:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_window.py
-def _drain_sim_log_queue(ext: Any) -> None:
-    # 프리런 완료 시점에 타임라인 플레이어를 시작한다(메인 스레드에서만).
-    ev = getattr(ext, "_sim_prerun_done_evt", None)
-    if (not started) and ev is not None and ev.is_set():
-        results = getattr(ext, "_sim_prerun_results_by_screen", None)
         ...
-        by[str(int(scr))] = float(res.final_sim_time)  # 화면별 총시간 확정
-        ...
-        playback_engs.append(PlaybackEngine(final_sim_time=float(rr.final_sim_time)))
-        ext._sim_engines = playback_engs
-        ...
-        player = SimTimelinePlayer(...)
-        player.start()
-        ext._sim_playback_player = player
-        ...
-        ext._sim_playback_ui_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
-            lambda _e: _tick_playback(ext),
-            name="morph.tbs_control_1:sim_playback_tick",
-        )
-```
-
-여기서 중요한 값:
-- `ext._sim_last_total_est_by_screen[screen] = final_sim_time`: **막대그래프 스케일/끝값의 단일 소스**
-- `PlaybackEngine.env.now`: 포트 아래 EP 타임라인이 `env.now`를 참고하므로, 재생 중에도 `env.now`가 업데이트되어야 함
-
-### 1.6 “프리런 모드에서 엔진 콜백을 UI로 직접 보내지 않는” 이유
-
-프리런은 “계산” 단계이므로 UI에 직접 log/event/progress를 쏘면 실제 재생과 충돌합니다. 따라서 엔진 생성 시 콜백을 노옵으로 주입합니다(프리런 수집 단계에서만 engine 콜백을 덮어씀).
-
-```5571:5594:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_window.py
-# 프리런/재생 모드에서는 엔진 콜백을 UI로 직접 보내지 않는다(프리런 수집 → 재생 단계에서만 UI로 emit).
-engine = TBSSimulationEngine(
-    ...
-    on_log=lambda _line: None,
-    on_event=lambda _payload: None,
-    on_progress=lambda _payload: None,
-    on_gate=lambda payload: float(_estimate_anim_duration_for_gate_payload(ext, payload or {})),
-    ...
-)
-```
-
-### 1.7 예시 코드: “프리런 결과를 파일(JSON)로 저장” (개념 예시)
-
-아래 코드는 프리런 결과의 핵심(`final_sim_time`, `items`)를 JSON으로 저장하는 예시입니다.
-실제 프로젝트에서는 파일 IO 정책에 맞게 경로/권한을 조정하세요.
-
-```python
-import json
-from pathlib import Path
-
-def dump_prerun(results_by_screen: dict[int, "SimPreRunResult"], out_path: str):
-    out = {
-        "screens": {
-            str(scr): {
-                "final_sim_time": res.final_sim_time,
-                "items": [{"t": it.t, "kind": it.kind, "payload": it.payload} for it in res.items],
-            }
-            for scr, res in results_by_screen.items()
-        }
-    }
-    Path(out_path).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        while i < len(items) and float(items[i].t) <= float(t_sim) + 1e-9:
+            self._emit(items[i].kind, items[i].payload, int(scr))
+            i += 1
 ```
 
 ---
 
-## 2) 애니메이션 편집(Sequence Editor)
+## 4) “이벤트(event)”가 오면 애니메이션(JSON)이 어떻게 실행되는가?
 
-### 2.1 역할
+여기서 핵심은 2단계입니다.
 
-`sequence_editor.py`는 “JSON step 목록”을 UI로 편집하고, `SequenceRunner`로 실행/중지/일시정지하는 편집기입니다.
+1) 이벤트 payload를 표준 포맷(XML)으로 맞춰서 “어떤 상황인지”를 안정적으로 뽑는다
+2) 그 결과로 “어떤 JSON을 실행할지”를 고르고, `SequenceRunner`로 실행한다
 
-```4:44:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\sequence_editor.py
-sequence_editor.py — TBS 시퀀스 편집기 UI (별도 창)
-【역할】
-- STEP_TYPES(USD_TIMELINE, MOVE, ROTATE, DELAY 등)별로 행 UI를 구성하고, JSON 저장/불러오기.
-- SequenceRunner에 스텝 리스트를 넘검 실행·일시정지·중지.
-...
-```
+### 4.1 XML 생성/역파싱(표준화)의 이유
 
-### 2.2 핵심 데이터: Step dict
+웹 개발 비유:
+- 여러 API가 서로 다른 필드명을 보내면 매번 조건문이 복잡해짐
+- 그래서 중간에 “표준 DTO”로 변환해서 이후 처리를 단순화하는 것과 같습니다.
 
-step은 dict이며 기본적으로 다음 키들을 사용합니다.
-- **`type`**: `"USD_TIMELINE" | "MOVE" | "ROTATE" | "DELAY"`
-- **`prim`**: 대상 prim 식별자(경로 또는 이름, 복수는 공백/콤마)
-- **`duration`**: 초 단위
-- **`run_with_previous`**: 이전 step과 병렬 그룹으로 묶을지 여부
-- **`step_delay_ms`**: 병렬 그룹 내 오프셋/다음 그룹 지연(ms)
-
-Step 타입 목록은 아래에 있습니다.
-
-```70:84:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\sequence_editor.py
-STEP_TYPES = ["USD_TIMELINE", "MOVE", "ROTATE", "DELAY"]
-...
-self._runner = SequenceRunner(...)
-```
-
-### 2.3 UI에서 “바로 clear()하지 않고 post_update로 refresh”하는 패턴
-
-Omni UI 이벤트 도중 container를 clear하면 오류가 날 수 있어, 다음 프레임(post_update)로 넘깁니다.
-
-```164:192:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\sequence_editor.py
-def _schedule_refresh(self) -> None:
-    ...
-    stream = app.get_app().get_post_update_event_stream()
-    self._refresh_sub = stream.create_subscription_to_pop(_do, name="...sequence_editor.refresh")
-```
-
-### 2.4 예시 코드: “MOVE step 1개짜리 시퀀스 실행”
-
-```python
-from morph.tbs_control_1.sequence_engine import SequenceRunner
-
-runner = SequenceRunner()
-steps = [
-    {"type": "MOVE", "prim": "Mesh_308", "duration": 1.0, "dx": 100, "dy": 0, "dz": 0},
-]
-runner.run(steps, usd_context_name=None, speed_scale=1.0)
-```
-
----
-
-## 3) 시뮬 애니 매핑 방식 (이벤트 → JSON 선택 → 실행)
-
-### 3.1 이벤트의 표준화: XML 생성/역파싱
-
-시뮬 이벤트는 내부 payload로 들어오지만, 매핑 로직은 “장비 메시지(TIB) 형식”을 흉내낸 XML을 생성하고 다시 역파싱해 **표준 키**(`sequence_name/port_id/from/to`)를 뽑아 사용합니다.
-
-XML 생성:
+여기서는 XML이 그 표준 포맷 역할을 합니다.
 
 ```203:266:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\xml_generator.py
-def build_xml_string(sequence_name: str, port_id: Optional[int] = None, from_port_id: Optional[int] = None, to_port_id: Optional[int] = None) -> str:
+def build_xml_string(...):
     ...
-    if seq in FROM_TO_SEQS:
-        ...
-    elif seq in PORT_ID_ONLY_SEQS:
-        ...
-```
-
-역파싱:
-
-```301:349:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\xml_generator.py
 def parse_xml_string(xml_text: str) -> Optional[dict]:
     ...
-    seq_name = body.get(ATTR_SEQUENCE_NAME, "") or ""
-    port_id, from_port_id, to_port_id = _extract_values_from_tree(root)
-    out: Dict[str, str] = { "sequence_name": seq_name_u, "port_id": port_id_s, "from_port_id": from_port_id_s, "to_port_id": to_port_id_s, ... }
 ```
 
-### 3.2 JSON 시퀀스 실행 엔진: SequenceRunner
+### 4.2 JSON 시퀀스(steps) 실행: SequenceRunner
 
-`SequenceRunner`는 step 리스트를 받아 병렬 그룹(run_with_previous) 규칙으로 실행합니다.
+시퀀스는 “steps 배열”입니다.
 
-> 상세 실행 규칙(그룹/앵커/step_delay_ms)은 `sequence_engine.py` 상단 설명과 `SequenceRunner.run()`을 참고하세요.
+```json
+[
+  {"type": "MOVE", "prim": "Mesh_308", "duration": 1.0, "dx": 100, "dy": 0, "dz": 0},
+  {"type": "ROTATE", "prim": "Mesh_308", "duration": 1.0, "rx": 0, "ry": 90, "rz": 0}
+]
+```
+
+`SequenceRunner.run(steps)`가 이 배열을 읽고, 타입별로 실제 애니메이션을 실행합니다.
 
 ---
 
-## 4) 로그 방식 (스레드 → UI 큐 → 패널)
+## 5) 애니메이션 편집기(Sequence Editor)는 무엇을 하는가?
 
-### 4.1 왜 큐가 필요한가
+웹 UI로 비유하면:
+- “폼으로 배열 데이터를 편집”하고
+- “저장 버튼을 누르면 JSON 문자열로 export”
+- “실행 버튼을 누르면 그 배열을 엔진에 전달”
 
-시뮬/웹/기타 스레드에서 올라오는 업데이트를 Omni UI 위젯에 직접 적용하면 스레드-unsafe 문제가 생길 수 있어,
-`control_window.py`는 `_sim_log_queue`로 **kind/payload**를 큐잉하고, 메인 스레드에서 `_drain_sim_log_queue()`가 소비합니다.
+실제 파일:
+- `morph/tbs_control_1/sequence_editor.py`
 
-```3568:3593:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_window.py
+기본 구조:
+- UI에서 step dict를 만들고/수정하고
+- `json.dumps(self._steps)`로 저장하고
+- `SequenceRunner.run(self._steps)`로 실행합니다.
+
+---
+
+## 6) 로그/진행현황은 왜 ‘큐(queue)’를 쓰는가?
+
+핵심 이유는 “스레드”입니다.
+
+웹 개발 비유:
+- 웹 워커(worker)에서 DOM을 직접 만지면 안 되는 것처럼,
+- Kit/Omni UI도 **메인(UI) 스레드에서만** 안전하게 UI를 변경할 수 있습니다.
+
+그래서 다른 스레드에서 올라온 이벤트는 `_sim_log_queue`에 넣고,
+UI 메인 루프가 `_drain_sim_log_queue()`에서 꺼내 UI를 갱신합니다.
+
+```3578:3592:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\control_window.py
 def _dispatch_sim_ui_queue_item(ext: Any, kind: str, payload: Any, panel_mode: SimLogPanelMode) -> None:
-    if kind == SimUiQueueKind.PROGRESS.value: ...
-    elif kind == SimUiQueueKind.ANIM_EVENT.value: ...
-    elif kind == SimUiQueueKind.ACTION.value: ...
-    elif kind == SimUiQueueKind.GATE.value: ...
-    elif kind == SimUiQueueKind.HISTORY_LINE.value: ...
+    ...
 ```
-
-프리런/플레이백 모드에서도 최종적으로는 동일한 `post_sim_*` 경로를 타므로, UI 로깅 방식은 동일하게 유지됩니다.
 
 ---
 
-## 5) 웹 연결 방식 (Kit HTTP Bridge)
+## 7) 웹 연결(HTTP Bridge)은 어떤 구조인가?
 
-### 5.1 목적
+목표:
+- 브라우저에서 `/api/command`로 “sim_start / sim_stop / sim_reset”을 호출하면
+- Kit 내부에서 실제 `on_sim_start_clicked()` 같은 함수가 실행되게 만드는 것
 
-브라우저에서 Kit 내부의 TBS 제어창 기능을 호출(시작/정지/리셋/스냅샷/리소스 등)하기 위해 로컬 HTTP 서버를 제공합니다.
+핵심 제약:
+- HTTP 서버는 별도 스레드에서 돌기 때문에,
+- UI/확장 함수 호출은 반드시 “메인 스레드로 넘겨서 실행”해야 안전합니다.
 
-```4:16:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\kit_remote_http_bridge.py
-Kit 내 HTTP 브리지 — 브라우저에서 TBS 제어창·USD Load 와 동일 동작을 호출한다.
-...
-모든 ext / omni.ui 접근은 메인 스레드(업데이트 스트림)에서만 수행한다.
-```
-
-### 5.2 “메인 스레드에서만 ext/UI 호출”을 보장하는 방법
-
-웹 서버 스레드는 `_run_on_main()`을 통해 “메인 스레드 큐”에 작업을 넣고 결과를 기다립니다.
+그래서 `_run_on_main()` 큐를 둡니다.
 
 ```62:86:c:\Users\ptK\Documents\kit-app-template_mine\source\extensions\morph.tbs_control_1\morph\tbs_control_1\kit_remote_http_bridge.py
 def _run_on_main(fn: Callable[[], Any]) -> Any:
-    fut: Future = Future()
-    def _wrap() -> None:
-        try: fut.set_result(fn())
-        except Exception as e: fut.set_exception(e)
-    with _pending_lock:
-        _pending_main.append((fut, _wrap))
-    return fut.result(timeout=120.0)
-
-def _pump_main_queue(_e: Any) -> None:
-    while True:
-        with _pending_lock:
-            if not _pending_main: break
-            _, run = _pending_main.popleft()
-        run()
+    ...
 ```
 
-### 5.3 API 엔드포인트 개요(대표)
+---
 
-- `GET /api/state`: 현재 채널 스냅샷(포트 상태/진행/이력/EP 타임라인 등)
-- `POST /api/command`: `sim_start`, `sim_stop`, `sim_reset`, `xml_run` 등
+## 8) (따라하기) 웹 개발자가 이해하기 쉬운 최소 실습 3개
 
-> 웹 UI 구현은 `web/tbs_kit_remote/index.html`, `tbs_panel.js`, `tbs_panel.css`를 참고하세요.
+### 8.1 “타임라인 배열”을 JS로 직접 만들어 재생해보기(개념 실습)
 
-### 5.4 예시 코드: 브라우저/스크립트에서 시뮬 시작 호출
+```js
+const timeline = [
+  { t: 0, kind: "log", payload: "시작" },
+  { t: 1, kind: "log", payload: "1초 지남" },
+  { t: 2, kind: "log", payload: "2초 지남" },
+];
+
+let cursor = 0;
+const t0 = performance.now();
+
+function tick() {
+  const simNow = (performance.now() - t0) / 1000;
+  while (cursor < timeline.length && timeline[cursor].t <= simNow) {
+    console.log("[emit]", timeline[cursor]);
+    cursor++;
+  }
+  requestAnimationFrame(tick);
+}
+tick();
+```
+
+이게 프로젝트에서 `SimTimelinePlayer.tick()`이 하는 일과 거의 같습니다.
+
+### 8.2 “웹에서 sim_start 호출” 실습
 
 ```bash
-curl -X POST http://127.0.0.1:8720/api/command ^
+curl -X POST "http://127.0.0.1:8720/api/command" ^
   -H "Content-Type: application/json" ^
   -d "{\"cmd\":\"sim_start\",\"data\":{}}"
 ```
 
+### 8.3 “시퀀스 편집기 step JSON” 실습
+
+```json
+[
+  {"type":"ROTATE","prim":"Mesh_308","duration":1.0,"rx":0,"ry":90,"rz":0},
+  {"type":"DELAY","duration":0.5},
+  {"type":"MOVE","prim":"Mesh_308","duration":1.0,"dx":100,"dy":0,"dz":0}
+]
+```
+
+이 JSON을 편집기 상단 JSON 박스에 붙여넣고 “현재 JSON 상태로 스텝 생성하기” → “실행”을 누르면 동작합니다.
+
 ---
 
-## 부록 A) “왜 prim_matches=0이 생기나?”
+## 9) 파일 지도(실제 수정은 여기서 시작)
 
-MOVE/ROTATE step의 `prim`이 현재 stage에서 하나도 매칭되지 않으면(경로 불일치/이름 변경/분할 USD에 prim 부재),
-해당 step은 “실행되더라도 움직일 대상이 없어” 결과적으로 애니가 안 움직일 수 있습니다.
-
-prim 해석의 단일 소스는 `sequence_engine.resolve_prim_paths()` / `resolve_prim_paths_multi()` 입니다.
-
----
-
-## 부록 B) 문서 작성 팁(유지보수)
-
-이 문서의 핵심은 “코드 라인 인용이 최신 상태를 반영”하는 것입니다.
-리팩터링으로 파일/함수 이동이 있으면 아래 순서로 업데이트하세요.
-
-- 1) 엔트리포인트: `on_sim_start_clicked`, `SimTimelinePlayer`, `SequenceEditorWindow`
-- 2) 데이터 구조: payload keys (`sim_time`, `tbs_sim_screen`, `sim_total_est_sec`, `seq`, `from_port_id`, `to_port_id`)
-- 3) UI/스레드 경계: `_drain_sim_log_queue`, `_run_on_main`, update stream subscription
+- 시뮬 프리런/재생: `morph/tbs_control_1/control_window.py`, `control_sim_prerun_playback.py`
+- 애니 편집: `morph/tbs_control_1/sequence_editor.py`
+- 애니 실행(스텝 엔진): `morph/tbs_control_1/sequence_engine.py`
+- 이벤트 표준화(XML): `morph/tbs_control_1/xml_generator.py`
+- 웹 브리지: `morph/tbs_control_1/kit_remote_http_bridge.py`, `web/tbs_kit_remote/*`
