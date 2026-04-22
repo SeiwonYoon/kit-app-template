@@ -92,6 +92,8 @@ class SequenceEditorWindow:
         self._json_update_sub = None
         # ROTATE 스텝: "현재 중심(BBox) 기준 회전" 체크박스 모델
         self._rotate_auto_pivot_models: Dict[int, ui.SimpleBoolModel] = {}
+        # ROTATE 스텝: "최초 위치(USD 로드 시점) 기준 절대 각도" 체크박스 모델
+        self._rotate_from_initial_models: Dict[int, ui.SimpleBoolModel] = {}
         self._parallel_with_prev_models: Dict[int, ui.SimpleBoolModel] = {}
         self._step_delay_ms_models: Dict[int, ui.SimpleIntModel] = {}
         self._build()
@@ -155,6 +157,7 @@ class SequenceEditorWindow:
         if not self._steps_frame:
             return
         self._rotate_auto_pivot_models.clear()
+        self._rotate_from_initial_models.clear()
         self._parallel_with_prev_models.clear()
         self._step_delay_ms_models.clear()
         self._steps_frame.clear()
@@ -482,19 +485,62 @@ class SequenceEditorWindow:
         # - auto_pivot_world_center=True: 실행 순간 prim의 월드 BBox 중심을 pivot으로 잡아 "제자리 회전"처럼 보이게 함.
         if "auto_pivot_world_center" not in step:
             step["auto_pivot_world_center"] = False
+        if "rotate_from_initial" not in step:
+            step["rotate_from_initial"] = False
 
         auto_pivot = ui.SimpleBoolModel(bool(step.get("auto_pivot_world_center", False)))
-        auto_pivot.add_value_changed_fn(
-            lambda _m: step.__setitem__("auto_pivot_world_center", bool(auto_pivot.get_value_as_bool()))
-        )
+        from_initial = ui.SimpleBoolModel(bool(step.get("rotate_from_initial", False)))
+
+        # UX: 두 옵션은 의미가 달라 혼동이 크므로 "둘 중 하나만" 선택되도록 강제한다.
+        def _on_auto_pivot(_m=None) -> None:
+            v = bool(auto_pivot.get_value_as_bool())
+            if v:
+                try:
+                    from_initial.set_value(False)
+                except Exception:
+                    pass
+            step["auto_pivot_world_center"] = bool(auto_pivot.get_value_as_bool())
+            step["rotate_from_initial"] = bool(from_initial.get_value_as_bool())
+
+        def _on_from_initial(_m=None) -> None:
+            v = bool(from_initial.get_value_as_bool())
+            if v:
+                try:
+                    auto_pivot.set_value(False)
+                except Exception:
+                    pass
+            step["rotate_from_initial"] = bool(from_initial.get_value_as_bool())
+            step["auto_pivot_world_center"] = bool(auto_pivot.get_value_as_bool())
+
+        auto_pivot.add_value_changed_fn(_on_auto_pivot)
+        from_initial.add_value_changed_fn(_on_from_initial)
+        # 초기 상태도 정규화(둘 다 true인 구버전/수동 편집 JSON 방어)
+        if bool(auto_pivot.get_value_as_bool()) and bool(from_initial.get_value_as_bool()):
+            try:
+                from_initial.set_value(False)
+            except Exception:
+                pass
+        _on_auto_pivot()
+        _on_from_initial()
+
         self._rotate_auto_pivot_models[step_idx] = auto_pivot
+        self._rotate_from_initial_models[step_idx] = from_initial
 
         with ui.HStack(spacing=6, height=28):
             ui.CheckBox(model=auto_pivot, style=CHECKBOX_WHITE_STYLE)
             ui.Label("현재 중심 기준 회전(자동)", width=200)
+        with ui.HStack(spacing=6, height=28):
+            ui.CheckBox(model=from_initial, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("최초 위치 기준(절대 각도)", width=200)
         ui.Label(
             "체크 시: 실행 시점의 prim '월드 BBox 중심'을 pivot으로 잡습니다. "
             "객체가 어디로 이동해 있어도 제자리(중심)에서 회전하는 것처럼 보이게 하는 것이 목표입니다.",
+            height=0,
+            word_wrap=True,
+        )
+        ui.Label(
+            "※ '최초 위치 기준' 체크 시: 입력한 RX/RY/RZ는 USD 로드 시점의 최초 자세 기준 목표 각도입니다. "
+            "실행 시 현재 각도에서 목표 각도로 가는 최단 회전(±180°) Δ로 변환되어 적용됩니다.",
             height=0,
             word_wrap=True,
         )
@@ -716,6 +762,12 @@ class SequenceEditorWindow:
             m = self._rotate_auto_pivot_models.get(idx)
             if m is not None:
                 step["auto_pivot_world_center"] = bool(m.get_value_as_bool())
+            m2 = self._rotate_from_initial_models.get(idx)
+            if m2 is not None:
+                step["rotate_from_initial"] = bool(m2.get_value_as_bool())
+            # 상호 배타 보장(수동 JSON 편집 등으로 둘 다 true가 될 수 있어 방어)
+            if bool(step.get("auto_pivot_world_center", False)) and bool(step.get("rotate_from_initial", False)):
+                step["auto_pivot_world_center"] = False
             # 편집기 UI에서 더 이상 지원하지 않는 월드 피봇 모드 플래그들은 실행 시 혼선을 만들 수 있어 강제 해제.
             # (기존 JSON 호환을 위해 키 자체는 남아있을 수 있지만, 실행 관점에서는 OFF가 안전)
             step["user_axis_rotate"] = False

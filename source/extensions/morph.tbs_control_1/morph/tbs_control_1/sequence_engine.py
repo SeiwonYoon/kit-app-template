@@ -1059,6 +1059,80 @@ class SequenceRunner:
         self._start_from_current_paths: List[str] = []
         # path -> {t, r, mode, m16?} — composed_local 는 m16 로 정밀 복원
         self._start_snapshot: Dict[str, Dict[str, Any]] = {}
+        # "최초 위치 기준(절대 각도)" ROTATE 지원:
+        # - USD 로드 시점(=스테이지 식별자별 최초 접근 시점)의 TBS_OFFSET rotateXYZ 값을 저장한다.
+        # - rotate_from_initial=True 인 스텝은 목표각(target)을 "초기 기준 절대각"으로 해석하고,
+        #   현재값과의 차이를 최단(±180°) Δ로 변환해 run_prim_rotate_animation(delta=...)로 실행한다.
+        self._initial_tbs_rotate_by_stage: Dict[str, Dict[str, Tuple[float, float, float]]] = {}
+
+    def _stage_key(self) -> str:
+        """현재 stage를 구분하는 키(USD 재로드 시 초기값 캐시 무효화를 위해)."""
+        st = self._stage()
+        try:
+            ident = str(st.GetRootLayer().identifier) if st is not None else ""
+        except Exception:
+            ident = ""
+        ctx = str(getattr(self, "_usd_context_name", "") or "")
+        return f"{ctx}|{ident}"
+
+    def _read_tbs_rotate_xyz_deg(self, prim: Usd.Prim, tc: Usd.TimeCode) -> Tuple[float, float, float]:
+        """TBS_OFFSET rotateXYZ op의 현재 값을 (rx,ry,rz) degree로 읽는다. 없으면 (0,0,0)."""
+        try:
+            if prim is None or (not prim.IsValid()):
+                return (0.0, 0.0, 0.0)
+        except Exception:
+            return (0.0, 0.0, 0.0)
+        try:
+            x = UsdGeom.Xformable(prim)
+            ops = list(x.GetOrderedXformOps()) if x else []
+        except Exception:
+            ops = []
+        for op in ops:
+            try:
+                if _OFFSET_SUFFIX not in str(op.GetName() or ""):
+                    continue
+                if op.GetOpType() != UsdGeom.XformOp.TypeRotateXYZ:
+                    continue
+                v = _op_value_at_time(op, tc)
+                try:
+                    return (float(v[0]), float(v[1]), float(v[2]))
+                except Exception:
+                    return (0.0, 0.0, 0.0)
+            except Exception:
+                continue
+        return (0.0, 0.0, 0.0)
+
+    def _initial_tbs_rotate_for_path(self, path: str, tc: Usd.TimeCode) -> Tuple[float, float, float]:
+        """stage 기준 최초 접근 시점의 TBS_OFFSET rotateXYZ (rx,ry,rz) 저장/반환."""
+        sk = self._stage_key()
+        try:
+            m = self._initial_tbs_rotate_by_stage.get(sk)
+            if not isinstance(m, dict):
+                m = {}
+                self._initial_tbs_rotate_by_stage[sk] = m
+        except Exception:
+            m = {}
+            self._initial_tbs_rotate_by_stage[sk] = m
+        if str(path) in m:
+            return m[str(path)]
+        st = self._stage()
+        prim = st.GetPrimAtPath(path) if st else None
+        v = self._read_tbs_rotate_xyz_deg(prim, tc) if prim else (0.0, 0.0, 0.0)
+        m[str(path)] = v
+        return v
+
+    @staticmethod
+    def _wrap_to_180(deg: float) -> float:
+        """각도 차이를 (-180, 180] 범위로 정규화(최단 회전)."""
+        try:
+            d = float(deg)
+        except Exception:
+            return 0.0
+        d = (d + 180.0) % 360.0 - 180.0
+        # -180은 +180으로 표현해 방향 일관성 유지
+        if abs(d + 180.0) < 1e-9:
+            return 180.0
+        return d
 
     def is_running(self) -> bool:
         return self._running
@@ -1844,6 +1918,7 @@ class SequenceRunner:
             ry = float(step.get("ry", 0.0))
             rz = float(step.get("rz", 0.0))
             auto_center = bool(step.get("auto_pivot_world_center", False))
+            from_initial = bool(step.get("rotate_from_initial", False))
             # 편집기에서 UI로 제어하는건 auto_pivot_world_center 뿐이다.
             # 과거 JSON의 user_axis_rotate/world_pivot_rotate 등이 남아있으면
             # "이동하면서 회전"처럼 보일 수 있으므로, 여기서는 auto_center가 아닐 때는 로컬 회전 경로를 우선한다.
@@ -1925,10 +2000,31 @@ class SequenceRunner:
                 if remaining["n"] <= 0:
                     _done()
 
+            # 로컬 회전:
+            # - 기본(현행): 입력 rx/ry/rz는 현재 자세 기준 Δ(상대 회전)
+            # - rotate_from_initial=True: 입력 rx/ry/rz는 "USD 로드 시점 최초 자세 기준 목표각"
+            #   → 현재 TBS_OFFSET rotateXYZ 값과의 차이를 최단(±180°) Δ로 변환해서 실행
+            tc_now = _get_current_time_code()
+            stg = self._stage()
             for p in paths:
+                drx, dry, drz = rx, ry, rz
+                if from_initial:
+                    try:
+                        prim = stg.GetPrimAtPath(p) if stg else None
+                    except Exception:
+                        prim = None
+                    cur = self._read_tbs_rotate_xyz_deg(prim, tc_now) if prim else (0.0, 0.0, 0.0)
+                    ini = self._initial_tbs_rotate_for_path(p, tc_now)
+                    # target = initial + 입력값(=최초 기준 목표각)
+                    tx = float(ini[0]) + float(rx)
+                    ty = float(ini[1]) + float(ry)
+                    tz = float(ini[2]) + float(rz)
+                    drx = self._wrap_to_180(float(tx) - float(cur[0]))
+                    dry = self._wrap_to_180(float(ty) - float(cur[1]))
+                    drz = self._wrap_to_180(float(tz) - float(cur[2]))
                 run_prim_rotate_animation(
                     p,
-                    [{"duration": duration, "delta": (rx, ry, rz)}],
+                    [{"duration": duration, "delta": (drx, dry, drz)}],
                     loop=False,
                     on_completed=_one_done,
                 )
