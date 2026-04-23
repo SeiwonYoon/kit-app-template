@@ -516,6 +516,42 @@ def _emit(kind: str, payload: Any, screen: int) -> None:
 
 그리고 `handle_sim_event_for_animation`이 “event → XML 표준화 → 룰/맵으로 JSON 선택 → SequenceRunner 실행”의 중심입니다(섹션 3-B 참고).
 
+#### 3.3.3 (추가) “진행현황 텍스트용 heartbeat(progress emit)”가 왜 필요한가?
+
+재생(playback) 중에 UI를 업데이트하는 경로는 크게 2가지가 있습니다.
+
+- **(A) 타임라인에 원래 들어있던 `kind="progress"` 항목**
+  - 프리런 중에 엔진이 만든 progress 콜백이 녹화되어, 재생 시점에 그대로 다시 emit 됩니다.
+  - 하지만 progress 항목은 “항상 0.1초마다” 같은 촘촘한 주기로 존재하지 않을 수 있습니다.
+
+- **(B) UI가 스스로 만들어서 보내는 progress(heartbeat)**
+  - 요구사항: “DONE/대기 상태에서도 `t(sim)`은 계속 증가해 보이게”
+  - 그래서 `_tick_playback()`이 “마지막으로 본 progress payload”를 복사해서 `sim_time`만 바꿔 **주기적으로** 다시 보내는 방식을 씁니다.
+
+JS 비유(감각 잡기):
+
+```javascript
+// 원래 timeline에 progress가 자주 없을 수 있으니,
+// UI가 "마지막 상태"를 복사해서 시간만 바꿔 계속 렌더하는 방식
+let lastProgress = null;
+
+function heartbeat(simNow) {
+  const p = lastProgress ? { ...lastProgress } : { label: "대기", status: "RUNNING" };
+  p.sim_time = simNow.toFixed(2);
+  renderProgressText(p);
+}
+```
+
+왜 “마지막 progress payload”가 필요하냐면:
+- progress 텍스트에는 단순 시간 외에도 `label/status/detail/percent` 같은 “문장 상태”가 같이 들어가고,
+- 이걸 매번 새로 계산하기보다, **가장 최근 상태를 그대로 유지**하면서 시간만 업데이트하는 게 안전하고 단순하기 때문입니다.
+
+이 프로젝트에서 그 “복사 원본(lastProgress)” 역할을 하는 저장소가:
+- `ext._sim_progress_last_payload_by_screen[scr]` 입니다.
+
+그리고 “heartbeat로 실제로 다시 보내는(post/emit) 코드”는:
+- `morph/tbs_control_1/control_window.py`의 `_tick_playback()` 내부에 있습니다.
+
 JS 의사코드:
 
 ```js
