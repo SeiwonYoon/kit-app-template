@@ -353,7 +353,8 @@ def play_usd_animation(
                     if not tl.is_playing():
                         return
                     t = tl.get_current_time()
-                    if t >= end_time - 1e-6:
+                    epsilon = (1.0 * sp) / tps
+                    if t >= end_time - epsilon:
                         tl.pause()
                         try:
                             if prev_speed is not None:
