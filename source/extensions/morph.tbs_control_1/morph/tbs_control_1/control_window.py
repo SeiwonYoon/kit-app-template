@@ -3881,17 +3881,29 @@ def _tick_playback(ext: Any) -> None:
                     try:
                         by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
                         lp = by_lp.get(str(scr)) if isinstance(by_lp, dict) else None
+                        # 첫 공정(첫 progress) 전에도 t(sim)이 계속 증가해야 한다.
+                        # lp(마지막 progress payload)가 없으면 "대기" 기본 payload를 합성한다.
                         if isinstance(lp, dict) and str(lp.get("label", "") or "").strip():
                             p3 = dict(lp)
-                            p3["tbs_sim_screen"] = str(scr)
-                            p3["sim_time"] = f"{float(tnow):.2f}"
-                            # 총시간은 유지/확정
-                            try:
-                                if isinstance(results, dict) and results.get(int(scr)) is not None:
-                                    p3["sim_total_est_sec"] = f"{float(results[int(scr)].final_sim_time):.2f}"
-                            except Exception:
-                                pass
-                            post_sim_progress_update(ext, p3)
+                        else:
+                            p3 = {
+                                "tbs_sim_screen": str(scr),
+                                "label": "대기",
+                                "detail": "",
+                                "status": "RUNNING",
+                                "elapsed": "0.0",
+                                "total": "0.0",
+                                "percent": "0",
+                            }
+                        p3["tbs_sim_screen"] = str(scr)
+                        p3["sim_time"] = f"{float(tnow):.2f}"
+                        # 총시간은 유지/확정
+                        try:
+                            if isinstance(results, dict) and results.get(int(scr)) is not None:
+                                p3["sim_total_est_sec"] = f"{float(results[int(scr)].final_sim_time):.2f}"
+                        except Exception:
+                            pass
+                        post_sim_progress_update(ext, p3)
                     except Exception:
                         pass
 
@@ -4544,11 +4556,17 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
     NAME_W = 56
 
     t_end = float(sim_time)
+    # total_est가 없거나 0이면(리셋/초기화 상태) "총시간 라벨"은 표시하지 않는다.
+    # 단, 막대 스케일 계산을 위해 내부 total_est는 최소값(10s)을 사용한다.
+    _total_raw = 0.0
     try:
-        total_est = float(str(payload.get("sim_total_est_sec", "")).strip() or "0.0")
+        _total_raw = float(str(payload.get("sim_total_est_sec", "")).strip() or "0.0")
     except Exception:
-        total_est = 0.0
-    total_est = max(10.0, total_est)
+        _total_raw = 0.0
+    show_total_label = bool(isinstance(_total_raw, (float, int)) and float(_total_raw) > 0.0)
+    total_est = max(10.0, float(_total_raw) if show_total_label else 0.0)
+    if total_est <= 0.0:
+        total_est = 10.0
     t_start = 0.0
 
     # 라벨이 너무 많으면(폭이 1px) 안 보이므로, 화면에 보일 만큼만 샘플링한다.
@@ -4574,22 +4592,27 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
             ui.Spacer(width=NAME_W)
             with ui.ZStack(width=BAR_W, height=12):
                 ui.Rectangle(width=BAR_W, height=12, style={"background_color": 0x441A1E26})
-                # 막대 끝(우측)에 총 시뮬 시간을 표시(요구사항)
-                try:
-                    with ui.Placer(offset_x=max(0, BAR_W - 72), offset_y=0):
-                        try:
-                            _end_txt = f"{int(round(total_est))}s" if abs(float(total_est) - float(int(round(total_est)))) < 1e-6 else f"{float(total_est):.1f}s"
-                        except Exception:
-                            _end_txt = f"{total_est:.1f}s"
-                        ui.Label(
-                            _end_txt,
-                            width=72,
-                            height=12,
-                            alignment=ui.Alignment.RIGHT_CENTER,
-                            style={"color": 0xFFBFC7D5, "font_size": 10},
-                        )
-                except Exception:
-                    pass
+                # 막대 끝(우측)에 총 시뮬 시간을 표시(리셋/초기 상태에서는 숨김)
+                if show_total_label:
+                    try:
+                        with ui.Placer(offset_x=max(0, BAR_W - 72), offset_y=0):
+                            try:
+                                _end_txt = (
+                                    f"{int(round(total_est))}s"
+                                    if abs(float(total_est) - float(int(round(total_est)))) < 1e-6
+                                    else f"{float(total_est):.1f}s"
+                                )
+                            except Exception:
+                                _end_txt = f"{total_est:.1f}s"
+                            ui.Label(
+                                _end_txt,
+                                width=72,
+                                height=12,
+                                alignment=ui.Alignment.RIGHT_CENTER,
+                                style={"color": 0xFFBFC7D5, "font_size": 10},
+                            )
+                    except Exception:
+                        pass
                 # 눈금 라벨을 절대좌표로 배치(겹침/폭 축소로 안 보이는 문제 방지)
                 try:
                     ticks = int(total_est // tick_step)
@@ -6259,6 +6282,24 @@ def on_sim_reset_clicked(ext: Any) -> None:
         pass
     try:
         ext._sim_last_ports_occupancy_by_screen = {}
+    except Exception:
+        pass
+    # 총시간(끝 라벨) 캐시도 초기화(리셋 후 이전 총시간이 남는 문제 방지)
+    try:
+        ext._sim_last_total_est_by_screen = {}
+    except Exception:
+        pass
+    # 진행현황(텍스트용) 마지막 payload도 초기화(리셋 후 DONE/총시간 잔상 방지)
+    try:
+        ext._sim_progress_last_payload_by_screen = {}
+    except Exception:
+        pass
+    # 프리런/재생 상태도 초기화(리셋 후 이전 결과 잔상 방지)
+    try:
+        ext._sim_prerun_results_by_screen = None
+        ext._sim_playback_player = None
+        ext._sim_playback_started = False
+        ext._sim_playback_done = False
     except Exception:
         pass
     try:
