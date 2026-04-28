@@ -1348,6 +1348,69 @@ def _auto_fill_per_screen_snapshots_on_start(ext: Any) -> None:
         pass
 
 
+def _sync_default_sim_snapshot_from_ui(ext: Any) -> None:
+    """
+    제어창(UI 모델) 값을 “기본 스냅샷(dict)”으로 즉시 동기화한다.
+
+    목적:
+    - 사용자가 제어창에서 시간/간격/초기포트 등을 바꾸면, 그 값이 "기본값"으로 한 곳에서만 관리되게 한다.
+    - 화면별 스냅샷 구조는 유지하되,
+      - 화면1 스냅샷은 항상 "기본값"으로 갱신
+      - 저장하지 않은 화면(None)만 기본값을 자동으로 따라가게 한다.
+    """
+    # re-entrancy(모델 set_value가 다시 value_changed를 부르는 경우) 방지
+    try:
+        if bool(getattr(ext, "_sim_snapshot_sync_guard", False)):
+            return
+        ext._sim_snapshot_sync_guard = True
+    except Exception:
+        pass
+    try:
+        try:
+            cap = _capture_per_screen_sim_settings(ext)
+        except Exception:
+            cap = {}
+        try:
+            snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
+        except Exception:
+            snaps = [None, None, None, None]
+        while len(snaps) < 4:
+            snaps.append(None)
+        snaps = snaps[:4]
+
+        # 화면1은 “기본값”으로 항상 갱신
+        try:
+            snaps[0] = dict(cap)
+        except Exception:
+            snaps[0] = cap
+
+        # 저장 안 한 화면(None)만 기본값을 따라가게 채움
+        for i in range(1, len(snaps)):
+            if snaps[i] is None:
+                try:
+                    snaps[i] = copy.deepcopy(cap)
+                except Exception:
+                    snaps[i] = dict(cap)
+
+        try:
+            ext._sim_per_screen_snapshots = snaps
+        except Exception:
+            pass
+        try:
+            _refresh_sim_per_screen_status_labels(ext)
+        except Exception:
+            pass
+        try:
+            sim_multi_view.schedule_viewport_snapshot_hud_refresh(ext)
+        except Exception:
+            pass
+    finally:
+        try:
+            ext._sim_snapshot_sync_guard = False
+        except Exception:
+            pass
+
+
 def _fault_ports_from_snapshot(snap: Dict[str, Any], ep_count: int) -> Set[str]:
     """스냅샷의 고장 포트 체크박스를 집합으로 변환한다."""
     out: Set[str] = set()
@@ -2011,6 +2074,7 @@ def build_control_window(ext: Any) -> None:
     ext._sim_split_stage_sub = None
     ext._sim_multi_split_row = None
     ext._sim_per_screen_snapshots = [None, None, None, None]
+    ext._sim_snapshot_sync_guard = False
     ext._sim_per_screen_block = None
     ext._sim_per_screen_row_hstacks = []
     ext._sim_per_screen_status_labels = []
@@ -2347,6 +2411,8 @@ def build_control_window(ext: Any) -> None:
                         _rebuild_sim_monitor_split_ui(ext)
                         ext._sim_port_state_label = ui.Label("", word_wrap=False, width=0, height=0, visible=False)
                         on_sim_ep_count_changed(ext)
+                        # 초기 1회: 제어창 UI 값으로 기본 스냅샷(화면1)을 채운다.
+                        _sync_default_sim_snapshot_from_ui(ext)
                 ui.Spacer(height=6)
                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
                 ui.Spacer(height=8)
@@ -2366,6 +2432,52 @@ def build_control_window(ext: Any) -> None:
         )
         _sync_sim_multi_split_row_visibility(ext)
         _refresh_sim_per_screen_rows(ext)
+    except Exception:
+        pass
+
+    # -------------------------------------------------------------------
+    # “기본값은 제어창 한 군데만 수정”을 위한 자동 동기화:
+    # - UI 모델이 바뀌면 화면1 스냅샷(기본값) 갱신
+    # - 저장하지 않은 화면(None)만 기본값을 따라가게 채움
+    # -------------------------------------------------------------------
+    try:
+        for mdl in (
+            getattr(ext, "_sim_lot_count_model", None),
+            getattr(ext, "_sim_lot_spawn_min_model", None),
+            getattr(ext, "_sim_lot_spawn_max_model", None),
+            getattr(ext, "_sim_pickup_evt_min_model", None),
+            getattr(ext, "_sim_pickup_evt_max_model", None),
+            getattr(ext, "_sim_oht_bp1_min_model", None),
+            getattr(ext, "_sim_oht_bp1_max_model", None),
+            getattr(ext, "_sim_bp1_bp_min_model", None),
+            getattr(ext, "_sim_bp1_bp_max_model", None),
+            getattr(ext, "_sim_bp_ep_min_model", None),
+            getattr(ext, "_sim_bp_ep_max_model", None),
+            getattr(ext, "_sim_ep_oht_min_model", None),
+            getattr(ext, "_sim_ep_oht_max_model", None),
+            getattr(ext, "_sim_init_inout_model", None),
+            getattr(ext, "_sim_init_bp1_model", None),
+            getattr(ext, "_sim_init_bp2_model", None),
+            getattr(ext, "_sim_init_bp3_model", None),
+            getattr(ext, "_sim_init_bp4_model", None),
+            getattr(ext, "_sim_init_ep1_model", None),
+            getattr(ext, "_sim_init_ep2_model", None),
+            getattr(ext, "_sim_init_ep3_model", None),
+            getattr(ext, "_sim_fault_inout_model", None),
+            getattr(ext, "_sim_fault_bp1_model", None),
+            getattr(ext, "_sim_fault_bp2_model", None),
+            getattr(ext, "_sim_fault_bp3_model", None),
+            getattr(ext, "_sim_fault_bp4_model", None),
+            getattr(ext, "_sim_fault_ep1_model", None),
+            getattr(ext, "_sim_fault_ep2_model", None),
+            getattr(ext, "_sim_fault_ep3_model", None),
+        ):
+            if mdl is None:
+                continue
+            try:
+                mdl.add_value_changed_fn(lambda _m, e=ext: _sync_default_sim_snapshot_from_ui(e))
+            except Exception:
+                pass
     except Exception:
         pass
 
