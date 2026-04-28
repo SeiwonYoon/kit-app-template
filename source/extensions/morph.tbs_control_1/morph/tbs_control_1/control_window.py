@@ -652,7 +652,7 @@ def _normalize_json_path(path_text: str) -> Path:
         return base / rel
 
 
-def _estimate_step_duration_sec_for_log(step: Dict[str, Any]) -> Optional[float]:
+def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: float = 1.0) -> Optional[float]:
     """
     애니메이션 실행이력용 "예상 길이" 계산(보수적).
     - MOVE/ROTATE: duration_max가 있으면 max, 없으면 duration.
@@ -660,29 +660,39 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any]) -> Optional[float]
     - USD_TIMELINE: 프레임 범위(start/end)로 추정
     """
     try:
+        sp = max(0.01, float(speed_scale))
+    except Exception:
+        sp = 1.0
+    try:
         t = str((step or {}).get("type") or "").upper()
     except Exception:
         return None
     try:
         if t in ("MOVE", "ROTATE"):
             if "duration_max" in (step or {}):
-                return max(0.0, float((step or {}).get("duration_max", (step or {}).get("duration", 0.0))))
-            return max(0.0, float((step or {}).get("duration", 0.0)))
+                return max(0.0, float((step or {}).get("duration_max", (step or {}).get("duration", 0.0)))) / sp
+            return max(0.0, float((step or {}).get("duration", 0.0))) / sp
         if t == "DELAY":
-            return max(0.0, float((step or {}).get("duration", 0.0)))
+            return max(0.0, float((step or {}).get("duration", 0.0))) / sp
         if t == "USD_TIMELINE":
             start = int((step or {}).get("start_frame", 0))
             end = int((step or {}).get("end_frame", 0))
             if end <= start:
                 return 0.0
-            # 대략치: 60fps 가정(Kit 환경별로 다를 수 있어 "예상치"로만 사용)
-            return max(0.0, float(end - start) / 60.0)
+            # 정책: 기본 30fps(TPS) 기반 환산 + 배속 반영
+            try:
+                step_sp = float((step or {}).get("speed_scale", 1.0))
+            except Exception:
+                step_sp = 1.0
+            step_sp = max(0.01, float(step_sp))
+            base = float(usd_animation_control.frame_to_time(float(end - start)))
+            return max(0.0, base / float(sp * step_sp))
     except Exception:
         return None
     return None
 
 
-def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]]) -> Optional[float]:
+def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]], *, speed_scale: float = 1.0) -> Optional[float]:
     """
     SequenceRunner의 그룹/지연 규칙을 단순화해서 "예상 총 길이"를 계산한다.
     - 병렬 그룹: 리더 시작 시각 기준으로 (offset + duration)의 최대값을 그룹 종료로 본다.
@@ -716,7 +726,7 @@ def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]]) -
                     off = max(0.0, int((st or {}).get("step_delay_ms", 0)) / 1000.0)
                 except Exception:
                     off = 0.0
-            dur = _estimate_step_duration_sec_for_log(st)
+            dur = _estimate_step_duration_sec_for_log(st, speed_scale=float(speed_scale))
             if dur is None:
                 # 알 수 없는 타입/auto 타임라인이 섞이면 전체 추정도 None 처리
                 return None
@@ -735,7 +745,7 @@ def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]]) -
                 anchor_off = max(0.0, int((anchor_step or {}).get("step_delay_ms", 0)) / 1000.0)
             except Exception:
                 anchor_off = 0.0
-        anchor_dur = _estimate_step_duration_sec_for_log(anchor_step)
+        anchor_dur = _estimate_step_duration_sec_for_log(anchor_step, speed_scale=float(speed_scale))
         if anchor_dur is None:
             return None
         anchor_end = t0 + anchor_off + float(anchor_dur)
@@ -830,7 +840,14 @@ def _execute_mapped_sequence_stub(
         return
 
     # 예상 총 길이(초): 엑셀/로그에 같이 남길 수 있게 추정
-    est_total = _estimate_sequence_total_duration_sec_for_log(parsed)
+    sp_est = 1.0
+    try:
+        m = getattr(ext, "_sim_speed_model", None)
+        if m is not None:
+            sp_est = max(0.01, float(m.get_value_as_float()))
+    except Exception:
+        sp_est = 1.0
+    est_total = _estimate_sequence_total_duration_sec_for_log(parsed, speed_scale=float(sp_est))
     est_text = f"{est_total:.2f}s" if isinstance(est_total, (float, int)) else "미확인"
 
     step_types: List[str] = []
@@ -1169,7 +1186,14 @@ def _estimate_anim_duration_for_gate_payload(ext: Any, payload: Dict[str, str]) 
         parsed_steps = json.loads(pth.read_text(encoding="utf-8"))
         if not isinstance(parsed_steps, list):
             return 0.0
-        est = _estimate_sequence_total_duration_sec_for_log(parsed_steps)
+        sp = 1.0
+        try:
+            m = getattr(ext, "_sim_speed_model", None)
+            if m is not None:
+                sp = max(0.01, float(m.get_value_as_float()))
+        except Exception:
+            sp = 1.0
+        est = _estimate_sequence_total_duration_sec_for_log(parsed_steps, speed_scale=float(sp))
         return max(0.0, float(est)) if isinstance(est, (float, int)) else 0.0
     except Exception:
         return 0.0

@@ -1818,13 +1818,24 @@ class SequenceRunner:
                         _apply_world_space_offset_correction(paths_for_offset, start)
                 except Exception:
                     pass
+            # per-step 배속(USD_TIMELINE 전용) * 시퀀스 전체 배속(speed_scale)
+            try:
+                step_sp = float(step.get("speed_scale", 1.0))
+            except Exception:
+                step_sp = 1.0
+            step_sp = float(max(0.01, step_sp))
+            try:
+                seq_sp = float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0))
+            except Exception:
+                seq_sp = 1.0
+            combined_sp = float(max(0.01, step_sp * seq_sp))
             ok = usd_animation_control.play_usd_animation(
                 start_frame=start,
                 end_frame=end,
                 loop=False,
                 on_completed=_done,
                 usd_context_name=getattr(self, "_usd_context_name", None),
-                speed_scale=float(max(0.01, getattr(self, "_speed_scale", 1.0) or 1.0)),
+                speed_scale=combined_sp,
             )
             if not ok:
                 _done()

@@ -556,6 +556,23 @@ class SequenceEditorWindow:
                 ui.Label("END", width=40)
                 ui.IntField(model=ef, width=80, height=28, style=INPUT_FIELD_STYLE)
 
+        # USD_TIMELINE per-step speed scale (default 1.0)
+        spm = ui.SimpleFloatModel(float(step.get("speed_scale", 1.0)))
+
+        def _on_spm(_m):
+            try:
+                v = float(spm.get_value_as_float())
+            except Exception:
+                v = 1.0
+            # 0 이하/너무 작은 값 방지
+            step["speed_scale"] = float(max(0.01, v))
+
+        spm.add_value_changed_fn(_on_spm)
+        with ui.HStack(spacing=6, height=28):
+            ui.Label("SPEED", width=60)
+            ui.FloatField(model=spm, width=80, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("x (USD_TIMELINE 전용)", width=0, height=28, style={"color": 0xFF9AA4B2})
+
         ocp = ui.SimpleStringModel(str(step.get("offset_correct_prims", "")))
 
         def _on_ocp(_m):
