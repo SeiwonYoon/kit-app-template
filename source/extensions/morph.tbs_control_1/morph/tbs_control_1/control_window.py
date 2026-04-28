@@ -6286,6 +6286,17 @@ def on_sim_reset_clicked(ext: Any) -> None:
                 _set_port_box_style(ext, "EP3", "-", boxes)
             except Exception:
                 pass
+            # 멀티 채널도 EP 타임라인을 즉시 t=0으로 재렌더(총시간 라벨 잔상 방지)
+            try:
+                occ0 = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+                by_occ = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+                if not isinstance(by_occ, dict):
+                    by_occ = {}
+                    ext._sim_last_ports_occupancy_by_screen = by_occ
+                by_occ[str(si)] = dict(occ0)
+                _update_ep_timeline_under_port_state(ext, ch, occ0, "0.0")
+            except Exception:
+                pass
     else:
         if getattr(ext, "_sim_history_label", None) is not None:
             ext._sim_history_label.text = "[SIM] 리셋 완료"
