@@ -5153,76 +5153,32 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             pass
 
+    # 공정 시간/간격/초기포트/고장포트 등 “시뮬 입력값”은 스냅샷(dict) 하나로 통일한다.
+    # - 분할(N>1): 화면별로 저장된 스냅샷을 사용
+    # - 단일(N==1): 화면1 스냅샷(없으면 현재 UI값을 캡처한 dict)을 사용
     ep_count = 2
-    initial_full_ports: List[str] = []
     timing = SimulationTimingConfig()
-    init_cfg = SimulationInitConfig(
-        ep_count=2,
-        initial_full_ports=[],
-        max_oht_lots=6,
-        process_time_priority=bool(
-            getattr(ext, "_sim_process_time_priority_model", None) is not None
-            and ext._sim_process_time_priority_model.get_value_as_bool()
-        ),
-    )
-
+    init_cfg = SimulationInitConfig(ep_count=2, initial_full_ports=[], max_oht_lots=6, process_time_priority=False)
+    snap_1: Dict[str, Any] = {}
     if n_ch <= 1:
         try:
-            ep_count_idx = ext._sim_ep_count_combo.model.get_item_value_model().as_int
+            snaps1 = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
         except Exception:
-            ep_count_idx = 0
-        ep_count = 2 if ep_count_idx == 0 else 3
-
-        initial_full_ports = []
-        if ext._sim_init_inout_model.get_value_as_bool():
-            initial_full_ports.append("INOUT")
-        if ext._sim_init_bp1_model.get_value_as_bool():
-            initial_full_ports.append("BP1")
-        if ext._sim_init_bp2_model.get_value_as_bool():
-            initial_full_ports.append("BP2")
-        if ext._sim_init_bp3_model.get_value_as_bool():
-            initial_full_ports.append("BP3")
-        if ext._sim_init_bp4_model.get_value_as_bool():
-            initial_full_ports.append("BP4")
-        if ext._sim_init_ep1_model.get_value_as_bool():
-            initial_full_ports.append("EP1")
-        if ext._sim_init_ep2_model.get_value_as_bool():
-            initial_full_ports.append("EP2")
-        if ep_count >= 3 and ext._sim_init_ep3_model.get_value_as_bool():
-            initial_full_ports.append("EP3")
-
-        lot_count = max(1, ext._sim_lot_count_model.get_value_as_int())
-        spawn_imin = max(0.1, ext._sim_lot_spawn_min_model.get_value_as_float())
-        spawn_imax = max(0.1, ext._sim_lot_spawn_max_model.get_value_as_float())
-        if spawn_imin > spawn_imax:
-            spawn_imin, spawn_imax = spawn_imax, spawn_imin
-        pue_min = max(0.1, ext._sim_pickup_evt_min_model.get_value_as_float())
-        pue_max = max(0.1, ext._sim_pickup_evt_max_model.get_value_as_float())
-        if pue_min > pue_max:
-            pue_min, pue_max = pue_max, pue_min
-        timing = SimulationTimingConfig(
-            oht_to_bp1_min=max(0.1, ext._sim_oht_bp1_min_model.get_value_as_float()),
-            oht_to_bp1_max=max(0.1, ext._sim_oht_bp1_max_model.get_value_as_float()),
-            bp1_to_bp_min=max(0.1, ext._sim_bp1_bp_min_model.get_value_as_float()),
-            bp1_to_bp_max=max(0.1, ext._sim_bp1_bp_max_model.get_value_as_float()),
-            bp_to_ep_min=max(0.1, ext._sim_bp_ep_min_model.get_value_as_float()),
-            bp_to_ep_max=max(0.1, ext._sim_bp_ep_max_model.get_value_as_float()),
-            ep_to_oht_min=max(0.1, ext._sim_ep_oht_min_model.get_value_as_float()),
-            ep_to_oht_max=max(0.1, ext._sim_ep_oht_max_model.get_value_as_float()),
-            lot_spawn_interval_min=spawn_imin,
-            lot_spawn_interval_max=spawn_imax,
-            pickup_event_interval_min=pue_min,
-            pickup_event_interval_max=pue_max,
-        )
-        init_cfg = SimulationInitConfig(
-            ep_count=ep_count,
-            initial_full_ports=initial_full_ports,
-            max_oht_lots=lot_count,
-            process_time_priority=bool(
-                getattr(ext, "_sim_process_time_priority_model", None) is not None
-                and ext._sim_process_time_priority_model.get_value_as_bool()
-            ),
-        )
+            snaps1 = [None, None, None, None]
+        try:
+            cap1 = _capture_per_screen_sim_settings(ext)
+        except Exception:
+            cap1 = {}
+        s0 = snaps1[0] if len(snaps1) >= 1 else None
+        snap_1 = dict(s0) if isinstance(s0, dict) else dict(cap1)
+        try:
+            timing, init_cfg = _timing_and_init_from_snapshot(ext, snap_1)
+        except Exception:
+            pass
+        try:
+            ep_count = int(getattr(init_cfg, "ep_count", 2) or 2)
+        except Exception:
+            ep_count = 2
 
     log_interval = max(0.0, ext._sim_log_interval_model.get_value_as_float())
     log_cfg = SimulationLogConfig(
@@ -5566,30 +5522,11 @@ def on_sim_start_clicked(ext: Any) -> None:
     if n_ch <= 1:
 
         def _collect_faulty_ports_for_engine() -> Set[str]:
-            out: Set[str] = set()
+            # 단일도 스냅샷(dict) 기준으로 통일(= UI 모델/다른 경로 중복 제거)
             try:
-                if getattr(ext, "_sim_fault_inout_model", None) is not None and ext._sim_fault_inout_model.get_value_as_bool():
-                    out.add("INOUT")
-                if getattr(ext, "_sim_fault_bp1_model", None) is not None and ext._sim_fault_bp1_model.get_value_as_bool():
-                    out.add("BP1")
-                if getattr(ext, "_sim_fault_bp2_model", None) is not None and ext._sim_fault_bp2_model.get_value_as_bool():
-                    out.add("BP2")
-                if getattr(ext, "_sim_fault_bp3_model", None) is not None and ext._sim_fault_bp3_model.get_value_as_bool():
-                    out.add("BP3")
-                if getattr(ext, "_sim_fault_bp4_model", None) is not None and ext._sim_fault_bp4_model.get_value_as_bool():
-                    out.add("BP4")
-                if getattr(ext, "_sim_fault_ep1_model", None) is not None and ext._sim_fault_ep1_model.get_value_as_bool():
-                    out.add("EP1")
-                if getattr(ext, "_sim_fault_ep2_model", None) is not None and ext._sim_fault_ep2_model.get_value_as_bool():
-                    out.add("EP2")
-                if getattr(ext, "_sim_fault_ep3_model", None) is not None and ext._sim_fault_ep3_model.get_value_as_bool():
-                    out.add("EP3")
+                return set(_fault_ports_from_snapshot(snap_1, ep_count))
             except Exception:
-                pass
-            if ep_count < 3:
-                out.discard("EP3")
-                out.discard("BP4")
-            return out
+                return set()
 
         # 프리런/재생 모드에서는 엔진 콜백을 UI로 직접 보내지 않는다(프리런 수집 → 재생 단계에서만 UI로 emit).
         engine = TBSSimulationEngine(
