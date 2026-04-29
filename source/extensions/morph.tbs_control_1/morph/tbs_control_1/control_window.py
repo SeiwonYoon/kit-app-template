@@ -4078,6 +4078,13 @@ def _tick_playback(ext: Any) -> None:
                             _enqueue_control_action(ext, SimUiControlAction.EXPORT_XLSX.value)
                         except Exception:
                             pass
+                        # DONE 이후에는 heartbeat(progress 합성)가 계속 돌 필요가 없다.
+                        # player를 stop 처리해 _tick_playback()이 더 이상 PROGRESS를 enqueue하지 않게 한다.
+                        try:
+                            if hasattr(player, "stop"):
+                                player.stop()
+                        except Exception:
+                            pass
             except Exception:
                 pass
     except Exception:
