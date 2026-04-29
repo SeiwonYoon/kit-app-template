@@ -84,6 +84,9 @@ class SequenceEditorWindow:
         self._runner = SequenceRunner(on_sequence_completed=lambda: print("[SEQUENCE] 완료", flush=True))  # noqa: T201
 
         self._json_model = ui.SimpleStringModel("[]")
+        # "총 재생시간" 표시(우측). Label(model=...)은 일부 Kit에서 미지원이라, Label(text) + .text 갱신으로 처리.
+        self._json_total_badge_text = "총 재생: 0.00s"
+        self._json_total_badge_label = None
         self._start_from_current_model = ui.SimpleBoolModel(False)
         self._start_from_current_paths_model = ui.SimpleStringModel("")
 
@@ -309,7 +312,17 @@ class SequenceEditorWindow:
                 # 창 높이(720) 기준으로 충분한 고정 높이를 둡니다.
                 with ui.ScrollingFrame(height=650):
                     with ui.VStack(spacing=8):
-                        ui.Label("시퀀스 JSON (저장/로드용)", height=0)
+                        with ui.HStack(spacing=8, height=18):
+                            ui.Label("시퀀스 JSON (저장/로드용)", height=0)
+                            ui.Spacer()
+                            # 우측 총 시간 배지(겹침 방지: 고정 폭 + Label 사용)
+                            self._json_total_badge_label = ui.Label(
+                                self._json_total_badge_text,
+                                width=160,
+                                height=0,
+                                alignment=ui.Alignment.RIGHT_CENTER,
+                                style={"color": 0xFF9AA4B2},
+                            )
                         # multiline 지원이 되는 Kit 버전에서는 내부 스크롤이 가능하게 설정합니다.
                         # (일부 버전에서 multiline 인자가 없어서 깨질 수 있으므로 TypeError 방어)
                         try:
@@ -324,6 +337,7 @@ class SequenceEditorWindow:
                         ui.Label("Steps", height=0)
                         self._steps_frame = ui.VStack(spacing=6)
                         self._refresh_steps_ui()
+                        self._update_total_duration_badge()
 
     def _refresh_steps_ui(self) -> None:
         if not self._steps_frame:
@@ -848,17 +862,20 @@ class SequenceEditorWindow:
             }
         )
         self._schedule_refresh()
+        self._update_total_duration_badge()
 
     def _remove_step(self, idx: int) -> None:
         if 0 <= idx < len(self._steps):
             self._steps.pop(idx)
             self._schedule_refresh()
+            self._update_total_duration_badge()
 
     def _move_step(self, idx: int, delta: int) -> None:
         j = idx + delta
         if 0 <= idx < len(self._steps) and 0 <= j < len(self._steps):
             self._steps[idx], self._steps[j] = self._steps[j], self._steps[idx]
             self._schedule_refresh()
+            self._update_total_duration_badge()
 
     def _update_json_from_steps(self) -> None:
         """
@@ -884,6 +901,7 @@ class SequenceEditorWindow:
                 self._flush_timing_models_to_dict()
                 self._sync_runtime_start_options_to_steps()
                 self._json_model.set_value(json.dumps(self._steps, ensure_ascii=False, indent=2))
+                self._update_total_duration_badge()
             except Exception:
                 pass
 
@@ -931,6 +949,7 @@ class SequenceEditorWindow:
                 # JSON에서 읽은 시작옵션을 UI 체크/텍스트 박스로 역주입
                 self._load_runtime_start_options_from_steps()
                 self._schedule_refresh()
+                self._update_total_duration_badge()
         except Exception as e:
             print(f"[SEQUENCE] JSON load 실패: {e}", flush=True)  # noqa: T201
 
@@ -938,8 +957,163 @@ class SequenceEditorWindow:
         self._flush_rotate_step_flags_to_dict()
         self._flush_timing_models_to_dict()
         self._sync_runtime_start_options_to_steps()
-        self._runner.run(self._steps)
+        self._update_total_duration_badge()
+        ctx_nm = self._pick_usd_context_name_for_steps(self._steps)
+        self._runner.run(self._steps, usd_context_name=ctx_nm)
         print(f"[SEQUENCE] 실행: {len(self._steps)} steps", flush=True)  # noqa: T201
+
+    def _pick_usd_context_name_for_steps(self, steps: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        시퀀스 편집기는 기본적으로 usd_context_name을 넘기지 않아서,
+        split 화면 보조 컨텍스트에만 Stage가 열려있으면 "아무 동작도 안 함"처럼 보일 수 있다.
+
+        그래서 다음 후보 컨텍스트에서, steps의 prim이 실제로 매칭되는 Stage를 우선 선택한다.
+        - None (기본 컨텍스트)
+        - "morph_tbs_split_aux_1" ~ "morph_tbs_split_aux_3" (screen2~4)
+        """
+        try:
+            from .sequence_engine import _get_stage_for_context, resolve_prim_paths_multi
+        except Exception:
+            return None
+
+        # 1) 어떤 컨텍스트에든 Stage가 열려있고, prim 경로가 실제로 resolve 되는지로 결정
+        candidates: List[Optional[str]] = [None, "morph_tbs_split_aux_1", "morph_tbs_split_aux_2", "morph_tbs_split_aux_3"]
+        prim_ids: List[str] = []
+        try:
+            for st in list(steps or []):
+                if not isinstance(st, dict):
+                    continue
+                t = str(st.get("type") or "").upper()
+                if t in ("MOVE", "ROTATE"):
+                    pid = str(st.get("prim") or "").strip()
+                    if pid:
+                        prim_ids.append(pid)
+        except Exception:
+            prim_ids = []
+
+        best_ctx: Optional[str] = None
+        best_hits = -1
+        for ctx in candidates:
+            stage = _get_stage_for_context(ctx)
+            if stage is None:
+                continue
+            hits = 0
+            for pid in prim_ids:
+                try:
+                    hits += len(resolve_prim_paths_multi(pid, stage=stage))
+                except Exception:
+                    pass
+            # USD_TIMELINE만 있는 경우: hits=0 이어도 stage만 있으면 실행 의미가 있다.
+            if hits > best_hits:
+                best_hits = hits
+                best_ctx = ctx
+        return best_ctx
+
+    def _update_total_duration_badge(self) -> None:
+        """
+        현재 steps 기준 "예상 총 재생시간"을 상단 라벨 우측에 표시한다.
+        - 편집기 표시용 시간은 "기본 1x" 기준.
+        - USD_TIMELINE은 step["speed_scale"]만 반영(시퀀스 전체 speed는 편집기 실행에선 기본 1x).
+        """
+        steps = list(self._steps or [])
+        if not steps:
+            self._json_total_badge_text = "총 재생: 0.00s"
+            try:
+                if self._json_total_badge_label is not None:
+                    self._json_total_badge_label.text = self._json_total_badge_text
+            except Exception:
+                pass
+            return
+
+        def _step_dur_sec(st: Dict[str, Any]) -> float:
+            t = str((st or {}).get("type") or "").upper()
+            if t in ("MOVE", "ROTATE", "DELAY"):
+                try:
+                    return max(0.0, float((st or {}).get("duration", 0.0)))
+                except Exception:
+                    return 0.0
+            if t == "USD_TIMELINE":
+                try:
+                    start_f = int((st or {}).get("start_frame", 0))
+                    end_f = int((st or {}).get("end_frame", 0))
+                except Exception:
+                    return 0.0
+                if end_f <= start_f:
+                    return 0.0
+                # frame_to_time는 usd_animation_control의 기본 FPS 정책을 따른다(없으면 30fps 가정)
+                try:
+                    from . import usd_animation_control
+
+                    base = float(usd_animation_control.frame_to_time(float(end_f - start_f)))
+                except Exception:
+                    base = float(end_f - start_f) / 30.0
+                try:
+                    sp = float((st or {}).get("speed_scale", 1.0))
+                except Exception:
+                    sp = 1.0
+                sp = max(0.01, float(sp))
+                return max(0.0, base / sp)
+            return 0.0
+
+        def _group_end_index(i0: int) -> int:
+            g = int(i0)
+            while g + 1 < len(steps):
+                try:
+                    if bool((steps[g + 1] or {}).get("run_with_previous", False)):
+                        g += 1
+                        continue
+                except Exception:
+                    pass
+                break
+            return g
+
+        # 첫 스텝의 step_delay_ms는 "시퀀스 시작 전 지연"
+        try:
+            t_cursor = max(0.0, int((steps[0] or {}).get("step_delay_ms", 0)) / 1000.0)
+        except Exception:
+            t_cursor = 0.0
+        last_finish = float(t_cursor)
+
+        i = 0
+        while i < len(steps):
+            g_end = _group_end_index(i)
+            t0 = float(t_cursor)
+            group_finish = float(t0)
+            for j in range(i, g_end + 1):
+                st = steps[j] if isinstance(steps[j], dict) else {}
+                off = 0.0
+                if j != i:
+                    try:
+                        off = max(0.0, int((st or {}).get("step_delay_ms", 0)) / 1000.0)
+                    except Exception:
+                        off = 0.0
+                group_finish = max(group_finish, t0 + off + float(_step_dur_sec(st)))
+            last_finish = max(last_finish, group_finish)
+
+            next_idx = g_end + 1
+            if next_idx >= len(steps):
+                break
+            anchor_step = steps[g_end] if isinstance(steps[g_end], dict) else {}
+            anchor_off = 0.0
+            if g_end > i:
+                try:
+                    anchor_off = max(0.0, int((anchor_step or {}).get("step_delay_ms", 0)) / 1000.0)
+                except Exception:
+                    anchor_off = 0.0
+            anchor_end = float(t0) + float(anchor_off) + float(_step_dur_sec(anchor_step))
+            try:
+                delay_next = max(0.0, int((steps[next_idx] or {}).get("step_delay_ms", 0)) / 1000.0)
+            except Exception:
+                delay_next = 0.0
+            t_cursor = max(t0, anchor_end + float(delay_next))
+            i = next_idx
+
+        try:
+            self._json_total_badge_text = f"총 재생: {float(last_finish):.2f}s"
+            if self._json_total_badge_label is not None:
+                self._json_total_badge_label.text = self._json_total_badge_text
+        except Exception:
+            pass
 
     def _flush_rotate_step_flags_to_dict(self) -> None:
         """체크박스 모델 → step (value_changed 없이 바로 실행 버튼을 누른 경우 포함)."""

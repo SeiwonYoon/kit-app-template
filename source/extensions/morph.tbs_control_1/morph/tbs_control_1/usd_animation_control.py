@@ -143,7 +143,7 @@ def _try_set_timeline_speed(tl: Any, speed_scale: float) -> Optional[float]:
     s = max(0.01, min(100.0, s))
     if tl is None:
         return None
-    # 후보 API들
+    # 후보 API들 (set 후 get으로 실제 반영 여부를 검증한다)
     for get_nm, set_nm in (
         ("get_time_scale", "set_time_scale"),
         ("get_playback_rate", "set_playback_rate"),
@@ -155,7 +155,19 @@ def _try_set_timeline_speed(tl: Any, speed_scale: float) -> Optional[float]:
             if callable(f):
                 prev = float(g()) if callable(g) else None
                 f(float(s))
-                return prev
+                # 일부 구현은 set_*는 존재하지만 실제 재생 속도에 영향이 없을 수 있다.
+                # 가능한 경우 read-back으로 반영 여부를 확인한다.
+                if callable(g):
+                    try:
+                        cur = float(g())
+                        if abs(cur - float(s)) <= 1e-4:
+                            return prev
+                    except Exception:
+                        pass
+                    # 검증 실패: 다음 후보 API 시도
+                    continue
+                # getter가 없으면 검증 불가 → 성공으로 간주하지 않고 fallback 경로를 타게 한다.
+                return None
         except Exception:
             continue
     # 속성 기반(time_scale/playback_rate/speed)
@@ -164,7 +176,14 @@ def _try_set_timeline_speed(tl: Any, speed_scale: float) -> Optional[float]:
             prev = getattr(tl, attr, None)
             setattr(tl, attr, float(s))
             try:
-                return float(prev) if isinstance(prev, (float, int)) else None
+                # read-back 검증(가능하면)
+                try:
+                    cur = getattr(tl, attr, None)
+                    if isinstance(cur, (float, int)) and abs(float(cur) - float(s)) <= 1e-4:
+                        return float(prev) if isinstance(prev, (float, int)) else None
+                except Exception:
+                    pass
+                return None
             except Exception:
                 return None
         except Exception:
@@ -186,6 +205,8 @@ def play_usd_animation(
         return False
     try:
         # 배속 적용(지원되는 경우에만). 완료/중단 시 복구 시도.
+        # NOTE: 일부 Kit/타임라인 구현은 set_* API가 있어도 실제 재생 속도에 영향이 없을 수 있다.
+        # 그래서 아래에서 "current_time 직접 구동" fallback을 sp!=1이면 항상 준비해 일관된 동작을 보장한다.
         prev_speed = _try_set_timeline_speed(tl, float(speed_scale))
         st["_play_token"] = int(st.get("_play_token", 0) or 0) + 1
         my_token = int(st["_play_token"])
@@ -201,8 +222,7 @@ def play_usd_animation(
         tl.set_current_time(start_time)
         tl.play()
 
-        # 속도 API가 없는 환경(또는 적용 실패)에서는 current_time을 직접 가속해서 배속을 맞춘다.
-        # - tl 자체는 1x로 재생되므로, 추가로 (sp-1)x 만큼 current_time을 더 밀어 총 sp가 되게 한다.
+        # speed fallback 구독 정리
         try:
             if st.get("_speed_sub") is not None:
                 try:
@@ -216,14 +236,22 @@ def play_usd_animation(
             sp = float(speed_scale)
         except Exception:
             sp = 1.0
-        if prev_speed is None and sp > 1.000001:
+        sp = max(0.01, min(100.0, float(sp)))
+
+        # speed_scale이 1x가 아니면, 타임라인 구현 차이와 무관하게 "우리가 current_time을 직접 구동"한다.
+        # - tl.play()는 호출하지만, 매 프레임 set_current_time(절대시간)로 덮어써서 실제 체감 속도를 보장한다.
+        # - loop는 시퀀스 엔진에서 사용하지 않지만, 기본 동작은 유지한다.
+        if abs(sp - 1.0) > 1e-6:
             try:
                 import omni.kit.app as kit_app
+                import time as _time
+
+                t0_wall = float(_time.perf_counter())
 
                 def _on_update(e):
                     try:
-                        # 재생 토큰이 바뀌면(새 재생/stop) 즉시 종료
                         if int(st.get("_play_token", 0) or 0) != int(my_token):
+                            # 새 재생/stop이 들어오면 종료
                             if st.get("_speed_sub") is not None:
                                 try:
                                     st["_speed_sub"].unsubscribe()
@@ -231,26 +259,16 @@ def play_usd_animation(
                                     pass
                                 st["_speed_sub"] = None
                             return
-                        if not tl.is_playing():
-                            return
-                        dt = 0.0
-                        try:
-                            dt = float(getattr(e, "payload", {}) or {}).get("dt", 0.0)  # type: ignore[union-attr]
-                        except Exception:
-                            dt = 0.0
-                        if dt <= 0.0:
-                            dt = 1.0 / 60.0
-                        # 추가 가속분만큼 current_time을 더 전진시킨다.
-                        extra = dt * max(0.0, sp - 1.0)
-                        t = float(tl.get_current_time())
-                        t2 = t + extra
-                        if t2 >= end_time - 1e-6:
+
+                        wall_dt = float(_time.perf_counter()) - float(t0_wall)
+                        t2 = float(start_time) + float(wall_dt) * float(sp)
+                        if t2 >= float(end_time) - 1e-6:
                             try:
                                 tl.pause()
                             except Exception:
                                 pass
                             try:
-                                tl.set_current_time(end_time)
+                                tl.set_current_time(float(end_time))
                             except Exception:
                                 pass
                             if st.get("_speed_sub") is not None:
@@ -259,6 +277,7 @@ def play_usd_animation(
                                 except Exception:
                                     pass
                                 st["_speed_sub"] = None
+                            # complete_sub가 동시에 호출되는 중복을 막기 위해 선제 해제
                             if st.get("_complete_sub") is not None:
                                 try:
                                     st["_complete_sub"].unsubscribe()
@@ -272,7 +291,7 @@ def play_usd_animation(
                                     pass
                             return
                         try:
-                            tl.set_current_time(t2)
+                            tl.set_current_time(float(t2))
                         except Exception:
                             pass
                     except Exception:
@@ -280,10 +299,41 @@ def play_usd_animation(
 
                 st["_speed_sub"] = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
                     _on_update,
-                    name="morph.tbs_control_1:usd_animation_speed_fallback",
+                    name="morph.tbs_control_1:usd_animation_speed_driver",
                 )
             except Exception:
                 pass
+            # speed-driver 모드에서는 타임라인 이벤트 기반 complete/loop 감지를 쓰면
+            # (내부 1x 재생 + 외부 set_current_time 덮어쓰기)로 중복 완료가 발생할 수 있다.
+            # 따라서 여기서 종료한다. 완료는 speed-driver가 직접 처리한다.
+            try:
+                if st.get("_complete_sub") is not None:
+                    try:
+                        st["_complete_sub"].unsubscribe()
+                    except Exception:
+                        pass
+                    st["_complete_sub"] = None
+            except Exception:
+                pass
+            try:
+                if st.get("_loop_sub") is not None:
+                    try:
+                        st["_loop_sub"].unsubscribe()
+                    except Exception:
+                        pass
+                    st["_loop_sub"] = None
+            except Exception:
+                pass
+            try:
+                if st.get("_end_fix_sub") is not None:
+                    try:
+                        st["_end_fix_sub"].unsubscribe()
+                    except Exception:
+                        pass
+                    st["_end_fix_sub"] = None
+            except Exception:
+                pass
+            return True
 
         if st.get("_complete_sub") is not None:
             try:
