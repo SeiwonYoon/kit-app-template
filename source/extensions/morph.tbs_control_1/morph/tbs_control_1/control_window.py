@@ -659,10 +659,10 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
     - DELAY: duration
     - USD_TIMELINE: 프레임 범위(start/end)로 추정
     """
-    try:
-        sp = max(0.01, float(speed_scale))
-    except Exception:
-        sp = 1.0
+    # NOTE(정책):
+    # - "표시/예상 시간"은 **1배속 기준(콘텐츠 기준)** 으로 유지한다.
+    # - 시뮬 배속(ext._sim_speed_model)은 "재생/진행 속도"만 바꾸고, 여기의 표기 시간에는 반영하지 않는다.
+    # - 단, USD_TIMELINE의 per-step 배속(step["speed_scale"])은 "그 스텝 자체를 빠르게 재생"하므로 표기에도 반영한다.
     try:
         t = str((step or {}).get("type") or "").upper()
     except Exception:
@@ -670,10 +670,10 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
     try:
         if t in ("MOVE", "ROTATE"):
             if "duration_max" in (step or {}):
-                return max(0.0, float((step or {}).get("duration_max", (step or {}).get("duration", 0.0)))) / sp
-            return max(0.0, float((step or {}).get("duration", 0.0))) / sp
+                return max(0.0, float((step or {}).get("duration_max", (step or {}).get("duration", 0.0))))
+            return max(0.0, float((step or {}).get("duration", 0.0)))
         if t == "DELAY":
-            return max(0.0, float((step or {}).get("duration", 0.0))) / sp
+            return max(0.0, float((step or {}).get("duration", 0.0)))
         if t == "USD_TIMELINE":
             start = int((step or {}).get("start_frame", 0))
             end = int((step or {}).get("end_frame", 0))
@@ -686,7 +686,7 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
                 step_sp = 1.0
             step_sp = max(0.01, float(step_sp))
             base = float(usd_animation_control.frame_to_time(float(end - start)))
-            return max(0.0, base / float(sp * step_sp))
+            return max(0.0, base / float(step_sp))
     except Exception:
         return None
     return None
@@ -726,7 +726,9 @@ def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]], *
                     off = max(0.0, int((st or {}).get("step_delay_ms", 0)) / 1000.0)
                 except Exception:
                     off = 0.0
-            dur = _estimate_step_duration_sec_for_log(st, speed_scale=float(speed_scale))
+            # 표기/예상 시간은 1배속 기준(콘텐츠 기준).
+            # (USD_TIMELINE step["speed_scale"]만 _estimate_step_duration_sec_for_log 내부에서 반영)
+            dur = _estimate_step_duration_sec_for_log(st, speed_scale=1.0)
             if dur is None:
                 # 알 수 없는 타입/auto 타임라인이 섞이면 전체 추정도 None 처리
                 return None
@@ -745,7 +747,7 @@ def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]], *
                 anchor_off = max(0.0, int((anchor_step or {}).get("step_delay_ms", 0)) / 1000.0)
             except Exception:
                 anchor_off = 0.0
-        anchor_dur = _estimate_step_duration_sec_for_log(anchor_step, speed_scale=float(speed_scale))
+        anchor_dur = _estimate_step_duration_sec_for_log(anchor_step, speed_scale=1.0)
         if anchor_dur is None:
             return None
         anchor_end = t0 + anchor_off + float(anchor_dur)
@@ -840,14 +842,9 @@ def _execute_mapped_sequence_stub(
         return
 
     # 예상 총 길이(초): 엑셀/로그에 같이 남길 수 있게 추정
-    sp_est = 1.0
-    try:
-        m = getattr(ext, "_sim_speed_model", None)
-        if m is not None:
-            sp_est = max(0.01, float(m.get_value_as_float()))
-    except Exception:
-        sp_est = 1.0
-    est_total = _estimate_sequence_total_duration_sec_for_log(parsed, speed_scale=float(sp_est))
+    # 표시/예상 시간은 1배속 기준(콘텐츠 기준)으로 유지한다.
+    # (실제 재생 속도는 SequenceRunner.run(speed_scale=...)로 별도 적용)
+    est_total = _estimate_sequence_total_duration_sec_for_log(parsed, speed_scale=1.0)
     est_text = f"{est_total:.2f}s" if isinstance(est_total, (float, int)) else "미확인"
 
     step_types: List[str] = []
@@ -1186,14 +1183,8 @@ def _estimate_anim_duration_for_gate_payload(ext: Any, payload: Dict[str, str]) 
         parsed_steps = json.loads(pth.read_text(encoding="utf-8"))
         if not isinstance(parsed_steps, list):
             return 0.0
-        sp = 1.0
-        try:
-            m = getattr(ext, "_sim_speed_model", None)
-            if m is not None:
-                sp = max(0.01, float(m.get_value_as_float()))
-        except Exception:
-            sp = 1.0
-        est = _estimate_sequence_total_duration_sec_for_log(parsed_steps, speed_scale=float(sp))
+        # 게이트 표시/예상 시간은 1배속 기준으로 유지한다(배속은 진행 속도만 변경).
+        est = _estimate_sequence_total_duration_sec_for_log(parsed_steps, speed_scale=1.0)
         return max(0.0, float(est)) if isinstance(est, (float, int)) else 0.0
     except Exception:
         return 0.0
