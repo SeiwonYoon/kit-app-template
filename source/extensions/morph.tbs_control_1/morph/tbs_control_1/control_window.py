@@ -4489,6 +4489,8 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
             # (proc_sec/anim_sec/priority가 바뀌었는데도 elapsed/total이 같으면 UI가 갱신되지 않는 문제 방지)
             key = (
                 panel_slot,
+                # heartbeat(첫 공정 전/대기/DONE 포함)에서 sim_time만 바뀌는 업데이트도 표시되어야 한다.
+                str(sim_time),
                 str(percent),
                 str(elapsed),
                 str(total),
@@ -4500,6 +4502,8 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 proc_sec,
                 anim_sec,
                 proc_pri,
+                # 총 시간(총=XXXs)은 header에 직접 반영되므로 키에 포함
+                str(payload.get("sim_total_est_sec", "") or "").strip(),
             )
             if isinstance(last_key, dict) and last_key.get(dedupe_key) == key:
                 return
@@ -5426,11 +5430,88 @@ def on_sim_start_clicked(ext: Any) -> None:
                 _update_ep_timeline_under_port_state(ext, chans_s[0], occ0, "0.0")
         except Exception:
             pass
+
+    # -------------------------------------------------------------------
+    # Start 직후(t=0) 초기 적재 포트(FULL) 즉시 반영
+    # - 기존에는 occ0(전부 EMPTY)로 먼저 그린 뒤, 첫 공정/첫 이벤트까지 업데이트가 없어
+    #   포트상태/막대가 "첫 공정 전까지 빨강"처럼 보일 수 있었다.
+    # -------------------------------------------------------------------
+    def _occ_from_snap(snap: Dict[str, Any], ep_cnt: int) -> Dict[str, str]:
+        occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+        try:
+            if bool(snap.get("init_inout")):
+                occ["INOUT"] = "FULL"
+            if bool(snap.get("init_bp1")):
+                occ["BP1"] = "FULL"
+            if bool(snap.get("init_bp2")):
+                occ["BP2"] = "FULL"
+            if bool(snap.get("init_bp3")):
+                occ["BP3"] = "FULL"
+            if bool(snap.get("init_bp4")):
+                occ["BP4"] = "FULL"
+            if bool(snap.get("init_ep1")):
+                occ["EP1"] = "FULL"
+            if bool(snap.get("init_ep2")):
+                occ["EP2"] = "FULL"
+            if bool(snap.get("init_ep3")):
+                occ["EP3"] = "FULL"
+        except Exception:
+            pass
+        if int(ep_cnt) < 3:
+            occ["BP4"] = ""
+            occ["EP3"] = ""
+        return occ
+
+    try:
+        snaps_init = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
+    except Exception:
+        snaps_init = [None, None, None, None]
+    while len(snaps_init) < 4:
+        snaps_init.append(None)
+    snaps_init = snaps_init[:4]
+
+    for scr0 in range(1, int(n_ch) + 1):
+        s0 = snaps_init[scr0 - 1] if (scr0 - 1) < len(snaps_init) else None
+        if not isinstance(s0, dict):
+            try:
+                s0 = _capture_per_screen_sim_settings(ext)
+            except Exception:
+                s0 = {}
+        try:
+            ep_idx0 = int(s0.get("ep_count_idx", 0) or 0)
+        except Exception:
+            ep_idx0 = 0
+        ep_cnt0 = 2 if int(ep_idx0) == 0 else 3
+        occ_init = _occ_from_snap(s0, ep_cnt0)
+        try:
+            ext._sim_last_ports_occupancy_by_screen[str(scr0)] = dict(occ_init)  # type: ignore[index]
+        except Exception:
+            pass
+        try:
+            _update_port_occupancy_panel(ext, occ_init, sim_time="0.0", screen=int(scr0))
+        except Exception:
+            pass
     ext._sim_progress_rows = {}
     ext._sim_progress_history = []
     ext._sim_progress_start_times = {}
     ext._sim_log_queue = queue.SimpleQueue()
     _enqueue_sim_log(ext, "[SIM UI] 실시간 로그 큐 초기화")
+    # 첫 공정 전에도 진행현황이 끊기지 않도록, 화면별 기본 progress payload를 1회 시드한다.
+    try:
+        for scr0 in range(1, int(n_ch) + 1):
+            p0 = {
+                "tbs_sim_screen": str(scr0),
+                "sim_time": "0.00",
+                "label": "대기",
+                "detail": "",
+                "status": "RUNNING",
+                "elapsed": "0.0",
+                "total": "0.0",
+                "percent": "0",
+            }
+            _enqueue_sim_progress(ext, p0)
+    except Exception:
+        pass
     ext._sim_anim_active = {}
     ext._sim_anim_pending = []
 
