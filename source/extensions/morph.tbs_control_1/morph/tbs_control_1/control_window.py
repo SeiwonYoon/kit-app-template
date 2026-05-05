@@ -1337,25 +1337,9 @@ def _auto_fill_per_screen_snapshots_on_start(ext: Any) -> None:
         n_ch = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
     except Exception:
         n_ch = 1
-    snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
-    while len(snaps) < 4:
-        snaps.append(None)
-    snaps = snaps[:4]
-    cap = _capture_per_screen_sim_settings(ext)
-    filled = False
-    for i in range(n_ch):
-        if snaps[i] is None:
-            snaps[i] = copy.deepcopy(cap)
-            filled = True
-    try:
-        ext._sim_per_screen_snapshots = snaps
-    except Exception:
-        pass
-    if n_ch > 1 and filled:
-        try:
-            _enqueue_sim_log(ext, "[SIM UI] 미저장 화면에 제어창 현재 설정을 자동 반영했습니다.")
-        except Exception:
-            pass
+    # 요구사항: 기본화면(화면1) 외에는 "저장"을 눌렀을 때만 스냅샷에 반영되어야 한다.
+    # 따라서 start 시점에 미저장(None) 화면을 자동으로 dict로 채워 (저장됨) 상태로 만드는 동작은 하지 않는다.
+    # 엔진 생성 시에는 아래 on_sim_start_clicked()가 snaps[i]가 None이면 UI 캡처(cap)를 폴백으로 사용한다.
     _refresh_sim_per_screen_status_labels(ext)
     try:
         sim_multi_view.schedule_viewport_snapshot_hud_refresh(ext)
@@ -1399,13 +1383,8 @@ def _sync_default_sim_snapshot_from_ui(ext: Any) -> None:
         except Exception:
             snaps[0] = cap
 
-        # 저장 안 한 화면(None)만 기본값을 따라가게 채움
-        for i in range(1, len(snaps)):
-            if snaps[i] is None:
-                try:
-                    snaps[i] = copy.deepcopy(cap)
-                except Exception:
-                    snaps[i] = dict(cap)
+        # 요구사항: 화면2~4는 "저장"을 누르기 전까지는 스냅샷(None) 상태를 유지해야 한다.
+        # 따라서 여기서는 화면1(기본값)만 갱신하고, 다른 화면은 자동 채우지 않는다.
 
         try:
             ext._sim_per_screen_snapshots = snaps
@@ -2754,7 +2733,8 @@ def _ep_count_idx_for_port_panel(ext: Any, screen_1based: int) -> int:
     포트 상태 패널에서 BP4/EP3 칸 표시용 (0=EP2구성, 1=EP3구성).
 
     멀티 분할 시 화면별 「현재 설정 저장」스냅샷이 있으면 그 값을 쓰고,
-    없으면 제어창 EP 개수 콤보를 따른다.
+    없으면 "화면1 스냅샷(기본값)"을 따른다.
+    (요구사항: 화면2~4는 저장 전까지 현재 UI 변경의 영향을 받지 않아야 함)
     """
     try:
         si = int(screen_1based)
@@ -2767,6 +2747,9 @@ def _ep_count_idx_for_port_panel(ext: Any, screen_1based: int) -> int:
         idx = si - 1
         if 0 <= idx < len(snaps) and isinstance(snaps[idx], dict):
             return int(snaps[idx].get("ep_count_idx", 0) or 0)
+        # 화면2~4가 미저장(None)인 경우: 화면1 기본값을 폴백으로 사용
+        if si > 1 and len(snaps) >= 1 and isinstance(snaps[0], dict):
+            return int(snaps[0].get("ep_count_idx", 0) or 0)
     except Exception:
         pass
     try:
@@ -2923,7 +2906,9 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     # EP 줄은 항상 EP1/EP2를 표시하고, EP3는 설정(EP count=3)일 때만 추가한다.
     eps = ["EP1", "EP2"]
     try:
-        ep_idx = int(getattr(ext, "_sim_ep_count_combo", None).model.get_item_value_model().as_int)  # type: ignore[union-attr]
+        # 중요: 분할 화면은 화면별 저장 스냅샷의 ep_count_idx를 따라야 한다.
+        # (전역 콤보를 보면 모든 화면이 동일 EP 개수로 그려지는 문제가 생긴다)
+        ep_idx = int(_ep_count_idx_for_port_panel(ext, int(screen)))
     except Exception:
         ep_idx = 0
     if ep_idx != 0:
@@ -5800,8 +5785,24 @@ def on_sim_start_clicked(ext: Any) -> None:
 
             return _sup
 
+        # 요구사항: 화면2~4는 "저장" 전까지 현재 UI 변경이 즉시 반영되면 안 된다.
+        # 따라서 snap_i가 None이면,
+        # - 화면1은 현재 UI 캡처(cap)로 폴백(기본값)
+        # - 화면2~4는 화면1 스냅샷(기본값)이 있으면 그걸 폴백, 없으면 cap 폴백
+        base_snap = None
+        try:
+            base_snap = snaps[0] if (len(snaps) >= 1 and isinstance(snaps[0], dict)) else None
+        except Exception:
+            base_snap = None
         for i in range(n_ch):
-            snap_i = snaps[i] if snaps[i] is not None else copy.deepcopy(cap)
+            snap_i = snaps[i]
+            if snap_i is None:
+                if i == 0:
+                    snap_i = copy.deepcopy(cap)
+                elif isinstance(base_snap, dict):
+                    snap_i = copy.deepcopy(base_snap)
+                else:
+                    snap_i = copy.deepcopy(cap)
             timing_i, init_i = _timing_and_init_from_snapshot(ext, snap_i)
             screen_tag = str(i + 1)
             snap_frozen = copy.deepcopy(snap_i)
@@ -6593,23 +6594,26 @@ def on_sim_ep_count_changed(ext: Any) -> None:
         idx = 0
     is_ep3 = idx == 1
 
-    # 멀티 분할 시 포트 패널은 화면별 스냅샷(_sim_per_screen_snapshots)의 ep_count_idx를 우선 사용한다.
-    # 시작 시 자동 채움된 스냅샷이 존재하면 콤보 변경이 "반영되지 않는" 것처럼 보일 수 있어,
-    # 콤보 변경 시점에 현재 값(ep_count_idx)을 스냅샷에도 즉시 동기화한다.
+    # 요구사항: EP 포트 개수는 "현재 화면 설정 저장" 시점에 해당 화면 스냅샷에 반영되어야 한다.
+    # - 화면1은 기본값이므로 즉시 반영(스냅샷[0] 갱신) 가능
+    # - 화면2~4 스냅샷은 여기서 건드리지 않는다(저장 버튼에서만 반영)
     try:
-        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
-        changed = False
-        while len(snaps) < 4:
-            snaps.append(None)
-        snaps = snaps[:4]
-        for i in range(len(snaps)):
-            s = snaps[i]
-            if isinstance(s, dict):
-                if int(s.get("ep_count_idx", -1)) != int(idx):
-                    s["ep_count_idx"] = int(idx)
-                    changed = True
-        if changed:
-            ext._sim_per_screen_snapshots = snaps
+        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
+    except Exception:
+        snaps = [None, None, None, None]
+    while len(snaps) < 4:
+        snaps.append(None)
+    snaps = snaps[:4]
+    try:
+        if isinstance(snaps[0], dict):
+            snaps[0]["ep_count_idx"] = int(idx)
+        # 화면1 스냅샷이 아직 없으면 생성(기본값 성격)
+        elif snaps[0] is None:
+            cap0 = _capture_per_screen_sim_settings(ext)
+            if isinstance(cap0, dict):
+                cap0["ep_count_idx"] = int(idx)
+            snaps[0] = cap0
+        ext._sim_per_screen_snapshots = snaps
     except Exception:
         pass
 
