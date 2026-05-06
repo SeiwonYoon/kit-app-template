@@ -148,6 +148,11 @@ class SimulationTimingConfig:
     # READYTOUNLOAD(회수 시도) 이벤트 간격 — 공정 시간과 별개
     pickup_event_interval_min: float = 50.0
     pickup_event_interval_max: float = 70.0
+    # FOUP 공정(EP 상) 랜덤 범위(초)
+    # - 요구사항: EP 안착 후 FOUP 공정이 진행되며, 전역적으로 동시에 1개만 진행
+    # - Removed(회수)는 FOUP 공정(+종료 -3.2 이동 1초) 완료 전에는 대기
+    foup_process_min: float = 30.0
+    foup_process_max: float = 60.0
 
     @staticmethod
     def _norm(a: float, b: float) -> tuple:
@@ -185,6 +190,11 @@ class SimulationTimingConfig:
     def rand_pickup_event_interval(self) -> float:
         """회수(READYTOUNLOAD) 시도 티켓을 누적하는 간격(초) 난수."""
         lo, hi = self._norm(self.pickup_event_interval_min, self.pickup_event_interval_max)
+        return random.uniform(lo, hi)
+
+    def rand_foup_process_time(self) -> float:
+        """FOUP 공정 시간(초) 난수."""
+        lo, hi = self._norm(self.foup_process_min, self.foup_process_max)
         return random.uniform(lo, hi)
 
 
@@ -417,6 +427,11 @@ class TBSSimulationEngine:
         self._faulty_sec: Dict[str, float] = {}
         # EP 점유 기반 통계(요구사항)
         # - UI(진행현황 창) 막대그래프 우측에 표시되는 "EMPTY 누적 초"의 원천 데이터.
+        # FOUP 공정 전역 리소스(capacity=1): 동시에 1개만 공정 진행
+        try:
+            self._ep_foup_process_res = simpy.Resource(self.env, capacity=1) if (simpy and self.env is not None) else None
+        except Exception:
+            self._ep_foup_process_res = None
         # - 누적은 _accumulate_sim_stats()에서 매 tick(경과 dt)마다 갱신된다.
         # - 시뮬 종료 시 _log_final_summary()에서 요약 로그로 출력된다.
         self._ep_empty_sec: Dict[str, float] = {}
@@ -1285,6 +1300,12 @@ class TBSSimulationEngine:
         )
         # ARRIVED 이벤트는 위에서 이미 emit 했으므로, 여기서 _set_port가 ARRIVED를 재발행하면 중복 이벤트가 된다.
         self._set_port(ep_port, "ARRIVED", "FULL", lot, emit_arrived_event=False)
+        # FOUP 공정 시작(전역 1개만). 공정 완료 전에는 회수대기가 켜지지 않으므로 REMOVED가 대기한다.
+        try:
+            if self.env is not None:
+                self.env.process(self._run_ep_foup_process(ep_port, lot))
+        except Exception:
+            pass
         # 포트 상태 패널은 이벤트 수신 시점에 갱신된다.
         # direct input은 완료 시점에 별도 이벤트가 없으면 "다음 이벤트 때" 상태가 뒤늦게 보일 수 있어,
         # 갱신 전용 이벤트를 한 번 더 보내준다(애니/매핑 대상이 아님).
@@ -1521,6 +1542,12 @@ class TBSSimulationEngine:
             self._stage_mark(lot.lot_id, "bp_to_ep_end")
             # BP->EP 이동은 MOVE_REQ 이벤트로 처리하며, ARRIVED(=OHT 운반) 이벤트를 추가로 발생시키지 않는다.
             self._set_port(ep_port, "ARRIVED", "FULL", lot, emit_arrived_event=False)
+            # FOUP 공정 시작(전역 1개만). 공정 완료 전에는 회수대기가 켜지지 않으므로 REMOVED가 대기한다.
+            try:
+                if self.env is not None:
+                    self.env.process(self._run_ep_foup_process(ep_port, lot))
+            except Exception:
+                pass
             self._buffer_loaded_at.pop(bp_port, None)
             self._remove_from_port(bp_port)
             self._dispatching_to_ep[ep_port] = False
@@ -1538,6 +1565,120 @@ class TBSSimulationEngine:
             # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
             self._emit_port_occ_refresh("버퍼→EP 이송 완료 후 포트 표시 갱신")
             self._log(f"{lot.lot_id} | {ep_port} 도착(공정)")
+
+    def _run_ep_foup_process(self, ep_port: str, lot: Lot):
+        """
+        FOUP 공정(EP 상).
+
+        요구사항:
+        - EP 안착 후 FOUP 공정 시작
+        - 시작: Y +3.2 이동(1초) → 공정(30~60초 랜덤) → 종료: Y -3.2 이동(1초)
+        - 전역적으로 동시에 1개만 공정 진행(simpy.Resource capacity=1)
+        - Removed(회수)는 공정 완료(+ -3.2 이동 완료) 전에는 대기(=awaiting_pickup을 끝에서 True)
+        - Removed 애니메이션 중에도 다른 EP의 공정은 가능(Removed 자체는 이 리소스와 별개)
+        """
+        if self.env is None:
+            return
+        res = getattr(self, "_ep_foup_process_res", None)
+        if res is None:
+            # 리소스가 없으면(시뮬 미지원 환경 등) 공정만 시간 소모 없이 바로 회수대기로 전환
+            self._ep_awaiting_pickup[ep_port] = True
+            self._ep_ready_since[ep_port] = float(self.env.now)
+            return
+        # 공정 시간 샘플
+        try:
+            proc_time = float(self._timing.rand_foup_process_time())
+        except Exception:
+            proc_time = 30.0
+        proc_time = max(0.1, proc_time)
+
+        with res.request() as req:
+            try:
+                yield req
+            except Exception:
+                return
+            # 대기열 길이(추정)
+            try:
+                waiting_n = len(getattr(res, "queue", []) or [])
+            except Exception:
+                waiting_n = 0
+
+            # START 이벤트(애니메이션 훅: Y +3.2)
+            try:
+                self._emit_event({"seq": "FOUP_PROCESS_START", "port_id": ep_port, "lot_id": lot.lot_id})
+            except Exception:
+                pass
+            # +3.2 이동을 시뮬 시간으로도 반영(1초)
+            try:
+                yield self.env.process(
+                    self._wait_with_progress(
+                        total_sec=1.0,
+                        label=f"FOUP(+Y) {ep_port}",
+                        detail=f"{ep_port} FOUP 공정 시작(+Y 3.2) | 대기={waiting_n}",
+                        proc_sec=1.0,
+                        anim_sec=1.0,
+                        progress_interval=self._log_cfg.progress_interval(),
+                        event_seq="FOUP_PROCESS",
+                        linked_anim_json="",
+                    )
+                )
+            except Exception:
+                try:
+                    yield self.env.timeout(1.0)
+                except Exception:
+                    pass
+
+            # 공정 시간 대기(전역 1개만)
+            try:
+                yield self.env.process(
+                    self._wait_with_progress(
+                        total_sec=float(proc_time),
+                        label=f"FOUP 공정 {ep_port}",
+                        detail=f"{ep_port} FOUP 공정 진행 | 대기={waiting_n}",
+                        proc_sec=float(proc_time),
+                        anim_sec=0.0,
+                        progress_interval=self._log_cfg.progress_interval(),
+                        event_seq="FOUP_PROCESS",
+                        linked_anim_json="",
+                    )
+                )
+            except Exception:
+                try:
+                    yield self.env.timeout(float(proc_time))
+                except Exception:
+                    pass
+
+            # END 이벤트(애니메이션 훅: Y -3.2)
+            try:
+                self._emit_event({"seq": "FOUP_PROCESS_END", "port_id": ep_port, "lot_id": lot.lot_id})
+            except Exception:
+                pass
+            # -3.2 이동을 시뮬 시간으로도 반영(1초). 이 완료 후에야 회수 가능.
+            try:
+                yield self.env.process(
+                    self._wait_with_progress(
+                        total_sec=1.0,
+                        label=f"FOUP(-Y) {ep_port}",
+                        detail=f"{ep_port} FOUP 공정 종료(-Y 3.2)",
+                        proc_sec=1.0,
+                        anim_sec=1.0,
+                        progress_interval=self._log_cfg.progress_interval(),
+                        event_seq="FOUP_PROCESS",
+                        linked_anim_json="",
+                    )
+                )
+            except Exception:
+                try:
+                    yield self.env.timeout(1.0)
+                except Exception:
+                    pass
+
+            # 이제 회수 가능
+            try:
+                self._ep_awaiting_pickup[ep_port] = True
+                self._ep_ready_since[ep_port] = float(self.env.now)
+            except Exception:
+                pass
 
     def _execute_pickup(self, ep_port: str):
         """회수: READYTOUNLOAD 게이트→이벤트, REMOVED 게이트→이벤트→공정+애니 대기→포트 비움·completed."""
@@ -1617,14 +1758,16 @@ class TBSSimulationEngine:
         )
 
     def _set_port(self, port: str, event_cd: str, start_cd: str, lot: Lot, emit_arrived_event: bool = True) -> None:
-        """포트 점유·상태코드를 갱신하고, EP면 회수 대기 플래그를 켠다. 필요 시 ARRIVED 이벤트."""
+        """포트 점유·상태코드를 갱신한다. 필요 시 ARRIVED 이벤트."""
         self.ports[port] = lot
         self.port_event_cd[port] = event_cd
         self.port_start_cd[port] = start_cd
         if port in self._ep_ports:
-            # EP 안착 = 반출 준비 완료(별도 PROCESS 대기 없음); 회수는 티켓+READYTOUNLOAD
-            self._ep_awaiting_pickup[port] = True
-            self._ep_ready_since[port] = float(self.env.now) if self.env is not None else 0.0
+            # FOUP 공정이 추가되면 "EP 안착 즉시 회수대기"가 아니라,
+            # FOUP 공정 완료(+종료 -3.2 이동 1초 완료) 이후에만 회수대기 상태가 된다.
+            # 따라서 EP 안착 시점에는 awaiting_pickup을 켜지 않는다.
+            self._ep_awaiting_pickup[port] = False
+            self._ep_ready_since[port] = 0.0
         # 정책: BP2~BP4는 "경유 버퍼"이므로 ARRIVED(안착) 이벤트를 별도로 emit 하지 않는다.
         # (BP1->BPx 이송 이벤트(MOVE_TRANSFERING)만으로 애니/로그를 대표)
         if emit_arrived_event and port not in self._buffer_ports:
@@ -1706,6 +1849,14 @@ class TBSSimulationEngine:
             self._set_port(port, "ARRIVED", "FULL", lot, emit_arrived_event=False)
             if port in self._buffer_ports:
                 self._buffer_loaded_at[port] = now
+            # FOUP 공정(EP 상)은 "안착 후 공정"이므로, 초기 적재로 EP가 FULL이면
+            # 해당 EP도 공정이 시작되어야 한다. (그렇지 않으면 회수대기 상태가 영원히 켜지지 않아 시뮬이 멈춘다)
+            if port in self._ep_ports:
+                try:
+                    if self.env is not None:
+                        self.env.process(self._run_ep_foup_process(port, lot))
+                except Exception:
+                    pass
             applied.append(f"{port}={lot.lot_id}")
         if applied:
             return ", ".join(applied)

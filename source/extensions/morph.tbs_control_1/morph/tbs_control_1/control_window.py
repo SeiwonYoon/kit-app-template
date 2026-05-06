@@ -1229,6 +1229,14 @@ def _capture_per_screen_sim_settings(ext: Any) -> Dict[str, Any]:
             d[key] = float(m.get_value_as_float()) if m is not None else 5.0
         except Exception:
             d[key] = 5.0
+    # FOUP 공정 시간(min/max)
+    try:
+        mnm = getattr(ext, "_sim_foup_proc_min_model", None)
+        mxm = getattr(ext, "_sim_foup_proc_max_model", None)
+        d["foup_proc_min"] = float(mnm.get_value_as_float()) if mnm is not None else 30.0
+        d["foup_proc_max"] = float(mxm.get_value_as_float()) if mxm is not None else 60.0
+    except Exception:
+        d["foup_proc_min"], d["foup_proc_max"] = 30.0, 60.0
     for key, attr in (
         ("init_inout", "_sim_init_inout_model"),
         ("init_bp1", "_sim_init_bp1_model"),
@@ -1488,6 +1496,8 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
         lot_spawn_interval_max=spawn_imax,
         pickup_event_interval_min=pue_min,
         pickup_event_interval_max=pue_max,
+        foup_process_min=_f_snap("foup_proc_min", 30.0),
+        foup_process_max=_f_snap("foup_proc_max", 60.0),
     )
     try:
         lot_count = max(1, int(snap.get("lot_count", 6) or 6))
@@ -1807,7 +1817,7 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     # NOTE: ui.Frame(height=..) 가 일부 Kit 버전에서 레이아웃에 의해 축소/클리핑되는 사례가 있어,
     # 고정 높이가 확실한 ScrollingFrame을 사용한다(스크롤바는 숨김).
     ch["ep_timeline_host"] = ui.ScrollingFrame(
-        height=160,
+        height=130,
         horizontal_scrollbar_policy=_ep_timeline_host_horizontal_scroll_policy(ext),
         vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
         style={"background_color": 0x221A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
@@ -1817,9 +1827,16 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     ch["ep_timeline_widget"] = None
     # 진행현황: 텍스트 + EP 점유 타임라인(막대그래프)
     # 진행현황은 "로그 텍스트" 중심으로 유지. (그래프는 포트상태 아래 전용 영역으로 분리됨)
-    ch["progress_frame"] = ui.ScrollingFrame(height=190, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
+    ch["progress_frame"] = ui.ScrollingFrame(height=200, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
     with ch["progress_frame"]:
         with ui.VStack(spacing=6):
+            # FOUP 공정 진행 전용 고정 라벨(요구사항: 다른 진행현황과 섞여 깜빡이지 않게 분리)
+            ch["foup_progress_label"] = ui.Label(
+                "FOUP 공정: 없음" if screen == 1 else f"FOUP 공정(화면{screen}): 없음",
+                word_wrap=True,
+                height=34,
+                style={"color": 0xFFFFE08A},
+            )
             ch["progress_label"] = ui.Label("", word_wrap=True, height=170, style={"color": 0xFFFFFFFF})
             # 진행현황 영역에서는 그래프를 표시하지 않는다(포트상태 아래 전용 영역으로 분리).
             ch["progress_ep_timeline_host"] = None
@@ -2030,6 +2047,9 @@ def build_control_window(ext: Any) -> None:
     ext._sim_bp_ep_max_model = ui.SimpleFloatModel(10.0)
     ext._sim_ep_oht_min_model = ui.SimpleFloatModel(5.0)
     ext._sim_ep_oht_max_model = ui.SimpleFloatModel(10.0)
+    # FOUP 공정 시간(EP 상) — min/max 랜덤 범위
+    ext._sim_foup_proc_min_model = ui.SimpleFloatModel(30.0)
+    ext._sim_foup_proc_max_model = ui.SimpleFloatModel(60.0)
     ext._sim_ep_count_combo = None
     # 초기 적재 포트: IN/OUT + BP1~BP4 + EP1~EP3
     # (EP 개수=2이면 BP4/EP3은 UI에서 숨기며 값도 강제로 False로 유지)
@@ -2255,6 +2275,12 @@ def build_control_window(ext: Any) -> None:
                             ui.FloatField(model=ext._sim_pickup_evt_min_model, width=55)
                             ui.Label("~", width=10)
                             ui.FloatField(model=ext._sim_pickup_evt_max_model, width=55)
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label("FOUP공정(EP)", width=100)
+                            ui.FloatField(model=ext._sim_foup_proc_min_model, width=65)
+                            ui.Label("~", width=10)
+                            ui.FloatField(model=ext._sim_foup_proc_max_model, width=65)
+                            ui.Label("초", width=20, style={"color": 0xFF9AA4B2})
                         ui.Label("초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)", height=20)
                         with ui.HStack(spacing=8, height=26):
                             ui.Label("IN/OUT", width=55); ui.CheckBox(model=ext._sim_init_inout_model, width=30, style=CHECKBOX_WHITE_STYLE)
@@ -3201,9 +3227,9 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                     ui.Spacer(width=6)
                     ui.Label(
                         end_txt,
-                        width=44,
+                        width=24,
                         height=14,
-                        alignment=ui.Alignment.RIGHT_CENTER,
+                        alignment=ui.Alignment.LEFT_CENTER,
                         style={"color": 0xFFE0E6F0, "font_size": 10},
                     )
                 # 막대(EP1/EP2(/EP3)/ALL_EP) — 줄은 항상 렌더된다.
@@ -4596,6 +4622,34 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
         panel_slot = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
     except Exception:
         panel_slot = "1"
+
+    # FOUP 공정 진행은 별도 고정 라벨로만 표시(다른 진행현황과 섞여 깜빡이는 문제 방지)
+    try:
+        if str(event_seq or "").strip().upper() == "FOUP_PROCESS":
+            chansf = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chansf, list) and len(chansf) > 0:
+                try:
+                    si = int(str(panel_slot or "1").strip() or "1")
+                except Exception:
+                    si = 1
+                si = max(1, min(len(chansf), si))
+                chf = chansf[si - 1] if isinstance(chansf[si - 1], dict) else None
+            else:
+                chf = None
+            lbl = (chf or {}).get("foup_progress_label") if chf else None
+            if lbl is not None:
+                t_sim = str(payload.get("sim_time", "0.00"))
+                st = str(payload.get("status", "RUNNING"))
+                pct = str(payload.get("percent", "0"))
+                el = str(payload.get("elapsed", "0.0"))
+                tot = str(payload.get("total", "0.0"))
+                det = str(payload.get("detail", "") or "").strip()
+                prefix = "FOUP 공정" if int((chf or {}).get("screen", si) or si) == 1 else f"FOUP 공정(화면{si})"
+                body = f"{prefix}: {det}" if det else f"{prefix}: 진행"
+                lbl.text = f"{body} | {st} {pct}% ({el}/{tot}) | t={t_sim}"
+            return
+    except Exception:
+        pass
     # 화면별 마지막 진행현황 payload 저장(플레이백에서 DONE 상태에도 t(sim)을 부드럽게 갱신하기 위함)
     try:
         by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
@@ -5079,6 +5133,48 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
     """
     seq_raw = (payload.get("seq") or "").strip()
     if not seq_raw:
+        return
+    # FOUP 공정 전용 이벤트는 XML 매핑 파이프라인을 타지 않고, 즉시 prim 이동 애니메이션을 실행한다.
+    try:
+        seq_u0 = str(seq_raw or "").strip().upper()
+    except Exception:
+        seq_u0 = ""
+    if seq_u0 in ("FOUP_PROCESS_START", "FOUP_PROCESS_END"):
+        try:
+            port_id = str(payload.get("port_id", "") or "").strip().upper()
+        except Exception:
+            port_id = ""
+        if not port_id:
+            return
+        try:
+            from . import port_lot_visibility  # type: ignore
+            mp = port_lot_visibility.load_port_lot_prim_paths() or {}
+        except Exception:
+            mp = {}
+        prim_path = str((mp or {}).get(port_id, "") or "").strip()
+        if not prim_path:
+            if verbose:
+                print(f"[FOUP] prim path missing: port={port_id}", flush=True)
+            return
+        try:
+            scr = int(str(payload.get("tbs_sim_screen", "1") or "1").strip() or "1")
+        except Exception:
+            scr = 1
+        ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
+        dy = 3.2 if seq_u0 == "FOUP_PROCESS_START" else -3.2
+        try:
+            stop_prim_translate_animation(prim_path, usd_context_name=ctx_nm)
+        except Exception:
+            pass
+        try:
+            run_prim_translate_animation(
+                prim_path,
+                [{"duration": 1.0, "delta": (0.0, float(dy), 0.0)}],
+                loop=False,
+                usd_context_name=ctx_nm,
+            )
+        except Exception:
+            pass
         return
     seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
     sim_time = payload.get("sim_time", "")
