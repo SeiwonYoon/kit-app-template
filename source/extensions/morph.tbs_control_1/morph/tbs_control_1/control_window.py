@@ -1918,6 +1918,29 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
     except Exception:
         pass
 
+    # 안정성(포트상태 깜빡임/초기화 방지):
+    # 분할 레이아웃이 어떤 이유로 재조립되면(port cells가 기본값 "-"로 재생성),
+    # 직후 포트상태가 "비었다가 채워졌다"처럼 보이는 깜빡임이 발생할 수 있다.
+    # 마지막 점유 스냅샷이 있으면 즉시 복원해 화면을 안정화한다.
+    try:
+        by_occ = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if isinstance(by_occ, dict) and isinstance(channels, list):
+            for ch in channels:
+                if not isinstance(ch, dict):
+                    continue
+                try:
+                    si = int(ch.get("screen", 1) or 1)
+                except Exception:
+                    si = 1
+                occ = by_occ.get(str(si))
+                if isinstance(occ, dict) and occ:
+                    try:
+                        _update_port_occupancy_panel(ext, occ, sim_time="", screen=si)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
     if n == 1 and len(channels) == 1:
         c0 = channels[0]
         try:
@@ -2810,6 +2833,21 @@ def _set_port_box_style(ext: Any, port: str, value: str, cell_boxes: Any = None)
 def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = "", screen: int = 1) -> None:
     if not isinstance(occ, dict):
         return
+    # 중요(포트상태 "전부 비어버림" 방지):
+    # occ가 빈 dict로 들어오면 _port_cell_text 기본값이 "-"가 되어 포트상태가 통째로 비어 보인다.
+    # 타임라인 재생/프리런 플레이백에서 간헐적으로 occ가 누락/빈 값이 들어올 수 있으므로,
+    # 이 경우에는 마지막 스냅샷으로 폴백하고, 폴백도 없으면 UI를 덮어쓰지 않는다.
+    if not occ:
+        try:
+            by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+            if isinstance(by_prev, dict):
+                occ_prev = by_prev.get(str(int(screen) if int(screen) > 0 else 1))
+                if isinstance(occ_prev, dict) and occ_prev:
+                    occ = dict(occ_prev)
+        except Exception:
+            pass
+        if not occ:
+            return
     ch: Optional[Dict[str, Any]] = None
     chans = getattr(ext, "_sim_monitor_channels", None)
     if isinstance(chans, list) and len(chans) > 0:
@@ -2829,9 +2867,14 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
     ep3 = _port_cell_text(occ, "EP3")
     t = str(sim_time).strip()
     scr_lbl = int((ch or {}).get("screen", screen) or screen)
-    head = f"[포트상태·화면{scr_lbl} t={t}]" if t else f"[포트상태·화면{scr_lbl}]"
     hdr = (ch or {}).get("port_header") if ch else getattr(ext, "_sim_port_state_header_label", None)
-    if hdr is not None:
+    # 헤더의 t= 깜빡임 방지:
+    # - 어떤 경로(예: 레이아웃 재조립 직후 복원)에서는 sim_time을 빈 문자열로 호출할 수 있다.
+    # - 이때 헤더를 "[포트상태·화면N]"으로 덮어쓰면 t=가 사라졌다가, 다음 정상 업데이트에서 다시 나타나는
+    #   깜빡임이 발생한다.
+    # - 따라서 t가 비어있으면 헤더 텍스트는 유지(덮어쓰지 않음)한다.
+    if hdr is not None and t:
+        head = f"[포트상태·화면{scr_lbl} t={t}]"
         hdr.text = head
     _sync_ep3_port_cell_visibility(ext)
     cells = (ch or {}).get("port_cells") if ch else (getattr(ext, "_sim_port_cells", {}) or {})
@@ -2866,6 +2909,18 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
         ep3_cell.text = f"EP3:{_compact_cell_value(ep3)}"
         _set_port_box_style(ext, "EP3", ep3, boxes)
 
+    # 마지막 점유 스냅샷 저장(빈 dict는 저장하지 않음)
+    try:
+        by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_last_ports_occupancy_by_screen = by
+        sk = str(int((ch or {}).get("screen", screen) or screen))
+        if occ:
+            by[sk] = dict(occ)
+    except Exception:
+        pass
+
     # 포트상태 아래 EP 타임라인(전용 영역) 갱신 — 멀티 채널 UI가 없어도(USD 미로드 등) 스냅샷/웹 막대용 상태는 누적
     try:
         ch_tl = ch if ch is not None else {"screen": int(screen), "ep_timeline_host": None}
@@ -2887,6 +2942,74 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     except Exception:
         return
 
+    # 막대그래프 점프(버스트) 방지:
+    # - sim_time_text는 UI 큐 드레인/렌더 지연에 따라 띄엄띄엄 갱신될 수 있다.
+    # - 그 경우 dt가 크게 잡혀 세그먼트가 한 번에 누적되며 막대가 "몇 배 빨리" 채워진 것처럼 보인다.
+    # - 해결: bar 누적에는 wall-clock 기반의 virtual time을 사용해 일정 속도로 전진시키고,
+    #   target(sim_time)을 따라가되 한 프레임에 큰 dt를 먹지 않도록 clamp 한다.
+    try:
+        vt_by = getattr(ext, "_sim_ep_timeline_virtual_time_by_screen", None)
+        if not isinstance(vt_by, dict):
+            vt_by = {}
+            ext._sim_ep_timeline_virtual_time_by_screen = vt_by
+    except Exception:
+        vt_by = {}
+        try:
+            ext._sim_ep_timeline_virtual_time_by_screen = vt_by
+        except Exception:
+            pass
+    try:
+        vprev = float(vt_by.get(scr_key, 0.0) or 0.0)
+    except Exception:
+        vprev = 0.0
+    try:
+        # reset/재시작 등으로 target이 감소하면 즉시 맞춘다.
+        if t_now + 1e-9 < vprev:
+            vprev = float(t_now)
+    except Exception:
+        pass
+    try:
+        now_wall = float(time.perf_counter())
+    except Exception:
+        now_wall = 0.0
+    try:
+        last_wall = float(vt_by.get(f"_wall_{scr_key}", 0.0) or 0.0)
+    except Exception:
+        last_wall = 0.0
+    if last_wall <= 0.0 or now_wall <= 0.0:
+        dt_wall = 0.0
+    else:
+        dt_wall = max(0.0, float(now_wall) - float(last_wall))
+    try:
+        vt_by[f"_wall_{scr_key}"] = float(now_wall)
+    except Exception:
+        pass
+    # wall 기준 전진량(상한): 시뮬 배속을 반영해 bar가 sim_time 증가 속도를 따라가게 한다.
+    # - 배속이 높을수록(sim_time이 더 빠르게 전진) dt_adv도 비례해서 커져야 한다.
+    # - 단, 프레임 드랍/큐 지연이 있어도 "한 번에 확 뛰는" 느낌을 줄이기 위해 상한은 유지하되 배속에 비례해 확장한다.
+    try:
+        sp_model = getattr(ext, "_sim_speed_model", None)
+        sp = float(sp_model.get_value_as_float()) if sp_model is not None else 1.0
+    except Exception:
+        sp = 1.0
+    if sp <= 0.0:
+        sp = 1.0
+    # 배속 반영 전진량(초/호출)
+    dt_adv_raw = float(dt_wall) * float(sp)
+    # 상한(초/호출): 기본 0.20s를 배속에 비례 확장
+    dt_adv_cap = 0.20 * float(sp)
+    dt_adv = min(float(dt_adv_cap), float(dt_adv_raw))
+    vnow = float(vprev) + float(dt_adv)
+    # target(t_now)을 넘지 않도록 clamp (표시 t(sim)보다 막대가 앞서가지 않게)
+    if vnow > float(t_now):
+        vnow = float(t_now)
+    try:
+        vt_by[scr_key] = float(vnow)
+    except Exception:
+        pass
+    # bar 누적은 virtual time 기준으로 진행(표시 라벨은 t_now 그대로 사용 가능)
+    t_bar = float(vnow)
+
     st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
     if not isinstance(st_by, dict):
         st_by = {}
@@ -2896,12 +3019,12 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         st = {"t_last": None, "rows": {}, "total_est_fixed": None}
         st_by[scr_key] = st
     t_last = st.get("t_last", None)
-    st["t_last"] = t_now
+    st["t_last"] = t_bar
     if t_last is None:
         # 첫 프레임은 누적 없이 렌더만
         dt = 0.0
     else:
-        dt = max(0.0, float(t_now) - float(t_last))
+        dt = max(0.0, float(t_bar) - float(t_last))
 
     # EP 줄은 항상 EP1/EP2를 표시하고, EP3는 설정(EP count=3)일 때만 추가한다.
     eps = ["EP1", "EP2"]
@@ -3502,13 +3625,47 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     occ = p.get("ports_occupancy", {})
     if not isinstance(occ, dict):
         occ = {}
-    # EP 타임라인(대기 구간 포함) 갱신을 위해 마지막 점유 스냅샷을 화면별로 저장
+    # 안정성:
+    # - ports_occupancy가 빈 dict이거나(누락), 부분 dict(키 누락) 또는 전부 빈 값이면
+    #   포트상태 패널이 통째로 비어 보이거나 "전 포트 EMPTY"로 덮이는 현상이 생길 수 있다.
+    # - 따라서 마지막 스냅샷으로 폴백/merge하고, 빈 값으로는 last snapshot을 덮어쓰지 않는다.
+    _REQ_PORT_KEYS = ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")
     try:
-        by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-        if not isinstance(by, dict):
-            by = {}
-            ext._sim_last_ports_occupancy_by_screen = by
-        by[str(scr)] = dict(occ)
+        by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if not isinstance(by_prev, dict):
+            by_prev = {}
+            ext._sim_last_ports_occupancy_by_screen = by_prev
+        occ_prev = by_prev.get(str(scr))
+    except Exception:
+        by_prev = {}
+        occ_prev = None
+    # 1) 부분 dict는 merge (누락 키가 '-'로 보이는 문제 방지)
+    try:
+        if isinstance(occ_prev, dict) and occ_prev:
+            if occ and any((k not in occ) for k in _REQ_PORT_KEYS):
+                merged = dict(occ_prev)
+                merged.update(dict(occ))
+                occ = merged
+    except Exception:
+        pass
+    # 2) 빈 dict는 마지막 스냅샷으로 폴백
+    if not occ:
+        try:
+            if isinstance(occ_prev, dict) and occ_prev:
+                occ = dict(occ_prev)
+        except Exception:
+            pass
+    # 3) "전부 빈 값"도 마지막 스냅샷으로 폴백(명시적 reset payload가 아닌 이상)
+    try:
+        if occ and (not any(bool(str(v or "").strip()) for v in occ.values())):
+            if isinstance(occ_prev, dict) and occ_prev and any(bool(str(v or "").strip()) for v in occ_prev.values()):
+                occ = dict(occ_prev)
+    except Exception:
+        pass
+    # 마지막 점유 스냅샷 저장(빈/무의미한 스냅샷은 저장하지 않음)
+    try:
+        if isinstance(by_prev, dict) and occ and any((k in occ) for k in _REQ_PORT_KEYS):
+            by_prev[str(scr)] = dict(occ)
     except Exception:
         pass
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)

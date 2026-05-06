@@ -1855,6 +1855,25 @@ class TBSSimulationEngine:
                 payload["sim_time"] = f"{float(self.env.now):.2f}" if self.env is not None else "0.00"
             except Exception:
                 payload["sim_time"] = "0.00"
+        # 중요(포트상태/막대 안정성):
+        # UI는 ports_occupancy를 기준으로 포트상태 패널과 EP 타임라인을 갱신한다.
+        # progress payload에 ports_occupancy가 누락되면, UI가 "전 포트 EMPTY"로 덮어쓰는 경로가 생겨
+        # 포트가 동시에 사라지거나 깜빡이는 현상이 발생할 수 있다.
+        # 따라서 on_progress payload에도 항상 ports_occupancy(전체 포트 스냅샷)를 포함한다.
+        try:
+            occ_all: Dict[str, str] = {}
+            for p in self._all_ports:
+                lot = self.ports.get(p)
+                occ_all[str(p)] = lot.lot_id if lot else ""
+            # 빈 dict 금지: 최소한 _all_ports 키는 항상 채워진다.
+            payload["ports_occupancy"] = occ_all
+        except Exception:
+            # 예외 시에도 UI가 전부 비는 것을 막기 위해, 가능한 키는 유지한다.
+            try:
+                if "ports_occupancy" not in payload or not isinstance(payload.get("ports_occupancy"), dict):
+                    payload["ports_occupancy"] = {}
+            except Exception:
+                payload["ports_occupancy"] = {}
         # 진행현황 막대그래프용 EP 점유 스냅샷(시뮬 시간 기준)
         try:
             ep_ports = list(getattr(self, "_ep_ports", []) or [])
