@@ -2461,14 +2461,18 @@ def build_control_window(ext: Any) -> None:
                 ui.Spacer(height=8)
                 ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=20)
                 ui.StringField(model=ext._priority_prefix_model, height=22)
-                ui.Spacer(height=4)
-                ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=20)
-                ui.Button("목록 새로고침", height=28, clicked_fn=lambda: on_refresh_prim_list(ext))
-                ui.Spacer(height=4)
-                with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
-                    ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
+                # 요구사항: “우선표시 이름 규칙” 아래 영역은 당분간 사용하지 않으므로 숨김 처리.
+                # (주석처리 수준으로 UI에서 안 보이게)
+                if False:
+                    ui.Spacer(height=4)
+                    ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=20)
+                    ui.Button("목록 새로고침", height=28, clicked_fn=lambda: on_refresh_prim_list(ext))
+                    ui.Spacer(height=4)
+                    with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
+                        ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
     ext._sync_sim_multi_split_row_visibility_fn = _sync_sim_multi_split_row_visibility
-    refresh_object_list(ext)
+    # 우선표시 이름 규칙 아래 UI를 숨겼으므로 목록 refresh도 비활성
+    # refresh_object_list(ext)
     try:
         sim_multi_view.attach_stage_visibility_subscription(
             ext, lambda: _sync_sim_multi_split_row_visibility(ext)
@@ -2644,6 +2648,16 @@ def _append_sim_log(ext: Any, line: str) -> None:
     raw = (line or "").strip()
     if not raw:
         return
+    # 요구사항: SIM 현황(진행현황 아래 [SIM] 이력 영역)에는 타임테이블만 깔끔하게 남긴다.
+    # - 일반 로그/안내(프리런 시작/완료 등)는 콘솔로만 보고, 이력 영역은 타임테이블 전용으로 유지.
+    # - 타임테이블 블록은 _build_prerun_timetable_text에서 "[SIM] 타임테이블(프리런)" 헤더로 시작한다.
+    try:
+        only_tb = bool(getattr(ext, "_sim_history_timetable_only", True))
+    except Exception:
+        only_tb = True
+    if only_tb:
+        if not (raw.startswith("[SIM] 타임테이블(프리런)") or raw.startswith("[화면")):
+            return
     chans = getattr(ext, "_sim_monitor_channels", None)
     if isinstance(chans, list) and len(chans) > 1:
         m0 = re.match(r"^\[화면(\d+)\]\s*", raw)
@@ -3887,6 +3901,95 @@ def _dispatch_sim_ui_queue_item(ext: Any, kind: str, payload: Any, panel_mode: S
         _sim_ui_sink_history_line(ext, line, panel_mode)
 
 
+def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
+    """
+    프리런 결과(SimPreRunResult.items)에서 "DONE progress"를 모아 타임테이블(시간표) 텍스트를 만든다.
+
+    요구사항:
+    - 시뮬 시작부터 종료까지의 각 동작(공정/이동/FOUP 등)을 시작/종료/소요 시간으로 표 형태로 정리.
+    - 진행현황창 아래 [SIM] 이력 로그와, 일반 콘솔에도 동일한 타임테이블을 출력할 수 있게 한다.
+    """
+    out: Dict[int, str] = {}
+    if not isinstance(results_by_screen, dict):
+        return out
+
+    def _f(x: Any, d: float = 0.0) -> float:
+        try:
+            return float(str(x).strip() or d)
+        except Exception:
+            return float(d)
+
+    for scr, res in results_by_screen.items():
+        try:
+            si = int(scr)
+        except Exception:
+            continue
+        items = getattr(res, "items", None)
+        if not isinstance(items, (list, tuple)):
+            continue
+        rows: List[Dict[str, Any]] = []
+        for it in items:
+            try:
+                if str(getattr(it, "kind", "") or "") != "progress":
+                    continue
+                p = getattr(it, "payload", None)
+                if not isinstance(p, dict):
+                    continue
+                st = str(p.get("status", "") or "").strip().upper()
+                if st != "DONE":
+                    continue
+                ev = str(p.get("event_seq") or p.get("sequence_name") or "").strip()
+                label = str(p.get("label", "") or "").strip()
+                total = _f(p.get("total", 0.0), 0.0)
+                t_end = _f(getattr(it, "t", 0.0), 0.0)
+                t_start = max(0.0, float(t_end) - max(0.0, float(total)))
+                rows.append(
+                    {
+                        "t_start": float(t_start),
+                        "t_end": float(t_end),
+                        "dur": float(total),
+                        "event": ev,
+                        "label": label,
+                        "detail": str(p.get("detail", "") or "").strip(),
+                        "anim": str(p.get("linked_anim_json", "") or "").strip(),
+                    }
+                )
+            except Exception:
+                continue
+        if not rows:
+            continue
+        try:
+            rows.sort(key=lambda r: (float(r.get("t_start", 0.0)), float(r.get("t_end", 0.0))))
+        except Exception:
+            pass
+
+        lines: List[str] = []
+        head = f"[SIM] 타임테이블(프리런) — 화면{si}"
+        lines.append(head)
+        lines.append("-" * len(head))
+        lines.append("start   end     dur   event          label")
+        lines.append("------  ------  ----  ------------  ------------------------------")
+        for r in rows:
+            s0 = f"{float(r['t_start']):6.1f}"
+            e0 = f"{float(r['t_end']):6.1f}"
+            d0 = f"{float(r['dur']):4.1f}"
+            ev = (str(r.get("event") or "-")[:12]).ljust(12)
+            lb = str(r.get("label") or "-")
+            if len(lb) > 30:
+                lb = lb[:29] + "…"
+            lines.append(f"{s0}  {e0}  {d0}  {ev}  {lb}")
+            det = str(r.get("detail") or "")
+            if det:
+                if len(det) > 140:
+                    det = det[:139] + "…"
+                lines.append(f"  - detail: {det}")
+            anim = str(r.get("anim") or "")
+            if anim:
+                lines.append(f"  - anim: {anim}")
+        out[si] = "\n".join(lines).strip()
+    return out
+
+
 def _drain_sim_log_queue(ext: Any) -> None:
     try:
         # 프리런 완료 시점에 타임라인 플레이어를 시작한다(메인 스레드에서만).
@@ -3914,6 +4017,40 @@ def _drain_sim_log_queue(ext: Any) -> None:
                                 continue
                     except Exception:
                         pass
+
+                    # 프리런 타임테이블을 [SIM] 창(이력) + 콘솔에 출력
+                    try:
+                        printed = bool(getattr(ext, "_sim_prerun_timetable_printed", False))
+                    except Exception:
+                        printed = False
+                    if not printed:
+                        try:
+                            ext._sim_prerun_timetable_printed = True
+                        except Exception:
+                            pass
+                        try:
+                            tb_by = _build_prerun_timetable_text(results)
+                        except Exception:
+                            tb_by = {}
+                        if isinstance(tb_by, dict) and tb_by:
+                            for si, txt in tb_by.items():
+                                if not str(txt or "").strip():
+                                    continue
+                                try:
+                                    # UI [SIM] 창(화면별 history_label)에 블록 형태로 붙인다.
+                                    _append_sim_log_channel(ext, int(si), str(txt))
+                                except Exception:
+                                    pass
+                                # 콘솔에도 동일 블록 출력(화면별 구분)
+                                try:
+                                    print(str(txt), flush=True)
+                                except Exception:
+                                    pass
+                        else:
+                            try:
+                                _append_sim_log(ext, "[SIM] 타임테이블 생성: 표시할 DONE progress 항목이 없습니다.")
+                            except Exception:
+                                pass
 
                     # UI 그래프 동기화용 playback 엔진 생성
                     playback_engs: List[Any] = []
@@ -6157,6 +6294,11 @@ def on_sim_start_clicked(ext: Any) -> None:
         pass
     speed_value = max(0.1, ext._sim_speed_model.get_value_as_float())
     _append_sim_log(ext, "[SIM] 프리런 시작: 내부적으로 전체 시뮬을 먼저 계산합니다...")
+    # SIM 현황(이력) 영역은 타임테이블 전용으로 유지
+    try:
+        ext._sim_history_timetable_only = True
+    except Exception:
+        pass
     try:
         ext._sim_log_ui_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
             lambda e: _drain_sim_log_queue(ext),
@@ -6171,6 +6313,7 @@ def on_sim_start_clicked(ext: Any) -> None:
         ext._sim_prerun_results_by_screen = None
         ext._sim_playback_player = None
         ext._sim_playback_ui_sub = None
+        ext._sim_prerun_timetable_printed = False
     except Exception:
         pass
 
