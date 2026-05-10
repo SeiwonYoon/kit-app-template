@@ -1,0 +1,7 @@
+[
+  {"t": 0.0,  "event": "event_1"},
+  {"t": 2.5,  "event": "event_2"},
+  {"t": 4.0,  "event": "event_3"},
+  {"t": 6.5,  "event": "event_4"},
+  {"t": 9.0,  "event": "event_5"}
+]

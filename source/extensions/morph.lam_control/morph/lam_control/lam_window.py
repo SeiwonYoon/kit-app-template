@@ -1,0 +1,721 @@
+"""LAM 메인 창 — 다중 USD 로드 + Master Save/Open + 시퀀스 편집기 진입 + JSON 테스트 창.
+
+UX 정책 (REQ-008, 2026-05-10 결정):
+- 첫 진입에서 사용자가 헤매지 않도록 "시작 방법 두 가지" 를 가이드형으로 분리한다.
+  ① 새로 시작 — USD 들을 합쳐 새 합성 USD 만들기
+  ② 기존 합성 USD 열기 — 이전에 저장해 둔 합성(Master) USD 1개 열기
+- "Master USD" 라는 표기를 유지하되, 파일명은 임의(예: master.usd 는 예시일 뿐)
+  라는 한 줄 안내문구를 붙여 혼동을 막는다.
+- 모든 경로 입력에는 omni.kit.window.filepicker 다이얼로그 버튼을 곁들인다.
+- LAM Window 가 뜨면 LAM Sequence Editor 도 같이 자동으로 열린다.
+- 도구 영역에 "JSON 테스트 창 열기" 진입 버튼이 있다(REQ-009).
+
+Viewport 정책 (REQ-007, 결정 A):
+- 별도 LAM viewport 를 새로 만들지 않는다. 대신 default viewport 의 source 만
+  LAM master context 로 마운트한다. (lam_viewport.py 참고)
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Optional
+
+from .lam_composition_discovery import CompositionDiscovery
+from .lam_external_event_runner import LamExternalEventRunner
+from .lam_instance_registry import AnimationInstanceRegistry
+from .lam_json_test_window import LamJsonTestWindow
+from .lam_master_stage import MasterStage
+from .lam_multi_usd_loader import MultiUsdLoader
+from .lam_playback_scheduler import PlaybackScheduler
+from .lam_runtime_evaluator import RuntimeEvaluator
+from .lam_sequence_editor import LamSequenceEditor
+from .lam_viewport import LamViewport
+
+
+_PRINT_PREFIX = "[LAM/WIN]"
+
+WINDOW_TITLE = "LAM Multi-USD Load"
+
+
+def _find_lam_data_root() -> str:
+    """repo 루트의 `lam/` 폴더 절대 경로를 반환한다.
+
+    `__file__` 위치가 source/extensions/... 이든 _build/.../exts/... 이든 모두 통하도록,
+    부모 폴더를 거슬러 올라가며 `lam` 폴더가 존재하는 첫 위치를 반환한다.
+    못 찾으면 폴더 자체를 만들어서 반환(첫 실행 자동 생성).
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    cur = here
+    for _ in range(12):
+        cand = os.path.normpath(os.path.join(cur, "lam"))
+        if os.path.isdir(cand):
+            return cand
+        nxt = os.path.dirname(cur)
+        if nxt == cur:
+            break
+        cur = nxt
+    # 폴더가 어디에도 없으면 here 위로 6단계(= 일반적인 _build 깊이) 위에 생성 시도.
+    fallback = os.path.normpath(os.path.join(here, "..", "..", "..", "..", "..", "..", "lam"))
+    try:
+        os.makedirs(os.path.join(fallback, "lam_event_sequences"), exist_ok=True)
+        os.makedirs(os.path.join(fallback, "lam_external_results"), exist_ok=True)
+        os.makedirs(os.path.join(fallback, "usd"), exist_ok=True)
+    except Exception:
+        pass
+    return fallback
+
+
+def _ext_data_dir() -> str:
+    """레거시 호환 — 새 lam/ 폴더 위치를 반환."""
+    return _find_lam_data_root()
+
+
+class LamWindow:
+    """다중 USD 로드 + 메인 진입 창."""
+
+    def __init__(
+        self,
+        registry: AnimationInstanceRegistry,
+        scheduler: PlaybackScheduler,
+        evaluator: RuntimeEvaluator,
+    ) -> None:
+        self._registry = registry
+        self._scheduler = scheduler
+        self._evaluator = evaluator
+        self._master = MasterStage()
+        self._loader = MultiUsdLoader(self._master, self._registry)
+        self._discovery = CompositionDiscovery(self._master, self._registry)
+        self._viewport = LamViewport(self._master.context_name)
+
+        # Phase 2 — Evaluator 가 master stage 에 reauthor 할 수 있도록 주입.
+        try:
+            self._evaluator.set_master(self._master)
+        except Exception:
+            pass
+
+        # 인스턴스가 사라지면 reauthor 캐시도 무효화해야 한다(Phase 2 안전망).
+        self._registry.add_listener(self._invalidate_attr_caches)
+        self._sequence_editor: Optional[LamSequenceEditor] = None
+        self._json_test_window: Optional[LamJsonTestWindow] = None
+        self._external_runner: Optional[LamExternalEventRunner] = None
+        self._window = None
+        self._instances_inner = None
+        self._asset_path_model = None
+        self._instance_id_model = None
+        self._master_path_model = None
+        self._results_path_model = None
+        self._sim_speed_model = None
+        self._log_label = None
+        # 다이얼로그 보유 슬롯(중복 생성 방지).
+        self._fp_open_usd = None
+        self._fp_open_master = None
+        self._fp_save_master = None
+        self._fp_open_results = None
+
+        self._registry.add_listener(self._refresh_instances)
+
+    # ------------------------------------------------------------------ window
+
+    def show(self) -> None:
+        try:
+            import omni.ui as ui  # type: ignore
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} omni.ui not available: {exc}", flush=True)
+            return
+
+        if self._window is not None:
+            try:
+                self._window.visible = True
+                # 시퀀스 편집기도 같이 살린다(REQ-008).
+                self._open_editor()
+                return
+            except Exception:
+                self._window = None
+
+        # Phase 1 — master context 가 비어 있으면 즉시 새 stage 를 생성하여 첫 USD 등록이
+        # 곧바로 동작하도록 한다. Viewport 는 별도로 새로 만들지 않고, 기존 default
+        # viewport 의 source 만 LAM master 로 마운트한다(REQ-007 결정 A, lam_viewport.py).
+        try:
+            self._master.ensure_context()
+            self._master.set_root_layer_edit_target()
+            self._viewport.show()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} ensure_context/viewport failed: {exc}", flush=True)
+
+        self._asset_path_model = ui.SimpleStringModel("")
+        self._instance_id_model = ui.SimpleStringModel("")
+        # 모든 기본 경로는 repo 루트의 lam/ 폴더를 가리킨다(외부 _build/.../exts/... 가 아님).
+        lam_root = _find_lam_data_root()
+        self._master_path_model = ui.SimpleStringModel(
+            os.path.join(lam_root, "usd", "master.usd")
+        )
+        self._results_path_model = ui.SimpleStringModel(
+            os.path.join(lam_root, "lam_external_results", "sample_external_result.json")
+        )
+
+        self._window = ui.Window(WINDOW_TITLE, width=860, height=720)
+        with self._window.frame:
+            with ui.VStack(spacing=6):
+                ui.Label(
+                    "LAM 컨트롤 — 여러 USD 를 합쳐 한 뷰포트에서 독립 타임라인으로 재생합니다.",
+                    height=20,
+                )
+                ui.Label(
+                    "(\"Master USD\" 라는 단어가 나오지만 파일명은 임의입니다. "
+                    "예: master.usd 는 그저 예시 이름.)",
+                    height=18,
+                )
+                ui.Label(
+                    "※ LAM 은 기본(default) USD 컨텍스트를 사용합니다. 기본 Viewport·Stage 패널·Property 패널이 자동으로 LAM 의 prim 을 봅니다.",
+                    height=18,
+                )
+                ui.Label(
+                    "※ 주의: tbs_control_1 의 [USD Load] 를 누르면 기본 stage 가 새로 열려 LAM 의 author 가 사라집니다. (LAM 작업 중에는 누르지 마세요.)",
+                    height=18,
+                )
+                ui.Separator()
+
+                # ─── 시작 방법 ① 새로 시작 ────────────────────────────────────
+                cf1 = ui.CollapsableFrame("① 새로 시작 — USD 를 추가해 합성 만들기", collapsed=False, height=0)
+                with cf1:
+                    with ui.VStack(spacing=4):
+                        ui.Label(
+                            "lam/ 폴더 안의 샘플 USD 들을 [USD 추가...] 로 하나씩 등록하세요. "
+                            "여러 개 추가하면 한 뷰포트에 같이 보입니다.",
+                            height=18,
+                        )
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Label("Asset path", width=90)
+                            ui.StringField(model=self._asset_path_model)
+                            ui.Button("...", clicked_fn=self._on_browse_usd, width=30)
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Label("Instance ID", width=90)
+                            ui.StringField(model=self._instance_id_model)
+                            ui.Spacer()
+                            ui.Button("+ USD 추가", clicked_fn=self._on_add_usd, width=110)
+                        ui.Label(
+                            "※ Instance ID 비워두면 파일명에서 추출. 같은 ID 충돌 시 자동 _1, _2 …",
+                            height=18,
+                        )
+
+                ui.Separator()
+
+                # ─── 시작 방법 ② 기존 합성 USD 열기 ───────────────────────────
+                cf2 = ui.CollapsableFrame("② 기존 합성 USD 열기", collapsed=False, height=0)
+                with cf2:
+                    with ui.VStack(spacing=4):
+                        ui.Label(
+                            "이전에 저장해 둔 합성 USD 1 개를 열어 인스턴스를 자동으로 복원합니다.",
+                            height=18,
+                        )
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Label("Master path", width=90)
+                            ui.StringField(model=self._master_path_model)
+                            ui.Button("...", clicked_fn=self._on_browse_open_master, width=30)
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Spacer()
+                            ui.Button("Open Master…", clicked_fn=self._on_open_master, width=120)
+                            ui.Button("Save Master As…", clicked_fn=self._on_browse_save_master, width=140)
+                            ui.Button("Discover", clicked_fn=self._on_discover, width=90)
+
+                ui.Separator()
+
+                # ─── 등록된 인스턴스 목록 ────────────────────────────────────
+                cf_inst = ui.CollapsableFrame("등록된 인스턴스 (어느 시작 방법이든 여기 모임)", collapsed=False, height=0)
+                with cf_inst:
+                    with ui.VStack(spacing=2):
+                        ui.Label(
+                            "prim_path / instance_id / source_asset",
+                            height=18,
+                        )
+                        self._instances_frame = ui.ScrollingFrame(height=160)
+                        with self._instances_frame:
+                            self._instances_inner = ui.VStack(spacing=2)
+
+                ui.Separator()
+
+                # ─── 도구 ──────────────────────────────────────────────────
+                cf_tools = ui.CollapsableFrame("도구", collapsed=False, height=0)
+                with cf_tools:
+                    with ui.VStack(spacing=4):
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Button("LAM Sequence Editor 열기", clicked_fn=self._open_editor, width=200)
+                            ui.Button("JSON 테스트 창 열기", clicked_fn=self._open_json_test, width=180)
+                            ui.Spacer()
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Button("Master 진단 (등록 결과 확인)", clicked_fn=self._on_diagnose, width=210)
+                            ui.Button("LAM Viewport 강제 열기", clicked_fn=self._on_force_dedicated_viewport, width=210)
+                            ui.Spacer()
+                        ui.Label(
+                            "※ 기본은 default 컨텍스트 사용 → 기본 viewport 에 자동으로 보입니다. "
+                            "[Master 진단] 으로 /World 자식 prim 확인 가능. "
+                            "별도 LAM Viewport 창이 필요하면 [LAM Viewport 강제 열기].",
+                            height=36,
+                            word_wrap=True,
+                        )
+
+                ui.Separator()
+
+                # ─── 외부 시뮬 결과(선택) ──────────────────────────────────
+                cf_ext = ui.CollapsableFrame("외부 시뮬 결과 → 시퀀스 트리거 (선택, T1)", collapsed=True, height=0)
+                with cf_ext:
+                    with ui.VStack(spacing=4):
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Label("Results path", width=90)
+                            ui.StringField(model=self._results_path_model)
+                            ui.Button("...", clicked_fn=self._on_browse_results, width=30)
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Spacer()
+                            ui.Button("Run External", clicked_fn=self._on_run_external, width=120)
+                            ui.Button("Pause", clicked_fn=self._on_pause_external, width=70)
+                            ui.Button("Resume", clicked_fn=self._on_resume_external, width=70)
+                            ui.Button("Restart", clicked_fn=self._on_restart_external, width=70)
+                            ui.Button("Stop External", clicked_fn=self._on_stop_external, width=120)
+                        with ui.HStack(spacing=4, height=24):
+                            ui.Label("Sim Speed", width=90)
+                            self._sim_speed_model = ui.SimpleFloatModel(1.0)
+                            ui.FloatField(model=self._sim_speed_model, width=80)
+                            ui.Button("Apply Speed", clicked_fn=self._on_apply_speed, width=110)
+                            ui.Spacer()
+                            ui.Label("(External Runner trigger 속도 + Evaluator reauthor 속도에 동시 적용)")
+
+                ui.Separator()
+                ui.Label("Log", height=20)
+                self._log_label = ui.Label("(no log yet)", height=80, word_wrap=True)
+
+        self._refresh_instances()
+
+        # REQ-008 — LAM Window 가 뜨면 시퀀스 편집기도 같이 자동으로 연다.
+        try:
+            self._open_editor()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} auto open editor failed: {exc}", flush=True)
+
+    def destroy(self) -> None:
+        try:
+            if self._sequence_editor is not None:
+                self._sequence_editor.destroy()
+        except Exception:
+            pass
+        self._sequence_editor = None
+        try:
+            if self._json_test_window is not None:
+                self._json_test_window.destroy()
+        except Exception:
+            pass
+        self._json_test_window = None
+        try:
+            if self._external_runner is not None:
+                self._external_runner.stop()
+        except Exception:
+            pass
+        self._external_runner = None
+        try:
+            if self._viewport is not None:
+                self._viewport.destroy()
+        except Exception:
+            pass
+        # 다이얼로그 정리.
+        for d in (self._fp_open_usd, self._fp_open_master, self._fp_save_master, self._fp_open_results):
+            try:
+                if d is not None:
+                    d.hide()
+            except Exception:
+                pass
+        try:
+            if self._window is not None:
+                self._window.destroy()
+        except Exception:
+            pass
+        self._window = None
+
+    # ----------------------------------------------------------------- actions
+
+    def _on_add_usd(self) -> None:
+        if self._asset_path_model is None:
+            return
+        path = (self._asset_path_model.get_value_as_string() or "").strip()
+        rid = (self._instance_id_model.get_value_as_string() or "").strip() if self._instance_id_model else ""
+        if not path:
+            self._log("Asset path 가 비어 있습니다. (옆의 ... 버튼으로 USD 파일을 선택하세요)")
+            return
+        inst = self._loader.add_usd(source_asset=path, requested_id=rid)
+        if inst is None:
+            self._log(f"USD 등록 실패: {path}")
+            return
+        # 등록 직후 master stage 에 정말 prim 이 author 됐는지 즉시 검증해 사용자에게 알림.
+        author_ok = self._verify_prim_in_master(inst.prim_path)
+        view_status = self._viewport.status_text() if self._viewport else "viewport=N/A"
+        self._log(
+            f"등록 OK: {inst.instance_id} ({inst.prim_path}) | author_in_master={author_ok} | {view_status}"
+        )
+        if not self._viewport.is_default_visible() and not self._viewport.has_dedicated():
+            self._log(
+                "※ 화면에 안 보이면 도구 영역의 [LAM Viewport 강제 열기] 를 눌러 주세요."
+            )
+
+    def _on_open_master(self) -> None:
+        if self._master_path_model is None:
+            return
+        path = (self._master_path_model.get_value_as_string() or "").strip()
+        if not path:
+            self._log("Master path 가 비어 있습니다.")
+            return
+        ok = self._master.open_master(path)
+        self._log(f"Open Master {'OK' if ok else 'FAIL'}: {path}")
+        if ok:
+            try:
+                self._master.set_root_layer_edit_target()
+            except Exception:
+                pass
+            self._on_discover()
+
+    def _on_save_master(self) -> None:
+        """경로 텍스트박스의 현재 경로로 저장(다이얼로그 없이)."""
+        if self._master_path_model is None:
+            return
+        path = (self._master_path_model.get_value_as_string() or "").strip()
+        if not path:
+            self._log("Master path 가 비어 있습니다.")
+            return
+        ok = self._master.save_master(path)
+        self._log(f"Save Master {'OK' if ok else 'FAIL'}: {path}")
+        # 저장 후에도 author 는 계속 root layer 로 가야 한다(REQ-005 P-3).
+        try:
+            self._master.set_root_layer_edit_target()
+        except Exception:
+            pass
+
+    def _on_discover(self) -> None:
+        added = self._discovery.discover()
+        self._log(f"Discover added={len(added)}")
+
+    def _on_diagnose(self) -> None:
+        """master stage 의 현재 prim 들과 viewport 마운트 상태를 Log 에 dump."""
+        lines = [f"viewport: {self._viewport.status_text()}"]
+        try:
+            stage = self._master.get_stage()
+        except Exception as exc:
+            self._log(" / ".join(lines + [f"stage 가져오기 실패: {exc}"]))
+            return
+        if stage is None:
+            self._log(" / ".join(lines + ["stage=None (ensure_context 실패?)"]))
+            return
+        try:
+            world = stage.GetPrimAtPath("/World")
+            if not world or not world.IsValid():
+                lines.append("/World 없음")
+                self._log(" / ".join(lines))
+                return
+            children = list(world.GetChildren())
+            lines.append(f"/World children = {len(children)}")
+            for c in children[:8]:
+                refs = ""
+                try:
+                    has_refs = c.HasAuthoredReferences()
+                    refs = " [has_refs]" if has_refs else ""
+                except Exception:
+                    pass
+                lines.append(f"  {c.GetPath()}{refs}")
+            if len(children) > 8:
+                lines.append(f"  ... (+{len(children) - 8})")
+        except Exception as exc:
+            lines.append(f"dump 실패: {exc}")
+        self._log(" | ".join(lines))
+
+    def _on_force_dedicated_viewport(self) -> None:
+        """default viewport 마운트가 안 먹는 환경 폴백 — 전용 LAM Viewport 창을 강제로 띄움."""
+        if self._viewport is None:
+            self._log("viewport 객체가 없습니다.")
+            return
+        ok = self._viewport.open_dedicated()
+        self._log(
+            f"LAM Viewport 강제 열기 {'OK' if ok else 'FAIL'} | {self._viewport.status_text()}"
+        )
+
+    def _verify_prim_in_master(self, prim_path: str) -> bool:
+        """master stage 에 prim 이 author 됐는지 즉시 확인."""
+        try:
+            stage = self._master.get_stage()
+            if stage is None:
+                return False
+            p = stage.GetPrimAtPath(prim_path)
+            return bool(p and p.IsValid())
+        except Exception:
+            return False
+
+    def _open_editor(self) -> None:
+        if self._sequence_editor is None:
+            seq_dir = os.path.join(_find_lam_data_root(), "lam_event_sequences")
+            self._sequence_editor = LamSequenceEditor(
+                self._registry, self._scheduler, default_dir=seq_dir
+            )
+        self._sequence_editor.show()
+
+    def _open_json_test(self) -> None:
+        """REQ-009 — JSON 테스트 창(시퀀스 편집기와 별개) 을 연다."""
+        if self._json_test_window is None:
+            seq_dir = os.path.join(_find_lam_data_root(), "lam_event_sequences")
+            self._json_test_window = LamJsonTestWindow(
+                registry=self._registry,
+                scheduler=self._scheduler,
+                sequence_dir=seq_dir,
+            )
+        self._json_test_window.show()
+
+    def _on_run_external(self) -> None:
+        if self._results_path_model is None:
+            return
+        path = (self._results_path_model.get_value_as_string() or "").strip()
+        if not path:
+            self._log("Results path 가 비어 있습니다.")
+            return
+        if self._external_runner is None:
+            seq_dir = os.path.join(_find_lam_data_root(), "lam_event_sequences")
+            self._external_runner = LamExternalEventRunner(self._registry, self._scheduler, seq_dir)
+        ok = self._external_runner.start(path, on_log=self._log)
+        self._log(f"External {'STARTED' if ok else 'NOT_STARTED'}: {path}")
+
+    def _on_stop_external(self) -> None:
+        if self._external_runner is not None:
+            self._external_runner.stop()
+            self._log("External STOPPED")
+
+    def _on_pause_external(self) -> None:
+        if self._external_runner is not None:
+            self._external_runner.pause()
+            self._log("External PAUSED")
+
+    def _on_resume_external(self) -> None:
+        if self._external_runner is not None:
+            self._external_runner.resume()
+            self._log("External RESUMED")
+
+    def _on_restart_external(self) -> None:
+        if self._external_runner is not None:
+            ok = self._external_runner.restart(on_log=self._log)
+            self._log(f"External {'RESTARTED' if ok else 'NOT_RESTARTED'}")
+
+    def _on_apply_speed(self) -> None:
+        if self._sim_speed_model is None:
+            return
+        try:
+            sp = float(self._sim_speed_model.get_value_as_float())
+        except Exception:
+            sp = 1.0
+        sp = max(0.01, sp)
+        # External Runner 의 trigger 속도 + Evaluator 의 reauthor 속도 모두에 동시 적용.
+        try:
+            self._evaluator.set_global_speed(sp)
+        except Exception:
+            pass
+        if self._external_runner is not None:
+            try:
+                self._external_runner.set_speed(sp)
+            except Exception:
+                pass
+        self._log(f"Speed applied: {sp:.2f}x (Evaluator + External Runner)")
+
+    # -------------------------------------------------- file picker dialogs
+
+    def _make_open_picker(self, title: str, on_pick) -> object:
+        """omni.kit.window.filepicker 가 있으면 다이얼로그 생성, 없으면 None.
+
+        on_pick(full_path: str) 를 호출.
+        """
+        try:
+            from omni.kit.window.filepicker import FilePickerDialog  # type: ignore
+        except Exception as exc:
+            self._log(f"FilePickerDialog 사용 불가: {exc}")
+            return None
+        try:
+            dlg = FilePickerDialog(
+                title,
+                allow_multi_selection=False,
+                apply_button_label="Select",
+                click_apply_handler=lambda filename, dirname: on_pick(
+                    os.path.normpath(os.path.join(dirname or "", filename or ""))
+                ),
+            )
+            dlg.hide()
+            return dlg
+        except Exception as exc:
+            self._log(f"FilePickerDialog 생성 실패: {exc}")
+            return None
+
+    def _on_browse_usd(self) -> None:
+        if self._fp_open_usd is None:
+            self._fp_open_usd = self._make_open_picker(
+                "USD 자산 선택 (lam/usd 또는 절대경로)",
+                self._on_picked_usd,
+            )
+        d = self._fp_open_usd
+        if d is None:
+            return
+        try:
+            start = os.path.join(_find_lam_data_root(), "usd")
+            d.show(start)
+        except Exception as exc:
+            self._log(f"FilePicker show 실패: {exc}")
+
+    def _on_picked_usd(self, full_path: str) -> None:
+        if self._asset_path_model is None:
+            return
+        try:
+            self._asset_path_model.set_value(full_path)
+        except Exception:
+            pass
+        self._log(f"USD 선택됨: {full_path} (이제 [+ USD 추가] 클릭)")
+        try:
+            if self._fp_open_usd is not None:
+                self._fp_open_usd.hide()
+        except Exception:
+            pass
+
+    def _on_browse_open_master(self) -> None:
+        if self._fp_open_master is None:
+            self._fp_open_master = self._make_open_picker(
+                "합성 USD 열기 (Master USD)",
+                self._on_picked_open_master,
+            )
+        d = self._fp_open_master
+        if d is None:
+            return
+        try:
+            start = os.path.join(_find_lam_data_root(), "usd")
+            d.show(start)
+        except Exception as exc:
+            self._log(f"FilePicker show 실패: {exc}")
+
+    def _on_picked_open_master(self, full_path: str) -> None:
+        if self._master_path_model is None:
+            return
+        try:
+            self._master_path_model.set_value(full_path)
+        except Exception:
+            pass
+        try:
+            if self._fp_open_master is not None:
+                self._fp_open_master.hide()
+        except Exception:
+            pass
+        # 선택 즉시 열기까지 한 번에 진행.
+        self._on_open_master()
+
+    def _on_browse_save_master(self) -> None:
+        """Save 다이얼로그 — 선택한 경로로 즉시 저장."""
+        if self._fp_save_master is None:
+            self._fp_save_master = self._make_open_picker(
+                "합성 USD 저장 (Master USD As…)",
+                self._on_picked_save_master,
+            )
+        d = self._fp_save_master
+        if d is None:
+            return
+        try:
+            start = os.path.join(_find_lam_data_root(), "usd")
+            d.show(start)
+        except Exception as exc:
+            self._log(f"FilePicker show 실패: {exc}")
+
+    def _on_picked_save_master(self, full_path: str) -> None:
+        if self._master_path_model is None:
+            return
+        if not full_path:
+            return
+        # 확장자 없으면 .usd 자동 부여.
+        if not any(full_path.lower().endswith(ext) for ext in (".usd", ".usda", ".usdc")):
+            full_path = full_path + ".usd"
+        try:
+            self._master_path_model.set_value(full_path)
+        except Exception:
+            pass
+        try:
+            if self._fp_save_master is not None:
+                self._fp_save_master.hide()
+        except Exception:
+            pass
+        self._on_save_master()
+
+    def _on_browse_results(self) -> None:
+        if self._fp_open_results is None:
+            self._fp_open_results = self._make_open_picker(
+                "외부 시뮬 결과 JSON 선택",
+                self._on_picked_results,
+            )
+        d = self._fp_open_results
+        if d is None:
+            return
+        try:
+            start = os.path.join(_find_lam_data_root(), "lam_external_results")
+            d.show(start)
+        except Exception as exc:
+            self._log(f"FilePicker show 실패: {exc}")
+
+    def _on_picked_results(self, full_path: str) -> None:
+        if self._results_path_model is None:
+            return
+        try:
+            self._results_path_model.set_value(full_path)
+        except Exception:
+            pass
+        try:
+            if self._fp_open_results is not None:
+                self._fp_open_results.hide()
+        except Exception:
+            pass
+
+    # ----------------------------------------------------------------- helpers
+
+    def _refresh_instances(self) -> None:
+        try:
+            import omni.ui as ui  # type: ignore
+        except Exception:
+            return
+        if self._instances_inner is None:
+            return
+        self._instances_inner.clear()
+        with self._instances_inner:
+            instances = self._registry.all_instances()
+            if not instances:
+                ui.Label("(아직 등록된 인스턴스가 없습니다 — 위에서 [+ USD 추가] 또는 [Open Master…])")
+                return
+            for inst in instances:
+                with ui.HStack(spacing=4, height=22):
+                    ui.Label(inst.prim_path, width=200)
+                    ui.Label(inst.instance_id, width=140)
+                    ui.Label(inst.source_asset)
+                    ui.Spacer()
+                    ui.Button(
+                        "Remove",
+                        width=80,
+                        clicked_fn=lambda p=inst.prim_path: self._on_remove(p),
+                    )
+
+    def _on_remove(self, prim_path: str) -> None:
+        ok = self._loader.remove_usd(prim_path)
+        self._log(f"Remove {'OK' if ok else 'FAIL'}: {prim_path}")
+
+    def _invalidate_attr_caches(self) -> None:
+        try:
+            self._evaluator.invalidate_attr_cache(None)
+        except Exception:
+            pass
+        # 핫픽스 7 — 인스턴스 등록/해제 변동 시 sublayer mapping 시그니처도 모두 무효화하여
+        # 다음 update tick 에서 evaluator 가 sublayer mapping 을 다시 author 하도록 한다.
+        try:
+            self._evaluator.invalidate_mapping(None)
+        except Exception:
+            pass
+
+    def _log(self, msg: str) -> None:
+        print(f"{_PRINT_PREFIX} {msg}", flush=True)
+        try:
+            if self._log_label is not None:
+                # 간단한 1줄 갱신.
+                self._log_label.text = msg
+        except Exception:
+            pass
+
+
+__all__ = ["LamWindow"]

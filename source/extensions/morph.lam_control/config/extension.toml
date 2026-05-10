@@ -1,0 +1,29 @@
+[package]
+title = "LAM Control"
+version = "0.1.0"
+description = "LAM 멀티 USD 독립 타임라인 재생 + LAM 시퀀스 편집기 + 외부 이벤트 러너 (morph.tbs_control_1 와 코드 분리)."
+category = "Example"
+keywords = ["kit", "extension", "lam", "usd", "animation", "multi-usd"]
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+
+# 본 확장은 morph.tbs_control_1 의 어떤 모듈도 import 하지 않는다.
+# (USD_Timeline_Spec.md REQ-002 0줄 변경 원칙, §12 절대 보호 영역)
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.ui" = {}
+"omni.usd" = {}
+"omni.kit.viewport.utility" = {}
+"omni.kit.viewport.window" = {}
+"omni.kit.window.filepicker" = {}
+# 의도적으로 omni.timeline 은 의존성에서 빼둔다.
+# LAM Runtime Evaluator (L5) 는 자체 update 루프로 attribute 를 reauthor 하므로
+# omni.timeline.set_current_time() 을 호출하지 않는다(USD_Timeline_Spec.md §3.1, REQ-004).
+
+[settings]
+
+[[python.module]]
+name = "morph.lam_control"
+
+[documentation]
+pages = ["docs/LAM_Spec.md", "docs/CHANGELOG.md"]
