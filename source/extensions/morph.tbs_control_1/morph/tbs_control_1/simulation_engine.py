@@ -1620,6 +1620,7 @@ class TBSSimulationEngine:
                         progress_interval=self._log_cfg.progress_interval(),
                         event_seq="FOUP_PROCESS",
                         linked_anim_json="",
+                        port_hint=ep_port,
                     )
                 )
             except Exception:
@@ -1640,6 +1641,7 @@ class TBSSimulationEngine:
                         progress_interval=self._log_cfg.progress_interval(),
                         event_seq="FOUP_PROCESS",
                         linked_anim_json="",
+                        port_hint=ep_port,
                     )
                 )
             except Exception:
@@ -1665,6 +1667,7 @@ class TBSSimulationEngine:
                         progress_interval=self._log_cfg.progress_interval(),
                         event_seq="FOUP_PROCESS",
                         linked_anim_json="",
+                        port_hint=ep_port,
                     )
                 )
             except Exception:
@@ -1872,6 +1875,7 @@ class TBSSimulationEngine:
         progress_interval: float = 5.0,
         event_seq: str = "",
         linked_anim_json: str = "",
+        port_hint: str = "",
     ):
         """
         공정 대기 시간을 simpy timeout으로 소모하고 진행률을 낸다.
@@ -1881,11 +1885,14 @@ class TBSSimulationEngine:
         - progress_interval > 0: 텍스트 로그([PROGRESS])는 누적하지 않고, on_progress(UI)만 주기적으로 갱신
           (요구사항: 설정한 초마다 %만 반영되도록)
         - linked_anim_json: UI 진행현황에 표시할 ``data/sim_sequences`` 기준 파일명(로그 anim_line 과 동일).
+        - port_hint: UI 가 진행 라벨을 포트별로 분리해 표시할 때 라우팅 키로 쓰는 포트 ID(예: "EP1").
+          비어 있어도 동작에는 영향이 없다.
         """
         total = max(0.01, float(total_sec))
         interval = self._progress_emit_policy.normalize_interval(float(progress_interval))
         ev = str(event_seq or "").strip()
         aj = str(linked_anim_json or "").strip()
+        ph = str(port_hint or "").strip().upper()
         psec = max(0.0, float(proc_sec))
         asec = max(0.0, float(anim_sec))
         # UI 표시용: 공정/애니 시간을 각각 제공한다.
@@ -1895,6 +1902,7 @@ class TBSSimulationEngine:
             "detail": detail,
             "event_seq": ev,
             "linked_anim_json": aj,
+            "port_id": ph,
             "proc_sec": self._progress_emit_policy.format_sec_1(psec),
             "anim_sec": self._progress_emit_policy.format_sec_1(asec),
             "process_time_priority": "1" if self._process_time_priority else "0",
@@ -1911,6 +1919,7 @@ class TBSSimulationEngine:
                 "detail": detail,
                 "event_seq": ev,
                 "linked_anim_json": aj,
+                "port_id": ph,
                 "proc_sec": self._progress_emit_policy.format_sec_1(psec),
                 "anim_sec": self._progress_emit_policy.format_sec_1(asec),
                 "process_time_priority": "1" if self._process_time_priority else "0",
@@ -1946,6 +1955,7 @@ class TBSSimulationEngine:
                 "detail": detail,
                 "event_seq": ev,
                 "linked_anim_json": aj,
+                "port_id": ph,
                 "proc_sec": self._progress_emit_policy.format_sec_1(psec),
                 "anim_sec": self._progress_emit_policy.format_sec_1(asec),
                 "process_time_priority": "1" if self._process_time_priority else "0",

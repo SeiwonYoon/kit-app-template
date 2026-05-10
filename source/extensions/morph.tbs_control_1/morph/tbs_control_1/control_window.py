@@ -1827,16 +1827,33 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     ch["ep_timeline_widget"] = None
     # 진행현황: 텍스트 + EP 점유 타임라인(막대그래프)
     # 진행현황은 "로그 텍스트" 중심으로 유지. (그래프는 포트상태 아래 전용 영역으로 분리됨)
-    ch["progress_frame"] = ui.ScrollingFrame(height=200, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
+    # 요구사항: FOUP 공정 진행 표시는 EP 포트별로 "줄을 다르게 고정"하여 깜빡임 없이 표시한다.
+    # EP1/EP2/EP3 각 22px 라벨 3줄(총 ~66px) + 기존 텍스트 영역을 함께 두기 위해
+    # progress_frame 의 높이를 200 → 270 으로 늘려 자리만 확보한다(레이아웃 안정성).
+    ch["progress_frame"] = ui.ScrollingFrame(height=270, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
     with ch["progress_frame"]:
-        with ui.VStack(spacing=6):
-            # FOUP 공정 진행 전용 고정 라벨(요구사항: 다른 진행현황과 섞여 깜빡이지 않게 분리)
-            ch["foup_progress_label"] = ui.Label(
-                "FOUP 공정: 없음" if screen == 1 else f"FOUP 공정(화면{screen}): 없음",
-                word_wrap=True,
-                height=34,
-                style={"color": 0xFFFFE08A},
-            )
+        with ui.VStack(spacing=4):
+            # FOUP 공정 진행 라벨(EP 포트별 고정 줄):
+            # - 항상 EP1/EP2/EP3 라벨 3개를 만들어 두고, 각 EP 가 자기 줄만 갱신한다.
+            # - 진행 중이 아닐 때는 "대기"(회색), 진행 중에는 노란색 텍스트로 구분.
+            # - EP 카운트가 1/2 인 경우에도 라벨은 그대로 두고 "대기"로만 표시(레이아웃 흔들림 방지).
+            ch["foup_progress_labels"] = {}
+            for ep_id in ("EP1", "EP2", "EP3"):
+                idle_text = (
+                    f"{ep_id} FOUP 공정: 대기"
+                    if screen == 1
+                    else f"{ep_id} FOUP 공정(화면{screen}): 대기"
+                )
+                lbl = ui.Label(
+                    idle_text,
+                    word_wrap=False,
+                    height=22,
+                    style={"color": 0xFF888888},
+                )
+                ch["foup_progress_labels"][ep_id] = lbl
+            # 호환용(스냅샷/복원/구버전 참조 안전망): 첫 번째 EP 라벨을 단일 슬롯에 매핑해 둔다.
+            # _update_sim_progress 의 FOUP 분기는 dict 우선으로 동작한다.
+            ch["foup_progress_label"] = ch["foup_progress_labels"]["EP1"]
             ch["progress_label"] = ui.Label("", word_wrap=True, height=170, style={"color": 0xFFFFFFFF})
             # 진행현황 영역에서는 그래프를 표시하지 않는다(포트상태 아래 전용 영역으로 분리).
             ch["progress_ep_timeline_host"] = None
@@ -4760,7 +4777,10 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     except Exception:
         panel_slot = "1"
 
-    # FOUP 공정 진행은 별도 고정 라벨로만 표시(다른 진행현황과 섞여 깜빡이는 문제 방지)
+    # FOUP 공정 진행은 EP 포트별로 "줄을 다르게 고정"한 라벨에만 갱신한다.
+    # - 단일 라벨에 다른 EP/단계 텍스트가 덮어써져 깜빡이는 문제를 근본적으로 차단.
+    # - payload["port_id"] (또는 detail/label 의 EPn 패턴) 으로 라우팅한다.
+    # - -Y 단계 DONE 수신 시 1.05초 뒤 해당 EP 라벨만 "대기" 로 되돌린다(다른 EP 라벨은 무관).
     try:
         if str(event_seq or "").strip().upper() == "FOUP_PROCESS":
             chansf = getattr(ext, "_sim_monitor_channels", None)
@@ -4773,17 +4793,80 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 chf = chansf[si - 1] if isinstance(chansf[si - 1], dict) else None
             else:
                 chf = None
-            lbl = (chf or {}).get("foup_progress_label") if chf else None
+            # EP 식별자 결정: payload.port_id → label/detail 안의 EPn 패턴 폴백
+            ep_id = ""
+            try:
+                ep_id = str(payload.get("port_id", "") or "").strip().upper()
+            except Exception:
+                ep_id = ""
+            if not ep_id:
+                try:
+                    import re as _re
+                    src_txt = (str(payload.get("label", "") or "") + " " + str(payload.get("detail", "") or "")).upper()
+                    m = _re.search(r"\bEP(\d+)\b", src_txt)
+                    if m:
+                        n = int(m.group(1))
+                        if 1 <= n <= 3:
+                            ep_id = f"EP{n}"
+                except Exception:
+                    pass
+            labels = (chf or {}).get("foup_progress_labels") if chf else None
+            lbl = None
+            if isinstance(labels, dict) and ep_id:
+                lbl = labels.get(ep_id)
+            if lbl is None:
+                # 폴백: 구조가 갱신되기 전이거나 EP 식별 실패 시 단일 라벨에라도 표시(원래 동작 유지)
+                lbl = (chf or {}).get("foup_progress_label") if chf else None
             if lbl is not None:
                 t_sim = str(payload.get("sim_time", "0.00"))
                 st = str(payload.get("status", "RUNNING"))
                 pct = str(payload.get("percent", "0"))
                 el = str(payload.get("elapsed", "0.0"))
                 tot = str(payload.get("total", "0.0"))
+                lab = str(payload.get("label", "") or "").strip()
                 det = str(payload.get("detail", "") or "").strip()
-                prefix = "FOUP 공정" if int((chf or {}).get("screen", si) or si) == 1 else f"FOUP 공정(화면{si})"
-                body = f"{prefix}: {det}" if det else f"{prefix}: 진행"
+                screen_num = int((chf or {}).get("screen", si) or si)
+                head = (
+                    f"{ep_id} FOUP 공정"
+                    if (ep_id and screen_num == 1)
+                    else (
+                        f"{ep_id} FOUP 공정(화면{screen_num})"
+                        if ep_id
+                        else ("FOUP 공정" if screen_num == 1 else f"FOUP 공정(화면{screen_num})")
+                    )
+                )
+                # 단계 표기(+Y/-Y/공정)는 detail 보다 label 이 더 짧고 깔끔
+                stage = ""
+                try:
+                    if "+Y" in lab:
+                        stage = "+Y"
+                    elif "-Y" in lab:
+                        stage = "-Y"
+                    elif "공정" in lab or "공정" in det:
+                        stage = "공정"
+                except Exception:
+                    stage = ""
+                body = f"{head}: 진행 [{stage}]" if stage else f"{head}: 진행"
                 lbl.text = f"{body} | {st} {pct}% ({el}/{tot}) | t={t_sim}"
+                # 진행 중 색(노랑), DONE 색(연한 회녹색) 으로 구분
+                try:
+                    color = 0xFFFFE08A if str(st).upper() == "RUNNING" else 0xFF9FBFA0
+                    lbl.style = {"color": color}
+                except Exception:
+                    pass
+            # -Y(공정 종료 복귀) DONE 수신 시 해당 EP 만 1.05초 뒤 "대기" 로 되돌린다.
+            try:
+                lab_u = str(payload.get("label", "") or "").upper()
+                if (
+                    str(payload.get("status", "")).strip().upper() == "DONE"
+                    and "-Y" in lab_u
+                    and ep_id
+                    and isinstance(labels, dict)
+                    and labels.get(ep_id) is not None
+                ):
+                    _schedule_foup_label_reset(ext, si, ep_id, delay_sec=1.05)
+            except Exception:
+                pass
             return
     except Exception:
         pass
@@ -5261,6 +5344,129 @@ def _normalize_port_text_from_xml(parsed_val: str, original_text: str) -> str:
         if 6 <= n <= 9:
             return f"BP{n - 5}"
     return p
+
+
+def _foup_label_idle_text(screen_num: int, ep_id: str) -> str:
+    """EP 별 FOUP 라벨의 'idle(대기)' 텍스트를 한 곳에서 생성한다(생성/리셋 일관성)."""
+    if int(screen_num or 1) <= 1:
+        return f"{ep_id} FOUP 공정: 대기"
+    return f"{ep_id} FOUP 공정(화면{int(screen_num)}): 대기"
+
+
+def _reset_foup_label_now(ext: Any, screen_idx: int, ep_id: str) -> None:
+    """지정된 화면(screen_idx, 1-based) / EP 라벨 한 줄을 즉시 'idle(대기)' 표시로 되돌린다."""
+    try:
+        chans = getattr(ext, "_sim_monitor_channels", None) or []
+        if not isinstance(chans, list) or not chans:
+            return
+        si = max(1, min(len(chans), int(screen_idx or 1)))
+        chf = chans[si - 1] if isinstance(chans[si - 1], dict) else None
+        if not chf:
+            return
+        labels = chf.get("foup_progress_labels") or {}
+        lbl = labels.get(str(ep_id or "").strip().upper()) if isinstance(labels, dict) else None
+        if lbl is None:
+            return
+        screen_num = int(chf.get("screen", si) or si)
+        try:
+            lbl.text = _foup_label_idle_text(screen_num, str(ep_id))
+        except Exception:
+            pass
+        try:
+            lbl.style = {"color": 0xFF888888}
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _reset_all_foup_labels(ext: Any) -> None:
+    """모든 화면/EP 의 FOUP 라벨을 'idle(대기)' 표시로 일괄 리셋(Reset/Stop 안전망용)."""
+    try:
+        chans = getattr(ext, "_sim_monitor_channels", None) or []
+        if not isinstance(chans, list):
+            return
+        for ch in chans:
+            if not isinstance(ch, dict):
+                continue
+            try:
+                screen_num = int(ch.get("screen", 1) or 1)
+            except Exception:
+                screen_num = 1
+            labels = ch.get("foup_progress_labels") or {}
+            if not isinstance(labels, dict):
+                continue
+            for ep_id, lbl in labels.items():
+                if lbl is None:
+                    continue
+                try:
+                    lbl.text = _foup_label_idle_text(screen_num, str(ep_id))
+                except Exception:
+                    pass
+                try:
+                    lbl.style = {"color": 0xFF888888}
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _schedule_foup_label_reset(ext: Any, screen_idx: int, ep_id: str, delay_sec: float = 1.05) -> None:
+    """
+    FOUP_PROCESS 의 -Y(공정 종료 복귀) DONE 시점에서 ``delay_sec`` 후
+    해당 화면/EP 라벨만 'idle(대기)' 로 되돌리는 1회성 update event subscription 을 등록한다.
+
+    동작:
+    - opts/A 의 ``_schedule_foup_inprogress_unmark`` 와 동일한 패턴(1회성 sub, deadline 기반).
+    - subscription 객체는 GC 방지를 위해 ``ext._foup_label_reset_subs`` 에 보관.
+    - Stop/Reset 시 해당 리스트도 일괄 정리(아래 on_sim_stop_clicked 안전망 참조).
+    """
+    try:
+        import time as _t
+        deadline = _t.monotonic() + max(0.0, float(delay_sec))
+        sub_holder: Dict[str, Any] = {"sub": None, "done": False}
+
+        def _on_update(_ev):
+            try:
+                if sub_holder.get("done"):
+                    return
+                if _t.monotonic() < deadline:
+                    return
+                sub_holder["done"] = True
+                try:
+                    _reset_foup_label_now(ext, int(screen_idx), str(ep_id))
+                except Exception:
+                    pass
+                try:
+                    s = sub_holder.get("sub")
+                    if s is not None:
+                        s.unsubscribe()
+                except Exception:
+                    pass
+                sub_holder["sub"] = None
+            except Exception:
+                pass
+
+        sub_holder["sub"] = app.get_app().get_update_event_stream().create_subscription_to_pop(
+            _on_update, name="morph.tbs_control_1.foup_label_reset"
+        )
+        try:
+            holders = getattr(ext, "_foup_label_reset_subs", None)
+            if not isinstance(holders, list):
+                holders = []
+                ext._foup_label_reset_subs = holders
+            holders.append(sub_holder)
+            try:
+                ext._foup_label_reset_subs = [h for h in holders if not h.get("done")]
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        try:
+            _reset_foup_label_now(ext, int(screen_idx), str(ep_id))
+        except Exception:
+            pass
 
 
 def _schedule_foup_inprogress_unmark(ext: Any, prim_path: str, delay_sec: float = 1.05) -> None:
@@ -6687,6 +6893,32 @@ def on_sim_stop_clicked(ext: Any) -> None:
                 except Exception:
                     pass
             ext._foup_unmark_subs = []
+    except Exception:
+        pass
+    # FOUP 라벨 idle 리셋 + 보류 중인 라벨 reset sub 정리(안전망):
+    # - 진행 중이던 라벨이 'DONE/대기' 갱신 없이 stop 이 들어오면 텍스트가 잔여로 남을 수 있다.
+    # - 보류된 1회성 update sub 도 모두 unsubscribe 해 잔여 콜백을 차단한다.
+    try:
+        holders2 = getattr(ext, "_foup_label_reset_subs", None)
+        if isinstance(holders2, list):
+            for h in holders2:
+                try:
+                    s = h.get("sub") if isinstance(h, dict) else None
+                    if s is not None:
+                        s.unsubscribe()
+                except Exception:
+                    pass
+                try:
+                    if isinstance(h, dict):
+                        h["done"] = True
+                        h["sub"] = None
+                except Exception:
+                    pass
+            ext._foup_label_reset_subs = []
+    except Exception:
+        pass
+    try:
+        _reset_all_foup_labels(ext)
     except Exception:
         pass
     # FOUP material 안전망: 정상 종료가 아니어도 다음 실행 시작 상태가 깨끗하도록
