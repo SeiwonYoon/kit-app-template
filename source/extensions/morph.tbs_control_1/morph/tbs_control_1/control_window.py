@@ -5399,6 +5399,23 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
                 _schedule_foup_inprogress_unmark(ext, prim_path, delay_sec=1.05)
         except Exception:
             pass
+        # 1-D-2) Material 바인딩(요청 사양):
+        #     - START: 공정 진행 중 material(MATERIAL_PATH_FOUP_PROCESSING, 기본 CASE_02)
+        #     - END  : 공정 종료(회수 대기) material(MATERIAL_PATH_FOUP_DONE, 기본 CASE_03)
+        #     - 회수(REMOVED) 후 “포트상태 초기화 시점”에 phong1 로 복귀하는 처리는
+        #       port_lot_visibility.apply_port_lot_prim_visibility_for_context 의
+        #       has_lot=False 분기에서 일괄 처리한다.
+        #     - 분할화면(보조 USD 컨텍스트)을 고려해 ctx_nm 을 그대로 전달.
+        try:
+            from . import port_lot_visibility as _plv  # type: ignore
+            mat_path = (
+                _plv.MATERIAL_PATH_FOUP_PROCESSING
+                if seq_u0 == "FOUP_PROCESS_START"
+                else _plv.MATERIAL_PATH_FOUP_DONE
+            )
+            _plv.apply_port_lot_prim_material_for_context(ctx_nm, prim_path, mat_path)
+        except Exception:
+            pass
         # 1-E) START 면 +Y320, END 면 -Y320 (1.0초 부드러운 이동)
         #     - 좌표 단위(320)는 USD 스테이지 단위에 맞춰 사용자가 조정한 값
         #     - 같은 prim 의 진행 중 translate 가 있으면 먼저 정지(중첩 방지)
@@ -6670,6 +6687,28 @@ def on_sim_stop_clicked(ext: Any) -> None:
                 except Exception:
                     pass
             ext._foup_unmark_subs = []
+    except Exception:
+        pass
+    # FOUP material 안전망: 정상 종료가 아니어도 다음 실행 시작 상태가 깨끗하도록
+    # 모든 매핑 prim 의 material 을 기본(phong1)으로 일괄 복원한다.
+    # 분할화면(보조 USD 컨텍스트)도 함께 처리한다.
+    try:
+        from . import port_lot_visibility as _plv  # type: ignore
+        # 기본 컨텍스트
+        try:
+            _plv.restore_port_lot_prims_to_default_material(None)
+        except Exception:
+            pass
+        # 분할화면 보조 컨텍스트들
+        try:
+            ctx_names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+        except Exception:
+            ctx_names = []
+        for cn in ctx_names:
+            try:
+                _plv.restore_port_lot_prims_to_default_material(str(cn))
+            except Exception:
+                pass
     except Exception:
         pass
     # 프리런/재생 모드 정리
