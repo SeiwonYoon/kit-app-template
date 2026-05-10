@@ -262,7 +262,9 @@ def play_usd_animation(
 
                         wall_dt = float(_time.perf_counter()) - float(t0_wall)
                         t2 = float(start_time) + float(wall_dt) * float(sp)
-                        if t2 >= float(end_time) - 1e-6:
+                        epsilon = (1.0 * sp) / tps
+
+                        if t2 >= float(end_time) - epsilon:
                             try:
                                 tl.pause()
                             except Exception:
@@ -369,7 +371,9 @@ def play_usd_animation(
                     if not tl.is_playing():
                         return
                     t = tl.get_current_time()
-                    if t >= end_time - 1e-6:
+                    epsilon = (1.0 * sp) / tps
+                    if t >= end_time - epsilon:
+
                         tl.set_current_time(start_time)
                 except Exception:
                     pass
