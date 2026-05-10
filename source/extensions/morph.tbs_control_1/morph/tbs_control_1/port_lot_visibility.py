@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import omni.usd as ou
 from pxr import Gf, UsdGeom
@@ -32,6 +32,13 @@ _MTIME: Optional[float] = None
 
 # 포트별 LOT 표현 prim의 "기준 자세"(최초 캡처). 애니 시작 시 이 값으로 복원한다(가시성 로직은 별도).
 _PORT_LOT_AUTHORING: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
+
+# FOUP 공정이 진행 중인 prim 경로 집합.
+# - FOUP_PROCESS_START 시 등록(+Y 오프셋 보호 시작)
+# - FOUP_PROCESS_END 의 -Y 복귀 애니가 끝난 뒤(약 1초 후) 해제
+# - 이 집합에 포함된 path 는 restore_port_lot_prims_to_authoring() 에서 baseline 복원을 건너뛴다.
+#   이렇게 하면 FOUP 가 +Y 위치에 있는 동안 다른 시퀀스가 시작해도 prim 이 원위치로 튀지 않는다.
+_FOUP_IN_PROGRESS_PATHS: Set[str] = set()
 
 
 def _config_path() -> Path:
@@ -114,8 +121,38 @@ def _iter_unique_mapped_prim_paths() -> List[str]:
 
 
 def clear_port_lot_authoring_cache() -> None:
-    """시뮬 리셋 등에서 다음 애니 시작 시 authoring을 다시 잡을 수 있게 캐시를 비운다."""
+    """시뮬 리셋 등에서 다음 애니 시작 시 authoring을 다시 잡을 수 있게 캐시를 비운다.
+    함께 FOUP 진행중 보호 집합도 초기화하여, 잔여 플래그로 인해 다음 시뮬에서 복원이 막히지 않게 한다.
+    """
     _PORT_LOT_AUTHORING.clear()
+    _FOUP_IN_PROGRESS_PATHS.clear()
+
+
+def mark_foup_in_progress(prim_path: str, in_progress: bool) -> None:
+    """
+    특정 prim 경로의 FOUP 공정 진행 여부를 등록/해제한다.
+    이 집합에 포함된 prim 은 ``restore_port_lot_prims_to_authoring()`` 에서 baseline 복원을 건너뛴다.
+
+    - FOUP_PROCESS_START → True 로 등록(+Y 오프셋 유지)
+    - FOUP_PROCESS_END 후 -Y 복귀 애니가 끝난 뒤 False 로 해제
+    """
+    p = str(prim_path or "").strip()
+    if not p:
+        return
+    if in_progress:
+        _FOUP_IN_PROGRESS_PATHS.add(p)
+    else:
+        _FOUP_IN_PROGRESS_PATHS.discard(p)
+
+
+def clear_foup_in_progress() -> None:
+    """모든 FOUP 진행중 표시를 비운다(시뮬 시작/리셋/정지 시 안전망용)."""
+    _FOUP_IN_PROGRESS_PATHS.clear()
+
+
+def is_foup_in_progress(prim_path: str) -> bool:
+    """디버그/조회용. 해당 path 가 FOUP 진행중으로 표시되어 있는지 반환."""
+    return str(prim_path or "").strip() in _FOUP_IN_PROGRESS_PATHS
 
 
 def ensure_port_lot_authoring_captured() -> None:
@@ -157,6 +194,10 @@ def restore_port_lot_prims_to_authoring() -> None:
     if not stage:
         return
     for path in _iter_unique_mapped_prim_paths():
+        # FOUP 공정이 진행 중인 prim 은 baseline 복원에서 제외한다.
+        # (다른 시퀀스가 시작될 때 FOUP +Y 오프셋이 사라져 prim 이 원위치로 튀는 것을 방지)
+        if path in _FOUP_IN_PROGRESS_PATHS:
+            continue
         try:
             stop_prim_translate_animation(path)
             stop_prim_rotate_animation(path)

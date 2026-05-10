@@ -5263,26 +5263,112 @@ def _normalize_port_text_from_xml(parsed_val: str, original_text: str) -> str:
     return p
 
 
+def _schedule_foup_inprogress_unmark(ext: Any, prim_path: str, delay_sec: float = 1.05) -> None:
+    """
+    FOUP_PROCESS_END 가 발생하면 -Y 복귀 애니가 끝나는 시점(약 1초 후)에
+    port_lot_visibility 의 FOUP 진행중 표시를 해제한다.
+
+    동작:
+    - 1회성 update event subscription 으로 deadline 도달 시 unmark + self-unsubscribe.
+    - subscription 객체가 GC 로 사라지지 않게 ext._foup_unmark_subs 에 보관한다.
+    - 어떤 단계에서 실패하더라도, 마지막 안전망으로 즉시 unmark 호출(보호가 너무 길게 남는 것 방지).
+    """
+    try:
+        from . import port_lot_visibility  # type: ignore
+    except Exception:
+        return
+    p = str(prim_path or "").strip()
+    if not p:
+        return
+    try:
+        import time as _t
+        deadline = _t.monotonic() + max(0.0, float(delay_sec))
+        sub_holder: Dict[str, Any] = {"sub": None, "done": False}
+
+        def _on_update(_ev):
+            try:
+                if sub_holder.get("done"):
+                    return
+                if _t.monotonic() < deadline:
+                    return
+                sub_holder["done"] = True
+                try:
+                    port_lot_visibility.mark_foup_in_progress(p, False)
+                except Exception:
+                    pass
+                try:
+                    s = sub_holder.get("sub")
+                    if s is not None:
+                        s.unsubscribe()
+                except Exception:
+                    pass
+                sub_holder["sub"] = None
+            except Exception:
+                pass
+
+        sub_holder["sub"] = app.get_app().get_update_event_stream().create_subscription_to_pop(
+            _on_update, name="morph.tbs_control_1.foup_unmark"
+        )
+        try:
+            holders = getattr(ext, "_foup_unmark_subs", None)
+            if not isinstance(holders, list):
+                holders = []
+                ext._foup_unmark_subs = holders
+            holders.append(sub_holder)
+            # 다 끝난 항목 정리(메모리 누수 방지)
+            try:
+                ext._foup_unmark_subs = [h for h in holders if not h.get("done")]
+            except Exception:
+                pass
+        except Exception:
+            pass
+    except Exception:
+        try:
+            port_lot_visibility.mark_foup_in_progress(p, False)
+        except Exception:
+            pass
+
+
 def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: bool = True) -> None:
     """
-    시뮬레이션 이벤트 -> 애니메이션 실행 훅.
-    현재는 분기별 로그만 출력하고, 추후 분기 내부에 실제 애니메이션 함수를 연결한다.
+    시뮬레이션 이벤트 → 애니메이션 실행 훅.
+
+    이 함수가 하는 일(전체 흐름 한눈에):
+    1) FOUP 공정 전용 이벤트(FOUP_PROCESS_START/END) → 별도 분기에서 prim Y축 ±이동만 실행 후 종료
+    2) 그 외 일반 이벤트 → "이벤트 → XML 빌드 → 역파싱 → rules/map 매칭 → JSON 시퀀스 실행" 파이프라인
+    3) 디버그 로그는 verbose 모드에서만 출력
+
+    호출 경로(요약):
+    - simulation_engine._emit_event(...) → ANIM_EVENT 큐 → _sim_ui_sink_anim_event(...) → 본 함수
     """
+
+    # 0) 시퀀스 식별자(seq) 가져오기
+    #    - 비어 있으면 처리할 게 없으므로 즉시 종료
     seq_raw = (payload.get("seq") or "").strip()
     if not seq_raw:
         return
-    # FOUP 공정 전용 이벤트는 XML 매핑 파이프라인을 타지 않고, 즉시 prim 이동 애니메이션을 실행한다.
+
+    # ─────────────────────────────────────────────────────────────────────
+    # 1) FOUP 공정 전용 분기 (FOUP_PROCESS_START / FOUP_PROCESS_END)
+    #    - XML/매핑/JSON 시퀀스 파이프라인을 "타지 않는다".
+    #    - port_lot_prim_paths.json 매핑으로 EP 포트의 FOUP prim 경로를 찾고,
+    #      START 시 +Y320, END 시 -Y320 만큼 1초 동안 이동시킨다.
+    #    - 분할화면(보조 USD 컨텍스트)도 고려한다(ctx_nm).
+    # ─────────────────────────────────────────────────────────────────────
     try:
         seq_u0 = str(seq_raw or "").strip().upper()
     except Exception:
         seq_u0 = ""
     if seq_u0 in ("FOUP_PROCESS_START", "FOUP_PROCESS_END"):
+        # 1-A) 어떤 EP 포트의 FOUP 인지 확인
+        #     - port_id 가 없으면 매핑할 prim 을 못 찾으므로 종료
         try:
             port_id = str(payload.get("port_id", "") or "").strip().upper()
         except Exception:
             port_id = ""
         if not port_id:
             return
+        # 1-B) port_lot_prim_paths.json → 해당 EP 포트의 FOUP prim 경로 조회
         try:
             from . import port_lot_visibility  # type: ignore
             mp = port_lot_visibility.load_port_lot_prim_paths() or {}
@@ -5293,12 +5379,30 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             if verbose:
                 print(f"[FOUP] prim path missing: port={port_id}", flush=True)
             return
+        # 1-C) 분할 화면별 USD 컨텍스트 결정(어떤 화면의 stage 위에서 움직일지)
         try:
             scr = int(str(payload.get("tbs_sim_screen", "1") or "1").strip() or "1")
         except Exception:
             scr = 1
         ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
-        dy = 3.2 if seq_u0 == "FOUP_PROCESS_START" else -3.2
+        # 1-D) FOUP 진행중 보호 마킹(옵션 A):
+        #     - START: 즉시 mark(True) → 다른 시퀀스가 중간에 시작해도 baseline 복원에서 제외되어
+        #              +Y320 오프셋이 유지된다.
+        #     - END: -Y320 복귀 애니(약 1초)가 끝난 시점에 mark(False) 로 해제(지연 unmark).
+        #            (END 직후 즉시 해제하면 -Y 복귀 도중 다른 시퀀스의 restore 가 prim 을
+        #             baseline 으로 스냅시켜 시각적 점프가 발생할 수 있어 1초 지연한다.)
+        try:
+            from . import port_lot_visibility as _plv  # type: ignore
+            if seq_u0 == "FOUP_PROCESS_START":
+                _plv.mark_foup_in_progress(prim_path, True)
+            else:  # FOUP_PROCESS_END
+                _schedule_foup_inprogress_unmark(ext, prim_path, delay_sec=1.05)
+        except Exception:
+            pass
+        # 1-E) START 면 +Y320, END 면 -Y320 (1.0초 부드러운 이동)
+        #     - 좌표 단위(320)는 USD 스테이지 단위에 맞춰 사용자가 조정한 값
+        #     - 같은 prim 의 진행 중 translate 가 있으면 먼저 정지(중첩 방지)
+        dy = 320 if seq_u0 == "FOUP_PROCESS_START" else -320
         try:
             stop_prim_translate_animation(prim_path, usd_context_name=ctx_nm)
         except Exception:
@@ -5312,8 +5416,16 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             )
         except Exception:
             pass
+        # 1-F) FOUP 분기는 여기서 종료(매핑/JSON 파이프라인을 타지 않는다)
         return
+
+    # ─────────────────────────────────────────────────────────────────────
+    # 2) 일반 이벤트(ARRIVED/MOVE_TRANSFERING/MOVE_REQ/REMOVED 등) 처리
+    # ─────────────────────────────────────────────────────────────────────
+
+    # 2-A) seq 별칭 정규화(내부 alias → 표준 시퀀스명)
     seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
+    # 2-B) payload 에서 자주 쓰는 필드 미리 추출(가독성/로그용)
     sim_time = payload.get("sim_time", "")
     lot_id = payload.get("lot_id", "")
     from_port_txt = str(payload.get("from_port_id", ""))
@@ -5323,6 +5435,7 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
     to_kind = _port_kind(to_port_txt)
     port_kind = _port_kind(port_txt)
 
+    # 2-C) 디버그 한 줄 로그(verbose 모드)
     if verbose:
         print(
             f"[ANIM HOOK t={sim_time}] 이벤트={seq_raw}->{seq} lot={lot_id} "
@@ -5330,8 +5443,9 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             flush=True,
         )
 
-    # 요구사항: READYTOLOAD / READYTOUNLOAD 는 애니메이션을 절대 실행하지 않는다.
-    # (rules/map에 남아있는 매핑이 있어도 무시)
+    # 2-D) 정책상 애니메이션이 없는 이벤트는 즉시 종료
+    #     - READYTOLOAD/READYTOUNLOAD 는 "준비됨" 알림 성격이라 연계 애니가 없다.
+    #     - rules/map 에 잘못 남아 있어도 여기서 차단(과실행 방지)
     try:
         if str(seq).strip().upper() in (
             str(xml_generator.SEQ_READYTOLOAD).strip().upper(),
@@ -5343,14 +5457,17 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
     except Exception:
         pass
 
-    # 주 실행 경로: 이벤트 -> XML 생성 -> 역파싱 -> 매핑 -> JSON 실행
-    # 유지보수 규칙:
-    # - rules/map 매칭 입력값은 "반드시" XML 역파싱 결과를 기준으로 표준화한다.
-    # - 시뮬 payload 원본을 바로 매칭에 쓰지 않는다(포맷 드리프트 방지).
+    # 2-E) 주 실행 파이프라인:
+    #      이벤트 → XML 생성 → 역파싱 → 표준화된 mapping_payload → rules/map 매칭 → JSON 시퀀스 실행
+    #
+    #      유지보수 규칙(중요):
+    #      - rules/map 매칭 입력은 "반드시" XML 역파싱 결과를 기준으로 표준화한다.
+    #      - 시뮬 payload 원본을 바로 매칭에 쓰지 않는다(포맷 드리프트 방지).
     parsed: Dict[str, Any] = {}
     xml_text = ""
     seq_for_mapping = seq
     try:
+        # 2-E-1) 이벤트 종류에 따라 from/to 또는 port 만으로 XML 텍스트 생성
         if seq in xml_generator.FROM_TO_SEQS:
             from_port = _parse_port_num(from_port_txt, 1)
             to_port = _parse_port_num(to_port_txt, 1)
@@ -5358,18 +5475,20 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
         else:
             port = _parse_port_num(port_txt, 1)
             xml_text = xml_generator.build_xml_string(seq, port_id=port)
+        # 2-E-2) XML 을 다시 dict 로 역파싱하여 표준 sequence_name 추출
         parsed = xml_generator.parse_xml_string(xml_text) or {}
         parsed_seq = str(parsed.get("sequence_name", "")).strip().upper()
         if parsed_seq:
-            # XML이 알려주는 정식 sequence를 최우선으로 채택
+            # 2-E-3) XML 이 알려주는 정식 sequence 를 매칭 키로 최우선 채택
             seq_for_mapping = parsed_seq
     except Exception as e:
         if verbose:
             print(f"[ANIM HOOK] XML 생성/역파싱 실패: seq={seq}, err={e}", flush=True)
         return
 
-    # rules/map 입력을 XML 역파싱 기준으로 완전히 표준화
-    # from/to/port 텍스트는 원본 접두사(BP/EP/OHT) 힌트를 살려 재구성한다.
+    # 2-F) rules/map 매칭 입력 표준화
+    #     - 원본 payload 복사본에 XML 역파싱 결과로 from/to/port/seq 를 정규화해서 덮어쓴다.
+    #     - 원본 텍스트의 접두사(BP/EP/OHT) 힌트는 _normalize_port_text_from_xml 가 보존한다.
     mapping_payload = dict(payload or {})
     parsed_from = str(parsed.get("from_port_id", "") or "")
     parsed_to = str(parsed.get("to_port_id", "") or "")
@@ -5382,8 +5501,9 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
     mapping_payload["_xml_text"] = xml_text
     mapping_payload["_xml_parsed"] = parsed
 
-    # 역파싱된 seq를 기준으로 기존 rules/map(JSON 파일)은 그대로 사용
-    # 즉, 규칙 파일은 수정하지 않고도 XML 표준화 파이프라인 위에서 동작한다.
+    # 2-G) 매칭(이벤트 → JSON 경로)
+    #     - rules.json 우선 → fallback map.json 순으로 _resolve_event_animation_entry 가 결정
+    #     - 매칭 성공 시 _execute_mapped_sequence_stub 가 SequenceRunner.run(...) 까지 트리거한다.
     mapped_json, mapped_meta, matched_rule, matched_source = _resolve_event_animation_entry(seq_for_mapping, mapping_payload)
     if mapped_json:
         _append_anim_history_log(
@@ -5392,18 +5512,20 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
         )
         _execute_mapped_sequence_stub(ext, seq_for_mapping, mapping_payload, mapped_json, mapped_meta, matched_rule, verbose)
     elif verbose:
+        # 매칭 없음: 콘솔에 어느 파일을 확인해야 하는지 힌트 출력
         print(
             f"[ANIM MAP] 이벤트={seq_for_mapping} 매핑 없음 "
             f"(config/event_animation_rules.json / event_animation_map.json 확인)",
             flush=True,
         )
+    # 2-H) 매칭이 없으면 이력 로그(애니 히스토리) 한 줄 추가(필요 예시 파일명 추정)
     if not mapped_json:
         hint_name = f"{seq_for_mapping.lower()}.json".replace("eapeis_port_", "")
         _append_anim_history_log(
             ext,
             f"[ANIM] 매핑없음 | event={seq_for_mapping} | 필요한 예시파일={hint_name}",
         )
-    # 이후 출력도 XML 표준화된 값 기준으로 일관성 유지
+    # 2-I) 이후 출력에서 쓰는 텍스트도 XML 표준화 결과로 갱신(일관성 유지)
     from_port_txt = str(mapping_payload.get("from_port_id", ""))
     to_port_txt = str(mapping_payload.get("to_port_id", ""))
     port_txt = str(mapping_payload.get("port_id", ""))
@@ -5411,6 +5533,7 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
     to_kind = _port_kind(to_port_txt)
     port_kind = _port_kind(port_txt)
 
+    # 2-J) action_desc 가 있으면 디버그용 액션 한 줄 출력
     action_desc = parsed.get("action_desc", "")
     if action_desc and verbose:
         if port_txt:
@@ -5419,7 +5542,9 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             action_desc += f" | 이동경로={from_port_txt}({from_kind})->{to_port_txt}({to_kind})"
         print(f"[ANIM HOOK ACTION] {action_desc}", flush=True)
 
-    # 추후 실제 애니메이션 분기 지점
+    # 2-K) 시퀀스 종류별 디버그 분기
+    #     - 실제 애니 실행은 위 _execute_mapped_sequence_stub 에서 이미 끝났고,
+    #       여기서는 “어떤 종류의 이벤트가 통과했는지” 한 줄 로그만 남긴다.
     if seq_for_mapping == xml_generator.SEQ_READYTOLOAD:
         if verbose:
             print(f"[ANIM PLAN] READY_TO_LOAD 대기 상태 애니메이션 | port={port_txt}({port_kind})", flush=True)
@@ -5647,6 +5772,13 @@ def on_sim_start_clicked(ext: Any) -> None:
         n_ch = 1
 
     on_sim_stop_clicked(ext)
+    # FOUP 진행중 보호 표시 추가 안전망(이전 세션 잔여 차단):
+    # - on_sim_stop_clicked 에서 이미 정리하지만, 어떤 경로로든 잔여가 남는 것을 막기 위해 한 번 더 비운다.
+    try:
+        from . import port_lot_visibility as _plv  # type: ignore
+        _plv.clear_foup_in_progress()
+    except Exception:
+        pass
     # 시작을 반복할 때 모니터 UI(포트/그래프/진행/이력) 영역에 위젯이 누적되어
     # 버튼 아래의 빈 공간이 점점 커지는 현상이 발생할 수 있어,
     # 시작 시점에 모니터 영역을 한 번 깨끗하게 재빌드한다.
@@ -6513,6 +6645,33 @@ def on_sim_stop_clicked(ext: Any) -> None:
         ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
     except Exception:
         ext._sim_run_gen = 1
+    # FOUP 진행중 보호 표시 정리(안전망):
+    # - END 후 1초 unmark 가 잡히기 전에 stop 이 들어오면 보호 플래그가 남을 수 있다.
+    # - 보류 중인 unmark subscription 도 함께 해제하여 잔여 콜백을 차단한다.
+    try:
+        from . import port_lot_visibility as _plv  # type: ignore
+        _plv.clear_foup_in_progress()
+    except Exception:
+        pass
+    try:
+        holders = getattr(ext, "_foup_unmark_subs", None)
+        if isinstance(holders, list):
+            for h in holders:
+                try:
+                    s = h.get("sub") if isinstance(h, dict) else None
+                    if s is not None:
+                        s.unsubscribe()
+                except Exception:
+                    pass
+                try:
+                    if isinstance(h, dict):
+                        h["done"] = True
+                        h["sub"] = None
+                except Exception:
+                    pass
+            ext._foup_unmark_subs = []
+    except Exception:
+        pass
     # 프리런/재생 모드 정리
     try:
         p = getattr(ext, "_sim_playback_player", None)
