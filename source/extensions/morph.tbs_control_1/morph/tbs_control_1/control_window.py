@@ -68,7 +68,9 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
  - 시뮬 UI 큐 라우팅: `SimUiQueueKind` + `_dispatch_sim_ui_queue_item` + `_sim_ui_sink_*`.
    새 공정 텍스트 로그는 `post_sim_history_line(ext, line)`(시뮬 스레드)만 쓰면 이력 창으로 간다.
  - 시뮬레이션 종료 시 `_export_sim_logs_to_xlsx()`가 자동 호출되어
-   `data/sim_logs/sim_logs_YYYYmmdd_HHMMSS.xlsx`에 2개 시트(진행현황/이력로그)를 저장한다.
+   `data/sim_logs/sim_logs_YYYYmmdd_HHMMSS.xlsx`에 **JSON 타임테이블만** 저장한다.
+   (시트는 한 장(`타임테이블`)으로 통합, 1열에 JSON 라인을 시간순으로 한 줄씩 기록.
+   화면 구분은 각 라인의 `"screen"` 키로 한다.)
 
 【시뮬레이션 이벤트→애니메이션(JSON) 매핑 요약 (요구사항 반영)】
 주의:
@@ -2170,7 +2172,7 @@ def build_control_window(ext: Any) -> None:
     ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
 
-    ext._control_window = ui.Window("TBS 제어창", width=800, height=840)
+    ext._control_window = ui.Window("EBS 제어창", width=800, height=840)
     with ext._control_window.frame:
         with ui.ScrollingFrame(
             height=ui.Fraction(1.0),
@@ -2202,49 +2204,49 @@ def build_control_window(ext: Any) -> None:
                                 style=CHECKBOX_WHITE_STYLE,
                             )
                 ui.Spacer(height=6)
-                with ui.Frame(style={"background_color": 0xFF23262B}):
+                with ui.Frame(style={"background_color": 0xFF23262B}, height=0):
                     with ui.VStack(padding=8, spacing=8):
                         ui.Label("USD Load", height=24, style={"color": 0xFFDDDDDD})
                         build_load_ui_into_stack(ext)
                 ui.Spacer(height=6)
-                with ui.Frame(style={"background_color": 0xFF23262B}):
-                    # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
-                    with ui.VStack(padding=8, spacing=8):
-                        ui.Label("XML 제너레이터 생성기", height=24, style={"color": 0xFFDDDDDD})
-                        ext._xml_seq_combo = ui.ComboBox(
-                            0,
-                            xml_generator.SEQ_READYTOLOAD,
-                            xml_generator.SEQ_ARRIVED,
-                            xml_generator.SEQ_MOVE_TRANSFERING,
-                            xml_generator.SEQ_MOVE,
-                            xml_generator.SEQ_MOVE_REQ,
-                            xml_generator.SEQ_READYTOUNLOAD,
-                            xml_generator.SEQ_REMOVED,
-                        )
-                        ext._xml_seq_combo.model.add_item_changed_fn(lambda m, *a: on_xml_seq_changed(ext))
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Button("OK", width=72, height=28, clicked_fn=lambda: on_xml_ok_clicked(ext))
-                            ui.Button("제너레이터 실행(역파싱)", height=28, clicked_fn=lambda: on_xml_run_clicked(ext))
-                        ext._xml_ab_inputs_frame = ui.HStack(spacing=8, height=28)
-                        with ext._xml_ab_inputs_frame:
-                            ui.Label("FROM_PORT_ID", width=110, height=28)
-                            ui.IntField(model=ext._xml_from_port_model, width=60, height=28)
-                            ui.Label("TO_PORT_ID", width=90, height=28)
-                            ui.IntField(model=ext._xml_to_port_model, width=60, height=28)
-                        ext._xml_ab_inputs_frame.visible = True
+                # with ui.Frame(style={"background_color": 0xFF23262B}):
+                #     # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
+                #     with ui.VStack(padding=8, spacing=8):
+                #         ui.Label("XML 제너레이터 생성기", height=24, style={"color": 0xFFDDDDDD})
+                #         ext._xml_seq_combo = ui.ComboBox(
+                #             0,
+                #             xml_generator.SEQ_READYTOLOAD,
+                #             xml_generator.SEQ_ARRIVED,
+                #             xml_generator.SEQ_MOVE_TRANSFERING,
+                #             xml_generator.SEQ_MOVE,
+                #             xml_generator.SEQ_MOVE_REQ,
+                #             xml_generator.SEQ_READYTOUNLOAD,
+                #             xml_generator.SEQ_REMOVED,
+                #         )
+                #         ext._xml_seq_combo.model.add_item_changed_fn(lambda m, *a: on_xml_seq_changed(ext))
+                #         with ui.HStack(spacing=8, height=28):
+                #             ui.Button("OK", width=72, height=28, clicked_fn=lambda: on_xml_ok_clicked(ext))
+                #             ui.Button("제너레이터 실행(역파싱)", height=28, clicked_fn=lambda: on_xml_run_clicked(ext))
+                #         ext._xml_ab_inputs_frame = ui.HStack(spacing=8, height=28)
+                #         with ext._xml_ab_inputs_frame:
+                #             ui.Label("FROM_PORT_ID", width=110, height=28)
+                #             ui.IntField(model=ext._xml_from_port_model, width=60, height=28)
+                #             ui.Label("TO_PORT_ID", width=90, height=28)
+                #             ui.IntField(model=ext._xml_to_port_model, width=60, height=28)
+                #         ext._xml_ab_inputs_frame.visible = True
 
-                        ext._xml_port_inputs_frame = ui.HStack(spacing=8, height=28)
-                        with ext._xml_port_inputs_frame:
-                            ui.Label("PORT_ID", width=110, height=28)
-                            ui.IntField(model=ext._xml_port_id_model, width=60, height=28)
-                        ext._xml_port_inputs_frame.visible = False
-                        ui.Label(
-                            "포트 ID 표: EP1~3=1~3, IN/OUT=5, BP1~4=6~9, OHT=10",
-                            height=18,
-                            style={"color": 0xFF9AA4B2},
-                        )
-                        # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
-                        on_xml_seq_changed(ext)
+                #         ext._xml_port_inputs_frame = ui.HStack(spacing=8, height=28)
+                #         with ext._xml_port_inputs_frame:
+                #             ui.Label("PORT_ID", width=110, height=28)
+                #             ui.IntField(model=ext._xml_port_id_model, width=60, height=28)
+                #         ext._xml_port_inputs_frame.visible = False
+                #         ui.Label(
+                #             "포트 ID 표: EP1~3=1~3, IN/OUT=5, BP1~4=6~9, OHT=10",
+                #             height=18,
+                #             style={"color": 0xFF9AA4B2},
+                #         )
+                #         # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
+                #         on_xml_seq_changed(ext)
                 ui.Spacer(height=6)
                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
                 ui.Spacer(height=6)
@@ -3920,11 +3922,18 @@ def _dispatch_sim_ui_queue_item(ext: Any, kind: str, payload: Any, panel_mode: S
 
 def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
     """
-    프리런 결과(SimPreRunResult.items)에서 "DONE progress"를 모아 타임테이블(시간표) 텍스트를 만든다.
+    프리런 결과(SimPreRunResult.items)를 **JSON 라인 형식의 타임테이블**로 만든다.
 
-    요구사항:
-    - 시뮬 시작부터 종료까지의 각 동작(공정/이동/FOUP 등)을 시작/종료/소요 시간으로 표 형태로 정리.
-    - 진행현황창 아래 [SIM] 이력 로그와, 일반 콘솔에도 동일한 타임테이블을 출력할 수 있게 한다.
+    출력 정책(요구사항):
+    - 한 줄에 한 JSON 객체. 각 줄은 두 종류 중 하나.
+        ┌─ kind="event": 시뮬 이벤트 발생 시점(ARRIVED/MOVE_*/REMOVED/FOUP_PROCESS_START/END 등)
+        └─ kind="step":  공정/애니 동작 시작 시점(progress 의 RUNNING 첫 emit, elapsed=0.0)
+    - 같은 시각이면 event → step 순서로 정렬.
+    - port_id 등은 문자열("EP1", "BP3" 등)로 그대로 유지(시뮬 내부 표기와 일치).
+    - 동작 라인(step)에는 anim 파일명/공정시간/애니시간/동작 설명/공정시간우선 등을 함께 동봉.
+
+    출력 헤더는 ``"[SIM] 타임테이블(프리런) — 화면N"`` 으로 두어, ``_append_sim_log`` 의
+    "타임테이블만 표시" 필터(timetable_only)를 그대로 통과한다.
     """
     out: Dict[int, str] = {}
     if not isinstance(results_by_screen, dict):
@@ -3936,6 +3945,12 @@ def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
         except Exception:
             return float(d)
 
+    def _s(v: Any) -> str:
+        try:
+            return str(v).strip() if v is not None else ""
+        except Exception:
+            return ""
+
     for scr, res in results_by_screen.items():
         try:
             si = int(scr)
@@ -3944,65 +3959,87 @@ def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
         items = getattr(res, "items", None)
         if not isinstance(items, (list, tuple)):
             continue
+
         rows: List[Dict[str, Any]] = []
         for it in items:
             try:
-                if str(getattr(it, "kind", "") or "") != "progress":
-                    continue
+                kind = str(getattr(it, "kind", "") or "").strip().lower()
                 p = getattr(it, "payload", None)
-                if not isinstance(p, dict):
-                    continue
-                st = str(p.get("status", "") or "").strip().upper()
-                if st != "DONE":
-                    continue
-                ev = str(p.get("event_seq") or p.get("sequence_name") or "").strip()
-                label = str(p.get("label", "") or "").strip()
-                total = _f(p.get("total", 0.0), 0.0)
-                t_end = _f(getattr(it, "t", 0.0), 0.0)
-                t_start = max(0.0, float(t_end) - max(0.0, float(total)))
-                rows.append(
-                    {
-                        "t_start": float(t_start),
-                        "t_end": float(t_end),
-                        "dur": float(total),
-                        "event": ev,
-                        "label": label,
-                        "detail": str(p.get("detail", "") or "").strip(),
-                        "anim": str(p.get("linked_anim_json", "") or "").strip(),
+                t_val = round(_f(getattr(it, "t", 0.0), 0.0), 2)
+
+                # 1) 시뮬 이벤트 라인 (kind="event")
+                if kind == "event" and isinstance(p, dict):
+                    seq = _s(p.get("seq")).upper()
+                    if not seq:
+                        continue
+                    row: Dict[str, Any] = {
+                        "t": t_val,
+                        "screen": si,
+                        "kind": "event",
+                        "event": seq,
                     }
-                )
+                    # 있으면 동봉(없으면 키 자체 생략 → JSON 한 줄을 깔끔하게)
+                    for k in ("port_id", "from_port_id", "to_port_id", "lot_id", "foup_id", "lot_seq"):
+                        v = _s(p.get(k))
+                        if v:
+                            row[k] = v
+                    rows.append(row)
+
+                # 2) 동작 시작 라인 (kind="step") = progress.RUNNING 첫 emit (elapsed=0.0)
+                elif kind == "progress" and isinstance(p, dict):
+                    st = _s(p.get("status")).upper()
+                    el = _f(p.get("elapsed", 0.0), 0.0)
+                    if st != "RUNNING" or abs(el) > 1e-9:
+                        continue
+                    ev = _s(p.get("event_seq") or p.get("sequence_name")).upper()
+                    if not ev:
+                        continue
+                    row = {
+                        "t": t_val,
+                        "screen": si,
+                        "kind": "step",
+                        "event": ev,
+                    }
+                    pid = _s(p.get("port_id"))
+                    if pid:
+                        row["port_id"] = pid
+                    label = _s(p.get("label"))
+                    if label:
+                        row["label"] = label
+                    # anim 파일명: 비어 있어도 명시적으로 빈 문자열로 둔다(필드 존재 자체가 의미)
+                    row["anim"] = _s(p.get("linked_anim_json"))
+                    row["proc_sec"] = round(_f(p.get("proc_sec", 0.0), 0.0), 2)
+                    row["anim_sec"] = round(_f(p.get("anim_sec", 0.0), 0.0), 2)
+                    detail = _s(p.get("detail"))
+                    if detail:
+                        row["detail"] = detail
+                    ptp = _s(p.get("process_time_priority"))
+                    if ptp:
+                        row["process_time_priority"] = ptp
+                    rows.append(row)
             except Exception:
                 continue
+
         if not rows:
             continue
+
+        # 같은 시각이면 event 를 먼저, step 을 다음에
+        kind_prio = {"event": 0, "step": 1}
         try:
-            rows.sort(key=lambda r: (float(r.get("t_start", 0.0)), float(r.get("t_end", 0.0))))
+            rows.sort(key=lambda r: (
+                float(r.get("t", 0.0)),
+                int(kind_prio.get(str(r.get("kind", "")), 9)),
+            ))
         except Exception:
             pass
 
         lines: List[str] = []
-        head = f"[SIM] 타임테이블(프리런) — 화면{si}"
-        lines.append(head)
-        lines.append("-" * len(head))
-        lines.append("start   end     dur   event          label")
-        lines.append("------  ------  ----  ------------  ------------------------------")
+        lines.append(f"[SIM] 타임테이블(프리런) — 화면{si}")
         for r in rows:
-            s0 = f"{float(r['t_start']):6.1f}"
-            e0 = f"{float(r['t_end']):6.1f}"
-            d0 = f"{float(r['dur']):4.1f}"
-            ev = (str(r.get("event") or "-")[:12]).ljust(12)
-            lb = str(r.get("label") or "-")
-            if len(lb) > 30:
-                lb = lb[:29] + "…"
-            lines.append(f"{s0}  {e0}  {d0}  {ev}  {lb}")
-            det = str(r.get("detail") or "")
-            if det:
-                if len(det) > 140:
-                    det = det[:139] + "…"
-                lines.append(f"  - detail: {det}")
-            anim = str(r.get("anim") or "")
-            if anim:
-                lines.append(f"  - anim: {anim}")
+            try:
+                lines.append(json.dumps(r, ensure_ascii=False))
+            except Exception:
+                continue
         out[si] = "\n".join(lines).strip()
     return out
 
@@ -5797,6 +5834,20 @@ def _is_progress_only_mode(ext: Any) -> bool:
 
 
 def _export_sim_logs_to_xlsx(ext: Any) -> None:
+    """
+    시뮬 종료 시 자동 호출되어 ``data/sim_logs/sim_logs_YYYYmmdd_HHMMSS.xlsx`` 를 생성한다.
+
+    출력 정책(요구사항):
+    - 엑셀에는 **프리런 JSON 타임테이블만** 남긴다(진행현황/이력로그/리포트 시트는 만들지 않는다).
+    - 시트는 **단 한 장(`타임테이블`)** 으로 통합한다. 화면 구분은 각 JSON 라인의 ``"screen"`` 키로 한다.
+    - 1열에 JSON 라인을 한 줄씩 기록한다(헤더 라인 ``[SIM] 타임테이블(프리런) — 화면N`` 은 제외).
+    - 정렬 우선순위: ``t`` (시뮬 시간) 오름차순 → ``screen`` 오름차순 → kind(event 우선, step 다음).
+
+    데이터 출처(우선순위):
+    1) ``ext._sim_prerun_results_by_screen`` (프리런 결과) → ``_build_prerun_timetable_text`` 로 재빌드
+       (가장 신뢰할 수 있는 원본; UI 라벨에 잘려 표시되었어도 전체 라인을 복원할 수 있음)
+    2) 화면별 ``history_label.text`` 에 이미 들어 있는 타임테이블 블록 (Fallback)
+    """
     try:
         from openpyxl import Workbook  # type: ignore
     except Exception as e:
@@ -5808,92 +5859,90 @@ def _export_sim_logs_to_xlsx(ext: Any) -> None:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = out_dir / f"sim_logs_{ts}.xlsx"
 
-    def _rows(text: str) -> List[str]:
-        lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-        # 실행 순서(오래된 항목 -> 최신 항목) 그대로 저장
-        return lines
+    # 1순위: 프리런 결과로 JSON 타임테이블을 다시 빌드(원본 신뢰)
+    timetable_by: Dict[int, str] = {}
+    try:
+        results = getattr(ext, "_sim_prerun_results_by_screen", None)
+        if isinstance(results, dict) and results:
+            built = _build_prerun_timetable_text(results) or {}
+            if isinstance(built, dict):
+                timetable_by = {int(k): str(v) for k, v in built.items() if str(v or "").strip()}
+    except Exception:
+        timetable_by = {}
 
-    progress_src = ""
-    history_src = ""
-    chans_x = getattr(ext, "_sim_monitor_channels", None)
-    if isinstance(chans_x, list) and len(chans_x) > 1:
-        pb_x: List[str] = []
-        hb_x: List[str] = []
-        for ch in chans_x:
-            if not isinstance(ch, dict):
+    # 2순위(Fallback): UI 의 history_label.text 에서 타임테이블 블록을 그대로 가져온다.
+    if not timetable_by:
+        try:
+            chans_x = getattr(ext, "_sim_monitor_channels", None) or []
+            if isinstance(chans_x, list):
+                for ch in chans_x:
+                    if not isinstance(ch, dict):
+                        continue
+                    try:
+                        si = int(ch.get("screen", 0))
+                    except Exception:
+                        continue
+                    if si <= 0:
+                        continue
+                    hl = ch.get("history_label")
+                    if hl is None:
+                        continue
+                    txt = str(getattr(hl, "text", "") or "").strip()
+                    if txt:
+                        timetable_by[si] = txt
+        except Exception:
+            pass
+
+    # 모든 화면의 JSON 라인을 하나로 모아 시간순 정렬
+    # all_rows 의 항목: (t_float, screen_int, kind_str, raw_json_line_str)
+    all_rows: List[Tuple[float, int, str, str]] = []
+    for si, txt in (timetable_by.items() if isinstance(timetable_by, dict) else []):
+        for line in (txt or "").splitlines():
+            s = (line or "").strip()
+            if not s:
                 continue
+            if s.startswith("[SIM] 타임테이블(프리런)"):
+                continue
+            t_val = 0.0
+            scr_val = int(si)
+            kind_val = ""
             try:
-                si = int(ch.get("screen", 0))
+                obj = json.loads(s)
+                if isinstance(obj, dict):
+                    try:
+                        t_val = float(obj.get("t", 0.0))
+                    except Exception:
+                        t_val = 0.0
+                    try:
+                        scr_val = int(obj.get("screen", si))
+                    except Exception:
+                        scr_val = int(si)
+                    kind_val = str(obj.get("kind", "") or "")
             except Exception:
-                si = 0
-            pl = ch.get("progress_label")
-            hl = ch.get("history_label")
-            if pl is not None:
-                pt = str(pl.text or "").strip()
-                if pt:
-                    pb_x.append(f"=== 화면{si} 진행현황 ===\n{pt}")
-            if hl is not None:
-                ht = str(hl.text or "").strip()
-                if ht:
-                    hb_x.append(f"=== 화면{si} Sim 로그 ===\n{ht}")
-        progress_src = "\n\n".join(pb_x).strip()
-        history_src = "\n\n".join(hb_x).strip()
-    else:
-        pl0 = getattr(ext, "_sim_progress_label", None)
-        if pl0 is not None:
-            progress_src = pl0.text or ""
-        if not (progress_src or "").strip() and getattr(ext, "_sim_progress_text", None):
-            progress_src = ext._sim_progress_text.as_string or ""
-        hl0 = getattr(ext, "_sim_history_label", None)
-        if hl0 is not None:
-            history_src = hl0.text or ""
-        if not (history_src or "").strip() and getattr(ext, "_sim_history_text", None):
-            history_src = ext._sim_history_text.as_string or ""
-        if isinstance(chans_x, list) and len(chans_x) == 1:
-            ch0 = chans_x[0]
-            if isinstance(ch0, dict):
-                pl1 = ch0.get("progress_label")
-                hl1 = ch0.get("history_label")
-                if not (progress_src or "").strip() and pl1 is not None:
-                    progress_src = str(pl1.text or "")
-                if not (history_src or "").strip() and hl1 is not None:
-                    history_src = str(hl1.text or "")
+                # JSON 파싱 실패해도 원문은 보존(정렬 키만 기본값)
+                pass
+            all_rows.append((float(t_val), int(scr_val), str(kind_val), s))
 
-    progress_rows = _rows(progress_src)
-    history_rows = _rows(history_src)
+    kind_prio = {"event": 0, "step": 1}
+    try:
+        all_rows.sort(
+            key=lambda r: (
+                float(r[0]),
+                int(r[1]),
+                int(kind_prio.get(str(r[2]), 9)),
+            )
+        )
+    except Exception:
+        pass
 
     wb = Workbook()
-    ws1 = wb.active
-    ws1.title = "진행현황"
-    ws2 = wb.create_sheet("이력로그")
-    ws3 = wb.create_sheet("리포트")
-
-    for idx, row in enumerate(progress_rows, start=1):
-        ws1.cell(row=idx, column=1, value=row)
-    for idx, row in enumerate(history_rows, start=1):
-        ws2.cell(row=idx, column=1, value=row)
-
-    # 리포트: 엔진 요약(총시간, 포트별 유휴/고장 등) — 멀티 시 각 화면 엔진을 이어 붙인다.
-    rep = ""
-    try:
-        me = getattr(ext, "_sim_engines", None)
-        parts: List[str] = []
-        if isinstance(me, list) and len(me) > 0:
-            for i, sim in enumerate(me, start=1):
-                if sim is not None and hasattr(sim, "get_report_text"):
-                    block = str(sim.get_report_text() or "").strip()
-                    if block:
-                        parts.append(f"=== 화면{i} ===\n{block}")
-        else:
-            sim = getattr(ext, "_sim_engine", None)
-            if sim is not None and hasattr(sim, "get_report_text"):
-                parts.append(str(sim.get_report_text() or ""))
-        rep = "\n\n".join(parts) if parts else ""
-    except Exception:
-        rep = ""
-    rep_rows = [ln for ln in (rep or "").splitlines() if ln.strip()] or ["(리포트 없음)"]
-    for idx, row in enumerate(rep_rows, start=1):
-        ws3.cell(row=idx, column=1, value=row)
+    ws = wb.active
+    ws.title = "타임테이블"
+    if not all_rows:
+        ws.cell(row=1, column=1, value="(타임테이블 없음)")
+    else:
+        for i, (_t, _s, _k, raw) in enumerate(all_rows, start=1):
+            ws.cell(row=i, column=1, value=raw)
 
     wb.save(str(out_path))
     _append_sim_log(ext, f"[SIM EXPORT] 저장 완료: {out_path}")
