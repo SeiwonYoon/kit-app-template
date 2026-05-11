@@ -44,7 +44,7 @@ from .lam_id_resolver import resolve_step_ref
 from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_offset_correction import apply_world_space_offset_correction
 from .lam_playback_scheduler import PlaybackScheduler
-from .lam_types import RESOLVE_MISSING, ResolveResult, StepRef
+from .lam_types import LAM_FIXED_FPS, RESOLVE_MISSING, ResolveResult, StepRef
 # 동적 import 의 lazy 로드를 막기 위해 미리 캐시 (background thread 호출 시 cache hit).
 from . import lam_translate_animation as _ltx_preload  # type: ignore  # noqa: E402,F401
 from . import lam_rotate_animation as _lrx_preload  # type: ignore  # noqa: E402,F401
@@ -272,14 +272,8 @@ def _refresh_instance_asset_time_from_stage(instance) -> tuple[float, float, flo
         print(f"{_PRINT_PREFIX} fallback timeSamples scan failed prim={prim_path}: {exc}", flush=True)
 
     if mn is not None and mx is not None and mx > mn:
-        # tps 가 0 이면 stage 의 TimeCodesPerSecond 를 시도, 그래도 없으면 24 로.
-        if tps <= 0:
-            try:
-                tps = float(stage.GetTimeCodesPerSecond())
-            except Exception:
-                tps = 24.0
-            if tps <= 0:
-                tps = 24.0
+        # FPS 30 고정 정책 — tps 는 항상 LAM_FIXED_FPS.
+        tps = LAM_FIXED_FPS
         try:
             instance.asset_start_time = float(mn)
             instance.asset_end_time = float(mx)
@@ -288,7 +282,7 @@ def _refresh_instance_asset_time_from_stage(instance) -> tuple[float, float, flo
             pass
         print(
             f"{_PRINT_PREFIX} fallback asset timeline filled prim={prim_path} "
-            f"timeSamples [{mn},{mx}]@{tps}fps  (n_attr_with_samples={n_attr})",
+            f"timeSamples [{mn},{mx}]@{tps}fps(forced)  (n_attr_with_samples={n_attr})",
             flush=True,
         )
         return (float(mn), float(mx), float(tps))
@@ -636,8 +630,9 @@ class LamSequenceRunner:
                         if p not in paths_for_offset:
                             paths_for_offset.append(p)
                 start_seconds = float(_val("start_frame", 0) or 0.0)
-                tps = result.instance.asset_tps or 24.0
-                start_seconds_in = start_seconds / float(max(0.001, tps)) if start_seconds > 0 else 0.0
+                # FPS 30 고정 정책 — 자산 tps 무시.
+                tps = LAM_FIXED_FPS
+                start_seconds_in = start_seconds / float(tps) if start_seconds > 0 else 0.0
                 apply_world_space_offset_correction(
                     paths_for_offset, start_seconds_in, asset_tps=tps
                 )
@@ -696,7 +691,7 @@ class LamSequenceRunner:
             f"prim={result.instance.prim_path} range={range_mode}[{range_start},{range_end}] "
             f"sp={combined_speed} loop={loop} ok={ok} est_duration={est:.3f}s "
             f"asset_time=[{result.instance.asset_start_time},{result.instance.asset_end_time}]"
-            f"@{result.instance.asset_tps}fps",
+            f"@{LAM_FIXED_FPS}fps(forced)",
             flush=True,
         )
         if not ok or loop:
@@ -712,7 +707,7 @@ class LamSequenceRunner:
         range_end: float,
         combined_speed: float,
     ) -> float:
-        tps = instance.asset_tps if instance.asset_tps > 0 else 30.0
+        tps = LAM_FIXED_FPS
         if range_mode == "frames":
             length_sec = max(0.0, (range_end - range_start) / tps)
         elif range_mode == "ratio":

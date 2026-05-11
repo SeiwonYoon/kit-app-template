@@ -193,6 +193,11 @@ class LamWindow:
                             ui.StringField(model=self._instance_id_model)
                             ui.Spacer()
                             ui.Button("+ USD 추가", clicked_fn=self._on_add_usd, width=110)
+                            ui.Button(
+                                "모두 초기화",
+                                clicked_fn=self._on_reset_all,
+                                width=110,
+                            )
                         ui.Label(
                             "※ Instance ID 비워두면 파일명에서 추출. 같은 ID 충돌 시 자동 _1, _2 …",
                             height=18,
@@ -244,6 +249,7 @@ class LamWindow:
                             ui.Spacer()
                         with ui.HStack(spacing=4, height=24):
                             ui.Button("Master 진단 (등록 결과 확인)", clicked_fn=self._on_diagnose, width=210)
+                            ui.Button("Option E 진단", clicked_fn=self._on_diagnose_option_e, width=130)
                             ui.Button("LAM Viewport 강제 열기", clicked_fn=self._on_force_dedicated_viewport, width=210)
                             ui.Spacer()
                         ui.Label(
@@ -432,6 +438,15 @@ class LamWindow:
         self._log(
             f"LAM Viewport 강제 열기 {'OK' if ok else 'FAIL'} | {self._viewport.status_text()}"
         )
+
+    def _on_diagnose_option_e(self) -> None:
+        """Option E 운영 상태를 한 번에 콘솔에 dump 하고 한 줄 요약을 Log 라벨에 표시."""
+        try:
+            text = self._evaluator.dump_option_e_state()
+        except Exception as exc:
+            self._log(f"Option E 진단 실패: {exc}")
+            return
+        self._log(f"Option E 진단: {text}")
 
     def _verify_prim_in_master(self, prim_path: str) -> bool:
         """master stage 에 prim 이 author 됐는지 즉시 확인."""
@@ -687,6 +702,13 @@ class LamWindow:
                     ui.Label(inst.source_asset)
                     ui.Spacer()
                     ui.Button(
+                        "Bake",
+                        width=70,
+                        clicked_fn=(
+                            lambda p=inst.prim_path: self._on_bake_instance(p)
+                        ),
+                    )
+                    ui.Button(
                         "Remove",
                         width=80,
                         clicked_fn=lambda p=inst.prim_path: self._on_remove(p),
@@ -694,7 +716,234 @@ class LamWindow:
 
     def _on_remove(self, prim_path: str) -> None:
         ok = self._loader.remove_usd(prim_path)
+        # evaluator 의 Option E runtime 도 함께 dispose — registry listener 는 invalidate
+        # 만 수행하므로, 명시 호출이 없으면 옛 offscreen_asset 캐시가 누수된다.
+        try:
+            self._evaluator.forget_instance(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} remove forget_instance failed prim={prim_path}: {exc}",
+                flush=True,
+            )
         self._log(f"Remove {'OK' if ok else 'FAIL'}: {prim_path}")
+
+    def _on_reset_all(self) -> None:
+        """등록된 모든 LAM 인스턴스를 unload하고 master stage 의 /World 자식 prim 도 비운다.
+
+        - `MultiUsdLoader.remove_usd` 가 prim 제거 + sublayer cleanup + registry unregister.
+        - evaluator 의 Option E runtime 들은 `forget_instance` 가 dispose 까지 호출.
+        - 사용자 USD 자산 파일과 master 저장 파일은 일절 건드리지 않는다.
+        """
+        instances = list(self._registry.all_instances())
+        if not instances:
+            self._log("초기화할 LAM 인스턴스가 없습니다.")
+            return
+        fail = 0
+        for inst in instances:
+            try:
+                if not self._loader.remove_usd(inst.prim_path):
+                    fail += 1
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} reset remove_usd failed prim={inst.prim_path}: {exc}",
+                    flush=True,
+                )
+                fail += 1
+            # evaluator runtime 도 청소 (offscreen_asset 캐시 누수 방지).
+            try:
+                self._evaluator.forget_instance(inst.prim_path)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} reset forget_instance failed prim={inst.prim_path}: {exc}",
+                    flush=True,
+                )
+        # 안전 보강: stage 에 남아 있을 /World 자식 prim 정리 (혹시 모를 잔재 제거).
+        try:
+            stage = self._master.get_stage()
+            if stage is not None:
+                world = stage.GetPrimAtPath("/World")
+                if world and world.IsValid():
+                    for child in list(world.GetChildren()):
+                        try:
+                            stage.RemovePrim(child.GetPath())
+                        except Exception as exc:
+                            print(
+                                f"{_PRINT_PREFIX} reset stage RemovePrim failed "
+                                f"path={child.GetPath()}: {exc}",
+                                flush=True,
+                            )
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} reset stage scan failed: {exc}", flush=True)
+        self._log(f"모두 초기화 OK: removed={len(instances) - fail}, fail={fail}")
+
+    def _on_bake_instance(self, prim_path: str) -> None:
+        """선택한 인스턴스의 자산을 OmniGraph 평가 결과로 timeSamples bake.
+
+        흐름:
+            1) 인스턴스의 절대 자산 경로 해석 (registry.source_asset).
+            2) `lam_bake_omnigraph.bake_asset_to_timesamples_async` 를 별도 태스크로 시작.
+            3) 진행률 콜백 → log 라벨 갱신.
+            4) 완료 시:
+                - 성공: 동일 prim_path 의 인스턴스를 baked.usd 로 교체(unload 후 add_usd).
+                - 실패: 에러 로그.
+
+        본 호출은 **Kit default context 를 건드리지 않는다** — bake 모듈이 자체적으로
+        별도 USD context 를 생성하여 자산을 그 안에서 평가/캡처한다.
+
+        Args:
+            prim_path: 인스턴스 prim_path (예: `/World/aaa`).
+        """
+        try:
+            inst = self._registry.get_by_prim_path(prim_path)
+        except Exception:
+            inst = None
+        if inst is None:
+            for it in self._registry.all_instances():
+                if it.prim_path == prim_path:
+                    inst = it
+                    break
+        if inst is None:
+            self._log(f"Bake 실패 — 인스턴스를 찾을 수 없음: {prim_path}")
+            return
+
+        # source_asset 절대 경로 해석.
+        raw = (getattr(inst, "source_asset", "") or "").strip()
+        if not raw:
+            self._log(f"Bake 실패 — source_asset 비어 있음 prim={prim_path}")
+            return
+        raw_norm = raw.replace("\\", "/")
+        abs_path = ""
+        if os.path.isfile(raw_norm):
+            abs_path = os.path.normpath(os.path.abspath(raw_norm))
+        else:
+            mp = (getattr(self._master, "master_path", "") or "").strip()
+            if mp and not getattr(self._master, "is_anonymous", True):
+                cand = os.path.normpath(
+                    os.path.join(os.path.dirname(os.path.abspath(mp)), raw_norm)
+                )
+                if os.path.isfile(cand):
+                    abs_path = cand
+        if not abs_path:
+            self._log(f"Bake 실패 — 자산 경로 해석 실패: raw={raw!r}")
+            return
+
+        from .lam_bake_omnigraph import (
+            bake_prim_to_timesamples_async,
+            make_default_baked_path,
+            read_bake_speed_env,
+        )
+
+        # 이미 인스턴스의 source 가 `*_baked.usd` 라면 더 bake 할 필요 없음. 사용자가 또
+        # [Bake] 를 눌렀다면 단순 안내 후 종료.
+        if abs_path.lower().endswith("_baked.usd"):
+            self._log(
+                f"Bake 생략 — 이 인스턴스는 이미 baked USD 입니다: {abs_path}\n"
+                f"   원본에서 다시 굽고 싶다면 [+ USD 추가] 로 원본 USD 를 다시 등록 후 "
+                f"[Bake] 해 주세요."
+            )
+            return
+
+        out_path = make_default_baked_path(abs_path)
+
+        # 정책 (2026-05-11 사용자 결정): [Bake] 는 항상 새로 굽고 기존 baked.usd 를 덮어쓴다.
+        # Sdf.Layer.Export() 가 destination 파일을 덮어쓰므로 별도 삭제 없이 OK.
+        existed_before = os.path.isfile(out_path)
+
+        bake_stride, bake_sparse = read_bake_speed_env()
+        self._log(
+            f"Bake 속도: frame_stride={bake_stride} sparse_time_samples={bake_sparse} "
+            f"(기본 무손실. PowerShell 으로 가속 시 — 권장X: "
+            f"$env:LAM_BAKE_FRAME_STRIDE=2)"
+        )
+        if existed_before:
+            self._log(f"기존 baked.usd 가 존재 → 새로 굽고 덮어씁니다: {out_path}")
+
+        master_stage = None
+        try:
+            master_stage = self._master.get_stage()
+        except Exception:
+            master_stage = None
+        if master_stage is None:
+            self._log("Bake 실패 — master stage 가 None")
+            return
+
+        # 진행률 콜백 — main thread 의 log 라벨 안전 갱신.
+        def _progress(cur: int, total: int, msg: str) -> None:
+            try:
+                pct = 0 if total <= 0 else int(round(cur / total * 100))
+                self._log(f"Bake 진행 {pct:3d}% ({cur}/{total}) {msg}")
+            except Exception:
+                pass
+
+        # bake 종료 후 후처리 — 인스턴스 교체. 항상 새로 굽고 기존 파일을 덮어쓴다.
+        async def _runner() -> None:
+            self._log(f"Bake 시작: {abs_path} → {out_path}")
+            try:
+                result = await bake_prim_to_timesamples_async(
+                    master_stage,
+                    prim_path,
+                    abs_path,
+                    output_path=out_path,
+                    fps=30.0,
+                    frame_stride=bake_stride,
+                    sparse_time_samples=bake_sparse,
+                    progress_cb=_progress,
+                )
+            except Exception as exc:
+                self._log(f"Bake 예외: {exc}")
+                return
+
+            if not result.ok:
+                self._log(f"Bake 실패: {result.error}")
+                return
+
+            self._log(
+                f"Bake 완료: out={result.output_path} sample_frames={result.n_frames} "
+                f"stride={result.frame_stride} sparse_cap_skip={result.n_sparse_skipped_capture} "
+                f"prims={result.n_target_prims} attrs={result.n_attr_authored} "
+                f"static_pruned={result.n_attr_pruned_static} "
+                f"elapsed={result.elapsed_sec:.2f}s — 인스턴스 교체 중..."
+            )
+
+            # 인스턴스 교체 — 같은 instance_id 로 baked.usd 를 등록.
+            # 주의: remove_usd 만으로는 evaluator 의 Option E runtime 이 dispose 되지 않는다
+            # (registry listener 는 invalidate 만 호출). 그래서 forget_instance 를 명시
+            # 호출하여 옛 offscreen_asset 캐시까지 완전히 청소한 뒤 add_usd 로 baked.usd 를
+            # 새 runtime 으로 attach 하도록 한다.
+            inst_id = inst.instance_id  # noqa: B023 (closure intended)
+            inst_prim = inst.prim_path  # noqa: B023 (closure intended)
+            try:
+                self._loader.remove_usd(inst_prim)
+            except Exception as exc:
+                self._log(f"Bake 후 remove_usd 실패: {exc}")
+            try:
+                self._evaluator.forget_instance(inst_prim)
+            except Exception as exc:
+                self._log(f"Bake 후 forget_instance 실패: {exc}")
+            try:
+                new_inst = self._loader.add_usd(
+                    source_asset=result.output_path,
+                    requested_id=inst_id,
+                )
+            except Exception as exc:
+                self._log(f"Bake 후 add_usd 실패: {exc}")
+                return
+
+            if new_inst is None:
+                self._log("Bake 후 add_usd 가 None — 자산 등록 실패")
+                return
+            self._log(
+                f"Bake → 교체 완료 prim={new_inst.prim_path} "
+                f"src={new_inst.source_asset} (Option E 로 독립 재생 가능)"
+            )
+
+        # asyncio task 로 실행. Kit 의 main loop 가 await 를 처리하도록 ensure_future.
+        try:
+            import asyncio  # noqa: F401  (이미 import 되어 있을 수 있으나 안전)
+
+            asyncio.ensure_future(_runner())
+        except Exception as exc:
+            self._log(f"Bake task 스케줄 실패: {exc}")
 
     def _invalidate_attr_caches(self) -> None:
         try:

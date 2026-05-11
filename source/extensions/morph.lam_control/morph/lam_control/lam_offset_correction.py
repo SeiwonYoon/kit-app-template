@@ -123,22 +123,27 @@ def apply_world_space_offset_correction(
     prim_paths: List[str],
     start_seconds: float,
     *,
-    asset_tps: float = 24.0,
+    asset_tps: float | None = None,
 ) -> None:
     """LAM 버전 offset correction — TBS 와 의미 동일.
 
     Args:
         prim_paths: 보정 대상 prim 경로 목록.
-        start_seconds: USD_TIMELINE 의 시작 위치(초). 인스턴스의 asset_tps 로 환산해 사용.
-        asset_tps: TimeCode 환산용. 인스턴스에 따라 다르므로 caller 가 전달.
+        start_seconds: USD_TIMELINE 의 시작 위치(초).
+        asset_tps: (deprecated) 무시됨. LAM 은 FPS 30 고정 정책(LAM_FIXED_FPS)을 따른다.
+            호환을 위해 키워드만 남겨두며, 어떤 값을 전달해도 LAM_FIXED_FPS 가 사용된다.
     """
+    from .lam_types import LAM_FIXED_FPS  # 모듈 cycle 회피용 지연 import.
+
     stage = _stage()
     if not stage or not prim_paths:
         return
     try:
         from pxr import Gf, Usd, UsdGeom  # type: ignore
 
-        time_start = Usd.TimeCode(float(start_seconds) * float(max(0.001, asset_tps)))
+        # FPS 30 고정 정책 — asset_tps 인자는 무시.
+        _ = asset_tps  # 사용 안 함 (호환 유지).
+        time_start = Usd.TimeCode(float(start_seconds) * float(LAM_FIXED_FPS))
         for path in prim_paths:
             try:
                 prim = stage.GetPrimAtPath(path)

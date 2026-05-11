@@ -18,12 +18,14 @@
 
 from __future__ import annotations
 
+import os
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 from .lam_attribute_reauthor import AttributeReauthorCache
 from .lam_instance_registry import AnimationInstanceRegistry
-from .lam_types import AnimationInstance
+from .lam_instance_runtime import AnimationInstanceRuntime
+from .lam_types import AnimationInstance, LAM_FIXED_FPS
 
 # omni.timeline 은 main thread 에서만 사용되며, evaluator 의 _on_update 도 main thread 에서
 # 호출되므로 top-level import 가 안전하다. 미설치 환경에서도 import 자체는 성공한다.
@@ -91,6 +93,36 @@ class RuntimeEvaluator:
         # (모든 인스턴스가 stopped 면 사용자가 슬라이더로 직접 조작 가능하도록 stage 보존.)
         self._last_was_any_playing: bool = False
 
+        # ------------------------------------------------------------------
+        # Phase B-1 + B-2-a (2026-05-11) — Option E (offscreen Stage + master mirror)
+        # `docs/LAM_Independent_Playback_Plan.md` §5 Phase B / docs/daily/2026-05-11.md.
+        #
+        # True (현재 기본값) — 새 경로(`_on_update_option_e`) 사용. instance 마다
+        #                      `AnimationInstanceRuntime` 1 개를 두고 offscreen Stage 에서
+        #                      자기 virtual_time 으로 평가한 attribute 값을 master stage 의
+        #                      mirror prim 의 default 로 write. master stage 의 timeline 은
+        #                      진행 안 함 (`omni.timeline.set_current_time` 미호출).
+        #                      master 의 자산 reference 는 LAM session sublayer 안에서
+        #                      `LayerOffset(0, 1e-9)` 로 freeze (`_ensure_option_e_freeze`).
+        # False              — 핫픽스 6-10 의 옛 경로 (rollback 용). LayerOffset 매핑
+        #                      / sublayer mapping flow / stage current time set 진행.
+        #
+        # 결정 (2026-05-11) — 사용자 합의로 기본값을 True 로 전환. 검증/회귀가 필요하면
+        # 코드 직접 변경 또는 `set_use_option_e(False)` 콘솔 호출로 즉시 rollback 가능.
+        # Phase D 안정화 시 flag 자체를 제거 + False 경로 (핫픽스 6-10) 의 dead code
+        # 일괄 삭제.
+        # ------------------------------------------------------------------
+        self._RUNTIME_USE_OPTION_E: bool = True
+        # Option E 경로 전용 — instance prim_path → 그 instance 의 runtime 객체.
+        # flag=False 인 동안에는 항상 비어있다 (lazy 생성).
+        self._runtime_by_path: Dict[str, AnimationInstanceRuntime] = {}
+        # Option E 경로에서 1 회만 보고하는 진단 flag.
+        self._diag_option_e_announced: bool = False
+        # Phase B-2-a — master 의 자산 reference 를 LAM session sublayer 안에서
+        # LayerOffset(0, 1e-9) 로 freeze 한 instance prim_path 들의 집합.
+        # 1 회만 author. unregister 시 forget_instance 가 청소.
+        self._option_e_freeze_seen: set = set()
+
     # ------------------------------------------------------------------ wiring
 
     def set_master(self, master) -> None:
@@ -106,6 +138,179 @@ class RuntimeEvaluator:
 
     def get_global_speed(self) -> float:
         return self._global_speed
+
+    def set_use_option_e(self, enabled: bool) -> None:
+        """Phase B-1+ — Option E 경로 runtime toggle.
+
+        검증 / 회귀 격리 / 비교 디버깅 용도. Kit 콘솔에서:
+            evaluator.set_use_option_e(False)  # 핫픽스 6-10 경로로 즉시 복귀
+            evaluator.set_use_option_e(True)   # 옵션 E 경로로 즉시 복귀
+
+        False → True 전환: 다음 update tick 부터 runtime 객체 lazy create + freeze
+        author 시작.
+        True → False 전환: 다음 update tick 부터 핫픽스 6-10 경로 사용. 기존 runtime
+        / freeze 캐시는 유지(다시 True 로 돌릴 때 재사용).
+        """
+        prev = self._RUNTIME_USE_OPTION_E
+        self._RUNTIME_USE_OPTION_E = bool(enabled)
+        if prev != self._RUNTIME_USE_OPTION_E:
+            print(
+                f"{_PRINT_PREFIX} OPTION_E toggle prev={prev} now={self._RUNTIME_USE_OPTION_E}",
+                flush=True,
+            )
+
+    def get_use_option_e(self) -> bool:
+        """현재 Option E 경로 활성 여부."""
+        return self._RUNTIME_USE_OPTION_E
+
+    def dump_option_e_state(self) -> str:
+        """Option E 운영 상태를 콘솔에 한꺼번에 print + 같은 문자열로 반환.
+
+        Kit UI 의 "Option E 진단" 버튼 또는 콘솔 호출용. 한 호출로 다음을 출력:
+        - flag 상태, master stage 존재, root layer 식별자
+        - registry 의 모든 instance 의 prim_path / state / virtual_time / source_asset
+        - runtime 보유 여부, offscreen asset, is_ready, attribute 캐시 크기, 마지막 wrote
+        - freeze 표식 보유 여부
+        """
+        lines = []
+        try:
+            stage = None
+            if self._master is not None:
+                try:
+                    stage = self._master.get_stage()
+                except Exception:
+                    stage = None
+            try:
+                root_id = stage.GetRootLayer().identifier if stage else "<no_stage>"
+            except Exception:
+                root_id = "?"
+            lines.append(
+                f"flag={self._RUNTIME_USE_OPTION_E} master_stage_ok={stage is not None} "
+                f"root_layer={root_id} update_sub={'set' if self._update_sub is not None else 'None'}"
+            )
+            for inst in self._registry.all_instances():
+                rt = self._runtime_by_path.get(inst.prim_path)
+                rt_part = (
+                    "runtime=None"
+                    if rt is None
+                    else (
+                        f"runtime(set offscreen={rt.offscreen_asset_path!r} "
+                        f"ready={rt.is_ready} attrs_cached={len(rt._attr_cache)} "
+                        f"last_wrote={rt.last_wrote} last_vt={rt.last_virtual_time})"
+                    )
+                )
+                lines.append(
+                    f"prim={inst.prim_path} state={inst.state} vt={inst.virtual_time:.3f}s "
+                    f"src={getattr(inst, 'source_asset', '')!r} "
+                    f"freeze={'yes' if inst.prim_path in self._option_e_freeze_seen else 'no'} "
+                    f"{rt_part}"
+                )
+        except Exception as exc:
+            lines.append(f"dump_option_e_state EXC: {exc}")
+        text = " | ".join(lines)
+        print(f"{_PRINT_PREFIX} DUMP {text}", flush=True)
+        return text
+
+    def reset_option_e_diag(self, prim_path: str = "") -> None:
+        """Option E 의 per-instance 1회 진단 플래그를 reset 하여 다음 frame 에 다시 출력.
+
+        `[모두 초기화]` 또는 `scheduler.start()` (RUN) 시 호출. dispose 와 달리 runtime
+        객체와 offscreen stage 는 그대로 유지(성능 보호).
+
+        Args:
+            prim_path: 빈 문자열이면 모든 runtime 의 진단 플래그 reset, 그 외엔 해당 prim 만.
+        """
+        targets = (
+            list(self._runtime_by_path.items())
+            if not prim_path
+            else [(prim_path, self._runtime_by_path.get(prim_path))]
+        )
+        for pp, rt in targets:
+            if rt is None:
+                continue
+            for k in (
+                "_diag_not_ready_logged",
+                "_diag_first_call_logged",
+                "_diag_first_eval_logged",
+                "_diag_first_eval_warned_zero",
+            ):
+                try:
+                    setattr(rt, k, False)
+                except Exception:
+                    pass
+            print(
+                f"{_PRINT_PREFIX} reset diag flags prim={pp} "
+                f"(다음 update tick 에 진단 로그가 다시 출력됩니다)",
+                flush=True,
+            )
+
+    def force_rebuild_attr_cache(self, prim_path: str = "") -> None:
+        """Option E 의 attribute 캐시를 강제로 재빌드하도록 표식만 비움.
+
+        다음 `evaluate_and_write` 호출 시 `_build_attr_cache` 가 다시 호출되어 `cache map`
+        / `cache built` / 0 이면 `diag dump offscreen` 진단이 다시 출력된다.
+
+        Args:
+            prim_path: 빈 문자열이면 모든 runtime, 그 외엔 해당 prim 만.
+        """
+        targets = (
+            list(self._runtime_by_path.items())
+            if not prim_path
+            else [(prim_path, self._runtime_by_path.get(prim_path))]
+        )
+        for pp, rt in targets:
+            if rt is None:
+                continue
+            try:
+                rt._attr_cache = []  # type: ignore[attr-defined]
+                rt._attr_cache_built = False  # type: ignore[attr-defined]
+                print(
+                    f"{_PRINT_PREFIX} attr_cache invalidated prim={pp} (will rebuild next frame)",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} attr_cache invalidate FAIL prim={pp}: {exc}",
+                    flush=True,
+                )
+
+    def _resolve_instance_asset_path(self, inst: AnimationInstance) -> str:
+        """REQ-005 P-2 상대 경로를 디스크 절대 경로로 보정.
+
+        Registry 에 저장된 `source_asset` 은 master 저장 시 상대 경로일 수 있다.
+        `Usd.Stage.Open` 은 실행 디렉터리가 아닐 때 실패하므로 master.usd 위치 기준으로
+        조합해 재시도한다.
+        """
+        raw = (getattr(inst, "source_asset", "") or "").strip()
+        if not raw:
+            return ""
+        raw_norm = raw.replace("\\", "/")
+        try:
+            if os.path.isfile(raw_norm):
+                return os.path.normpath(os.path.abspath(raw_norm))
+            mp = ""
+            anon = True
+            if self._master is not None:
+                try:
+                    mp = str(getattr(self._master, "master_path", "") or "")
+                    anon = bool(getattr(self._master, "is_anonymous", True))
+                except Exception:
+                    mp, anon = "", True
+            if mp and not anon:
+                cand = os.path.normpath(
+                    os.path.join(os.path.dirname(os.path.abspath(mp)), raw_norm)
+                )
+                if os.path.isfile(cand):
+                    return cand
+            cand_cwd = os.path.normpath(os.path.abspath(raw_norm))
+            if os.path.isfile(cand_cwd):
+                return cand_cwd
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} resolve asset_path failed prim={inst.prim_path} raw={raw!r}: {exc}",
+                flush=True,
+            )
+        return raw_norm
 
     def invalidate_attr_cache(self, prim_path: Optional[str] = None) -> None:
         if prim_path is None:
@@ -150,6 +355,18 @@ class RuntimeEvaluator:
             self._reauthor.invalidate(prim_path)
         except Exception:
             pass
+        # Phase B-1 — Option E runtime 정리 (flag 와 무관하게 dispose 안전).
+        rt = self._runtime_by_path.pop(prim_path, None)
+        if rt is not None:
+            try:
+                rt.dispose()
+            except Exception as exc:  # pragma: no cover - dispose 는 best-effort
+                print(
+                    f"{_PRINT_PREFIX} runtime.dispose failed prim={prim_path}: {exc}",
+                    flush=True,
+                )
+        # Phase B-2-a — Option E freeze 표식 청소 (instance 재등록 시 다시 author 가능).
+        self._option_e_freeze_seen.discard(prim_path)
 
     # ------------------------------------------------------------------ start
 
@@ -162,6 +379,14 @@ class RuntimeEvaluator:
             stream = app.get_app().get_update_event_stream()
             self._update_sub = stream.create_subscription_to_pop(self._on_update, name="lam.evaluator")
             self._last_perf = time.perf_counter()
+            # FPS 30 고정 — evaluator 가 시작될 때 master stage + omni.timeline 양쪽 강제.
+            try:
+                if self._master is not None:
+                    fn = getattr(self._master, "force_fixed_fps_30", None)
+                    if callable(fn):
+                        fn()
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} master.force_fixed_fps_30 failed: {exc}", flush=True)
             print(f"{_PRINT_PREFIX} evaluator started (no omni.timeline)", flush=True)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} start failed: {exc}", flush=True)
@@ -175,6 +400,18 @@ class RuntimeEvaluator:
             print(f"{_PRINT_PREFIX} evaluator stopped", flush=True)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} stop failed: {exc}", flush=True)
+        # Phase B-1 — Option E runtime 들 dispose (flag 무관, 안전 cleanup).
+        for prim_path, rt in list(self._runtime_by_path.items()):
+            try:
+                rt.dispose()
+            except Exception as exc:  # pragma: no cover - best-effort
+                print(
+                    f"{_PRINT_PREFIX} runtime.dispose failed prim={prim_path}: {exc}",
+                    flush=True,
+                )
+        self._runtime_by_path.clear()
+        # Phase B-2-a — re-start 후 freeze 가 다시 author 되도록 표식도 청소.
+        self._option_e_freeze_seen.clear()
 
     # ----------------------------------------------------------------- update
 
@@ -196,6 +433,12 @@ class RuntimeEvaluator:
                 stage = self._master.get_stage()
             except Exception:
                 stage = None
+
+        # Phase B-1 — Option E 분기. flag True 면 새 경로로 위임하고 옛 경로는 skip.
+        # flag False (기본값) 면 본 분기는 건너뛰고 아래 핫픽스 6-10 경로가 그대로 실행.
+        if self._RUNTIME_USE_OPTION_E:
+            self._on_update_option_e(dt, stage)
+            return
 
         # Phase 6 Hotfix6.2 — wall clock master_seconds 는 any_playing 인 frame 만 누적.
         # (모든 인스턴스가 stopped 일 때는 누적하지 않아 다음 RUN 의 master_tc 가 0 부터 시작.)
@@ -316,8 +559,8 @@ class RuntimeEvaluator:
                         pass
                     print(
                         f"{_PRINT_PREFIX} first reauthor prim={inst.prim_path} "
-                        f"v_t={new_t:.3f}s tps={inst.asset_tps} "
-                        f"timeCode={(new_t + float(inst.offset_sec)) * (inst.asset_tps if inst.asset_tps > 0 else 30.0):.3f} "
+                        f"v_t={new_t:.3f}s tps={LAM_FIXED_FPS}(forced) "
+                        f"timeCode={(new_t + float(inst.offset_sec)) * LAM_FIXED_FPS:.3f} "
                         f"wrote={wrote}",
                         flush=True,
                     )
@@ -336,6 +579,210 @@ class RuntimeEvaluator:
         if completed:
             inst.state = "stopped"
             print(f"{_PRINT_PREFIX} completed prim={inst.prim_path}", flush=True)
+
+    # ------------------------------------------------------------- Option E (Phase B-1)
+
+    def _on_update_option_e(self, dt: float, stage) -> None:
+        """`_RUNTIME_USE_OPTION_E=True` 일 때 호출되는 새 경로 (Phase B-1).
+
+        본 경로는 핫픽스 6-10 의 다음 우회 메커니즘을 **일절 사용하지 않는다**:
+        - `omni.timeline.set_current_time` (stage current_time 진행)
+        - `Sdf.LayerOffset` mapping author / sublayer override
+        - `SetInstanceable(False)` / freeze scale 우회 / fps 강제
+
+        대신 instance 마다 `AnimationInstanceRuntime` 1 개를 두고:
+          1. 자기 자산 USD 를 offscreen Stage 로 open
+          2. 매 frame `evaluate_and_write(virtual_time)` 호출 — offscreen 에서 평가한
+             attribute 값을 master stage 의 동일 prim path attribute 의 default 로 author
+        master stage 의 timeline 은 진행하지 않는다(default 가 reference 의 timeSamples
+        보다 winner — value resolution 의 stronger root layer 규칙).
+
+        Phase B-1 의 책임 범위:
+        - flag=True 진입 시 새 경로의 entry point 구축 + runtime lifecycle 관리.
+        - master stage 의 reference 안 timeSamples 가 stage current_time 평가로
+          잘못 보이는 부분은 **본 경로의 책임 밖** — Phase B-2 (multi_usd_loader 변경,
+          B-2-a 권장: LAM sublayer 안 LayerOffset(0, 1e-9) freeze 유지) 에서 해결.
+
+        `_RUNTIME_USE_OPTION_E=False` 인 환경에서는 본 method 가 호출되지 않음.
+        """
+        if not self._diag_option_e_announced:
+            self._diag_option_e_announced = True
+            try:
+                stage_ok = stage is not None
+                root_id = "?"
+                if stage_ok:
+                    try:
+                        root_id = stage.GetRootLayer().identifier
+                    except Exception:
+                        root_id = "?"
+            except Exception:
+                stage_ok = False
+                root_id = "?"
+            print(
+                f"{_PRINT_PREFIX} OPTION_E path enabled (Phase B-1) — "
+                f"hotfix 6-10 paths skipped | stage_ok={stage_ok} root_layer={root_id} "
+                f"registry={len(self._registry.all_instances())}",
+                flush=True,
+            )
+
+        # Per-instance setup 결과를 명확히 출력 (B-3 진단).
+        for inst in self._registry.all_instances():
+            rt = self._runtime_by_path.get(inst.prim_path)
+            if rt is None:
+                rt = AnimationInstanceRuntime(inst, master_stage=stage)
+                self._runtime_by_path[inst.prim_path] = rt
+                resolved = self._resolve_instance_asset_path(inst)
+                if resolved:
+                    ok_open = rt.setup_offscreen_stage(resolved)
+                    if not ok_open:
+                        print(
+                            f"{_PRINT_PREFIX} OPTION_E setup_offscreen_stage FAIL "
+                            f"prim={inst.prim_path} resolved={resolved}",
+                            flush=True,
+                        )
+                else:
+                    print(
+                        f"{_PRINT_PREFIX} OPTION_E source_asset EMPTY prim={inst.prim_path} "
+                        f"raw={getattr(inst, 'source_asset', '')!r} master_path="
+                        f"{getattr(self._master, 'master_path', '')!r}",
+                        flush=True,
+                    )
+                rt.setup_master_mirror_prim()
+            else:
+                rt.set_master_stage(stage)
+                if not rt.offscreen_asset_path and getattr(inst, "source_asset", ""):
+                    rt.setup_offscreen_stage(self._resolve_instance_asset_path(inst))
+            # Phase B-2-a — freeze sublayer 보장 (1회만 author).
+            self._ensure_option_e_freeze(inst, stage)
+
+        # 2) playing instance 의 virtual_time 진행. 모든 instance (state 무관) 에 대해
+        #    evaluate_and_write 를 호출하여 stopped/paused 도 마지막 vt 의 결과를 유지.
+        for inst in self._registry.all_instances():
+            if inst.state == "playing":
+                self._advance_virtual_time(inst, dt)
+            rt = self._runtime_by_path.get(inst.prim_path)
+            if rt is None:
+                continue
+            if not rt.is_ready:
+                # 첫 frame 한 번만 진단 출력 — setup 이 실패한 이유를 추적.
+                if not getattr(rt, "_diag_not_ready_logged", False):
+                    try:
+                        rt._diag_not_ready_logged = True  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    print(
+                        f"{_PRINT_PREFIX} OPTION_E runtime NOT_READY prim={inst.prim_path} "
+                        f"offscreen={bool(rt.offscreen_asset_path)} master={'set' if stage else 'None'}",
+                        flush=True,
+                    )
+                continue
+            # 첫 호출 시점 명시 — H1/H2 가설 분기를 즉시 식별.
+            if not getattr(rt, "_diag_first_call_logged", False):
+                try:
+                    rt._diag_first_call_logged = True  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                print(
+                    f"{_PRINT_PREFIX} OPTION_E first evaluate prim={inst.prim_path} "
+                    f"state={inst.state} vt={inst.virtual_time:.3f}s "
+                    f"offscreen_asset={rt.offscreen_asset_path!r}",
+                    flush=True,
+                )
+            try:
+                rt.evaluate_and_write(inst.virtual_time)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} runtime.evaluate_and_write FAIL "
+                    f"prim={inst.prim_path}: {exc}",
+                    flush=True,
+                )
+
+    def _advance_virtual_time(self, inst: AnimationInstance, dt: float) -> None:
+        """Option E 경로용 — 인스턴스의 `virtual_time` 만 1 frame 진행한다.
+
+        loop wrap / completed 시 state 전환은 기존 `_tick_instance` 와 동일하지만,
+        본 method 는 reauthor 캐시 / LayerOffset mapping / stage time set 등 핫픽스
+        6-10 의 부수 효과를 **일절 수행하지 않는다** (Option E 가 그 경로를 대체하므로).
+        """
+        prev_t = inst.virtual_time
+        sp = max(0.01, float(inst.speed)) * max(0.01, float(self._global_speed))
+        new_t = prev_t + dt * sp
+
+        end_t = self._end_time_seconds(inst)
+        start_t = self._start_time_seconds(inst)
+
+        completed = False
+        if end_t > start_t and new_t >= end_t:
+            if inst.loop:
+                length = end_t - start_t
+                if length > 1e-6:
+                    new_t = start_t + ((new_t - start_t) % length)
+                else:
+                    new_t = start_t
+            else:
+                new_t = end_t
+                completed = True
+
+        inst.virtual_time = new_t
+        if completed:
+            inst.state = "stopped"
+            print(
+                f"{_PRINT_PREFIX} completed prim={inst.prim_path} (option_e) "
+                f"prev_t={prev_t:.3f}s new_t={new_t:.3f}s dt={dt:.4f}s sp={sp:.3f} "
+                f"start_t={start_t:.3f}s end_t={end_t:.3f}s",
+                flush=True,
+            )
+
+    def _ensure_option_e_freeze(self, inst: AnimationInstance, stage) -> None:
+        """Phase B-2-a — master 의 자산 reference 의 timeline 평가만 freeze.
+
+        `lam_multi_usd_loader.add_usd` 가 root layer 에 author 한 `addRef(asset)` 는
+        그대로 두고, 본 함수가 **LAM session sublayer 안에서 explicit override**
+        (`LayerOffset(0, 1e-9)`, instanceable=False) 를 1 회 author 한다.
+
+        결과:
+        - master 의 mesh / material / SkelRoot / SkelAnimation prim tree 는 reference
+          로 그대로 보임 (사용자가 Stage 패널에서 prim path 복사 가능 — workflow 보존).
+        - reference 의 timeSamples 평가는 scale=1e-9 로 사실상 정지 (USD invalid
+          LayerOffset 회피용 micro scale).
+        - runtime 의 매 frame `evaluate_and_write` 가 author 한 attribute default 가
+          master root layer 의 stronger opinion → reference timeSamples 를 마스킹.
+        - 사용자 master USD 파일은 root layer 의 평범한 reference 만 박혀있어서 변경 0
+          (session sublayer 는 in-memory anonymous 라 자동 폐기).
+
+        1 회만 호출되도록 `_option_e_freeze_seen` 으로 추적. instance unregister 시
+        `forget_instance` 가 set 에서 제거.
+
+        flag=False 경로에서는 `_on_update_option_e` 자체가 호출되지 않으므로 본 함수도
+        호출되지 않음 → 회귀 0.
+        """
+        if _Sdf is None or stage is None or self._master is None:
+            return
+        if inst.prim_path in self._option_e_freeze_seen:
+            return
+
+        # 기존 핫픽스 9 의 _set_prim_layer_offset 가 정확히 동일한 author 절차
+        # (inst sublayer 보장 + explicit override + instanceable=False + ChangeBlock) 를
+        # 수행하므로 재사용. 단 본 호출은 1 회뿐이며 _last_mapping_sig 갱신 부수효과는
+        # flag=True 경로에서 `_sync_layer_offset_mapping` 이 호출되지 않으므로 무해.
+        ok = self._set_prim_layer_offset(
+            stage,
+            inst.prim_path,
+            offset=0.0,
+            scale=self.LAM_FREEZE_MIN_SCALE,
+        )
+        if ok:
+            self._option_e_freeze_seen.add(inst.prim_path)
+            print(
+                f"{_PRINT_PREFIX} OPTION_E freeze authored prim={inst.prim_path} "
+                f"offset=0 scale={self.LAM_FREEZE_MIN_SCALE:.1e}",
+                flush=True,
+            )
+        else:
+            # 자산 reference 가 root layer 에 아직 author 되지 않은 케이스 (예: 빈
+            # registry-only 인스턴스) — 다음 frame 에서 다시 시도 가능. (`_set_prim_layer_offset`
+            # 가 _diag_no_src_warned 로 1 회만 경고 출력.)
+            pass
 
     # ------------------------------------------------------------- timeline drive
 
@@ -366,14 +813,8 @@ class RuntimeEvaluator:
 
         # stage end 확장 — set 하려는 timecode 가 현재 endTimeCode 를 넘으면 늘려준다.
         try:
-            tps_val = 30.0
-            if stage is not None:
-                try:
-                    tps_val = float(stage.GetTimeCodesPerSecond())
-                    if tps_val <= 0.0:
-                        tps_val = 30.0
-                except Exception:
-                    tps_val = 30.0
+            # FPS 30 고정 정책 — 자산 / master 의 tps 와 무관하게 30 사용.
+            tps_val = LAM_FIXED_FPS
             timecode = float(eval_seconds) * float(tps_val)
             if stage is not None:
                 try:
@@ -643,7 +1084,7 @@ class RuntimeEvaluator:
             return
         self._last_state_seen[inst.prim_path] = cur_state
 
-        tps = inst.asset_tps if inst.asset_tps > 0 else 30.0
+        tps = LAM_FIXED_FPS
         # freeze 시각: 인스턴스의 마지막 평가된 시각(virtual_time + offset_sec) 를 timeCode 로 변환.
         # 첫 등록 직후엔 virtual_time=0 → freeze_tc=asset_start_tc 로 첫 frame 에 머무름.
         freeze_tc = (float(inst.virtual_time) + float(inst.offset_sec)) * float(tps)
@@ -1072,7 +1513,7 @@ class RuntimeEvaluator:
 
     def _start_time_seconds(self, inst: AnimationInstance) -> float:
         mode, s, _ = inst.range
-        tps = inst.asset_tps if inst.asset_tps > 0 else 30.0
+        tps = LAM_FIXED_FPS
         if mode == "frames":
             return float(s) / tps
         if mode == "ratio":
@@ -1082,7 +1523,7 @@ class RuntimeEvaluator:
 
     def _end_time_seconds(self, inst: AnimationInstance) -> float:
         mode, s, e = inst.range
-        tps = inst.asset_tps if inst.asset_tps > 0 else 30.0
+        tps = LAM_FIXED_FPS
         if mode == "frames":
             return float(e) / tps if e > s else self._start_time_seconds(inst)
         if mode == "ratio":

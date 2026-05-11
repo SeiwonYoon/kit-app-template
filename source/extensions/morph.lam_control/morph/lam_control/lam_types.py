@@ -12,6 +12,18 @@ from dataclasses import dataclass, field
 from typing import Tuple
 
 
+# ---------------------------------------------------------------- 전역 정책 상수
+
+# LAM 의 모든 timeCode↔초 변환은 30 fps 로 고정한다(사용자 요구 2026-05-11).
+#  - 자산 USD 의 `GetTimeCodesPerSecond()` 가 24 / 60 등 다른 값이어도 LAM 은 30 으로 해석.
+#  - 즉 자산 frame range [0, 30] = 1 초, [0, 60] = 2 초.
+#  - inst.asset_tps 는 본 상수로 강제 정규화된다(`AnimationInstance.__post_init__`).
+#  - 모든 모듈(evaluator / runtime / scheduler / sequence / attribute_reauthor /
+#    offset_correction)은 본 상수만 사용해야 하고, 자산 측 tps 는 진단 출력 외에는
+#    의사결정에 쓰지 않는다.
+LAM_FIXED_FPS: float = 30.0
+
+
 def make_guid() -> str:
     """REQ-005 메타데이터 규약에 사용되는 영구 고유 ID 발급."""
     return str(uuid.uuid4())
@@ -31,6 +43,10 @@ class AnimationInstance:
     """master stage 안의 1개 재생 단위.
 
     필드 의미는 REQ-004 데이터 모델 표를 그대로 따른다.
+
+    참고: `asset_tps` 는 `__post_init__` 에서 **항상 `LAM_FIXED_FPS`(=30)** 로 정규화된다.
+    외부 코드(loader / discovery / json 입력 등)가 어떤 값을 전달해도 30 으로 강제 — 사용자
+    요구(2026-05-11) "FPS=30 고정, timeCode 30 = 1 초" 정책을 단일 진입점에서 보장한다.
     """
 
     prim_path: str
@@ -51,7 +67,13 @@ class AnimationInstance:
     # range_mode == "full" 일 때 evaluator 가 이 값을 사용한다.
     asset_start_time: float = 0.0
     asset_end_time: float = 0.0
-    asset_tps: float = 30.0
+    asset_tps: float = LAM_FIXED_FPS
+
+    def __post_init__(self) -> None:
+        # FPS 30 고정 정책 — 입력값이 어떤 값이든 항상 LAM_FIXED_FPS 로 정규화.
+        # asset_start_time / asset_end_time 은 timeCode (frame 번호) 그대로 — LAM 은
+        # 이 frame 범위를 30 fps 기준으로 초 변환한다.
+        self.asset_tps = LAM_FIXED_FPS
 
     def added_at(self) -> str:  # pragma: no cover - 직렬화용 헬퍼
         return utc_now_iso()

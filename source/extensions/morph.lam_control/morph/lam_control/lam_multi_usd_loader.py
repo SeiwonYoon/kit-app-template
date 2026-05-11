@@ -31,7 +31,11 @@ _UP_AXIS_FIX_OP_SUFFIX = "lamUpAxisFix"
 
 
 def read_asset_time_range(asset_path: str) -> Tuple[float, float, float]:
-    """자산 USD 의 stage start/end timeCode + tps 를 best-effort 로 읽는다.
+    """자산 USD 의 stage start/end timeCode 를 best-effort 로 읽는다.
+
+    LAM 의 FPS 30 고정 정책(LAM_FIXED_FPS) 에 따라 반환 tps 는 **항상 30**.
+    자산 헤더의 `GetTimeCodesPerSecond()` 는 진단 로그로만 출력되며, 의사결정에는
+    쓰이지 않는다.
 
     실패 시 (0.0, 0.0, 30.0) 폴백.
     """
@@ -44,15 +48,21 @@ def read_asset_time_range(asset_path: str) -> Tuple[float, float, float]:
         if layer_stage is None:
             return (0.0, 0.0, _DEFAULT_TPS)
         try:
-            tps = float(layer_stage.GetTimeCodesPerSecond())
+            raw_tps = float(layer_stage.GetTimeCodesPerSecond())
         except Exception:
-            tps = _DEFAULT_TPS
+            raw_tps = _DEFAULT_TPS
         try:
             s = float(layer_stage.GetStartTimeCode())
             e = float(layer_stage.GetEndTimeCode())
         except Exception:
             s, e = 0.0, 0.0
-        return (s, e, tps if tps > 0 else _DEFAULT_TPS)
+        if abs(raw_tps - _DEFAULT_TPS) > 1e-6:
+            print(
+                f"{_PRINT_PREFIX} asset header tps={raw_tps} ignored — using fixed "
+                f"{_DEFAULT_TPS} (LAM_FIXED_FPS) for asset={asset_path}",
+                flush=True,
+            )
+        return (s, e, _DEFAULT_TPS)
     except Exception as exc:
         print(f"{_PRINT_PREFIX} read_asset_time_range failed: {exc}", flush=True)
         return (0.0, 0.0, _DEFAULT_TPS)

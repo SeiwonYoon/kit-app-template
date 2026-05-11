@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from .lam_types import AnimationInstance
+from .lam_types import AnimationInstance, LAM_FIXED_FPS
 
 
 _PRINT_PREFIX = "[LAM/REAUTHOR]"
@@ -151,7 +151,7 @@ class AttributeReauthorCache:
         if not entries:
             return 0
 
-        tps = inst.asset_tps if inst.asset_tps > 0 else 30.0
+        tps = LAM_FIXED_FPS
         timeCode = float(eval_seconds) * tps
 
         wrote = 0

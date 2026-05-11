@@ -78,6 +78,9 @@ class MasterStage:
         - default 컨텍스트를 그대로 사용한다(빈 문자열이면 `omni.usd.get_context("")`).
         - default 의 stage 가 비어 있으면 새 stage 를 만들고 upAxis 를 명시한다(Z-up).
         - 이미 stage 가 있으면 그대로 둔다(TBS 가 만든 stage 위에 LAM 이 author 가능).
+        - **stage 가 새로 만들어졌든 기존 것이든 LAM 의 FPS 30 고정 정책을 stage 와
+          `omni.timeline` 의 target framerate 양쪽에 강제 적용**한다(사용자 요구
+          2026-05-11: 하단 타임라인 창 fps=60 → 30).
         """
         try:
             import omni.usd as ou  # type: ignore
@@ -117,6 +120,8 @@ class MasterStage:
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} new_stage failed: {exc}", flush=True)
                 return False
+
+        self.force_fixed_fps_30()
         return True
 
     def open_master(self, path: str) -> bool:
@@ -147,6 +152,8 @@ class MasterStage:
             self._master_path = path
             self._anonymous = False
             print(f"{_PRINT_PREFIX} open_master OK path={path}", flush=True)
+        # open 직후에도 fps 30 강제 (불러온 파일에 60fps 메타가 있어도 정책상 30 으로 통일).
+        self.force_fixed_fps_30()
         return bool(ok)
 
     def save_master(self, path: str) -> bool:
@@ -201,6 +208,80 @@ class MasterStage:
         except Exception as exc:
             print(f"{_PRINT_PREFIX} set_root_layer_edit_target failed: {exc}", flush=True)
             return False
+
+    # ------------------------------------------------------------------ FPS 30 고정
+
+    def force_fixed_fps_30(self) -> None:
+        """Master stage 와 omni.timeline 양쪽에 LAM_FIXED_FPS(=30) 를 강제.
+
+        사용자 요구(2026-05-11): "하단 타임라인 창의 fps 가 60 으로 되어있어. 그 부분도
+        전부 기본 설정이 30 으로 되어야 해."
+
+        본 메서드는 다음을 모두 author / 호출한다(가용한 것만, 실패는 진단 로그만 남김):
+        - `stage.SetTimeCodesPerSecond(30)`  (timeCode 평가 단위)
+        - `stage.SetFramesPerSecond(30)`     (UI / FCurve 표시 단위)
+        - `omni.timeline.get_timeline_interface().set_target_framerate(30)`
+        - 일부 빌드에서만 존재하는 `set_time_codes_per_second(30)` 도 시도
+
+        호출 시점: `ensure_context` / `open_master` 직후, 그리고 evaluator 시작 시.
+        """
+        # Lazy import — 본 모듈은 pxr 미가용 환경에서도 import 가능해야 함.
+        try:
+            from .lam_types import LAM_FIXED_FPS
+        except Exception:
+            LAM_FIXED_FPS = 30.0  # type: ignore[assignment]
+
+        stage = self.get_stage()
+        if stage is not None:
+            try:
+                cur = float(stage.GetTimeCodesPerSecond())
+            except Exception:
+                cur = -1.0
+            try:
+                stage.SetTimeCodesPerSecond(float(LAM_FIXED_FPS))
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} master SetTimeCodesPerSecond({LAM_FIXED_FPS}) "
+                    f"FAIL: {exc}",
+                    flush=True,
+                )
+            try:
+                stage.SetFramesPerSecond(float(LAM_FIXED_FPS))
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} master SetFramesPerSecond({LAM_FIXED_FPS}) "
+                    f"FAIL: {exc}",
+                    flush=True,
+                )
+            if abs(cur - float(LAM_FIXED_FPS)) > 1e-6:
+                print(
+                    f"{_PRINT_PREFIX} master tps {cur} → {LAM_FIXED_FPS} (forced)",
+                    flush=True,
+                )
+
+        try:
+            import omni.timeline as _ot  # type: ignore
+
+            ti = _ot.get_timeline_interface()
+        except Exception:
+            ti = None
+        if ti is not None:
+            for setter_name in ("set_target_framerate", "set_time_codes_per_second"):
+                fn = getattr(ti, setter_name, None)
+                if fn is None:
+                    continue
+                try:
+                    fn(float(LAM_FIXED_FPS))
+                    print(
+                        f"{_PRINT_PREFIX} timeline {setter_name}({LAM_FIXED_FPS}) OK",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} timeline {setter_name}({LAM_FIXED_FPS}) "
+                        f"FAIL: {exc}",
+                        flush=True,
+                    )
 
     def make_relative_to_master(self, abs_path: str) -> str:
         """REQ-005 P-2 — master.usd 가 저장된 경우 상대 경로 변환을 시도. 실패 시 절대 경로 그대로."""

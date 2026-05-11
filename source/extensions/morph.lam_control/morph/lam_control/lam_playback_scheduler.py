@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 
 from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_runtime_evaluator import RuntimeEvaluator
-from .lam_types import AnimationInstance
+from .lam_types import AnimationInstance, LAM_FIXED_FPS
 
 
 _PRINT_PREFIX = "[LAM/L4]"
@@ -83,6 +83,21 @@ class PlaybackScheduler:
             self._evaluator.invalidate_mapping(prim_path)
         except Exception:
             pass
+        # B-3 — Option E 의 1회 진단 플래그와 attribute 캐시를 RUN 마다 reset 하여
+        # 매 RUN 시작 시 `init / cache map / cache built / diag dump / first evaluate`
+        # 진단이 다시 출력되도록 한다(Kit 재시작 없이도 새 진단 코드의 동작을 확인 가능).
+        try:
+            fn1 = getattr(self._evaluator, "reset_option_e_diag", None)
+            if callable(fn1):
+                fn1(prim_path)
+            fn2 = getattr(self._evaluator, "force_rebuild_attr_cache", None)
+            if callable(fn2):
+                fn2(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} option_e diag reset failed prim={prim_path}: {exc}",
+                flush=True,
+            )
         print(
             f"{_PRINT_PREFIX} start prim={prim_path} reset={reset} "
             f"v_t={inst.virtual_time:.3f}s sp={inst.speed} loop={inst.loop}",
@@ -149,7 +164,8 @@ class PlaybackScheduler:
     def _range_start_seconds(self, inst: AnimationInstance) -> float:
         """현재 range_mode 기준의 시작 초 값 계산."""
         mode, s, e = inst.range
-        tps = inst.asset_tps if inst.asset_tps > 0 else 30.0
+        # FPS 30 고정 정책 — 자산 tps 무시.
+        tps = LAM_FIXED_FPS
         if mode == "frames":
             return float(s) / tps
         if mode == "ratio":
@@ -161,7 +177,7 @@ class PlaybackScheduler:
     def range_end_seconds(self, inst: AnimationInstance) -> float:
         """L5 가 loop/완료 판정에 사용하는 끝 초 값."""
         mode, s, e = inst.range
-        tps = inst.asset_tps if inst.asset_tps > 0 else 30.0
+        tps = LAM_FIXED_FPS
         if mode == "frames":
             return float(e) / tps if e > s else self._range_start_seconds(inst)
         if mode == "ratio":
