@@ -186,14 +186,73 @@ def stop_prim_translate_animation(prim_path: str, usd_context_name: Optional[str
     return False
 
 
-def stop_all_translate_animations() -> None:
-    """전체 이동 애니메이션 강제 중지(SequenceRunner 정지/일시정지용)."""
+def stop_prim_translate_animation_all_contexts(prim_path: str) -> int:
+    """
+    동일 prim_path 에 대해 등록된 모든 컨텍스트 키(기본/보조 USD)의 translate 애니 상태를 제거한다.
+    포트 LOT 복원 등에서 한 스테이지만 지정하지 않고 전부 끊을 때 사용.
+    """
     global _animations, _update_sub
-    try:
-        _animations.clear()
-    except Exception:
-        _animations = {}
-    if _update_sub is not None:
+    pp = str(prim_path or "").strip()
+    if not pp:
+        return 0
+    removed = 0
+    for k in list(_animations.keys()):
+        try:
+            tail = k.split("\x00", 1)[-1]
+        except Exception:
+            tail = str(k)
+        if tail != pp:
+            continue
+        try:
+            del _animations[k]
+            removed += 1
+        except Exception:
+            pass
+    if not _animations and _update_sub is not None:
+        try:
+            _update_sub.unsubscribe()
+        except Exception:
+            pass
+        _update_sub = None
+    return removed
+
+
+def stop_all_translate_animations(preserve_foup_port_lot_prims: bool = False) -> None:
+    """전체 이동 애니메이션 강제 중지(SequenceRunner 정지·공정우선 interrupt 등).
+
+    ``preserve_foup_port_lot_prims=True`` 인 경우, ``port_lot_visibility.is_foup_in_progress(prim)``
+    가 참인 prim 의 translate 애니는 유지한다. FOUP ±Y 이동이 공정우선 interrupt 등으로
+    중간에 끊겨 임의 위치에 멈추는 현상을 막는다.
+    """
+    global _animations, _update_sub
+    if not preserve_foup_port_lot_prims:
+        try:
+            _animations.clear()
+        except Exception:
+            _animations = {}
+    else:
+        try:
+            from . import port_lot_visibility as _plv  # type: ignore
+        except Exception:
+            _plv = None
+        if _plv is None:
+            try:
+                _animations.clear()
+            except Exception:
+                _animations = {}
+        else:
+            for k, state in list(_animations.items()):
+                try:
+                    path = str(state.get("prim_path") or "").strip()
+                    if path and _plv.is_foup_in_progress(path):
+                        continue
+                except Exception:
+                    pass
+                try:
+                    del _animations[k]
+                except Exception:
+                    pass
+    if not _animations and _update_sub is not None:
         try:
             _update_sub.unsubscribe()
         except Exception:

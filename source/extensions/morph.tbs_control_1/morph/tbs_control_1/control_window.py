@@ -5638,7 +5638,10 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             from . import port_lot_visibility as _plv  # type: ignore
             if seq_u0 == "FOUP_PROCESS_START":
                 _plv.mark_foup_in_progress(prim_path, True)
+                # plateau 진입은 +Y 1초 애니가 끝난 시점에 표시(아래 1-E 에서 on_completed 콜백).
             else:  # FOUP_PROCESS_END
+                # END 진입 즉시 plateau 해제 — 곧 시작될 -Y 애니가 baseline+320 강제 set 과 충돌하지 않게 한다.
+                _plv.mark_foup_lifted(prim_path, False)
                 _schedule_foup_inprogress_unmark(ext, prim_path, delay_sec=1.05)
         except Exception:
             pass
@@ -5667,11 +5670,25 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             stop_prim_translate_animation(prim_path, usd_context_name=ctx_nm)
         except Exception:
             pass
+
+        on_completed_cb = None
+        if seq_u0 == "FOUP_PROCESS_START":
+            def _on_lift_completed(_pp: str = prim_path) -> None:
+                # +Y 1초 애니가 끝났다 = prim 이 baseline+320 자리에 도달했다.
+                # 이후 "포트 초기화" 가 들어와도 baseline+320 으로 강제 set 되어 자리 유지.
+                try:
+                    from . import port_lot_visibility as _plv2  # type: ignore
+                    _plv2.mark_foup_lifted(_pp, True)
+                except Exception:
+                    pass
+            on_completed_cb = _on_lift_completed
+
         try:
             run_prim_translate_animation(
                 prim_path,
                 [{"duration": 1.0, "delta": (0.0, float(dy), 0.0)}],
                 loop=False,
+                on_completed=on_completed_cb,
                 usd_context_name=ctx_nm,
             )
         except Exception:
@@ -6051,6 +6068,20 @@ def on_sim_start_clicked(ext: Any) -> None:
         _plv.clear_foup_in_progress()
     except Exception:
         pass
+    # 포트 LOT prim 의 baseline transform 을 "시뮬 시작 직전(원위치)" 에 미리 캡처한다.
+    # 이유:
+    #   - baseline 캐시는 평소 SequenceRunner.run 진입 시 처음 잡힌다.
+    #   - 그런데 첫 시퀀스가 FOUP_PROCESS_START 같은 비-SequenceRunner 이벤트면 baseline 이
+    #     캡처되지 않은 채 +Y 320 애니가 먼저 prim 을 옮긴다. 이후 다른 시퀀스가 처음 SequenceRunner
+    #     를 돌릴 때 이미 +320 위치가 baseline 으로 잘못 캡처되어, 후속 보정에서 +320+320=640 으로
+    #     점프하는 누적 오프셋 버그가 발생한다.
+    #   - 시작 시점에 prim 이 진짜 author 위치인 상태에서 캐시를 채워두면 이 경합이 원천 차단된다.
+    try:
+        from . import port_lot_visibility as _plv  # type: ignore
+        _plv.clear_port_lot_authoring_cache()
+        _plv.ensure_port_lot_authoring_captured()
+    except Exception:
+        pass
     # 시작을 반복할 때 모니터 UI(포트/그래프/진행/이력) 영역에 위젯이 누적되어
     # 버튼 아래의 빈 공간이 점점 커지는 현상이 발생할 수 있어,
     # 시작 시점에 모니터 영역을 한 번 깨끗하게 재빌드한다.
@@ -6334,7 +6365,7 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             pass
         try:
-            stop_all_translate_animations()
+            stop_all_translate_animations(preserve_foup_port_lot_prims=True)
         except Exception:
             pass
         try:

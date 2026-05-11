@@ -1204,7 +1204,7 @@ class SequenceRunner:
         # 멀티 뷰(보조 USD context)에서는 전역 stop_all_*이 다른 화면 애니까지 끊을 수 있어 피한다.
         if getattr(self, "_usd_context_name", None) is None:
             try:
-                stop_all_translate_animations()
+                stop_all_translate_animations(preserve_foup_port_lot_prims=True)
             except Exception:
                 pass
             try:
@@ -1469,15 +1469,41 @@ class SequenceRunner:
                         pass
 
     def _restore_baseline(self, exclude_paths: Optional[set] = None) -> None:
-        """baseline으로 transform을 되돌림. (실행을 항상 초기값부터 재현하기 위함)"""
+        """baseline으로 transform을 되돌림. (실행을 항상 초기값부터 재현하기 위함)
+
+        공정 중 prim 처리 규칙(port_lot_visibility 와 동일):
+        - plateau(_FOUP_LIFTED_PATHS): baseline 이 아니라 baseline + (0, 320, 0) 으로 set.
+        - +Y / -Y 애니 진행 중(_FOUP_IN_PROGRESS_PATHS 이고 lifted 아님): 건드리지 않는다.
+        """
         stage = self._stage()
         if not stage:
             return
+        try:
+            from . import port_lot_visibility as _plv  # type: ignore
+        except Exception:
+            _plv = None
         # exclude_paths는 "현재 위치부터 시작" 부분 적용을 위한 선택적 복원 예외 목록.
         for path, (t, r) in list(self._baseline.items()):
             if exclude_paths and path in exclude_paths:
                 continue
             try:
+                if _plv is not None:
+                    try:
+                        lifted_t = _plv.get_foup_lifted_translate(path)
+                    except Exception:
+                        lifted_t = None
+                    if lifted_t is not None:
+                        prim = stage.GetPrimAtPath(path)
+                        if prim and prim.IsValid():
+                            _set_translate(prim, lifted_t)
+                            _set_rotate_xyz(prim, r)
+                        continue
+                    try:
+                        if _plv.is_foup_in_progress(path):
+                            # +Y / -Y 애니가 도중이면 baseline 복원을 건너뛴다(중간 점프 방지).
+                            continue
+                    except Exception:
+                        pass
                 prim = stage.GetPrimAtPath(path)
                 if prim and prim.IsValid():
                     _set_translate(prim, t)

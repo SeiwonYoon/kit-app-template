@@ -432,6 +432,8 @@ class TBSSimulationEngine:
             self._ep_foup_process_res = simpy.Resource(self.env, capacity=1) if (simpy and self.env is not None) else None
         except Exception:
             self._ep_foup_process_res = None
+        # FOUP 공정 플래토(+Y 1초 완료 후 ~ END 직전): UI 가시성 갱신 시 +Y320 재스냅(옵션 A)용
+        self._foup_proc_active_ep: str = ""
         # - 누적은 _accumulate_sim_stats()에서 매 tick(경과 dt)마다 갱신된다.
         # - 시뮬 종료 시 _log_final_summary()에서 요약 로그로 출력된다.
         self._ep_empty_sec: Dict[str, float] = {}
@@ -1629,6 +1631,12 @@ class TBSSimulationEngine:
                 except Exception:
                     pass
 
+            # +Y 이동이 끝난 뒤 공정 시간 구간: Prim 은 +Y320 상태이므로 페이로드에 표시해 UI 가 옵션 A 재스냅 가능.
+            try:
+                self._foup_proc_active_ep = str(ep_port).strip().upper()
+            except Exception:
+                self._foup_proc_active_ep = ""
+
             # 공정 시간 대기(전역 1개만)
             try:
                 yield self.env.process(
@@ -1649,6 +1657,12 @@ class TBSSimulationEngine:
                     yield self.env.timeout(float(proc_time))
                 except Exception:
                     pass
+
+            # END 직전: -Y 애니가 곧 시작되므로 플래토 플래그 해제(재스냅 +Y320 금지)
+            try:
+                self._foup_proc_active_ep = ""
+            except Exception:
+                pass
 
             # END 이벤트(애니메이션 훅: Y -3.2)
             try:
@@ -1999,6 +2013,10 @@ class TBSSimulationEngine:
             payload["ports_occupancy"] = occ
         except Exception:
             payload["ports_occupancy"] = {}
+        try:
+            payload["foup_proc_active_ep"] = str(getattr(self, "_foup_proc_active_ep", "") or "").strip().upper()
+        except Exception:
+            payload["foup_proc_active_ep"] = ""
         if self._on_event:
             try:
                 merged = dict(payload or {})
@@ -2060,6 +2078,10 @@ class TBSSimulationEngine:
             payload["sim_total_est_sec"] = f"{float(getattr(self, '_sim_total_est_sec', 0.0) or 0.0):.2f}"
         except Exception:
             payload["sim_total_est_sec"] = "0.00"
+        try:
+            payload["foup_proc_active_ep"] = str(getattr(self, "_foup_proc_active_ep", "") or "").strip().upper()
+        except Exception:
+            payload["foup_proc_active_ep"] = ""
         if self._on_progress:
             try:
                 merged = dict(payload or {})
