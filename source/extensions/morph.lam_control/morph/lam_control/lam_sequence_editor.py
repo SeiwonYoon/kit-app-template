@@ -115,11 +115,10 @@ def _default_step_for_type(t: str) -> Dict[str, Any]:
             "rx": 0.0,
             "ry": 90.0,
             "rz": 0.0,
-            "auto_pivot_world_center": False,
-            "user_axis_rotate": False,
-            "pivot_wx": 0.0,
-            "pivot_wy": 0.0,
-            "pivot_wz": 0.0,
+            # 2026-05-12: 월드 피봇 회전 옵션 제거 (auto_pivot_world_center /
+            # user_axis_rotate / pivot_w*). 로드 시 옛 JSON 의 해당 키는 그대로
+            # 보존되나, runner 는 무시한다.
+            "rotate_from_initial": False,
             "hide_enabled": False,
             "hide_prims": "",
             "run_with_previous": False,
@@ -645,45 +644,25 @@ class LamSequenceEditor:
             ui.FloatField(model=rz_m, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Spacer()
 
-        # auto_pivot_world_center
-        auto_m = ui.SimpleBoolModel(bool(step.get("auto_pivot_world_center", False)))
-        auto_m.add_value_changed_fn(
-            lambda _m, s=step, m=auto_m: s.__setitem__("auto_pivot_world_center", bool(m.get_value_as_bool()))
+        # rotate_from_initial — 입력값을 "최초 자세 기준 절대 목표각" 으로 해석.
+        # 켜면 매 스텝의 (rx,ry,rz) 가 누적 델타가 아니라 초기 자세에서의 절대 각도.
+        # 현재 자세와의 차이는 ±180° 로 wrap 되어 항상 짧은 호로 회전.
+        init_m = ui.SimpleBoolModel(bool(step.get("rotate_from_initial", False)))
+        init_m.add_value_changed_fn(
+            lambda _m, s=step, m=init_m: s.__setitem__("rotate_from_initial", bool(m.get_value_as_bool()))
         )
         with ui.HStack(spacing=4, height=28):
-            ui.CheckBox(model=auto_m, width=20, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("자동 월드 중심 피봇", height=0)
-            ui.Spacer()
-
-        # user_axis_rotate + pivot_w*
-        user_m = ui.SimpleBoolModel(bool(step.get("user_axis_rotate", False)))
-        user_m.add_value_changed_fn(
-            lambda _m, s=step, m=user_m: s.__setitem__("user_axis_rotate", bool(m.get_value_as_bool()))
-        )
-        with ui.HStack(spacing=4, height=28):
-            ui.CheckBox(model=user_m, width=20, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("월드 피봇 회전 사용 (pivot_w*)", height=0)
-            ui.Spacer()
-
-        pwx_m = ui.SimpleFloatModel(float(step.get("pivot_wx", 0.0)))
-        pwy_m = ui.SimpleFloatModel(float(step.get("pivot_wy", 0.0)))
-        pwz_m = ui.SimpleFloatModel(float(step.get("pivot_wz", 0.0)))
-        pwx_m.add_value_changed_fn(
-            lambda _m, s=step, m=pwx_m: s.__setitem__("pivot_wx", float(m.get_value_as_float()))
-        )
-        pwy_m.add_value_changed_fn(
-            lambda _m, s=step, m=pwy_m: s.__setitem__("pivot_wy", float(m.get_value_as_float()))
-        )
-        pwz_m.add_value_changed_fn(
-            lambda _m, s=step, m=pwz_m: s.__setitem__("pivot_wz", float(m.get_value_as_float()))
-        )
-        with ui.HStack(spacing=4, height=28):
-            ui.Label("pivot Wx", width=60)
-            ui.FloatField(model=pwx_m, width=70, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("Wy", width=24)
-            ui.FloatField(model=pwy_m, width=70, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("Wz", width=24)
-            ui.FloatField(model=pwz_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.CheckBox(model=init_m, width=20, style=CHECKBOX_WHITE_STYLE)
+            ui.Label(
+                "최초 위치 기준(절대 각도) · 짧은 호 회전",
+                height=0,
+                tooltip=(
+                    "켜진 스텝의 (rx,ry,rz) 는 USD 로드 시점 자세 기준 절대 각도입니다.\n"
+                    "예: 스텝1=rz 90 → 절대 90°, 스텝2=rz 100 → 절대 100° (추가 +10°).\n"
+                    "현재 자세에서 목표까지의 차이는 (-180,180] 로 정규화돼 항상 회전반경이 작은 방향으로 돌아갑니다.\n"
+                    "체크 해제 시: 입력값이 현재 자세에 더해지는 누적 델타로 동작."
+                ),
+            )
             ui.Spacer()
 
     # ----------------------------------------------------------------- DELAY UI

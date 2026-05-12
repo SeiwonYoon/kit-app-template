@@ -21,6 +21,7 @@ import omni.ext
 from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_playback_scheduler import PlaybackScheduler
 from .lam_runtime_evaluator import RuntimeEvaluator
+from .lam_event_playlist_window import LamEventPlaylistWindow
 from .lam_window import LamWindow
 
 
@@ -36,6 +37,7 @@ class LamControlExtension(omni.ext.IExt):
         self._scheduler: PlaybackScheduler | None = None
         self._evaluator: RuntimeEvaluator | None = None
         self._window: LamWindow | None = None
+        self._event_playlist: LamEventPlaylistWindow | None = None
 
     def on_startup(self, ext_id: str) -> None:  # noqa: D401
         print(f"{_PRINT_PREFIX} on_startup ext_id={ext_id}", flush=True)
@@ -52,19 +54,32 @@ class LamControlExtension(omni.ext.IExt):
         self._window.show()
         self._evaluator.start()
 
+        self._event_playlist = LamEventPlaylistWindow(
+            registry=self._registry,
+            scheduler=self._scheduler,
+            evaluator=self._evaluator,
+        )
+        self._event_playlist.show()
+
     def on_shutdown(self) -> None:
         print(f"{_PRINT_PREFIX} on_shutdown", flush=True)
+        try:
+            if self._event_playlist is not None:
+                self._event_playlist.destroy()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} event_playlist.destroy failed: {exc}", flush=True)
+        self._event_playlist = None
+        try:
+            if self._window is not None:
+                self._window.destroy()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} window.destroy failed: {exc}", flush=True)
+        self._window = None
         try:
             if self._evaluator is not None:
                 self._evaluator.stop()
         except Exception as exc:
             print(f"{_PRINT_PREFIX} evaluator.stop() failed: {exc}", flush=True)
-        try:
-            if self._window is not None:
-                self._window.destroy()
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} window.destroy() failed: {exc}", flush=True)
-        self._window = None
         self._scheduler = None
         self._evaluator = None
         self._registry = None

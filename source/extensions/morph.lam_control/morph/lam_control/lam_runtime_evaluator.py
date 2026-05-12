@@ -1113,7 +1113,8 @@ class RuntimeEvaluator:
                 resolved = self._resolve_instance_asset_path(inst)
                 if resolved:
                     ok_open = rt.setup_offscreen_stage(resolved)
-                    if not ok_open:
+                    if not ok_open and not rt._lam_option_e_setup_fail_logged:
+                        rt._lam_option_e_setup_fail_logged = True
                         print(
                             f"{_PRINT_PREFIX} OPTION_E setup_offscreen_stage FAIL "
                             f"prim={inst.prim_path} resolved={resolved}",
@@ -1130,7 +1131,16 @@ class RuntimeEvaluator:
             else:
                 rt.set_master_stage(stage)
                 if not rt.offscreen_asset_path and getattr(inst, "source_asset", ""):
-                    rt.setup_offscreen_stage(self._resolve_instance_asset_path(inst))
+                    resolved2 = self._resolve_instance_asset_path(inst)
+                    if resolved2:
+                        ok2 = rt.setup_offscreen_stage(resolved2)
+                        if not ok2 and not rt._lam_option_e_setup_fail_logged:
+                            rt._lam_option_e_setup_fail_logged = True
+                            print(
+                                f"{_PRINT_PREFIX} OPTION_E setup_offscreen_stage FAIL "
+                                f"prim={inst.prim_path} resolved={resolved2}",
+                                flush=True,
+                            )
             # Phase B-2-a — freeze sublayer 보장 (1회만 author).
             self._ensure_option_e_freeze(inst, stage)
             # TIMESAMPLES_REPLAY 핵심 — OmniGraph 가 매 frame xformOp 를 push 하여

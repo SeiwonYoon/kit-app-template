@@ -327,6 +327,24 @@ def _refresh_instance_asset_time_from_stage(instance) -> tuple[float, float, flo
     return (s, e, tps)
 
 
+def _wrap_to_180(deg: float) -> float:
+    """각도 차이를 (-180, 180] 범위로 정규화 — 최단 회전 호.
+
+    예) `_wrap_to_180(-100) == -100` (이미 [-180,180]),
+        `_wrap_to_180(260) == -100`  (시계방향으로 100° 가 시계반대 260° 보다 짧다),
+        `_wrap_to_180(-260) == 100`.
+    정확히 ±180° 인 경우 +180 으로 통일해 방향 일관성을 유지한다.
+    """
+    try:
+        d = float(deg)
+    except Exception:
+        return 0.0
+    d = (d + 180.0) % 360.0 - 180.0
+    if abs(d + 180.0) < 1e-9:
+        return 180.0
+    return d
+
+
 def _reset_tbs_offset_ops_for_paths(paths: List[str]) -> None:
     """애니메이션 중지 후 `TBS_OFFSET` Translate/Rotate 를 0 으로."""
     from . import lam_translate_animation as _ltx
@@ -375,17 +393,27 @@ class LamSequenceRunner:
 
     # ------------------------------------------------------------------ public
 
-    def stop(self) -> None:
-        """진행 중인 시퀀스 중단(다음 sleep 단계에서 빠져나옴)."""
-        self._stop_flag.set()
-        try:
-            from . import lam_translate_animation as _ltx
-            from . import lam_rotate_animation as _lrx
+    def stop(self, *, cancel_all_move_rotate: bool = True) -> None:
+        """진행 중인 시퀀스 중단(다음 sleep 단계에서 빠져나옴).
 
-            _ltx.stop_all_translate_animations()
-            _lrx.stop_all_rotate_animations()
-        except Exception:
-            pass
+        Args:
+            cancel_all_move_rotate: True(기본) — 시퀀스 편집기 Stop 과 동일하게 전역
+                translate/rotate 애니메이션을 모두 중단한다.
+                False — `_stop_flag` 만 세워 루프만 빠져나가게 하고, 전역
+                `stop_all_*` 는 호출하지 않는다. `lam_event_playlist_window` 가 동일
+                prim / 인스턴스 충돌 시 선점(preempt) 할 때 사용한다(다른 JSON 의
+                MOVE/ROTATE 를 건드리지 않기 위함).
+        """
+        self._stop_flag.set()
+        if cancel_all_move_rotate:
+            try:
+                from . import lam_translate_animation as _ltx
+                from . import lam_rotate_animation as _lrx
+
+                _ltx.stop_all_translate_animations()
+                _lrx.stop_all_rotate_animations()
+            except Exception:
+                pass
         try:
             self._hide.clear_all()
         except Exception:
@@ -911,7 +939,6 @@ class LamSequenceRunner:
 
     def _start_rotate(self, idx: int, step: dict, speed_scale: float) -> float:
         from . import lam_rotate_animation as _lrx
-        from pxr import Gf  # type: ignore
 
         prim_id = str(step.get("prim") or "")
         sp = float(max(0.01, speed_scale or 1.0))
@@ -919,11 +946,9 @@ class LamSequenceRunner:
         rx = float(step.get("rx", 0.0) or 0.0)
         ry = float(step.get("ry", 0.0) or 0.0)
         rz = float(step.get("rz", 0.0) or 0.0)
-        auto_center = bool(step.get("auto_pivot_world_center", False))
-        user_axis = bool(step.get("user_axis_rotate", False))
-        pwx = float(step.get("pivot_wx", 0.0) or 0.0)
-        pwy = float(step.get("pivot_wy", 0.0) or 0.0)
-        pwz = float(step.get("pivot_wz", 0.0) or 0.0)
+        # 2026-05-12: 월드 피봇 회전 / lock_world_center 옵션 제거 — 옛 JSON 의
+        # auto_pivot_world_center / user_axis_rotate / pivot_w* 는 모두 무시한다.
+        from_initial = bool(step.get("rotate_from_initial", False))
         stage = _stage()
         paths = _resolve_prim_paths(stage, prim_id)
         if not paths or duration <= 0:
@@ -932,75 +957,99 @@ class LamSequenceRunner:
                 flush=True,
             )
             return 0.0
-        if abs(rx) < 1e-9 and abs(ry) < 1e-9 and abs(rz) < 1e-9:
-            return 0.0
 
-        # USD write 는 모두 main thread 에서 (deadlock 회피 — _dispatch_main 주석 참조).
+        # 모든 USD read/write 는 main thread 에서 (background 에서 USD read/op 생성 시
+        # main 의 update/렌더 경로와 동시 접근으로 freeze 가능 — 2026-05-12 회귀 fix).
         from . import lam_translate_animation as _ltx
+
+        # rotate_from_initial=False 인 경우는 background 에서 0 입력 skip 만 처리.
+        if not from_initial:
+            if abs(rx) < 1e-9 and abs(ry) < 1e-9 and abs(rz) < 1e-9:
+                return 0.0
 
         def _do_in_main() -> None:
             try:
-                # 충돌 방지: 진행 중인 translate / rotate 모두 stop.
+                # 1) 충돌 방지: 진행 중인 translate / rotate 모두 stop.
                 for p in paths:
                     try:
                         _ltx.stop_prim_translate_animation(p)
                         _lrx.stop_prim_rotate_animation(p)
                     except Exception:
                         pass
-                try:
-                    _lrx.stop_world_pivot_rotate_animation()
-                except Exception:
-                    pass
 
-                # 모드 분기 (TBS 와 동일 의미):
-                # 1) auto_pivot_world_center=True 단일 prim → lock_world_center
-                # 2) user_axis_rotate=True + pivot_w* → world_pivot_euler
-                # 3) 그 외 → simple (TBS_OFFSET RotateXYZ 누적)
-                if auto_center and len(paths) == 1:
-                    _lrx.run_prim_rotate_lock_world_center_animation(
-                        paths[0], rx, ry, rz, duration
+                # 2) rotate_from_initial=True 인 스텝의 입력값 (rx,ry,rz) 은
+                #    "USD 로드 시점 자산 원본 자세 = TBS_OFFSET 가 author 되지 않은 자세
+                #    = (0,0,0) 기준 **절대 목표각**" 으로 해석한다.
+                #
+                #      target       = (rx, ry, rz)                       (절대)
+                #      delta_to_run = wrap180(target - current_TBS_OFFSET) (최단 호)
+                #
+                #    LAM 에서는 자산 원본에 TBS_OFFSET RotateXYZ 가 author 되어 있지 않으므로
+                #    baseline 은 항상 (0,0,0) 으로 고정. Run 을 여러 번 눌러도, 동일 prim 에
+                #    대해 같은 입력 90° 를 반복해도 target 은 항상 동일한 90° 절대각으로 해석되어
+                #    누적되지 않는다.
+                per_prim_payload: Dict[str, tuple[float, float, float]] = {}
+                if from_initial:
+                    for p in paths:
+                        cur = _lrx.read_tbs_offset_rotate_xyz_deg(p)
+                        drx = _wrap_to_180(float(rx) - float(cur[0]))
+                        dry = _wrap_to_180(float(ry) - float(cur[1]))
+                        drz = _wrap_to_180(float(rz) - float(cur[2]))
+                        per_prim_payload[p] = (drx, dry, drz)
+                    if all(
+                        abs(d[0]) < 1e-9 and abs(d[1]) < 1e-9 and abs(d[2]) < 1e-9
+                        for d in per_prim_payload.values()
+                    ):
+                        print(
+                            f"{_PRINT_PREFIX} (main) step[{idx}] ROTATE(initial) skip — "
+                            f"already at target (input={rx},{ry},{rz})",
+                            flush=True,
+                        )
+                        return
+                else:
+                    for p in paths:
+                        per_prim_payload[p] = (rx, ry, rz)
+
+                # 3) simple (= 유일한 모드)
+                for p, (drx, dry, drz) in per_prim_payload.items():
+                    if abs(drx) < 1e-9 and abs(dry) < 1e-9 and abs(drz) < 1e-9:
+                        continue
+                    _lrx.run_prim_rotate_animation(
+                        p,
+                        [{"duration": duration, "delta": (drx, dry, drz)}],
+                        loop=False,
                     )
+                if from_initial:
                     print(
-                        f"{_PRINT_PREFIX} (main) ROTATE lock_world_center prim={paths[0]} "
+                        f"{_PRINT_PREFIX} (main) ROTATE simple(from_initial) prim={paths} "
+                        f"input=({rx},{ry},{rz}) per_prim_delta={per_prim_payload} dur={duration}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"{_PRINT_PREFIX} (main) ROTATE simple prim={paths} "
                         f"r=({rx},{ry},{rz}) dur={duration}",
                         flush=True,
                     )
-                    return
-
-                if user_axis:
-                    pivot_world = Gf.Vec3d(pwx, pwy, pwz)
-                    _lrx.run_world_euler_pivot_rotate_animation(
-                        paths, pivot_world, rx, ry, rz, duration
-                    )
-                    print(
-                        f"{_PRINT_PREFIX} (main) ROTATE world_pivot_euler prim={paths} "
-                        f"r=({rx},{ry},{rz}) pivot=({pwx},{pwy},{pwz}) dur={duration}",
-                        flush=True,
-                    )
-                    return
-
-                # simple
-                for p in paths:
-                    _lrx.run_prim_rotate_animation(
-                        p,
-                        [{"duration": duration, "delta": (rx, ry, rz)}],
-                        loop=False,
-                    )
-                print(
-                    f"{_PRINT_PREFIX} (main) ROTATE simple prim={paths} "
-                    f"r=({rx},{ry},{rz}) dur={duration}",
-                    flush=True,
-                )
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} (main) ROTATE failed: {exc}", flush=True)
 
         print(
             f"{_PRINT_PREFIX} _start_rotate idx={idx} dispatching to main thread "
-            f"prim={paths} r=({rx},{ry},{rz}) dur={duration}",
+            f"prim={paths} r=({rx},{ry},{rz}) from_initial={from_initial} dur={duration}",
             flush=True,
         )
         _dispatch_main(_do_in_main)
         return duration
+
+    # --------------------------------------------------------------- (initial-rotate cache removed)
+    #
+    # 2026-05-12 후반: `rotate_from_initial=True` 의 baseline 을 "처음 진입 시점의 현재값"
+    # 으로 캐싱하던 방식은 사용자 의도와 불일치했다(Run 을 다시 누르거나 새 runner 가 만들어지면
+    # 직전 자세가 baseline 이 되어 같은 입력 90° 가 누적 회전되는 회귀). LAM 에서 자산 원본은
+    # TBS_OFFSET 을 author 하지 않으므로 baseline 은 **항상 (0,0,0)** 으로 고정한다. 이 경우
+    # `target = (rx, ry, rz)` (절대 각도), `delta = wrap180(target - current)` 로 단순화되어
+    # runner 인스턴스/Run 횟수와 무관하게 동일하게 동작한다.
 
     # ------------------------------------------------------------ wait/sleep
 

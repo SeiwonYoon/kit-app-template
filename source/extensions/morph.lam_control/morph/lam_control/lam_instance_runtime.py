@@ -49,6 +49,7 @@ TBS 의 default context / stage / sequence runner / port_lot_visibility 등 보�
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -66,6 +67,14 @@ except Exception:  # pragma: no cover
 
 
 _PRINT_PREFIX = "[LAM/Runtime]"
+
+
+def _normalize_asset_path_for_cache(path: str) -> str:
+    """Windows 경로 대소문자/슬래시 차이로 동일 파일을 중복 open 시도하지 않도록 정규화."""
+    try:
+        return os.path.normcase(os.path.normpath(os.path.expanduser(str(path))))
+    except Exception:
+        return str(path)
 
 
 class _AttrSampleEntry:
@@ -117,6 +126,13 @@ class AnimationInstanceRuntime:
         self._master_stage: Optional[Any] = master_stage  # pxr.Usd.Stage (master)
         self._offscreen_stage: Optional[Any] = None       # pxr.Usd.Stage (in-memory)
         self._offscreen_asset_path: str = ""
+        # `Usd.Stage.Open` 이 한 번이라도 실패한 자산 경로 — Option E 가 매 프레임
+        # `setup_offscreen_stage` 를 다시 호출해도 동일 경로에 대해 Open 을 재시도하지 않는다
+        # (미존재/손상 파일 시 무한 로그·프리즈 방지). 경로가 바뀌면 자동으로 해제된다.
+        self._offscreen_open_failed_key: str = ""
+
+        # `lam_runtime_evaluator` 가 open 실패 시 `[LAM/Runtime] OPTION_E ...` 를 1 회만 찍기 위함.
+        self._lam_option_e_setup_fail_logged: bool = False
 
         # offscreen 에서 sample 이 있는 attribute → master mirror attribute 매핑 캐시.
         self._attr_cache: List[_AttrSampleEntry] = []
@@ -147,6 +163,11 @@ class AnimationInstanceRuntime:
     @property
     def offscreen_asset_path(self) -> str:
         return self._offscreen_asset_path
+
+    def clear_offscreen_open_failure(self) -> None:
+        """이전 ``Usd.Stage.Open`` 실패 캐시를 지운다 — 파일을 복구한 뒤 같은 경로로 재시도할 때."""
+        self._offscreen_open_failed_key = ""
+        self._lam_option_e_setup_fail_logged = False
 
     @property
     def is_ready(self) -> bool:
@@ -240,6 +261,8 @@ class AnimationInstanceRuntime:
         self._offscreen_asset_path = (
             asset_path or f"memory-baked:{ident}"
         )
+        self._offscreen_open_failed_key = ""
+        self._lam_option_e_setup_fail_logged = False
         self._invalidate_attr_cache()
 
         # FPS 30 정규화 — bake 단계에서 이미 30 으로 박지만 안전 차원에서 한 번 더.
@@ -292,6 +315,14 @@ class AnimationInstanceRuntime:
             )
             return False
 
+        key = _normalize_asset_path_for_cache(asset_path)
+        if self._offscreen_open_failed_key:
+            if self._offscreen_open_failed_key == key:
+                # Option E 가 매 프레임 `not offscreen_asset_path` 분기로 재호출하는 경우
+                # 여기서 즉시 반환 — `Usd.Stage.Open` 무한 재시도·로그 폭주 방지.
+                return False
+            self._offscreen_open_failed_key = ""
+
         # 이미 같은 자산이 열려 있으면 재사용.
         if self._offscreen_stage is not None and self._offscreen_asset_path == asset_path:
             return True
@@ -303,6 +334,7 @@ class AnimationInstanceRuntime:
         try:
             stage = _Usd.Stage.Open(asset_path)
         except Exception as exc:
+            self._offscreen_open_failed_key = key
             print(
                 f"{_PRINT_PREFIX} setup_offscreen_stage FAIL prim={self.prim_path} "
                 f"asset={asset_path} exc={exc}",
@@ -311,6 +343,7 @@ class AnimationInstanceRuntime:
             return False
 
         if stage is None:
+            self._offscreen_open_failed_key = key
             print(
                 f"{_PRINT_PREFIX} setup_offscreen_stage returned None prim={self.prim_path} "
                 f"asset={asset_path}",
@@ -318,6 +351,8 @@ class AnimationInstanceRuntime:
             )
             return False
 
+        self._offscreen_open_failed_key = ""
+        self._lam_option_e_setup_fail_logged = False
         self._offscreen_stage = stage
         self._offscreen_asset_path = asset_path
         self._invalidate_attr_cache()
@@ -541,6 +576,8 @@ class AnimationInstanceRuntime:
         self._offscreen_root_path_str = ""
         self._skel_cache = None
         self._skel_write_diag_logged = False
+        self._offscreen_open_failed_key = ""
+        self._lam_option_e_setup_fail_logged = False
         print(f"{_PRINT_PREFIX} dispose prim={self.prim_path}", flush=True)
 
     # ------------------------------------------------------------------ internals
