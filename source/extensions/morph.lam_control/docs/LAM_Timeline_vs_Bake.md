@@ -247,7 +247,7 @@ timeSamples 메타** 로 표현. OmniGraph 가 만들어내는 결과도 결국 
 
 코드 진입점: `lam_bake_omnigraph.py:bake_prim_to_timesamples_async`.
 
-### 4.1 흐름 개요
+### 4.1 흐름 개요 (X3 — 2026-05-12 정책 기준)
 
 ```
 0. inst_prim_path 의 자산 경로 (asset_path) + upAxis 읽기
@@ -258,14 +258,19 @@ timeSamples 메타** 로 표현. OmniGraph 가 만들어내는 결과도 결국 
      b. Kit tick 1 회 대기 (await app.next_update_async()) → OmniGraph 평가
      c. inst_prim 산하 모든 prim 의 xformOp 의 현재 값 capture (samples 누적)
 4. 정적 attribute pruning (모든 frame 동일 값이면 default 1 회만 author)
-5. 출력 stage 생성:
+5. 출력 layer (anonymous Sdf.Layer) 생성:
      a. 원본을 reference 로 묶음
      b. OmniGraph prim 은 `over { active = false }`
      c. 동적 attribute 는 Sdf-batch 로 timeSamples 일괄 author
      d. 정적 attribute 는 default 만 author
      e. stage upAxis 를 원본과 동일하게 set
-6. *_baked.usd 로 Export (덮어쓰기)
-7. master stage 의 inst_prim 을 *_baked.usd reference 로 교체
+6. 출력 분기 (`output_mode` 파라미터):
+     - `"memory"` (UI [Bake] 기본): **layer 자체를 BakeResult.baked_layer 로 반환**.
+       디스크 출력 없음. 콘솔에 layer dump 출력 (변환된 timeSamples 형식 확인용).
+     - `"file"` (외부 도구용): `out_layer.Export(path)` 로 *_baked.usd 디스크 저장.
+7. (X3 경로) `evaluator.attach_memory_baked_layer(prim_path, layer)` 호출 →
+   해당 인스턴스 runtime 의 offscreen Stage 를 anonymous layer 로 재구성.
+   master stage 의 reference 는 원본 자산 그대로 (변경 없음). 인스턴스 교체 없음.
 ```
 
 ### 4.2 핵심 결정 4 가지 (= 핫픽스를 일으킨 것들)
@@ -327,18 +332,21 @@ opt-in 가속안 (§5 한계 §6.5):
 3. Run → 모든 인스턴스가 master timeline 1 개에 묶여 동시 평가 (= 독립 재생 실패)
 ```
 
-### 5.2 Bake + Option E 방식 (현재)
+### 5.2 Bake + Option E 방식 (현재 — X3 in-memory)
 
 ```
 1. 자산 *.usd 를 master 에 add_usd (Option E offscreen 자동 생성)
-2. [Bake] 클릭 → *_baked.usd 생성 (1 회만, 이후 재사용 가능)
-   ├ 자동으로 인스턴스가 *_baked.usd 로 교체
-   └ Option E 가 *_baked.usd 의 timeSamples 를 매 frame offscreen 평가
-3. 시퀀스에 USD_TIMELINE step 추가
+2. [Bake] 클릭 → in-memory anonymous Sdf.Layer 생성 (디스크 *_baked.usd X)
+   ├ runtime 의 offscreen Stage 가 baked layer 로 재구성됨
+   ├ 인스턴스 교체 없음 — master.usd 의 reference 는 원본 그대로
+   ├ 콘솔에 변환된 timeSamples 형식 dump 출력
+   └ Option E 가 baked layer 의 timeSamples 를 매 frame offscreen 평가
+3. 시퀀스에 TIMESAMPLES_REPLAY step 추가 (실무용) — 또는 USD_TIMELINE 도 동일 동작
 4. Run → 각 인스턴스가 자기 offscreen stage 의 virtual_time 으로 독립 평가 → 독립 재생 OK
 ```
 
-→ **Bake 는 1 회만**. 다음에는 그냥 *_baked.usd 를 add_usd 하면 곧장 Option E 동작.
+→ **Bake 는 휘발성** — Kit 종료 시 사라진다. 다음에 Kit 을 켜고 다시 자산을 add_usd
+하면 [Bake] 를 다시 한 번 클릭 필요. 사용자 의도된 테스트 흐름 (prompt.txt 239~244).
 
 ---
 
@@ -356,8 +364,10 @@ opt-in 가속안 (§5 한계 §6.5):
 
 ### Q3. "원본 31MB 가 baked 171KB 인데 material 손실 아닌가?"
 
-→ 아니다. baked.usd 는 **원본을 reference** 로 묶고 timeSamples over 만 author. material/
-   shader/texture/mesh 는 모두 reference 로 통과. 시각 결과 동일.
+→ 아니다. baked layer (in-memory) 는 **원본을 reference** 로 묶고 timeSamples over 만
+   author. material / shader / texture / mesh 는 모두 reference 로 통과. 시각 결과 동일.
+   X3 (2026-05-12) 이후엔 디스크 파일조차 만들지 않으므로 "용량 감소" 자체가 사용자
+   시야에 보이지 않게 됨.
 
 ### Q4. "FBX → USD 변환본은 OmniGraph 가 있나?"
 
@@ -377,15 +387,36 @@ opt-in 가속안 (§5 한계 §6.5):
 
 | # | 정책 | 근거 |
 |---|---|---|
-| D4 | OmniGraph 자산은 [Bake] 후 *_baked.usd 로 사용 | OmniGraph 는 isolated stage 평가 불가. |
-| D5 | [Bake] 는 항상 덮어쓰기 | mtime skip 시 사용자 혼란 + 옛 매개변수 결과 남음. |
+| D4 | OmniGraph 자산은 [Bake] 후 in-memory baked layer 로 사용 (2026-05-12 D13) | OmniGraph 는 isolated stage 평가 불가. |
+| D5 | [Bake] 는 항상 새로 굽기 (mtime skip X) | 사용자 혼란 + 옛 매개변수 결과 남음 방지. |
 | D6 | bake 기본은 무손실 (stride=1, sparse=False) | 사용자: "품질 최우선". |
-| D7 | baked.usd 의 stage upAxis 는 원본과 동일 | 이중 RotateX 보정 방지. |
-| D8 | [Bake] / [Remove] / [모두 초기화] 시 `evaluator.forget_instance` 명시 호출 | runtime offscreen_asset 캐시 누수 방지. |
+| D7 | baked layer 의 stage upAxis 는 원본과 동일 | 이중 RotateX 보정 방지. |
+| D8 | [Bake] / [Remove] / [모두 초기화] 시 `evaluator.forget_instance` 명시 호출 (단 [Bake] 는 X3 에서 `attach_memory_baked_layer` 가 forget 대신 attr_cache invalidate) | runtime offscreen_asset 캐시 누수 방지. |
 | D9 | bake 의 author 단계는 `Sdf.ChangeBlock` 사용 금지 | OverridePrim.IsValid()=False 사고 방지. |
 | D10 | bake 의 author 는 Sdf-level `attrSpec.SetInfo("timeSamples", dict)` 일괄 기록 | per-Set composition 비용 제거. |
+| D13 (2026-05-12) | UI [Bake] 의 출력은 **in-memory anonymous `Sdf.Layer` 만**. 디스크 `*_baked.usd` 는 만들지 않는다. file 모드는 호출자가 `output_mode='file'` 로 명시 지정한 경우만 사용. Kit 종료 시 baked layer 가 메모리에서 소멸 (휘발성). 재사용하려면 [Bake] 다시 클릭. | 사용자 요청 (prompt.txt 239~244). 디스크 흔적 / master.usd 비대화 / 인스턴스 교체 사이클 회피. |
 
 (D1, D2, D3 는 별건 — TBS 미변경 / Option E 기본 True / FPS 30 고정. Handoff §4 참조.)
+
+### 7.1 step kind 정책 (2026-05-12 추가)
+
+LAM 시퀀스 편집기의 step 종류는 다음 5 가지. 두 가지 인스턴스 재생 step (USD_TIMELINE /
+TIMESAMPLES_REPLAY) 의 의미를 명확히 구분한다.
+
+| step kind | 용도 | 평가 방식 | 멀티 인스턴스 독립 |
+|---|---|---|---|
+| `TIMESAMPLES_REPLAY` | **실무용** — 멀티 인스턴스 독립 재생 | Option E offscreen stage 에 자기 virtual_time 진행 → master mirror 에 default value 기록 | **O** |
+| `USD_TIMELINE` | **테스트용** (TBS 호환 이름) — 현 단계에서는 TIMESAMPLES_REPLAY 와 동일 동작. **추후 단계에서** TBS 처럼 `omni.timeline.play()` 로 master stage 시간을 진행하는 방식으로 재구현 예정. | (현재) TIMESAMPLES_REPLAY 와 동일 / (추후) master timeline play | (현재) O / (추후 TBS 방식 재구현 후) X (의도된 한계) |
+| `MOVE` | TBS 와 동일 — 지정 prim 을 `dx/dy/dz` 만큼 평행 이동 | translate op 직접 갱신 | (자산과 독립) |
+| `ROTATE` | TBS 와 동일 — 지정 prim 을 회전 | rotateXYZ / 사용자 축 회전 | (자산과 독립) |
+| `DELAY` | TBS 와 동일 — wall-clock 대기 | (없음) | — |
+
+**| 정책 D11 (2026-05-12) | TIMESAMPLES_REPLAY = 실무 기본값. USD_TIMELINE 은 TBS 와의 이름
+호환을 위해 남김. 실무 JSON 은 TIMESAMPLES_REPLAY 로 작성. |**
+
+**| 정책 D12 (2026-05-12) | USD_TIMELINE step 의 TBS 방식 (`omni.timeline.play()`) 재구현은
+TIMESAMPLES_REPLAY 의 멀티 인스턴스 독립 재생이 사용자 검증을 통과한 뒤 별도 단계에서 진행.
+검증 전에는 두 step kind 가 동일 동작 → 회귀 위험 0. |**
 
 ---
 
@@ -417,15 +448,22 @@ opt-in 가속안 (§5 한계 §6.5):
 > 그래서 **Bake** 를 쓴다.
 >
 > **Bake = Kit 런타임에서 OmniGraph 를 한 번 굴려 매 frame 의 결과 좌표를 표준 USD
-> timeSamples 로 박은 새 자산을 만드는 변환.** 결과물 `*_baked.usd` 는 OmniGraph 없이도
-> standalone 평가 가능 → Option E 의 offscreen stage 에서 자기 시간으로 독립 재생 OK →
-> 멀티 인스턴스가 한 viewport 에서 timeline 충돌 없이 유기적으로 동작.
+> timeSamples 로 박은 새 layer 를 만드는 변환.** 결과물은 OmniGraph 없이도 standalone
+> 평가 가능 → Option E 의 offscreen stage 에서 자기 시간으로 독립 재생 OK → 멀티
+> 인스턴스가 한 viewport 에서 timeline 충돌 없이 유기적으로 동작.
 >
-> Bake 는 **1 회만 굽고 이후 재사용**. mesh/material 은 원본 reference 라 깨지지 않고,
-> OmniGraph 만 비활성. 품질 손실 0, 정통 USD 표현 변환.
+> **X3 (2026-05-12)**: Bake 결과는 **anonymous Sdf.Layer 로 메모리에만** 보관 (휘발성).
+> 디스크 `*_baked.usd` 를 만들지 않는다. Kit 종료 시 사라지며, 다시 사용하려면 [Bake]
+> 를 다시 클릭. 인스턴스 교체 (remove_usd / add_usd) 도 일어나지 않음. mesh / material
+> 은 원본 reference 라 깨지지 않고, OmniGraph 만 비활성. 품질 손실 0, 정통 USD 표현
+> 변환.
 >
 > → **결과**: 사용자 요구 ("여러 자산 한 viewport, 독립 timeline, JSON 시퀀스, 외부 시뮬
 > 트리거") 가 모두 같은 architectural skeleton (Option E + Bake) 위에서 자연 동작한다.
+>
+> **시퀀스 step kind 도 분리.** 실무 = `TIMESAMPLES_REPLAY` (멀티 인스턴스 독립). 테스트
+> = `USD_TIMELINE` (TBS 호환 이름, 추후 단계에서 진짜 TBS 방식 `omni.timeline.play()` 로
+> 재구현 예정. 현재는 TIMESAMPLES_REPLAY 와 동일 동작 — 회귀 위험 0).
 
 ---
 

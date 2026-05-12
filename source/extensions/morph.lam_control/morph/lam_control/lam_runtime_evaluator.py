@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Set, Tuple
 
 from .lam_attribute_reauthor import AttributeReauthorCache
 from .lam_instance_registry import AnimationInstanceRegistry
@@ -39,6 +39,13 @@ try:
     from pxr import Sdf as _Sdf  # type: ignore
 except Exception:  # pragma: no cover
     _Sdf = None  # type: ignore
+
+# pxr.Usd 는 evaluate_and_write 호출 직전에 EditTarget 을 인스턴스 sublayer 로 잠깐
+# 옮길 때만 사용한다 (main thread). 미설치 환경에서도 import 자체는 성공.
+try:
+    from pxr import Usd as _Usd  # type: ignore
+except Exception:  # pragma: no cover
+    _Usd = None  # type: ignore
 
 
 _PRINT_PREFIX = "[LAM/L5]"
@@ -122,6 +129,25 @@ class RuntimeEvaluator:
         # LayerOffset(0, 1e-9) 로 freeze 한 instance prim_path 들의 집합.
         # 1 회만 author. unregister 시 forget_instance 가 청소.
         self._option_e_freeze_seen: set = set()
+        # USD_TIMELINE (TBS 스타일) — `omni.timeline` 으로 master stage 시간을 진행하는 동안
+        # 해당 인스턴스는 Option E freeze + offscreen evaluate 를 건너뛴다 (reference 가 전역
+        # 타임에 따라 평가되어야 함).
+        self._master_timeline_prims: Set[str] = set()
+        # TIMESAMPLES_REPLAY 핵심 — master 의 인스턴스 산하 OmniGraph 류 prim 을
+        # instance sublayer 에서 ``over { active = false }`` 로 비활성화한 prim_path 들.
+        # LayerOffset(0, 1e-9) freeze 는 reference 안의 timeSamples 만 정지시키지만
+        # OmniGraph 는 자기 tick 으로 평가되어 매 frame ``xformOp:*`` 를 push 하기 때문에,
+        # 별도로 prim 자체를 deactivate 하지 않으면 LAM 의 reauthor 가 마스킹된다.
+        # `_option_e_omnigraph_paths` 에는 인스턴스별 OmniGraph prim_path 목록을 캐시.
+        self._option_e_omnigraph_deactivated_seen: Set[str] = set()
+        self._option_e_omnigraph_paths: Dict[str, list] = {}
+        # Bake 진행 중인 prim 표식 — 이 prim 에는 매 update tick 의
+        # ``_ensure_option_e_freeze`` / ``_ensure_option_e_omnigraph_deactivated``
+        # 가 어떤 author 도 하지 않는다. 그렇지 않으면 bake 가 ``await`` 으로 다음
+        # update tick 으로 넘어가는 사이 evaluator 가 OmniGraph 를 다시 deactivate
+        # 하거나 LayerOffset freeze 를 다시 author 하여 master timeline scrub 이
+        # 평가되지 못한다(사용자 회귀 로그 재현 — 2026-05-12).
+        self._bake_in_progress_prims: Set[str] = set()
 
     # ------------------------------------------------------------------ wiring
 
@@ -243,6 +269,138 @@ class RuntimeEvaluator:
                 f"(다음 update tick 에 진단 로그가 다시 출력됩니다)",
                 flush=True,
             )
+
+    def attach_memory_baked_layer(
+        self,
+        prim_path: str,
+        baked_layer: Any,
+        *,
+        source_asset_for_log: str = "",
+    ) -> bool:
+        """**X3 in-memory bake 적용** — 지정 prim 의 runtime 의 offscreen Stage 를 baked layer 로 교체.
+
+        ``lam_bake_omnigraph.bake_prim_to_timesamples_async(output_mode='memory')`` 가
+        반환한 anonymous Sdf.Layer 를 받아, 해당 인스턴스 runtime 의 offscreen Stage 를
+        이 layer 기반으로 재구성한다. 디스크에 baked.usd 를 만들지 않고도 standalone
+        timeSamples 평가가 가능해진다.
+
+        흐름:
+            1) runtime_by_path[prim_path] 의 runtime 객체를 찾는다 (없으면 False).
+            2) ``setup_offscreen_stage_from_layer`` 호출.
+            3) attr_cache 무효화 + diag flag reset → 다음 evaluate 에서 새 stage 기준
+               재빌드.
+
+        Args:
+            prim_path: master 의 인스턴스 prim path.
+            baked_layer: ``pxr.Sdf.Layer``. anonymous 권장.
+            source_asset_for_log: 로그 라벨에만 사용되는 원본 자산 경로 (선택).
+
+        Returns:
+            성공 여부.
+        """
+        if not prim_path:
+            return False
+        rt = self._runtime_by_path.get(prim_path)
+        if rt is None:
+            # Lazy create — update tick 이 한 번도 안 돌았다면 runtime 객체가 아직
+            # 없을 수 있다. 이때는 registry 의 인스턴스 + master stage 로 즉시 생성.
+            inst = None
+            try:
+                for it in self._registry.all_instances():
+                    if it.prim_path == prim_path:
+                        inst = it
+                        break
+            except Exception:
+                inst = None
+            if inst is None:
+                print(
+                    f"{_PRINT_PREFIX} attach_memory_baked_layer SKIP no runtime and "
+                    f"no registry instance prim={prim_path}",
+                    flush=True,
+                )
+                return False
+            master_stage = None
+            try:
+                if self._master is not None:
+                    master_stage = self._master.get_stage()
+            except Exception:
+                master_stage = None
+            rt = AnimationInstanceRuntime(inst, master_stage=master_stage)
+            self._runtime_by_path[prim_path] = rt
+            try:
+                rt.setup_master_mirror_prim()
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} attach_memory_baked_layer lazy mirror_prim FAIL "
+                    f"prim={prim_path}: {exc}",
+                    flush=True,
+                )
+            print(
+                f"{_PRINT_PREFIX} attach_memory_baked_layer lazy-created runtime "
+                f"prim={prim_path}",
+                flush=True,
+            )
+        ok = False
+        try:
+            ok = bool(
+                rt.setup_offscreen_stage_from_layer(
+                    baked_layer,
+                    asset_path=source_asset_for_log,
+                )
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} attach_memory_baked_layer EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+            return False
+        if not ok:
+            return False
+        # bake 결과를 새로 attach 했으니 OmniGraph deactivate 표식과 path 캐시도 reset →
+        # 다음 update tick 에 다시 author 되어 baked timeSamples 가 winner 가 된다.
+        self._option_e_omnigraph_deactivated_seen.discard(prim_path)
+        self._option_e_omnigraph_paths.pop(prim_path, None)
+        # attr_cache + diag reset → 다음 evaluate 시 재빌드 + 진단 새로 출력.
+        try:
+            rt._attr_cache = []  # type: ignore[attr-defined]
+            rt._attr_cache_built = False  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        for k in (
+            "_diag_not_ready_logged",
+            "_diag_first_call_logged",
+            "_diag_first_eval_logged",
+            "_diag_first_eval_warned_zero",
+        ):
+            try:
+                setattr(rt, k, False)
+            except Exception:
+                pass
+        # Q1 — 2026-05-12: bake 완료 표식을 인스턴스에 박는다. UI 가 이 값을 보고
+        # [Bake] 버튼을 [BAKED ✓ / Re-bake] 로 전환한다. in-memory baked layer 는 휘발성
+        # 이므로 Kit 재시작 시 자동으로 False 로 시작 (D13).
+        try:
+            target_inst = getattr(rt, "inst", None) or getattr(rt, "_instance", None)
+            if target_inst is None:
+                for it in self._registry.all_instances():
+                    if it.prim_path == prim_path:
+                        target_inst = it
+                        break
+            if target_inst is not None:
+                target_inst.baked = True
+        except Exception as _mark_exc:
+            print(
+                f"{_PRINT_PREFIX} attach_memory_baked_layer: baked flag 박기 실패 "
+                f"prim={prim_path} exc={_mark_exc}",
+                flush=True,
+            )
+        print(
+            f"{_PRINT_PREFIX} attach_memory_baked_layer OK prim={prim_path} "
+            f"src={source_asset_for_log!r} — attr_cache invalidated, "
+            f"will rebuild next frame",
+            flush=True,
+        )
+        return True
 
     def force_rebuild_attr_cache(self, prim_path: str = "") -> None:
         """Option E 의 attribute 캐시를 강제로 재빌드하도록 표식만 비움.
@@ -367,6 +525,327 @@ class RuntimeEvaluator:
                 )
         # Phase B-2-a — Option E freeze 표식 청소 (instance 재등록 시 다시 author 가능).
         self._option_e_freeze_seen.discard(prim_path)
+        self._master_timeline_prims.discard(prim_path)
+        self._option_e_omnigraph_deactivated_seen.discard(prim_path)
+        self._option_e_omnigraph_paths.pop(prim_path, None)
+        self._bake_in_progress_prims.discard(prim_path)
+
+    # ---------------------------------------------------- OmniGraph deactivate
+    #
+    # TIMESAMPLES_REPLAY 모드에서 master stage 안의 OmniGraph (예: `/World/aaa/PushGraph`)
+    # 가 매 frame xformOp:* 를 push 하여 LAM 의 reauthor 결과(=baked timeSamples 값)
+    # 를 덮어쓰는 문제 해결. instance 전용 sublayer 에 `over { active = false }` 만
+    # author 하므로 사용자 master USD 는 무변경(session sublayer 라 휘발).
+    #
+    # USD_TIMELINE (TBS) 테스트 모드 진입 시에는 다시 active = True 로 author —
+    # OmniGraph 가 master omni.timeline 시각으로 평가되어야 한다.
+
+    _OMNIGRAPH_TYPE_NAMES: Tuple[str, ...] = (
+        "OmniGraph",
+        "OmniGraphNode",
+        "PushGraph",
+        "PushGraphNode",
+    )
+
+    def _collect_omnigraph_paths(self, stage, prim_path: str) -> list:
+        """master stage 의 인스턴스 prim 산하에서 OmniGraph 류 prim 의 path 목록을 수집."""
+        if stage is None or _Usd is None:
+            return []
+        try:
+            prim = stage.GetPrimAtPath(prim_path)
+        except Exception:
+            return []
+        if not prim or not prim.IsValid():
+            return []
+        out: list = []
+        try:
+            for p in _Usd.PrimRange(prim):
+                try:
+                    tn = str(p.GetTypeName() or "")
+                except Exception:
+                    continue
+                if tn in self._OMNIGRAPH_TYPE_NAMES:
+                    try:
+                        out.append(str(p.GetPath()))
+                    except Exception:
+                        continue
+        except Exception:
+            return out
+        return out
+
+    def _set_omnigraph_active_in_sublayer(
+        self, stage, prim_path: str, *, active: bool
+    ) -> int:
+        """instance 전용 sublayer 안에 OmniGraph prim 들의 active flag 를 author.
+
+        Returns:
+            author 한 spec 개수.
+        """
+        if stage is None or self._master is None or _Sdf is None:
+            return 0
+        try:
+            sublayer = self._master.ensure_inst_sublayer(prim_path, tag_hint=prim_path)
+        except Exception:
+            sublayer = None
+        if sublayer is None:
+            return 0
+        paths = self._option_e_omnigraph_paths.get(prim_path)
+        if paths is None:
+            paths = self._collect_omnigraph_paths(stage, prim_path)
+            self._option_e_omnigraph_paths[prim_path] = paths
+        if not paths:
+            return 0
+        n = 0
+        try:
+            with _Sdf.ChangeBlock():
+                for p in paths:
+                    try:
+                        spec = sublayer.GetPrimAtPath(p)
+                        if spec is None:
+                            spec = _Sdf.CreatePrimInLayer(sublayer, _Sdf.Path(p))
+                        if spec is None:
+                            continue
+                        try:
+                            spec.specifier = _Sdf.SpecifierOver
+                        except Exception:
+                            pass
+                        spec.active = bool(active)
+                        n += 1
+                    except Exception:
+                        continue
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} omnigraph active({active}) toggle FAIL "
+                f"prim={prim_path}: {exc}",
+                flush=True,
+            )
+            return 0
+        return n
+
+    def begin_bake_mode(self, prim_path: str) -> bool:
+        """[Bake] 시작 시 호출 — 해당 prim 의 모든 Option E 자동 author 를 보류한다.
+
+        - LayerOffset 을 (0, 1) 로 author → master timeline scrub 이 reference 의
+          timeSamples / OmniGraph 평가를 자유롭게 받을 수 있도록 한다.
+        - master sublayer 의 OmniGraph ``over { active=false }`` 를 ``active=True`` 로
+          토글 → bake 의 scrub 단계에서 PushGraph 가 평가되어 timeSamples 가 박힌다.
+        - `_bake_in_progress_prims` 표식 → 매 update tick 의 ``_ensure_option_e_freeze``
+          / ``_ensure_option_e_omnigraph_deactivated`` 가 본 prim 에 대해 skip.
+
+        `end_bake_mode` 가 호출되면 표식 해제 + freeze/deactivate 표식 reset →
+        다음 update tick 에서 자연스럽게 TIMESAMPLES_REPLAY 모드로 자동 복귀.
+        """
+        if not prim_path or not prim_path.startswith("/"):
+            return False
+        stage = None
+        if self._master is not None:
+            try:
+                stage = self._master.get_stage()
+            except Exception:
+                stage = None
+        if stage is None:
+            print(
+                f"{_PRINT_PREFIX} begin_bake_mode FAIL no stage prim={prim_path}",
+                flush=True,
+            )
+            return False
+        self._bake_in_progress_prims.add(prim_path)
+        self._option_e_freeze_seen.discard(prim_path)
+        self._option_e_omnigraph_deactivated_seen.discard(prim_path)
+        ok_off = self._set_prim_layer_offset(
+            stage, prim_path, offset=0.0, scale=1.0
+        )
+        n_act = self._set_omnigraph_active_in_sublayer(
+            stage, prim_path, active=True
+        )
+        print(
+            f"{_PRINT_PREFIX} begin_bake_mode prim={prim_path} "
+            f"ref_layer_offset=(0,1) ok={ok_off} omnigraph_reactivated={n_act} "
+            f"(freeze/deactivate 자동 author 보류)",
+            flush=True,
+        )
+        return True
+
+    def end_bake_mode(self, prim_path: str) -> None:
+        """[Bake] 종료 시 호출 — 다음 update tick 에서 freeze/deactivate 자동 복귀."""
+        was_in = prim_path in self._bake_in_progress_prims
+        self._bake_in_progress_prims.discard(prim_path)
+        self._option_e_freeze_seen.discard(prim_path)
+        self._option_e_omnigraph_deactivated_seen.discard(prim_path)
+        print(
+            f"{_PRINT_PREFIX} end_bake_mode prim={prim_path} was_in={was_in} "
+            f"(다음 update tick 에서 freeze/OmniGraph deactivate 자동 복귀)",
+            flush=True,
+        )
+
+    def set_omnigraph_active_for_instance(
+        self, prim_path: str, active: bool
+    ) -> int:
+        """외부(bake) 가 호출 — instance sublayer 의 OmniGraph active flag toggle.
+
+        bake 시 master stage 의 OmniGraph 가 평가되어야 baked timeSamples 가 생성된다.
+        TIMESAMPLES_REPLAY 모드에서는 우리가 OmniGraph 를 비활성화해 둔 상태이므로,
+        bake 시작 직전 ``active=True`` 로 잠시 활성, bake 완료 후 attach 호출에서
+        표식이 reset 되어 다음 update tick 에서 자동으로 다시 비활성화된다.
+
+        Args:
+            prim_path: 대상 인스턴스의 master prim path.
+            active: True 면 OmniGraph spec 들의 active=True 로 author, False 면 False.
+
+        Returns:
+            author 한 spec 개수. master/stage/Sdf 가 없거나 OmniGraph prim 이 없으면 0.
+        """
+        if not prim_path or not prim_path.startswith("/"):
+            return 0
+        stage = None
+        if self._master is not None:
+            try:
+                stage = self._master.get_stage()
+            except Exception:
+                stage = None
+        if stage is None:
+            return 0
+        n = self._set_omnigraph_active_in_sublayer(
+            stage, prim_path, active=bool(active)
+        )
+        if active:
+            self._option_e_omnigraph_deactivated_seen.discard(prim_path)
+        elif n > 0:
+            self._option_e_omnigraph_deactivated_seen.add(prim_path)
+        if n > 0:
+            paths = self._option_e_omnigraph_paths.get(prim_path, [])
+            print(
+                f"{_PRINT_PREFIX} set_omnigraph_active_for_instance prim={prim_path} "
+                f"active={active} count={n} paths={paths[:8]}",
+                flush=True,
+            )
+        return n
+
+    def _ensure_option_e_omnigraph_deactivated(
+        self, prim_path: str, stage
+    ) -> None:
+        """TIMESAMPLES_REPLAY 모드에서 1 회 author. master_timeline / bake 진행 중이면 skip."""
+        if prim_path in self._master_timeline_prims:
+            return
+        if prim_path in self._bake_in_progress_prims:
+            return
+        if prim_path in self._option_e_omnigraph_deactivated_seen:
+            return
+        n = self._set_omnigraph_active_in_sublayer(
+            stage, prim_path, active=False
+        )
+        if n > 0:
+            self._option_e_omnigraph_deactivated_seen.add(prim_path)
+            paths = self._option_e_omnigraph_paths.get(prim_path, [])
+            print(
+                f"{_PRINT_PREFIX} OPTION_E OmniGraph deactivated in sublayer "
+                f"prim={prim_path} count={n} paths={paths[:8]}",
+                flush=True,
+            )
+
+    def begin_master_timeline_mode(self, prim_path: str) -> bool:
+        """USD_TIMELINE (TBS 스타일) — master 의 해당 인스턴스 reference 가 전역 타임라인을
+        따르도록 LayerOffset 을 (0, 1) 로 author 하고 Option E offscreen 평가를 건너뛴다."""
+        if not prim_path or not prim_path.startswith("/"):
+            return False
+        stage = None
+        try:
+            if self._master is not None:
+                stage = self._master.get_stage()
+        except Exception:
+            stage = None
+        if stage is None:
+            print(
+                f"{_PRINT_PREFIX} begin_master_timeline_mode FAIL no stage prim={prim_path}",
+                flush=True,
+            )
+            return False
+        self._master_timeline_prims.add(prim_path)
+        self._option_e_freeze_seen.discard(prim_path)
+        ok = bool(
+            self._set_prim_layer_offset(stage, prim_path, offset=0.0, scale=1.0)
+        )
+        # OmniGraph 다시 활성 — TIMESAMPLES_REPLAY 모드에서 deactivate 해놓은 spec 들을
+        # active=True 로 author 하여 master timeline 진행 시 평가되도록 함.
+        n_active = self._set_omnigraph_active_in_sublayer(
+            stage, prim_path, active=True
+        )
+        self._option_e_omnigraph_deactivated_seen.discard(prim_path)
+        print(
+            f"{_PRINT_PREFIX} USD_TIMELINE master mode BEGIN prim={prim_path} "
+            f"ref_layer_offset=(0,1) ok={ok} omnigraph_reactivated={n_active}",
+            flush=True,
+        )
+        return ok
+
+    def end_master_timeline_mode(
+        self,
+        prim_path: str,
+        *,
+        freeze_at_tc: Optional[float] = None,
+    ) -> None:
+        """USD_TIMELINE 종료 후 Option E micro-freeze 로 복귀.
+
+        Args:
+            prim_path: 종료할 인스턴스 prim path.
+            freeze_at_tc: 지정하면 LayerOffset(freeze_at_tc, 1e-9) 로 freeze 를 author
+                한다 → omni.timeline 의 current_time 이 0 으로 돌아가도 reference 가
+                ``freeze_at_tc`` 시점의 값을 평가하여 viewport 가 끝 프레임에 머무른다.
+                None 이면 기존 동작 (LayerOffset(0, 1e-9), inst_tc ≈ 0).
+        """
+        self._master_timeline_prims.discard(prim_path)
+        self._option_e_freeze_seen.discard(prim_path)
+        stage = None
+        try:
+            if self._master is not None:
+                stage = self._master.get_stage()
+        except Exception:
+            stage = None
+        inst = self._registry.get_by_prim_path(prim_path)
+        if inst is None:
+            for it in self._registry.all_instances():
+                if it.prim_path == prim_path:
+                    inst = it
+                    break
+
+        if freeze_at_tc is not None and stage is not None:
+            ok = self._set_prim_layer_offset(
+                stage,
+                prim_path,
+                offset=float(freeze_at_tc),
+                scale=self.LAM_FREEZE_MIN_SCALE,
+            )
+            if ok:
+                self._option_e_freeze_seen.add(prim_path)
+                # 끝 프레임 정지 시에는 OmniGraph 도 다시 deactivate — LayerOffset
+                # freeze 만으로는 OmniGraph 가 계속 평가되어 viewport 가 튀어버릴 수 있음.
+                n_de = self._set_omnigraph_active_in_sublayer(
+                    stage, prim_path, active=False
+                )
+                if n_de > 0:
+                    self._option_e_omnigraph_deactivated_seen.add(prim_path)
+                print(
+                    f"{_PRINT_PREFIX} USD_TIMELINE master mode END prim={prim_path} "
+                    f"freeze_at_tc={float(freeze_at_tc):.3f} "
+                    f"omnigraph_deactivated={n_de} (끝 프레임 정지)",
+                    flush=True,
+                )
+                return
+            print(
+                f"{_PRINT_PREFIX} USD_TIMELINE master mode END prim={prim_path} "
+                f"freeze_at_tc 시도 실패 → 기본 freeze 로 폴백",
+                flush=True,
+            )
+
+        if inst is not None and stage is not None:
+            self._ensure_option_e_freeze(inst, stage)
+            # TIMESAMPLES_REPLAY 모드로 복귀 시 OmniGraph 도 다시 비활성화.
+            self._ensure_option_e_omnigraph_deactivated(prim_path, stage)
+        print(
+            f"{_PRINT_PREFIX} USD_TIMELINE master mode END prim={prim_path} "
+            f"(Option E freeze 재적용 시도)",
+            flush=True,
+        )
 
     # ------------------------------------------------------------------ start
 
@@ -654,6 +1133,9 @@ class RuntimeEvaluator:
                     rt.setup_offscreen_stage(self._resolve_instance_asset_path(inst))
             # Phase B-2-a — freeze sublayer 보장 (1회만 author).
             self._ensure_option_e_freeze(inst, stage)
+            # TIMESAMPLES_REPLAY 핵심 — OmniGraph 가 매 frame xformOp 를 push 하여
+            # reauthor 를 마스킹하지 않도록 instance sublayer 에서 deactivate (1회 author).
+            self._ensure_option_e_omnigraph_deactivated(inst.prim_path, stage)
 
         # 2) playing instance 의 virtual_time 진행. 모든 instance (state 무관) 에 대해
         #    evaluate_and_write 를 호출하여 stopped/paused 도 마지막 vt 의 결과를 유지.
@@ -662,6 +1144,10 @@ class RuntimeEvaluator:
                 self._advance_virtual_time(inst, dt)
             rt = self._runtime_by_path.get(inst.prim_path)
             if rt is None:
+                continue
+            if inst.prim_path in self._master_timeline_prims:
+                # USD_TIMELINE (TBS) — omni.timeline 이 master stage 시간을 진행.
+                # Option E offscreen 평가는 하지 않는다 (reference + OmniGraph 가 전역 시각으로 평가).
                 continue
             if not rt.is_ready:
                 # 첫 frame 한 번만 진단 출력 — setup 이 실패한 이유를 추적.
@@ -688,6 +1174,62 @@ class RuntimeEvaluator:
                     f"offscreen_asset={rt.offscreen_asset_path!r}",
                     flush=True,
                 )
+            # ----------------------------------------------------------------
+            # Option E core fix (2026-05-12) — reauthor 를 stronger sublayer 로.
+            #
+            # `evaluate_and_write` 가 `mirror_attr.Set(val)` 로 default 를 박는데,
+            # 매 frame _on_update 첫 부분에서 EditTarget 이 root layer 로 강제되어
+            # default 가 root layer 에 박힌다. 그러나 LAM session layer 의 strongest
+            # 슬롯에 끼운 `lam_inst_<tag>` sublayer 안에 freeze 용 explicit reference
+            # (`LayerOffset(0, 1e-9)`) 가 박혀 있어 — USD value resolution 상 sublayer
+            # 가 root layer 보다 stronger 라 reference 가 가져오는 timeSamples 가
+            # winner 가 되고 root 의 default 는 마스킹된다 (=viewport 변화 없음).
+            #
+            # 해결: 매 frame `evaluate_and_write` 직전에 master stage 의 EditTarget 을
+            # 해당 인스턴스의 sublayer 로 잠깐 옮긴다. 그러면 default 가 sublayer 의
+            # prim spec 위에 박히고, 같은 sublayer 안에서 reference 는 weaker
+            # composition arc (= referenced layer 의 opinion) 이라 default 가 winner
+            # 가 된다. omni.timeline 진행 / master stage 시각 진행 없이 인스턴스마다
+            # 자기 virtual_time 으로 평가된 값이 독립적으로 viewport 에 반영된다 —
+            # 즉 멀티 USD / 멀티 인스턴스 timeSamples replay 의 핵심 메커니즘.
+            # ----------------------------------------------------------------
+            inst_sublayer = None
+            try:
+                if self._master is not None:
+                    inst_sublayer = self._master.get_inst_sublayer(inst.prim_path)
+                    if inst_sublayer is None:
+                        try:
+                            inst_sublayer = self._master.ensure_inst_sublayer(
+                                inst.prim_path,
+                                tag_hint=inst.instance_id or inst.prim_path,
+                            )
+                        except Exception:
+                            inst_sublayer = None
+            except Exception:
+                inst_sublayer = None
+
+            edit_target_switched = False
+            if (
+                inst_sublayer is not None
+                and stage is not None
+                and _Usd is not None
+            ):
+                try:
+                    stage.SetEditTarget(_Usd.EditTarget(inst_sublayer))
+                    edit_target_switched = True
+                except Exception as exc:
+                    if not getattr(rt, "_diag_edit_target_warned", False):
+                        try:
+                            rt._diag_edit_target_warned = True  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                        print(
+                            f"{_PRINT_PREFIX} OPTION_E EditTarget switch FAIL "
+                            f"prim={inst.prim_path} sublayer="
+                            f"{getattr(inst_sublayer, 'identifier', '?')!r}: {exc}",
+                            flush=True,
+                        )
+
             try:
                 rt.evaluate_and_write(inst.virtual_time)
             except Exception as exc:
@@ -696,6 +1238,12 @@ class RuntimeEvaluator:
                     f"prim={inst.prim_path}: {exc}",
                     flush=True,
                 )
+            finally:
+                if edit_target_switched:
+                    try:
+                        self._master.set_root_layer_edit_target()
+                    except Exception:
+                        pass
 
     def _advance_virtual_time(self, inst: AnimationInstance, dt: float) -> None:
         """Option E 경로용 — 인스턴스의 `virtual_time` 만 1 frame 진행한다.
@@ -757,6 +1305,14 @@ class RuntimeEvaluator:
         호출되지 않음 → 회귀 0.
         """
         if _Sdf is None or stage is None or self._master is None:
+            return
+        # USD_TIMELINE (TBS 스타일) — 전역 타임라인이 reference 를 평가해야 하므로
+        # micro-freeze 를 건너뛴다 (`begin_master_timeline_mode` 가 scale=1 로 author).
+        if inst.prim_path in self._master_timeline_prims:
+            return
+        # Bake 진행 중 — master timeline scrub 이 reference 의 OmniGraph / timeSamples
+        # 를 평가할 수 있도록 freeze 도 보류한다.
+        if inst.prim_path in self._bake_in_progress_prims:
             return
         if inst.prim_path in self._option_e_freeze_seen:
             return

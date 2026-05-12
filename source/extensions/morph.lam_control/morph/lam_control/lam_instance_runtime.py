@@ -49,6 +49,7 @@ TBS 의 default context / stage / sequence runner / port_lot_visibility 등 보�
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .lam_types import AnimationInstance, LAM_FIXED_FPS
@@ -172,12 +173,108 @@ class AnimationInstanceRuntime:
 
     # ------------------------------------------------------------------ setup
 
+    def setup_offscreen_stage_from_layer(
+        self,
+        baked_layer: Any,
+        *,
+        asset_path: str = "",
+    ) -> bool:
+        """**X3 in-memory bake 경로** — anonymous `Sdf.Layer` 를 root 로 offscreen Stage 를 연다.
+
+        ``lam_bake_omnigraph.bake_prim_to_timesamples_async(output_mode='memory')`` 가
+        반환한 anonymous Sdf.Layer 를 그대로 root layer 로 사용해 Stage 를 open. 이렇게
+        하면 디스크에 ``*_baked.usd`` 를 만들지 않고도 baked timeSamples 가 들어간
+        offscreen Stage 로 SetCurrentTimeCode 평가가 가능하다 (휘발성 — Kit 종료 시
+        layer 가 메모리에서 소멸).
+
+        Args:
+            baked_layer: ``pxr.Sdf.Layer``. anonymous 가 일반적이지만 file-backed 도 허용.
+            asset_path: 원본 자산 경로. 로그 / `_offscreen_asset_path` 식별용. 평가에는
+                직접 영향 없음 (root layer 는 `baked_layer`).
+
+        Returns:
+            성공 여부.
+        """
+        if baked_layer is None:
+            print(
+                f"{_PRINT_PREFIX} setup_offscreen_stage_from_layer SKIP baked_layer is None "
+                f"prim={self.prim_path}",
+                flush=True,
+            )
+            return False
+        if _Usd is None:
+            print(
+                f"{_PRINT_PREFIX} setup_offscreen_stage_from_layer SKIP pxr.Usd unavailable "
+                f"prim={self.prim_path}",
+                flush=True,
+            )
+            return False
+
+        # 기존 offscreen stage 가 있으면 먼저 비움 — 같은 layer 라도 reload 일 수 있음.
+        if self._offscreen_stage is not None:
+            self._release_offscreen_stage()
+
+        try:
+            stage = _Usd.Stage.Open(baked_layer)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} setup_offscreen_stage_from_layer FAIL prim={self.prim_path} "
+                f"asset={asset_path} exc={exc}",
+                flush=True,
+            )
+            return False
+        if stage is None:
+            print(
+                f"{_PRINT_PREFIX} setup_offscreen_stage_from_layer returned None "
+                f"prim={self.prim_path} asset={asset_path}",
+                flush=True,
+            )
+            return False
+
+        self._offscreen_stage = stage
+        # 식별자 — 외부 진단 출력에서 baked layer 라는 점을 분명히 한다.
+        try:
+            ident = baked_layer.identifier
+        except Exception:
+            ident = "<unknown>"
+        self._offscreen_asset_path = (
+            asset_path or f"memory-baked:{ident}"
+        )
+        self._invalidate_attr_cache()
+
+        # FPS 30 정규화 — bake 단계에서 이미 30 으로 박지만 안전 차원에서 한 번 더.
+        try:
+            cur_tcps = float(stage.GetTimeCodesPerSecond())
+        except Exception:
+            cur_tcps = -1.0
+        if abs(cur_tcps - LAM_FIXED_FPS) > 1e-6:
+            try:
+                stage.SetTimeCodesPerSecond(LAM_FIXED_FPS)
+                stage.SetFramesPerSecond(LAM_FIXED_FPS)
+            except Exception:
+                pass
+
+        try:
+            start_tc = float(stage.GetStartTimeCode())
+            end_tc = float(stage.GetEndTimeCode())
+        except Exception:
+            start_tc, end_tc = 0.0, 0.0
+        print(
+            f"{_PRINT_PREFIX} setup_offscreen_stage_from_layer OK prim={self.prim_path} "
+            f"layer={ident} timeCode=[{start_tc},{end_tc}]@{LAM_FIXED_FPS}fps "
+            f"src_asset={asset_path or '(unset)'}",
+            flush=True,
+        )
+        return True
+
     def setup_offscreen_stage(self, asset_path: str) -> bool:
         """자산 USD 를 in-memory offscreen Stage 로 open.
 
         반환: True 면 정상, False 면 USD 미가용 / 파일 미존재 / open 실패 등.
         - 본 호출은 master stage 를 일절 건드리지 않는다.
         - 이미 다른 offscreen stage 가 열려 있으면 먼저 dispose 후 재로드.
+        - **In-memory bake (X3)** 사용 시에는 본 메서드 대신
+          `setup_offscreen_stage_from_layer` 를 호출한다.
         """
         if not asset_path:
             print(
@@ -861,6 +958,43 @@ class AnimationInstanceRuntime:
             f"{_PRINT_PREFIX} cache built prim={self.prim_path} attrs={len(self._attr_cache)}",
             flush=True,
         )
+
+        if self._attr_cache:
+            try:
+                by_prim: Dict[str, int] = defaultdict(int)
+                tmn: Optional[float] = None
+                tmx: Optional[float] = None
+                for ent in self._attr_cache:
+                    try:
+                        pp = str(ent.attr.GetPrim().GetPath())
+                    except Exception:
+                        continue
+                    by_prim[pp] += 1
+                    try:
+                        tmn = (
+                            ent.min_tc
+                            if tmn is None or ent.min_tc < tmn
+                            else tmn
+                        )
+                        tmx = (
+                            ent.max_tc
+                            if tmx is None or ent.max_tc > tmx
+                            else tmx
+                        )
+                    except Exception:
+                        pass
+                top = sorted(by_prim.items(), key=lambda kv: -kv[1])[:20]
+                print(
+                    f"{_PRINT_PREFIX} TS replay path coverage prim={self.prim_path} "
+                    f"offscreen_prims_touched={len(by_prim)} attrs_cached={len(self._attr_cache)} "
+                    f"union_tc=[{tmn},{tmx}] top_prims_by_attr_count={top!r}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} TS replay coverage log failed: {exc}",
+                    flush=True,
+                )
 
         # cache 가 0 이면 자산의 어디에 timeSamples 가 있는지를 추가 dump — 다음 patch 의
         # 매핑 정책을 결정하기 위한 핵심 진단.

@@ -1,7 +1,15 @@
 """LAM 시퀀스 엔진.
 
-step 종류: USD_TIMELINE / MOVE / ROTATE / DELAY (TBS 와 동일 의미·동일 JSON schema).
-TBS 측 `sequence_engine.py` 와 코드를 공유하지 않는다(REQ-002 0줄 변경 원칙).
+step 종류: USD_TIMELINE / TIMESAMPLES_REPLAY / MOVE / ROTATE / DELAY.
+
+- `TIMESAMPLES_REPLAY` = **실무용** — Option E (offscreen stage + master mirror default write).
+  멀티 인스턴스 독립 재생.
+- `USD_TIMELINE` = **테스트용 (TBS 스타일)** — `omni.timeline` 으로 master stage 의 전역
+  시각을 진행시켜 reference + OmniGraph 가 그대로 평가되도록 한다. 해당 step 동안만
+  해당 인스턴스의 Option E micro-freeze 를 해제한다(`RuntimeEvaluator.begin_master_timeline_mode`).
+  멀티 인스턴스 동시에 서로 다른 전역 시각을 가질 수는 없다(의도된 한계).
+- `USD_TIMELINE` + `loop=True` 는 아직 master omni.timeline 루프를 지원하지 않으므로
+  Option E 로 폴백한다(로그 안내).
 
 【 호출 모델 】
 - `LamSequenceRunner.run(steps)` 은 동기 차단형. background thread 에서 호출 권장
@@ -51,6 +59,26 @@ from . import lam_rotate_animation as _lrx_preload  # type: ignore  # noqa: E402
 
 
 _PRINT_PREFIX = "[LAM/SEQ]"
+
+
+# step kind 상수 — 추후 dispatch / UI 가 공통으로 참조.
+STEP_KIND_USD_TIMELINE: str = "USD_TIMELINE"
+STEP_KIND_TIMESAMPLES_REPLAY: str = "TIMESAMPLES_REPLAY"
+STEP_KIND_MOVE: str = "MOVE"
+STEP_KIND_ROTATE: str = "ROTATE"
+STEP_KIND_DELAY: str = "DELAY"
+
+# 두 step kind 모두 "ref 로 인스턴스를 지정하고 Option E 로 재생" 하는 의미를 가짐.
+# 현재는 동일 핸들러를 공유 — 추후 USD_TIMELINE 의 TBS 방식 재구현 시 분기 필요.
+_INSTANCE_PLAYBACK_KINDS = frozenset({
+    STEP_KIND_USD_TIMELINE,
+    STEP_KIND_TIMESAMPLES_REPLAY,
+})
+
+
+def step_kind_is_instance_playback(kind: str) -> bool:
+    """`ref` 기반 인스턴스 재생 step 인가 (USD_TIMELINE / TIMESAMPLES_REPLAY)."""
+    return (kind or "").upper() in _INSTANCE_PLAYBACK_KINDS
 
 
 # --------------------------------------------------------------------- helper
@@ -175,7 +203,10 @@ def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> boo
 
 
 def _collect_prim_paths_for_reset(steps: List[dict]) -> List[str]:
-    """시퀀스에 등장하는 prim — MOVE/ROTATE 의 prim 필드 + USD_TIMELINE 의 ref.prim_path."""
+    """시퀀스에 등장하는 prim.
+
+    MOVE/ROTATE 의 prim 필드 + (USD_TIMELINE / TIMESAMPLES_REPLAY) 의 ref.prim_path.
+    """
     out: List[str] = []
     seen: set[str] = set()
     st = _stage()
@@ -183,12 +214,12 @@ def _collect_prim_paths_for_reset(steps: List[dict]) -> List[str]:
         if not step:
             continue
         t = str(step.get("type") or "").upper()
-        if t in ("MOVE", "ROTATE"):
+        if t in (STEP_KIND_MOVE, STEP_KIND_ROTATE):
             for p in _resolve_prim_paths(st, str(step.get("prim") or "")):
                 if p not in seen:
                     seen.add(p)
                     out.append(p)
-        elif t == "USD_TIMELINE":
+        elif step_kind_is_instance_playback(t):
             ref = StepRef.from_dict(step.get("ref"))
             pp = (ref.prim_path or "").strip()
             if pp.startswith("/") and pp not in seen:
@@ -531,13 +562,14 @@ class LamSequenceRunner:
         )
         duration = 0.0
         try:
-            if t == "USD_TIMELINE":
+            if step_kind_is_instance_playback(t):
+                # USD_TIMELINE = master omni.timeline (테스트) / TIMESAMPLES_REPLAY = Option E (실무).
                 duration = self._start_usd_timeline(idx, step, speed_scale, reset_each_start)
-            elif t == "MOVE":
+            elif t == STEP_KIND_MOVE:
                 duration = self._start_move(idx, step, speed_scale)
-            elif t == "ROTATE":
+            elif t == STEP_KIND_ROTATE:
                 duration = self._start_rotate(idx, step, speed_scale)
-            elif t == "DELAY":
+            elif t == STEP_KIND_DELAY:
                 # DELAY 는 caller 에서 wait 하므로 여기서는 sleep 안 한다.
                 sp = float(max(0.01, speed_scale or 1.0))
                 duration = float(step.get("duration", 1.0) or 1.0) / sp
@@ -551,7 +583,7 @@ class LamSequenceRunner:
                 self._schedule_unhide_after(hidden_paths, duration)
         return duration
 
-    # -------------------------------------------------------- USD_TIMELINE
+    # -------------------------------------------------------- USD_TIMELINE / TIMESAMPLES_REPLAY
 
     def _start_usd_timeline(
         self,
@@ -560,6 +592,9 @@ class LamSequenceRunner:
         speed_scale: float,
         reset_each_start: bool,
     ) -> float:
+        # 로그 출력용 — 두 kind 가 같은 핸들러를 공유하므로 log line 에 실제 step type 을 출력.
+        step_kind_label = (str(step.get("type") or "") or STEP_KIND_USD_TIMELINE).upper()
+
         ref = StepRef.from_dict(step.get("ref"))
         play = step.get("play") or {}
 
@@ -582,7 +617,7 @@ class LamSequenceRunner:
 
         if result.status == RESOLVE_MISSING or result.instance is None:
             print(
-                f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE MISSING ref={ref.to_dict()}",
+                f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} MISSING ref={ref.to_dict()}",
                 flush=True,
             )
             return 0.0
@@ -595,7 +630,7 @@ class LamSequenceRunner:
         try:
             inst_dbg = result.instance
             print(
-                f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE inst prim={inst_dbg.prim_path} "
+                f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} inst prim={inst_dbg.prim_path} "
                 f"asset_time=[{inst_dbg.asset_start_time},{inst_dbg.asset_end_time}]"
                 f"@{inst_dbg.asset_tps}fps "
                 f"current_state={inst_dbg.state} virtual_time={inst_dbg.virtual_time:.3f}s "
@@ -657,6 +692,121 @@ class LamSequenceRunner:
             range_start = float(_val("range_start", _val("ratio_start", 0.0)) or 0.0)
             range_end = float(_val("range_end", _val("ratio_end", 0.0)) or 0.0)
 
+        est = self._estimate_usd_timeline_duration(
+            result.instance,
+            range_mode=range_mode,
+            range_start=range_start,
+            range_end=range_end,
+            combined_speed=combined_speed,
+        )
+
+        # ------------------------------------------------------------------ USD_TIMELINE (TBS) — omni.timeline + master stage 전역 시각
+        if step_kind_label == STEP_KIND_USD_TIMELINE and not loop:
+            prim_path = result.instance.prim_path
+            if range_mode == "frames":
+                play_sf, play_ef = float(range_start), float(range_end)
+            else:
+                play_sf = float(result.instance.asset_start_time)
+                play_ef = float(result.instance.asset_end_time)
+            if play_ef <= play_sf:
+                print(
+                    f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE skip — invalid frame range "
+                    f"[{play_sf},{play_ef}]",
+                    flush=True,
+                )
+                return 0.0
+
+            snap_holder: Dict[str, Any] = {}
+
+            def _snap_tl() -> None:
+                from .lam_master_timeline_play import snapshot_timeline
+
+                snap_holder["v"] = snapshot_timeline()
+
+            _dispatch_main_wait(_snap_tl, timeout=5.0)
+            snap = snap_holder.get("v") or (None, 0.0, False, None)
+            tl_snap, saved_time, was_playing, prev_speed = snap
+
+            def _tl_begin() -> None:
+                ok_b = self._scheduler.begin_master_timeline_mode(prim_path)
+                from .lam_master_timeline_play import begin_play_frame_range
+
+                ok_p = begin_play_frame_range(
+                    start_frame=play_sf,
+                    end_frame=play_ef,
+                    speed_scale=combined_speed,
+                    fps=LAM_FIXED_FPS,
+                )
+                print(
+                    f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE master-timeline "
+                    f"prim={prim_path} frames=[{play_sf},{play_ef}] "
+                    f"begin_ok={ok_b} play_ok={ok_p}",
+                    flush=True,
+                )
+
+            try:
+                _dispatch_main_wait(_tl_begin, timeout=15.0)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE begin failed: {exc}",
+                    flush=True,
+                )
+                return 0.0
+
+            self._sleep(est, allow_stop=True)
+
+            # 사용자 요청 (2026-05-12) — USD_TIMELINE step 이 끝나면 viewport 가 끝
+            # 프레임에 머무르도록 한다. 즉:
+            #   (1) omni.timeline 을 끝 시간 (= play_ef/fps) 에서 pause + 그 위치 유지
+            #       (saved_time 으로 0 초 회귀 X).
+            #   (2) Option E freeze 를 LayerOffset(play_ef, 1e-9) 로 author —
+            #       이후 timeline 이 슬라이더로 0 으로 돌아가더라도 reference 가
+            #       끝 프레임 시점의 값을 평가해 viewport 가 그 자세로 멈춘다.
+            end_time_sec = float(play_ef) / float(LAM_FIXED_FPS)
+            end_tc = float(play_ef)
+
+            def _tl_end() -> None:
+                from .lam_master_timeline_play import (
+                    end_play_pause,
+                    restore_timeline_after_usd_timeline,
+                )
+
+                end_play_pause()
+                self._scheduler.end_master_timeline_mode(
+                    prim_path, freeze_at_tc=end_tc
+                )
+                # saved_time 이 아니라 끝 시간으로 복구 → 사용자가 step 종료 후
+                # timeline 슬라이더에서 그 위치를 그대로 본다.
+                restore_timeline_after_usd_timeline(
+                    tl_snap, end_time_sec, False, prev_speed
+                )
+
+            try:
+                _dispatch_main_wait(_tl_end, timeout=15.0)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE end failed: {exc}",
+                    flush=True,
+                )
+
+            print(
+                f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE matched_by={result.matched_by} "
+                f"prim={prim_path} range=frames[{play_sf},{play_ef}] "
+                f"sp={combined_speed} loop={loop} mode=MASTER_TIMELINE est_duration={est:.3f}s "
+                f"asset_time=[{result.instance.asset_start_time},{result.instance.asset_end_time}]"
+                f"@{LAM_FIXED_FPS}fps(forced)",
+                flush=True,
+            )
+            return 0.0
+
+        if step_kind_label == STEP_KIND_USD_TIMELINE and loop:
+            print(
+                f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE loop=True — Option E 로 폴백 "
+                f"(master omni.timeline 루프는 미구현)",
+                flush=True,
+            )
+
+        # ------------------------------------------------------------------ TIMESAMPLES_REPLAY (또는 USD_TIMELINE+loop) — Option E
         # scheduler.start 도 main thread 에서 실행 (USD attribute 평가 lock 보호).
         start_ok_holder: Dict[str, bool] = {"ok": False}
 
@@ -679,15 +829,8 @@ class LamSequenceRunner:
             print(f"{_PRINT_PREFIX} step[{idx}] scheduler.start failed: {exc}", flush=True)
         ok = start_ok_holder["ok"]
 
-        est = self._estimate_usd_timeline_duration(
-            result.instance,
-            range_mode=range_mode,
-            range_start=range_start,
-            range_end=range_end,
-            combined_speed=combined_speed,
-        )
         print(
-            f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE matched_by={result.matched_by} "
+            f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} matched_by={result.matched_by} "
             f"prim={result.instance.prim_path} range={range_mode}[{range_start},{range_end}] "
             f"sp={combined_speed} loop={loop} ok={ok} est_duration={est:.3f}s "
             f"asset_time=[{result.instance.asset_start_time},{result.instance.asset_end_time}]"

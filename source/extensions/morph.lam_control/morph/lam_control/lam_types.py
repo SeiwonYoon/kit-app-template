@@ -9,7 +9,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Tuple
+from typing import Dict, Tuple
 
 
 # ---------------------------------------------------------------- 전역 정책 상수
@@ -36,6 +36,110 @@ def utc_now_iso() -> str:
 
 # REQ-006 Q-2 권장값. range_mode 의 가능한 값은 {"full", "frames", "ratio"}.
 DEFAULT_RANGE: Tuple[str, float, float] = ("full", 0.0, 0.0)
+
+
+# ----------------------------------------------------------------- 자산 종류 분류
+# 사용자 요구(2026-05-11 후반): add_usd 시 자산을 자동 스캔해 다음 중 하나로 분류.
+# `[Bake]` 의 조건부 분기 와 `TIMESAMPLES_REPLAY` step 의 동작 결정에 사용.
+#
+# 분류 규칙 (`lam_asset_diagnostics.scan_asset_kind` 참고):
+#   - timeSamples 가 박힌 attribute 수를 종류별로 카운트
+#       (xformOp:* / SkelAnimation / Mesh points / 기타)
+#   - OmniGraph(PushGraph/OmniGraph*) prim 개수 카운트
+#   - 두 카운트 조합으로 최종 kind 결정.
+
+ASSET_KIND_UNKNOWN: str = "UNKNOWN"            # 스캔 실패 / 미수행
+ASSET_KIND_STATIC: str = "STATIC"              # 시간 데이터 0
+ASSET_KIND_TIMESAMPLES_XFORM: str = "TIMESAMPLES_XFORM"  # xformOp:* timeSamples 만 또는 우세
+ASSET_KIND_TIMESAMPLES_SKEL: str = "TIMESAMPLES_SKEL"    # SkelAnimation.* timeSamples 우세
+ASSET_KIND_TIMESAMPLES_MESH: str = "TIMESAMPLES_MESH"    # Mesh.points 등 vertex anim 우세
+ASSET_KIND_OMNIGRAPH: str = "OMNIGRAPH"        # PushGraph 만 있고 timeSamples 없음
+ASSET_KIND_MIXED: str = "MIXED"                # OmniGraph + timeSamples 둘 다 있음
+
+# Bake 가 필요한가? — UI 의 [Bake] 조건부 분기 / Sequence Editor 의 자동 안내에 사용.
+_KINDS_BAKE_REQUIRED = frozenset({ASSET_KIND_OMNIGRAPH, ASSET_KIND_MIXED})
+_KINDS_BAKE_OPTIONAL = frozenset({ASSET_KIND_TIMESAMPLES_SKEL, ASSET_KIND_TIMESAMPLES_MESH})
+_KINDS_BAKE_NOT_NEEDED = frozenset({ASSET_KIND_TIMESAMPLES_XFORM, ASSET_KIND_STATIC})
+
+
+def asset_kind_needs_bake(kind: str) -> bool:
+    """해당 kind 의 자산이 멀티 인스턴스 독립 재생을 위해 bake 가 필수인가."""
+    return kind in _KINDS_BAKE_REQUIRED
+
+
+def asset_kind_bake_optional(kind: str) -> bool:
+    """bake 가 필수는 아니지만 별도 평가 경로(Skel/Mesh) 검증 필요한 kind."""
+    return kind in _KINDS_BAKE_OPTIONAL
+
+
+def asset_kind_bake_unnecessary(kind: str) -> bool:
+    """bake 가 의미 없는 kind (이미 native timeSamples 가 있음 / 시간 데이터 없음)."""
+    return kind in _KINDS_BAKE_NOT_NEEDED
+
+
+@dataclass
+class AssetDiag:
+    """`lam_asset_diagnostics.scan_asset_kind` 가 채우는 진단 결과.
+
+    `AnimationInstance.asset_diag` 에 저장되어 UI / Bake 분기 / 사용자 로그에 사용.
+
+    카운트는 자산 stage 의 모든 prim 을 traverse 하며 attribute 별로 누적.
+    """
+
+    # 종류별 timeSamples 보유 attribute 수.
+    n_xform_op_ts: int = 0                    # xformOp:* (translate/rotate/scale/orient/transform/...)
+    n_skel_anim_ts: int = 0                   # SkelAnimation 의 translations/rotations/scales/blendShapeWeights
+    n_mesh_points_ts: int = 0                 # Mesh 의 points/normals/extent/velocities
+    n_visibility_ts: int = 0                  # visibility (xformOp 와 함께 다니지만 분리 카운트)
+    n_other_ts: int = 0                       # 위 분류 외 timeSamples (primvars:* 등)
+
+    # OmniGraph 류 prim 수 (PushGraph / OmniGraph* / OG*).
+    n_omnigraph_prims: int = 0
+
+    # 자산 stage 정보 (참고용).
+    asset_default_prim_path: str = ""
+    asset_up_axis: str = ""
+    asset_start_tc: float = 0.0
+    asset_end_tc: float = 0.0
+    asset_native_tps: float = 0.0             # 자산이 선언한 timeCodesPerSecond (LAM 30 으로 정규화 전).
+
+    # OmniGraph prim 의 path 목록 (best-effort, baked.usd 의 비활성 대상 + 진단 출력용).
+    omnigraph_prim_paths: Tuple[str, ...] = field(default_factory=tuple)
+
+    def total_ts_attrs(self) -> int:
+        return (
+            self.n_xform_op_ts
+            + self.n_skel_anim_ts
+            + self.n_mesh_points_ts
+            + self.n_visibility_ts
+            + self.n_other_ts
+        )
+
+    def to_log_line(self) -> str:
+        """사용자 콘솔에 한 줄로 표시되는 요약 (add_usd 직후 출력)."""
+        return (
+            f"xform={self.n_xform_op_ts} skel={self.n_skel_anim_ts} "
+            f"mesh={self.n_mesh_points_ts} vis={self.n_visibility_ts} "
+            f"other={self.n_other_ts} | omnigraph_prims={self.n_omnigraph_prims} "
+            f"| range=[{self.asset_start_tc},{self.asset_end_tc}]@{self.asset_native_tps}fps "
+            f"up={self.asset_up_axis}"
+        )
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "n_xform_op_ts": int(self.n_xform_op_ts),
+            "n_skel_anim_ts": int(self.n_skel_anim_ts),
+            "n_mesh_points_ts": int(self.n_mesh_points_ts),
+            "n_visibility_ts": int(self.n_visibility_ts),
+            "n_other_ts": int(self.n_other_ts),
+            "n_omnigraph_prims": int(self.n_omnigraph_prims),
+            "asset_default_prim_path": str(self.asset_default_prim_path),
+            "asset_up_axis": str(self.asset_up_axis),
+            "asset_start_tc": float(self.asset_start_tc),
+            "asset_end_tc": float(self.asset_end_tc),
+            "asset_native_tps": float(self.asset_native_tps),
+            "omnigraph_prim_paths": list(self.omnigraph_prim_paths),
+        }
 
 
 @dataclass
@@ -68,6 +172,20 @@ class AnimationInstance:
     asset_start_time: float = 0.0
     asset_end_time: float = 0.0
     asset_tps: float = LAM_FIXED_FPS
+
+    # 자산 종류 자동 분류 결과 (W1 — 2026-05-11 후반). `add_usd` 가 자산을 스캔해 채움.
+    #   - kind: ASSET_KIND_* 중 하나
+    #   - diag: 종류별 timeSamples 카운트 + OmniGraph prim 수 등 상세
+    # Discovery / JSON load 경로로 만들어진 인스턴스는 처음에는 UNKNOWN 으로 두고,
+    # 필요 시 lam_asset_diagnostics.refresh_instance_kind() 로 채울 수 있다.
+    asset_kind: str = ASSET_KIND_UNKNOWN
+    asset_diag: AssetDiag = field(default_factory=lambda: AssetDiag())
+
+    # In-memory bake 상태 (W5 — 2026-05-12 후반).
+    # `RuntimeEvaluator.attach_memory_baked_layer` 가 성공하면 True 로 박힌다. UI 가 이
+    # 값을 보고 [Bake] 버튼 라벨/색을 [BAKED ✓ / Re-bake] 로 전환한다. Kit 종료 시 in-memory
+    # baked layer 가 휘발 → 다음 세션은 다시 False 로 시작 (D13 정책).
+    baked: bool = False
 
     def __post_init__(self) -> None:
         # FPS 30 고정 정책 — 입력값이 어떤 값이든 항상 LAM_FIXED_FPS 로 정규화.

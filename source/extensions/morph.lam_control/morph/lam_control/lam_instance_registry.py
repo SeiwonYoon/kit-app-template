@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 import threading
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .lam_types import AnimationInstance, make_guid
 
@@ -99,8 +99,17 @@ class AnimationInstanceRegistry:
         asset_start_time: float = 0.0,
         asset_end_time: float = 0.0,
         asset_tps: float = 30.0,
+        asset_kind: Optional[str] = None,
+        asset_diag: Optional[Any] = None,
     ) -> AnimationInstance:
-        """`prim_path` 를 단 1개만 가지는 새 인스턴스 등록."""
+        """`prim_path` 를 단 1개만 가지는 새 인스턴스 등록.
+
+        Q2 — 2026-05-12: `asset_kind` / `asset_diag` 가 주어지면 `_notify()` 호출 *전*에
+        인스턴스에 박는다. 이 두 값을 register() 밖에서 박으면 listener (예: lam_window
+        `_refresh_instances`) 가 인스턴스 생성 즉시 동기 호출되어 UI 가 `UNKNOWN` 으로
+        먼저 렌더되는 회귀가 발생한다. 호출자가 분류 결과를 이미 알고 있다면 반드시
+        여기로 함께 넘겨야 한다.
+        """
         if not prim_path:
             raise ValueError("prim_path is required")
 
@@ -119,13 +128,32 @@ class AnimationInstanceRegistry:
             asset_tps=asset_tps,
         )
 
+        # 분류 결과를 _notify 전에 먼저 박는다 (Q2). 실패해도 등록 자체는 계속.
+        if asset_kind is not None:
+            try:
+                inst.asset_kind = asset_kind
+            except Exception as _ak_exc:
+                print(
+                    f"{_PRINT_PREFIX} WARN: asset_kind 박기 실패 prim={prim_path} exc={_ak_exc}",
+                    flush=True,
+                )
+        if asset_diag is not None:
+            try:
+                inst.asset_diag = asset_diag
+            except Exception as _ad_exc:
+                print(
+                    f"{_PRINT_PREFIX} WARN: asset_diag 박기 실패 prim={prim_path} exc={_ad_exc}",
+                    flush=True,
+                )
+
         with self._lock:
             if prim_path in self._by_prim:
                 raise ValueError(f"prim_path already registered: {prim_path}")
             self._by_prim[prim_path] = inst
 
         print(
-            f"{_PRINT_PREFIX} register prim_path={prim_path} id={final_id} guid={final_guid[:8]}…",
+            f"{_PRINT_PREFIX} register prim_path={prim_path} id={final_id} guid={final_guid[:8]}… "
+            f"asset_kind={inst.asset_kind!r}",
             flush=True,
         )
         self._notify()

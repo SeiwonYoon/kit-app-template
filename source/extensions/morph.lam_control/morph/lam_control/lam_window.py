@@ -229,10 +229,23 @@ class LamWindow:
                 cf_inst = ui.CollapsableFrame("등록된 인스턴스 (어느 시작 방법이든 여기 모임)", collapsed=False, height=0)
                 with cf_inst:
                     with ui.VStack(spacing=2):
-                        ui.Label(
-                            "prim_path / instance_id / source_asset",
-                            height=18,
-                        )
+                        # 헤더 줄 — 컬럼 라벨 + 현재 합성 상태를 다른 이름으로 저장 버튼.
+                        with ui.HStack(spacing=4, height=20):
+                            ui.Label(
+                                "prim_path / instance_id / kind / source_asset",
+                                height=18,
+                            )
+                            ui.Spacer()
+                            ui.Button(
+                                "Save As…",
+                                width=80,
+                                height=20,
+                                tooltip=(
+                                    "현재 등록된 모든 인스턴스를 포함한 합성 stage 를 다른 이름의 USD 파일로 저장합니다.\n"
+                                    "(상단 '② 기존 합성 USD 열기' 의 [Save Master As…] 와 동일 기능)"
+                                ),
+                                clicked_fn=self._on_browse_save_master,
+                            )
                         self._instances_frame = ui.ScrollingFrame(height=160)
                         with self._instances_frame:
                             self._instances_inner = ui.VStack(spacing=2)
@@ -689,6 +702,34 @@ class LamWindow:
             return
         if self._instances_inner is None:
             return
+        # 자산 종류 helper — `_on_bake_instance` 의 분기 규칙과 동일하게 적용해
+        # UI 와 동작이 어긋나지 않도록 한다.
+        try:
+            from .lam_asset_diagnostics import kind_to_user_label
+            from .lam_types import (
+                ASSET_KIND_OMNIGRAPH,
+                ASSET_KIND_MIXED,
+                ASSET_KIND_UNKNOWN,
+                asset_kind_bake_optional,
+                asset_kind_bake_unnecessary,
+                asset_kind_needs_bake,
+            )
+        except Exception:
+            # types 모듈을 못 불러오면 기존 동작(모든 인스턴스에 Bake 노출) 으로 폴백.
+            kind_to_user_label = None  # type: ignore
+            ASSET_KIND_OMNIGRAPH = "OMNIGRAPH"  # type: ignore
+            ASSET_KIND_MIXED = "MIXED"  # type: ignore
+            ASSET_KIND_UNKNOWN = "UNKNOWN"  # type: ignore
+
+            def asset_kind_bake_optional(k):  # type: ignore
+                return False
+
+            def asset_kind_bake_unnecessary(k):  # type: ignore
+                return False
+
+            def asset_kind_needs_bake(k):  # type: ignore
+                return True
+
         self._instances_inner.clear()
         with self._instances_inner:
             instances = self._registry.all_instances()
@@ -696,21 +737,78 @@ class LamWindow:
                 ui.Label("(아직 등록된 인스턴스가 없습니다 — 위에서 [+ USD 추가] 또는 [Open Master…])")
                 return
             for inst in instances:
+                kind = (getattr(inst, "asset_kind", "") or ASSET_KIND_UNKNOWN).strip() or ASSET_KIND_UNKNOWN
+                is_baked = bool(getattr(inst, "baked", False))
+                # 색상 — bake 필수=주황, optional=노랑, 불필요=초록, 알수없음=회색.
+                if asset_kind_bake_unnecessary(kind):
+                    kind_color = 0xFF6CCB6C  # green
+                    bake_mode = "hidden"   # 버튼 자체 미노출
+                elif asset_kind_bake_optional(kind):
+                    kind_color = 0xFFE0B040  # yellow
+                    bake_mode = "optional"
+                elif asset_kind_needs_bake(kind):
+                    kind_color = 0xFFE08040  # orange
+                    bake_mode = "required"
+                else:  # UNKNOWN / 미분류
+                    kind_color = 0xFF9AA4B2  # gray
+                    bake_mode = "unknown"
+                # 사용자 라벨 — diagnostic helper 가 있으면 풀텍스트, 없으면 kind 자체.
+                kind_label = (
+                    kind_to_user_label(kind) if callable(kind_to_user_label) else kind
+                )
+                # Q1 — 2026-05-12: bake 완료 표시. 라벨에 BAKED 뱃지를 덧붙이고, 색상을
+                # 초록으로 덮어쓴다. in-memory baked 는 Kit 재시작 시 휘발되므로 다음
+                # 세션에서는 자동으로 원래 라벨/색으로 복귀한다 (D13).
+                if is_baked:
+                    kind_label = f"{kind_label} · BAKED ✓"
+                    kind_color = 0xFF6CCB6C  # green
                 with ui.HStack(spacing=4, height=22):
-                    ui.Label(inst.prim_path, width=200)
-                    ui.Label(inst.instance_id, width=140)
-                    ui.Label(inst.source_asset)
-                    ui.Spacer()
-                    ui.Button(
-                        "Bake",
-                        width=70,
-                        clicked_fn=(
-                            lambda p=inst.prim_path: self._on_bake_instance(p)
+                    ui.Label(inst.prim_path, width=180)
+                    ui.Label(inst.instance_id, width=120)
+                    ui.Label(
+                        kind_label,
+                        width=200,
+                        style={"color": kind_color},
+                        tooltip=(
+                            "자산 자동 분류 결과. "
+                            "OMNIGRAPH/MIXED 는 [Bake] 필수, TIMESAMPLES_* 는 자산이 직접 timeSamples 를 가짐, "
+                            "STATIC 은 시간 데이터 없음. add_usd 직후 scan_asset_kind 가 채움. "
+                            "'BAKED ✓' 뱃지는 이번 세션에서 [Bake] 가 성공해 in-memory baked layer 가 attach 된 상태."
                         ),
                     )
+                    ui.Label(inst.source_asset)
+                    ui.Spacer()
+                    if bake_mode == "hidden":
+                        # 자리만 유지 — 다른 row 와 우측 정렬이 어긋나지 않게 같은 폭의 placeholder.
+                        ui.Label("(bake 불필요)", width=90, style={"color": 0xFF6CCB6C})
+                    else:
+                        if is_baked:
+                            btn_label = "Re-bake"
+                            btn_tooltip = (
+                                "이미 in-memory baked layer 가 attach 된 상태. 다시 누르면 새 layer 로 교체합니다."
+                            )
+                        else:
+                            btn_label = (
+                                "Bake" if bake_mode == "required"
+                                else "Bake (선택)" if bake_mode == "optional"
+                                else "Bake"  # unknown
+                            )
+                            btn_tooltip = {
+                                "required": "OmniGraph 자산 — 멀티 인스턴스 독립 재생을 위해 in-memory 로 bake 합니다.",
+                                "optional": "이 자산은 자체 timeSamples 를 가지지만, Skel/Mesh 평가 경로 검증을 위해 bake 가능.",
+                                "unknown": "자산 종류 미분류 — 안전하게 사용자가 결정. [Bake] 누르면 OmniGraph 자산처럼 처리.",
+                            }.get(bake_mode, "")
+                        ui.Button(
+                            btn_label,
+                            width=90,
+                            tooltip=btn_tooltip,
+                            clicked_fn=(
+                                lambda p=inst.prim_path: self._on_bake_instance(p)
+                            ),
+                        )
                     ui.Button(
                         "Remove",
-                        width=80,
+                        width=70,
                         clicked_fn=lambda p=inst.prim_path: self._on_remove(p),
                     )
 
@@ -777,18 +875,22 @@ class LamWindow:
         self._log(f"모두 초기화 OK: removed={len(instances) - fail}, fail={fail}")
 
     def _on_bake_instance(self, prim_path: str) -> None:
-        """선택한 인스턴스의 자산을 OmniGraph 평가 결과로 timeSamples bake.
+        """선택한 인스턴스의 자산을 OmniGraph 평가 결과로 timeSamples bake (in-memory).
 
-        흐름:
+        흐름 (X3 정책 — 2026-05-12):
             1) 인스턴스의 절대 자산 경로 해석 (registry.source_asset).
-            2) `lam_bake_omnigraph.bake_asset_to_timesamples_async` 를 별도 태스크로 시작.
+            2) `lam_bake_omnigraph.bake_prim_to_timesamples_async(output_mode='memory')` 를
+               별도 태스크로 시작. 디스크에 `*_baked.usd` 를 생성하지 않는다.
             3) 진행률 콜백 → log 라벨 갱신.
             4) 완료 시:
-                - 성공: 동일 prim_path 의 인스턴스를 baked.usd 로 교체(unload 후 add_usd).
+                - 성공: ``RuntimeEvaluator.attach_memory_baked_layer`` 로 동일 prim_path 의
+                  runtime 의 offscreen Stage 를 anonymous baked layer 로 재구성. 인스턴스
+                  교체 (remove_usd / add_usd) 는 하지 않는다. 사용자 viewport 의 master
+                  reference 는 원본 자산 그대로 유지.
                 - 실패: 에러 로그.
 
-        본 호출은 **Kit default context 를 건드리지 않는다** — bake 모듈이 자체적으로
-        별도 USD context 를 생성하여 자산을 그 안에서 평가/캡처한다.
+        본 호출은 **Kit default context 의 OmniGraph 평가를 사용해 capture** 하지만,
+        결과는 메모리 layer 에만 저장되어 master stage 는 직접 건드리지 않는다.
 
         Args:
             prim_path: 인스턴스 prim_path (예: `/World/aaa`).
@@ -805,6 +907,38 @@ class LamWindow:
         if inst is None:
             self._log(f"Bake 실패 — 인스턴스를 찾을 수 없음: {prim_path}")
             return
+
+        # W2 — 자산 종류별 조건부 분기 (사용자 요구 2026-05-11 후반):
+        # add_usd 직후 `scan_asset_kind` 가 채워둔 `inst.asset_kind` 를 보고 결정.
+        # - TIMESAMPLES_XFORM / STATIC: bake 가 의미 없으므로 명시 안내 후 종료.
+        # - TIMESAMPLES_SKEL / TIMESAMPLES_MESH: bake 진행 (W3 의 자동 탐지가 SkelAnim/
+        #   Mesh-deform attribute 도 capture). 단 시각 결과 호환성은 별도 검증 필요.
+        # - OMNIGRAPH / MIXED: bake 필수 — 기존 흐름 그대로.
+        # - UNKNOWN: 진단 실패. 기존 흐름으로 best-effort.
+        from .lam_asset_diagnostics import kind_to_user_label
+        from .lam_types import (
+            asset_kind_bake_optional,
+            asset_kind_bake_unnecessary,
+        )
+
+        kind = (getattr(inst, "asset_kind", "") or "").strip()
+        if asset_kind_bake_unnecessary(kind):
+            self._log(
+                f"Bake 생략 — kind={kind_to_user_label(kind)}\n"
+                f"   이 자산은 이미 평가 가능한 timeSamples 를 가지고 있어 Bake 가 필요 없습니다.\n"
+                f"   시퀀스 편집기에서 TIMESAMPLES_REPLAY step (인스턴스 독립 평가) 으로 바로 재생하세요.\n"
+                f"   (USD_TIMELINE step 도 현 단계에서는 동일 동작이지만 추후 TBS 방식으로 재구현될 예정.)\n"
+                f"   prim={prim_path} src={inst.source_asset}"
+            )
+            return
+        if asset_kind_bake_optional(kind):
+            self._log(
+                f"Bake 진행 (호환 검증 필요) — kind={kind_to_user_label(kind)}\n"
+                f"   주의: SkelAnim / Mesh-deform 자산은 in-memory baked layer 가 만들어져도 master "
+                f"mirror 평가 경로 호환성을 별도 검증해야 합니다."
+            )
+        else:
+            self._log(f"Bake 시작 — kind={kind_to_user_label(kind) or 'UNKNOWN'}")
 
         # source_asset 절대 경로 해석.
         raw = (getattr(inst, "source_asset", "") or "").strip()
@@ -829,25 +963,12 @@ class LamWindow:
 
         from .lam_bake_omnigraph import (
             bake_prim_to_timesamples_async,
-            make_default_baked_path,
             read_bake_speed_env,
         )
 
-        # 이미 인스턴스의 source 가 `*_baked.usd` 라면 더 bake 할 필요 없음. 사용자가 또
-        # [Bake] 를 눌렀다면 단순 안내 후 종료.
-        if abs_path.lower().endswith("_baked.usd"):
-            self._log(
-                f"Bake 생략 — 이 인스턴스는 이미 baked USD 입니다: {abs_path}\n"
-                f"   원본에서 다시 굽고 싶다면 [+ USD 추가] 로 원본 USD 를 다시 등록 후 "
-                f"[Bake] 해 주세요."
-            )
-            return
-
-        out_path = make_default_baked_path(abs_path)
-
-        # 정책 (2026-05-11 사용자 결정): [Bake] 는 항상 새로 굽고 기존 baked.usd 를 덮어쓴다.
-        # Sdf.Layer.Export() 가 destination 파일을 덮어쓰므로 별도 삭제 없이 OK.
-        existed_before = os.path.isfile(out_path)
+        # X3 정책 (2026-05-12) — bake 는 in-memory anonymous Sdf.Layer 만 생성한다.
+        # 따라서 "이미 *_baked.usd 라서 또 bake 할 필요 없음" 같은 분기는 불필요. 사용자가
+        # [Bake] 를 다시 누르면 메모리 layer 를 다시 만들어 runtime 에 재주입하면 된다.
 
         bake_stride, bake_sparse = read_bake_speed_env()
         self._log(
@@ -855,8 +976,10 @@ class LamWindow:
             f"(기본 무손실. PowerShell 으로 가속 시 — 권장X: "
             f"$env:LAM_BAKE_FRAME_STRIDE=2)"
         )
-        if existed_before:
-            self._log(f"기존 baked.usd 가 존재 → 새로 굽고 덮어씁니다: {out_path}")
+        self._log(
+            "Bake 출력 모드 = in-memory (휘발성) — *_baked.usd 파일을 생성하지 않습니다. "
+            "Kit 종료 시 결과는 사라지며, 다시 사용하려면 [Bake] 를 다시 누르세요."
+        )
 
         master_stage = None
         try:
@@ -875,67 +998,134 @@ class LamWindow:
             except Exception:
                 pass
 
-        # bake 종료 후 후처리 — 인스턴스 교체. 항상 새로 굽고 기존 파일을 덮어쓴다.
+        # bake 종료 후 후처리 — runtime 의 offscreen_stage 를 baked layer 로 교체.
         async def _runner() -> None:
-            self._log(f"Bake 시작: {abs_path} → {out_path}")
+            self._log(f"Bake 시작 (in-memory): src={abs_path}")
+
+            # **회귀 fix (2026-05-12)** — TIMESAMPLES_REPLAY 모드용으로 evaluator 가
+            # 매 update tick 에서 OmniGraph deactivate / LayerOffset freeze 를 다시
+            # author 한다. bake 가 `await app.next_update_async()` 로 main update tick
+            # 으로 넘어가는 사이 그 author 가 들어가서 master scrub 이 평가 못 함.
+            # → `begin_bake_mode` 가 표식을 박아 evaluator 의 모든 자동 author 를
+            # 보류하고 OmniGraph 를 일시 활성, LayerOffset 을 (0,1) 로 복귀시킨다.
+            # bake 완료 후 `end_bake_mode` 가 표식 제거 + 다음 update tick 에서 자연
+            # 복귀.
+            try:
+                ok_bake_mode = bool(self._evaluator.begin_bake_mode(prim_path))
+                self._log(
+                    f"begin_bake_mode prim={prim_path} ok={ok_bake_mode} "
+                    f"(bake 진행 중 evaluator 자동 author 보류)"
+                )
+            except Exception as exc:
+                self._log(f"begin_bake_mode 실패(무시 가능): {exc}")
+
+            def _end_bake_mode_safe() -> None:
+                try:
+                    self._evaluator.end_bake_mode(prim_path)
+                except Exception:
+                    pass
+
             try:
                 result = await bake_prim_to_timesamples_async(
                     master_stage,
                     prim_path,
                     abs_path,
-                    output_path=out_path,
+                    output_mode="memory",
                     fps=30.0,
                     frame_stride=bake_stride,
                     sparse_time_samples=bake_sparse,
                     progress_cb=_progress,
+                    log_baked_dump=True,
                 )
             except Exception as exc:
                 self._log(f"Bake 예외: {exc}")
+                _end_bake_mode_safe()
                 return
 
             if not result.ok:
                 self._log(f"Bake 실패: {result.error}")
+                _end_bake_mode_safe()
                 return
 
+            # 모듈 hot-reload 안전 — Kit 의 omni.ext 가 lam_bake_omnigraph.py 의 함수만
+            # 새로 가져오고 BakeResult 클래스는 옛 객체를 참조하는 잘 알려진 함정에서
+            # 새 필드 (`baked_layer` / `output_mode`) 가 인스턴스에 없을 수 있다. 따라서
+            # 직접 attr 접근 대신 getattr 로 안전 추출.
+            out_mode = getattr(result, "output_mode", None)
+            baked_layer = getattr(result, "baked_layer", None)
+
             self._log(
-                f"Bake 완료: out={result.output_path} sample_frames={result.n_frames} "
-                f"stride={result.frame_stride} sparse_cap_skip={result.n_sparse_skipped_capture} "
+                f"Bake 완료: mode={out_mode or '(unknown)'} "
+                f"sample_frames={result.n_frames} stride={result.frame_stride} "
+                f"sparse_cap_skip={result.n_sparse_skipped_capture} "
                 f"prims={result.n_target_prims} attrs={result.n_attr_authored} "
                 f"static_pruned={result.n_attr_pruned_static} "
-                f"elapsed={result.elapsed_sec:.2f}s — 인스턴스 교체 중..."
+                f"elapsed={result.elapsed_sec:.2f}s — runtime 의 offscreen stage 에 적용 중..."
             )
 
-            # 인스턴스 교체 — 같은 instance_id 로 baked.usd 를 등록.
-            # 주의: remove_usd 만으로는 evaluator 의 Option E runtime 이 dispose 되지 않는다
-            # (registry listener 는 invalidate 만 호출). 그래서 forget_instance 를 명시
-            # 호출하여 옛 offscreen_asset 캐시까지 완전히 청소한 뒤 add_usd 로 baked.usd 를
-            # 새 runtime 으로 attach 하도록 한다.
-            inst_id = inst.instance_id  # noqa: B023 (closure intended)
+            if baked_layer is None:
+                # 두 가지 가능성:
+                #  (1) Kit hot-reload 함정 — 새 BakeResult 정의가 적용 안 됨.
+                #  (2) 호출자가 의도적으로 output_mode='file' 을 강제 (현 UI 경로에서는 X).
+                # 어느 쪽이든 사용자에게 명확히 안내 후 종료. attach 단계는 건너뛴다.
+                hint_lines = [
+                    "Bake 결과에 in-memory baked layer 가 없습니다.",
+                    "   가장 가능성 높은 원인 — Kit 의 hot-reload 가 lam_bake_omnigraph "
+                    "의 BakeResult 클래스 새 정의를 못 가져왔습니다.",
+                    "   해결: Kit 을 완전히 재시작한 뒤 [Bake] 를 다시 눌러주세요.",
+                ]
+                # 옛 함수가 file 모드로 동작했다면 result.output_path 에 디스크 경로가 들어있을
+                # 수 있다. 그 경우 사용자에게 안내만 한다 (자동 import 는 위험).
+                old_out = getattr(result, "output_path", "")
+                if isinstance(old_out, str) and old_out and os.path.isfile(old_out):
+                    hint_lines.append(
+                        f"   참고: hot-reload 전 옛 함수가 디스크에 baked.usd 를 만들었을 "
+                        f"수 있습니다 → {old_out} (수동 정리 권장)"
+                    )
+                self._log("\n".join(hint_lines))
+                _end_bake_mode_safe()
+                return
+
+            # 인스턴스 교체 없음 — same prim_path 의 runtime 에 in-memory baked layer 를
+            # 주입해 offscreen_stage 를 재구성한다. registry / master.usd 의 reference 는
+            # 원본 자산 그대로 유지된다 (master 측은 Option E freeze 로 평가 안 함).
             inst_prim = inst.prim_path  # noqa: B023 (closure intended)
             try:
-                self._loader.remove_usd(inst_prim)
-            except Exception as exc:
-                self._log(f"Bake 후 remove_usd 실패: {exc}")
-            try:
-                self._evaluator.forget_instance(inst_prim)
-            except Exception as exc:
-                self._log(f"Bake 후 forget_instance 실패: {exc}")
-            try:
-                new_inst = self._loader.add_usd(
-                    source_asset=result.output_path,
-                    requested_id=inst_id,
+                ok = self._evaluator.attach_memory_baked_layer(
+                    inst_prim,
+                    baked_layer,
+                    source_asset_for_log=abs_path,
                 )
             except Exception as exc:
-                self._log(f"Bake 후 add_usd 실패: {exc}")
+                self._log(f"Bake 후 attach_memory_baked_layer 예외: {exc}")
+                _end_bake_mode_safe()
                 return
 
-            if new_inst is None:
-                self._log("Bake 후 add_usd 가 None — 자산 등록 실패")
+            if not ok:
+                self._log(
+                    "Bake 결과 적용 실패 — runtime 이 없거나 stage open 실패. "
+                    "(인스턴스가 사라졌거나 LAM 모듈 미초기화일 수 있음)"
+                )
+                _end_bake_mode_safe()
                 return
+
+            # bake 모드 종료 — 다음 update tick 에서 evaluator 가 TIMESAMPLES_REPLAY 모드
+            # (LayerOffset freeze + OmniGraph deactivate) 를 자동으로 다시 author 한다.
+            _end_bake_mode_safe()
+
             self._log(
-                f"Bake → 교체 완료 prim={new_inst.prim_path} "
-                f"src={new_inst.source_asset} (Option E 로 독립 재생 가능)"
+                f"Bake → 적용 완료 prim={inst_prim} "
+                f"src={abs_path} (in-memory baked layer 사용. Option E 로 독립 재생 가능)"
             )
+            # Q1 — 2026-05-12: attach_memory_baked_layer 가 inst.baked=True 를 박았으니
+            # 인스턴스 목록을 새로 그려 [BAKED ✓ / Re-bake] 표시로 즉시 전환한다.
+            try:
+                self._refresh_instances()
+            except Exception as _ref_exc:
+                print(
+                    f"{_PRINT_PREFIX} bake 후 _refresh_instances 실패: {_ref_exc}",
+                    flush=True,
+                )
 
         # asyncio task 로 실행. Kit 의 main loop 가 await 를 처리하도록 ensure_future.
         try:

@@ -1,16 +1,23 @@
-"""LAM 시퀀스 편집기 (P2 — TBS Sequence Editor 와 동일한 4 종 step UI).
+"""LAM 시퀀스 편집기 (P2 — TBS Sequence Editor 와 동일한 4 종 step UI + LAM 추가 step).
 
-【 step 종류 — TBS 와 동일 】
-  STEP_TYPES = ["USD_TIMELINE", "MOVE", "ROTATE", "DELAY"]
+【 step 종류 】
+  STEP_TYPES = ["USD_TIMELINE", "TIMESAMPLES_REPLAY", "MOVE", "ROTATE", "DELAY"]
 
-【 USD_TIMELINE 의 단 한 가지 차이 (REQ-011) 】
+  - `USD_TIMELINE` / `TIMESAMPLES_REPLAY` 둘 다 LAM 인스턴스 (`ref`) 를 지정하는 재생 step.
+      * `TIMESAMPLES_REPLAY` = **실무용** — Option E offscreen 평가 (멀티 인스턴스 독립).
+      * `USD_TIMELINE` = **테스트용** (TBS 와 동일 이름·동일 schema. 현 단계에서는 동작도
+        TIMESAMPLES_REPLAY 와 동일. 추후 TBS 의 `omni.timeline.play()` 방식으로 재구현 예정).
+  - 두 step kind 는 schema 가 완전히 동일하며 같은 UI 컴포넌트를 공유한다.
+  - MOVE / ROTATE / DELAY 는 TBS 와 동일 schema.
+
+【 USD_TIMELINE / TIMESAMPLES_REPLAY 의 차이 (REQ-011) 】
   - UI 행 맨 위에 **LAM 인스턴스 드롭다운** 한 줄 추가. 선택 시 step["ref"] 가 4-tuple
     (`prim_path / guid / instance_id / source_asset`) 로 갱신된다(REQ-006).
   - 상태 배지(● OK / ● AUTO / ● MISSING) + Re-bind 버튼.
   - 그 외 START/END/SPEED/MODE 필드는 TBS 와 동일.
 
 【 JSON Save/Load 】
-  - 동일 schema. 다만 USD_TIMELINE 만 `ref` 필드를 추가로 가진다.
+  - 동일 schema. USD_TIMELINE / TIMESAMPLES_REPLAY 만 `ref` 필드를 추가로 가진다.
   - Save: `omni.kit.window.filepicker.FilePickerDialog` 로 파일 위치 선택 후 JSON dump.
   - Load: 같은 파일 다이얼로그로 열고 step 배열을 복원. 모르는 키는 무시한다.
 
@@ -42,7 +49,15 @@ _PRINT_PREFIX = "[LAM/EDITOR]"
 
 WINDOW_TITLE = "LAM Sequence Editor"
 
-STEP_TYPES = ["USD_TIMELINE", "MOVE", "ROTATE", "DELAY"]
+STEP_TYPES = ["USD_TIMELINE", "TIMESAMPLES_REPLAY", "MOVE", "ROTATE", "DELAY"]
+
+# UI / 핸들러 측에서 USD_TIMELINE 과 TIMESAMPLES_REPLAY 를 동일하게 처리해야 할 때 사용.
+# 두 kind 모두 LAM 인스턴스(ref) 를 지정해 시간 데이터를 재생한다.
+_INSTANCE_PLAYBACK_STEP_TYPES = frozenset({"USD_TIMELINE", "TIMESAMPLES_REPLAY"})
+
+
+def _is_instance_playback_step(t: str) -> bool:
+    return (t or "").upper() in _INSTANCE_PLAYBACK_STEP_TYPES
 
 CHECKBOX_WHITE_STYLE = {
     "color": 0xFF000000,
@@ -60,9 +75,10 @@ INPUT_FIELD_STYLE = {
 def _default_step_for_type(t: str) -> Dict[str, Any]:
     """TBS sequence_editor 의 _on_type_change 와 동일한 기본값."""
     t = (t or "").upper()
-    if t == "USD_TIMELINE":
+    if _is_instance_playback_step(t):
+        # USD_TIMELINE / TIMESAMPLES_REPLAY 는 schema 가 완전 동일 — `type` 만 다름.
         return {
-            "type": "USD_TIMELINE",
+            "type": t,
             "ref": StepRef().to_dict(),
             "mode": "MANUAL",
             "start_frame": 200,
@@ -168,47 +184,51 @@ class LamSequenceEditor:
             except Exception:
                 self._window = None
 
-        self._window = ui.Window(WINDOW_TITLE, width=840, height=780)
+        # TBS sequence editor 와 동일한 기본 폭(650). 작은 폭에 모든 row 가 들어가도록
+        # widget width 들을 더 줄였다. 사용자 환경(DPI / 모니터 폭) 에 맞춰 dock 가능.
+        self._window = ui.Window(WINDOW_TITLE, width=650, height=780)
         if self._json_model is None:
             self._json_model = ui.SimpleStringModel("[]")
 
         with self._window.frame:
             with ui.VStack(spacing=6):
                 ui.Label(
-                    "LAM 시퀀스 편집기 — 4 종 step (USD_TIMELINE / MOVE / ROTATE / DELAY). "
-                    "USD_TIMELINE 에만 LAM 인스턴스 선택이 붙습니다.",
-                    height=36,
+                    "LAM 시퀀스 편집기 — 5 종 step (USD_TIMELINE / TIMESAMPLES_REPLAY / MOVE / ROTATE / DELAY). "
+                    "REPLAY/TIMELINE 에만 LAM 인스턴스 선택이 붙습니다. "
+                    "실무에서는 TIMESAMPLES_REPLAY 를 사용하세요 (멀티 인스턴스 독립 재생).",
+                    height=0,
+                    word_wrap=True,
                 )
-                with ui.HStack(spacing=6, height=28):
-                    ui.Button("+ Step 추가", clicked_fn=self._add_default_step, width=110)
-                    ui.Spacer(width=8)
-                    ui.Button("Run", clicked_fn=lambda: self._run_now(reset=False), width=60)
-                    ui.Button("Run (reset)", clicked_fn=lambda: self._run_now(reset=True), width=100)
-                    ui.Button("Stop", clicked_fn=self._stop_now, width=60)
+                with ui.HStack(spacing=4, height=28):
+                    ui.Button("+ Step", clicked_fn=self._add_default_step, width=66)
+                    ui.Spacer(width=4)
+                    ui.Button("Run", clicked_fn=lambda: self._run_now(reset=False), width=52)
+                    ui.Button("Run (reset)", clicked_fn=lambda: self._run_now(reset=True), width=86)
+                    ui.Button("Stop", clicked_fn=self._stop_now, width=52)
                     ui.Button(
                         "Reset",
                         clicked_fn=self._reset_now,
-                        width=70,
+                        width=60,
                         tooltip=(
                             "현재 스텝에 등장하는 prim 들의 TBS_OFFSET (Translate/Rotate) 을 0 으로\n"
                             "되돌려 초기 위치/자세로 복귀시킵니다. 시퀀스를 재생하지는 않습니다."
                         ),
                     )
+                    ui.Spacer()
                 self._status_label = ui.Label("status: idle", height=20)
                 ui.Separator()
 
                 ui.Label("시퀀스 JSON", height=18)
-                with ui.HStack(spacing=6, height=28):
-                    ui.Button("현재 스텝 → JSON", clicked_fn=self._update_json_from_steps, width=130)
+                with ui.HStack(spacing=4, height=28):
+                    ui.Button("현재 → JSON", clicked_fn=self._update_json_from_steps, width=100)
                     ui.Button("JSON → 스텝", clicked_fn=self._load_steps_from_json_text, width=100)
                     ui.Spacer()
-                    ui.Button("Save JSON…", clicked_fn=self._save_json, width=100)
-                    ui.Button("Load JSON…", clicked_fn=self._load_json, width=100)
+                    ui.Button("Save…", clicked_fn=self._save_json, width=70)
+                    ui.Button("Load…", clicked_fn=self._load_json, width=70)
                 try:
                     ui.StringField(
                         model=self._json_model,
                         height=96,
-                        width=800,
                         multiline=True,
                         style=INPUT_FIELD_STYLE,
                     )
@@ -216,15 +236,16 @@ class LamSequenceEditor:
                     ui.StringField(
                         model=self._json_model,
                         height=96,
-                        width=800,
                         style=INPUT_FIELD_STYLE,
                     )
 
                 ui.Separator()
                 ui.Label("Steps", height=18)
+                # 가로 스크롤은 OFF — 내부 widget 들이 모두 컨테이너 폭에 맞도록(StringField 등
+                # width 인자 제거). 윈도우 자체 가로 폭은 600 정도면 충분히 들어옴.
                 self._steps_container = ui.ScrollingFrame(
                     height=400,
-                    horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_AS_NEEDED,
+                    horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
                     vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_ON,
                 )
                 with self._steps_container:
@@ -313,7 +334,7 @@ class LamSequenceEditor:
     def _render_step(self, ui, idx: int, step: Dict[str, Any]) -> None:
         title = f"Step {idx+1}: {step.get('type', '?')}"
         with ui.CollapsableFrame(title, height=0):
-            with ui.VStack(spacing=6, padding=6):
+            with ui.VStack(spacing=4, padding=4):
                 # 첫 step 메타 (TBS 와 동일 schema): _start_from_current / paths / snapshot
                 if idx == 0:
                     self._ui_start_from_current(ui, step)
@@ -324,13 +345,13 @@ class LamSequenceEditor:
                 desc_model.add_value_changed_fn(
                     lambda _m, s=step, m=desc_model: s.__setitem__("description", m.get_value_as_string())
                 )
-                with ui.HStack(spacing=6, height=28):
+                with ui.HStack(spacing=4, height=28):
                     ui.Label("설명", width=40)
-                    ui.StringField(model=desc_model, width=540, height=28, style=INPUT_FIELD_STYLE)
+                    ui.StringField(model=desc_model, height=28, style=INPUT_FIELD_STYLE)
 
                 # 타입 ComboBox + 위/아래/삭제
                 with ui.Frame(style={"background_color": 0xFF20242A}):
-                    with ui.HStack(spacing=6, height=28):
+                    with ui.HStack(spacing=4, height=28):
                         cur_type = (step.get("type") or "").upper()
                         if cur_type not in STEP_TYPES:
                             cur_type = "MOVE"
@@ -351,15 +372,16 @@ class LamSequenceEditor:
                             self._schedule_refresh()
 
                         cb.model.add_item_changed_fn(_on_type_change)
-                        ui.Button("위", width=40, height=28, clicked_fn=lambda i=idx: self._move_step(i, -1))
-                        ui.Button("아래", width=50, height=28, clicked_fn=lambda i=idx: self._move_step(i, 1))
-                        ui.Button("삭제", width=60, height=28, clicked_fn=lambda i=idx: self._remove_step(i))
+                        ui.Button("▲", width=28, height=28, tooltip="위로 이동", clicked_fn=lambda i=idx: self._move_step(i, -1))
+                        ui.Button("▼", width=28, height=28, tooltip="아래로 이동", clicked_fn=lambda i=idx: self._move_step(i, 1))
+                        ui.Button("✕", width=28, height=28, tooltip="이 스텝 삭제", clicked_fn=lambda i=idx: self._remove_step(i))
 
                 # 본문 (타입별)
                 with ui.Frame(style={"background_color": 0xFF262A30}):
-                    with ui.VStack(spacing=6, padding=8):
+                    with ui.VStack(spacing=4, padding=6):
                         t = (step.get("type") or "").upper()
-                        if t == "USD_TIMELINE":
+                        if _is_instance_playback_step(t):
+                            # USD_TIMELINE / TIMESAMPLES_REPLAY 는 같은 UI 컴포넌트 공유.
                             self._ui_step_usd_timeline(ui, idx, step)
                         elif t == "MOVE":
                             self._ui_step_move(ui, step)
@@ -372,15 +394,17 @@ class LamSequenceEditor:
                         self._ui_step_hide_options(ui, step)
                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
 
-    # -------------------------------------------------------- USD_TIMELINE UI
+    # -------------------------------------------------------- USD_TIMELINE / TIMESAMPLES_REPLAY UI
 
     def _ui_step_usd_timeline(self, ui, idx: int, step: Dict[str, Any]) -> None:
-        # 인스턴스 드롭다운 + 상태 배지 (LAM 전용 1줄)
+        # 인스턴스 드롭다운 + 상태 배지 (LAM 전용 1줄).
+        # USD_TIMELINE 과 TIMESAMPLES_REPLAY 는 동일 UI 컴포넌트를 공유한다.
+        step_kind_label = str(step.get("type") or "USD_TIMELINE").upper()
         instances = self._registry.all_instances()
         ref = StepRef.from_dict(step.get("ref"))
         # AUTO BIND — ref 가 완전히 비어있고 등록된 인스턴스가 있으면
         # 첫 번째 인스턴스로 자동 바인딩 (사용자가 ComboBox 를 클릭하지 않아도
-        # USD_TIMELINE step 이 MISSING 으로 끝나는 사고 방지).
+        # step 이 MISSING 으로 끝나는 사고 방지).
         if instances and not (
             (ref.prim_path or "").strip()
             or (ref.guid or "").strip()
@@ -396,7 +420,7 @@ class LamSequenceEditor:
             )
             step["ref"] = ref.to_dict()
             print(
-                f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE auto-bound to "
+                f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} auto-bound to "
                 f"first instance: {inst0.instance_id} ({inst0.prim_path})",
                 flush=True,
             )
@@ -408,8 +432,8 @@ class LamSequenceEditor:
             RESOLVE_MISSING: "● MISSING (인스턴스 선택 필요)",
         }.get(result.status, "?")
 
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("Instance", width=70)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("Instance", width=60)
             ids = [inst.instance_id for inst in instances] if instances else ["(등록된 인스턴스 없음)"]
             current_idx = 0
             for i, inst in enumerate(instances):
@@ -444,13 +468,15 @@ class LamSequenceEditor:
                 else 0xFFE0B040 if result.status == RESOLVE_AUTO
                 else 0xFFE05050
             )
-            ui.Label(status_text, width=200, style={"color": badge_color})
-            ui.Button("Re-bind…", width=80, clicked_fn=lambda i=idx: self._open_rebind_dialog(i))
+            ui.Label(status_text, width=140, style={"color": badge_color})
+            ui.Button("Re-bind", width=70, clicked_fn=lambda i=idx: self._open_rebind_dialog(i))
 
         ui.Label(
             f"prim={ref.prim_path or '-'}  guid={ref.guid or '-'}  "
             f"instance_id={ref.instance_id or '-'}  source={ref.source_asset or '-'}",
-            height=18,
+            height=0,
+            word_wrap=True,
+            style={"color": 0xFF9AA4B2},
         )
 
         # 등록된 인스턴스가 0 개면 사용자가 Master USD 를 열거나 USD 를 추가해야 한다는 안내.
@@ -458,15 +484,16 @@ class LamSequenceEditor:
             ui.Label(
                 "⚠ 등록된 LAM 인스턴스가 없습니다 — LAM Multi-USD Load 창에서 USD 를 추가하거나 "
                 "Master USD 를 열고 [Discover] 를 누르세요.",
-                height=18,
+                height=0,
+                word_wrap=True,
                 style={"color": 0xFFE05050},
             )
 
         # MODE (TBS 와 동일하게 MANUAL 만 노출, AUTO 는 호환만)
         if str(step.get("mode", "MANUAL")).upper() != "MANUAL":
             step["mode"] = "MANUAL"
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("MODE", width=60)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("MODE", width=50)
             ui.ComboBox(0, "MANUAL")
 
         # START / END
@@ -478,11 +505,12 @@ class LamSequenceEditor:
         ef.add_value_changed_fn(
             lambda _m, s=step, m=ef: s.__setitem__("end_frame", int(m.get_value_as_int()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("START", width=60)
-            ui.IntField(model=sf, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("END", width=40)
-            ui.IntField(model=ef, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("START", width=50)
+            ui.IntField(model=sf, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("END", width=36)
+            ui.IntField(model=ef, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Spacer()
 
         # SPEED (per-step speed_scale, TBS 와 동일)
         spm = ui.SimpleFloatModel(float(step.get("speed_scale", 1.0)))
@@ -495,19 +523,21 @@ class LamSequenceEditor:
             s["speed_scale"] = float(max(0.01, v))
 
         spm.add_value_changed_fn(_on_spm)
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("SPEED", width=60)
-            ui.FloatField(model=spm, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("x (USD_TIMELINE 전용)", height=28, style={"color": 0xFF9AA4B2})
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("SPEED", width=50)
+            ui.FloatField(model=spm, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("x", height=28, width=12, style={"color": 0xFF9AA4B2})
+            ui.Spacer()
 
         # LOOP
         loop_model = ui.SimpleBoolModel(bool(step.get("loop", False)))
         loop_model.add_value_changed_fn(
             lambda _m, s=step, m=loop_model: s.__setitem__("loop", bool(m.get_value_as_bool()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=loop_model, style=CHECKBOX_WHITE_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=loop_model, width=20, style=CHECKBOX_WHITE_STYLE)
             ui.Label("LOOP", height=0)
+            ui.Spacer()
 
         # offset_correction (UI 만 — 동작은 P3)
         off_model = ui.SimpleBoolModel(bool(step.get("offset_correction_enabled", False)))
@@ -516,19 +546,20 @@ class LamSequenceEditor:
                 "offset_correction_enabled", bool(m.get_value_as_bool())
             )
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=off_model, style=CHECKBOX_WHITE_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=off_model, width=20, style=CHECKBOX_WHITE_STYLE)
             ui.Label(
-                "오프셋 보정 적용 (USD_TIMELINE 시작 직전 TBS_OFFSET 두 op 재계산)",
+                "오프셋 보정 적용 (TBS_OFFSET 재계산)",
                 height=0,
             )
+            ui.Spacer()
         ocp = ui.SimpleStringModel(str(step.get("offset_correct_prims", "")))
         ocp.add_value_changed_fn(
             lambda _m, s=step, m=ocp: s.__setitem__("offset_correct_prims", m.get_value_as_string())
         )
-        with ui.HStack(spacing=6, height=28):
+        with ui.HStack(spacing=4, height=28):
             ui.Label("보정PRIM", width=60)
-            ui.StringField(model=ocp, width=420, height=28, style=INPUT_FIELD_STYLE)
+            ui.StringField(model=ocp, height=28, style=INPUT_FIELD_STYLE)
 
     # ----------------------------------------------------------------- MOVE UI
 
@@ -537,12 +568,12 @@ class LamSequenceEditor:
         prim_model.add_value_changed_fn(
             lambda _m, s=step, m=prim_model: s.__setitem__("prim", m.get_value_as_string())
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("PRIM", width=60)
-            ui.StringField(model=prim_model, width=420, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("PRIM", width=50)
+            ui.StringField(model=prim_model, height=28, style=INPUT_FIELD_STYLE)
             ui.Button(
-                "Stage 선택",
-                width=90,
+                "Stage",
+                width=60,
                 height=28,
                 clicked_fn=lambda m=prim_model: self._fill_selected_prim(m),
             )
@@ -551,10 +582,11 @@ class LamSequenceEditor:
         dur_m.add_value_changed_fn(
             lambda _m, s=step, m=dur_m: s.__setitem__("duration", float(m.get_value_as_float()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("DURATION", width=80)
-            ui.FloatField(model=dur_m, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("DURATION", width=66)
+            ui.FloatField(model=dur_m, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("sec", height=0)
+            ui.Spacer()
 
         dx_m = ui.SimpleFloatModel(float(step.get("dx", 0.0)))
         dy_m = ui.SimpleFloatModel(float(step.get("dy", 0.0)))
@@ -562,13 +594,14 @@ class LamSequenceEditor:
         dx_m.add_value_changed_fn(lambda _m, s=step, m=dx_m: s.__setitem__("dx", float(m.get_value_as_float())))
         dy_m.add_value_changed_fn(lambda _m, s=step, m=dy_m: s.__setitem__("dy", float(m.get_value_as_float())))
         dz_m.add_value_changed_fn(lambda _m, s=step, m=dz_m: s.__setitem__("dz", float(m.get_value_as_float())))
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("dX", width=30)
-            ui.FloatField(model=dx_m, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("dY", width=30)
-            ui.FloatField(model=dy_m, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("dZ", width=30)
-            ui.FloatField(model=dz_m, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("dX", width=24)
+            ui.FloatField(model=dx_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("dY", width=24)
+            ui.FloatField(model=dy_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("dZ", width=24)
+            ui.FloatField(model=dz_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Spacer()
 
     # --------------------------------------------------------------- ROTATE UI
 
@@ -577,12 +610,12 @@ class LamSequenceEditor:
         prim_model.add_value_changed_fn(
             lambda _m, s=step, m=prim_model: s.__setitem__("prim", m.get_value_as_string())
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("PRIM", width=60)
-            ui.StringField(model=prim_model, width=420, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("PRIM", width=50)
+            ui.StringField(model=prim_model, height=28, style=INPUT_FIELD_STYLE)
             ui.Button(
-                "Stage 선택",
-                width=90,
+                "Stage",
+                width=60,
                 height=28,
                 clicked_fn=lambda m=prim_model: self._fill_selected_prim(m),
             )
@@ -591,10 +624,11 @@ class LamSequenceEditor:
         dur_m.add_value_changed_fn(
             lambda _m, s=step, m=dur_m: s.__setitem__("duration", float(m.get_value_as_float()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("DURATION", width=80)
-            ui.FloatField(model=dur_m, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("DURATION", width=66)
+            ui.FloatField(model=dur_m, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("sec", height=0)
+            ui.Spacer()
 
         rx_m = ui.SimpleFloatModel(float(step.get("rx", 0.0)))
         ry_m = ui.SimpleFloatModel(float(step.get("ry", 0.0)))
@@ -602,31 +636,34 @@ class LamSequenceEditor:
         rx_m.add_value_changed_fn(lambda _m, s=step, m=rx_m: s.__setitem__("rx", float(m.get_value_as_float())))
         ry_m.add_value_changed_fn(lambda _m, s=step, m=ry_m: s.__setitem__("ry", float(m.get_value_as_float())))
         rz_m.add_value_changed_fn(lambda _m, s=step, m=rz_m: s.__setitem__("rz", float(m.get_value_as_float())))
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("rX", width=30)
-            ui.FloatField(model=rx_m, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("rY", width=30)
-            ui.FloatField(model=ry_m, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("rZ", width=30)
-            ui.FloatField(model=rz_m, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("rX", width=24)
+            ui.FloatField(model=rx_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("rY", width=24)
+            ui.FloatField(model=ry_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("rZ", width=24)
+            ui.FloatField(model=rz_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Spacer()
 
         # auto_pivot_world_center
         auto_m = ui.SimpleBoolModel(bool(step.get("auto_pivot_world_center", False)))
         auto_m.add_value_changed_fn(
             lambda _m, s=step, m=auto_m: s.__setitem__("auto_pivot_world_center", bool(m.get_value_as_bool()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=auto_m, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("자동 월드 중심 피봇 (auto_pivot_world_center)", height=0)
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=auto_m, width=20, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("자동 월드 중심 피봇", height=0)
+            ui.Spacer()
 
         # user_axis_rotate + pivot_w*
         user_m = ui.SimpleBoolModel(bool(step.get("user_axis_rotate", False)))
         user_m.add_value_changed_fn(
             lambda _m, s=step, m=user_m: s.__setitem__("user_axis_rotate", bool(m.get_value_as_bool()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=user_m, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("월드 피봇 회전 사용 (user_axis_rotate + pivot_w*)", height=0)
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=user_m, width=20, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("월드 피봇 회전 사용 (pivot_w*)", height=0)
+            ui.Spacer()
 
         pwx_m = ui.SimpleFloatModel(float(step.get("pivot_wx", 0.0)))
         pwy_m = ui.SimpleFloatModel(float(step.get("pivot_wy", 0.0)))
@@ -640,13 +677,14 @@ class LamSequenceEditor:
         pwz_m.add_value_changed_fn(
             lambda _m, s=step, m=pwz_m: s.__setitem__("pivot_wz", float(m.get_value_as_float()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("pivot Wx", width=70)
-            ui.FloatField(model=pwx_m, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("Wy", width=30)
-            ui.FloatField(model=pwy_m, width=80, height=28, style=INPUT_FIELD_STYLE)
-            ui.Label("Wz", width=30)
-            ui.FloatField(model=pwz_m, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("pivot Wx", width=60)
+            ui.FloatField(model=pwx_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("Wy", width=24)
+            ui.FloatField(model=pwy_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Label("Wz", width=24)
+            ui.FloatField(model=pwz_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Spacer()
 
     # ----------------------------------------------------------------- DELAY UI
 
@@ -658,14 +696,22 @@ class LamSequenceEditor:
         dur_m.add_value_changed_fn(
             lambda _m, s=step, m=dur_m: s.__setitem__("duration", float(m.get_value_as_float()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.Label("DURATION", width=80)
-            ui.FloatField(model=dur_m, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("DURATION", width=66)
+            ui.FloatField(model=dur_m, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("sec", height=0)
+            ui.Spacer()
 
     # ----------------------------------------------------------------- common
 
     def _ui_step_timing(self, ui, step: Dict[str, Any]) -> None:
+        """모든 step 의 끝에 표시되는 공용 timing 행 — 체크박스 옆에 즉시 라벨이 붙어
+        보이도록 CheckBox 폭을 명시(width=20)하고 spacing 을 4 로 좁힌다.
+
+        체크박스 옆 라벨은 그 토글의 의미만 짧게 표현하고, ``delay(ms)`` 입력은 같은 행에
+        스페이서 없이 바로 이어 붙는다. 가로 폭이 윈도우(600 기본) 안에 모두 들어오도록
+        라벨 width 도 단축.
+        """
         rwp_m = ui.SimpleBoolModel(bool(step.get("run_with_previous", False)))
         rwp_m.add_value_changed_fn(
             lambda _m, s=step, m=rwp_m: s.__setitem__("run_with_previous", bool(m.get_value_as_bool()))
@@ -674,11 +720,13 @@ class LamSequenceEditor:
         delay_m.add_value_changed_fn(
             lambda _m, s=step, m=delay_m: s.__setitem__("step_delay_ms", int(m.get_value_as_int()))
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=rwp_m, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("이전 step 과 동시 실행 (run_with_previous)", height=0, width=300)
-            ui.Label("step_delay_ms", width=110)
-            ui.IntField(model=delay_m, width=80, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=rwp_m, width=20, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("이전 step 과 동시 실행", height=0, width=160)
+            ui.Spacer(width=10)
+            ui.Label("delay(ms)", width=64)
+            ui.IntField(model=delay_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Spacer()
 
     def _ui_start_from_current(self, ui, step: Dict[str, Any]) -> None:
         """첫 step 의 _start_from_current / _start_from_current_paths / _start_snapshot 메타 UI.
@@ -699,31 +747,34 @@ class LamSequenceEditor:
                 "_start_from_current_paths", m.get_value_as_string()
             )
         )
-        with ui.HStack(spacing=8, height=28):
-            ui.CheckBox(model=from_current_m, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("현재 위치부터 시작 (_start_from_current)", width=240)
-            ui.Label("대상 경로", width=70)
-            ui.StringField(model=paths_m, width=300, height=28, style=INPUT_FIELD_STYLE)
-        with ui.HStack(spacing=6, height=24):
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=from_current_m, width=20, style=CHECKBOX_WHITE_STYLE)
+            ui.Label("현재 위치부터 시작", width=140)
+            ui.Spacer(width=6)
+            ui.Label("대상 경로", width=60)
+            ui.StringField(model=paths_m, height=28, style=INPUT_FIELD_STYLE)
+        with ui.HStack(spacing=4, height=24):
             ui.Button(
                 "Snapshot 캡처",
-                width=120,
+                width=110,
                 height=24,
                 clicked_fn=lambda s=step, m=paths_m: self._capture_start_snapshot(s, m),
             )
             ui.Button(
                 "Snapshot 비우기",
-                width=120,
+                width=110,
                 height=24,
                 clicked_fn=lambda s=step: (s.__setitem__("_start_snapshot", {}), self._set_status("snapshot 비웠음")),
             )
             cnt = len((step.get("_start_snapshot") or {}))
             ui.Label(f"snapshot 항목수: {cnt}", height=0)
+            ui.Spacer()
         ui.Label(
-            "※ LAM 의 baseline 모델 차이로 _start_from_current 자체는 거의 default 동작입니다. "
+            "※ LAM 의 baseline 모델 차이로 _start_from_current 자체는 거의 default 동작. "
             "_start_snapshot 의 m16 만 시작 시 TBS_OFFSET 두 op 로 분해 author 되어 의미가 살아남습니다.",
             height=0,
             word_wrap=True,
+            style={"color": 0xFF9AA4B2},
         )
         ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
 
@@ -782,11 +833,18 @@ class LamSequenceEditor:
         prims_m.add_value_changed_fn(
             lambda _m, s=step, m=prims_m: s.__setitem__("hide_prims", m.get_value_as_string())
         )
-        with ui.HStack(spacing=6, height=28):
-            ui.CheckBox(model=hide_m, style=CHECKBOX_WHITE_STYLE)
-            ui.Label("hide_enabled (step 시작 invisible / 종료 0.2s 후 visible 복귀)", height=0, width=380)
-            ui.Label("hide_prims", width=80)
-            ui.StringField(model=prims_m, width=320, height=28, style=INPUT_FIELD_STYLE)
+        # 폭 절약 — 라벨은 짧게(괄호 설명은 tooltip 으로 대체) + hide_prims 필드는 가변.
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=hide_m, width=20, style=CHECKBOX_WHITE_STYLE)
+            ui.Label(
+                "hide_enabled",
+                height=0,
+                width=100,
+                tooltip="step 시작 invisible / 종료 0.2s 후 visible 복귀",
+            )
+            ui.Spacer(width=6)
+            ui.Label("prims", width=46)
+            ui.StringField(model=prims_m, height=28, style=INPUT_FIELD_STYLE)
 
     # ----------------------------------------------------------------- helpers
 
@@ -852,12 +910,14 @@ class LamSequenceEditor:
             self._set_status("이미 실행 중 — Stop 으로 중단 후 다시 누르세요.")
             return
 
-        # USD_TIMELINE step 중 ref 가 비어있는 게 있으면 첫 번째 등록 인스턴스로 자동 바인딩.
-        # (= 사용자가 인스턴스 ComboBox 를 한 번도 펼쳐보지 않은 케이스 보호)
+        # USD_TIMELINE / TIMESAMPLES_REPLAY step 중 ref 가 비어있는 게 있으면 첫 번째
+        # 등록 인스턴스로 자동 바인딩. (= 사용자가 인스턴스 ComboBox 를 한 번도 펼쳐보지
+        # 않은 케이스 보호)
         instances = self._registry.all_instances()
         autobind_n = 0
         for i, st in enumerate(self._steps):
-            if str((st or {}).get("type") or "").upper() != "USD_TIMELINE":
+            t_label = str((st or {}).get("type") or "").upper()
+            if not _is_instance_playback_step(t_label):
                 continue
             ref = StepRef.from_dict(st.get("ref"))
             if (
@@ -869,11 +929,11 @@ class LamSequenceEditor:
                 continue
             if not instances:
                 self._set_status(
-                    f"step[{i}] USD_TIMELINE 의 인스턴스가 비어있고 등록된 LAM 인스턴스도 없습니다."
+                    f"step[{i}] {t_label} 의 인스턴스가 비어있고 등록된 LAM 인스턴스도 없습니다."
                     " LAM Multi-USD Load 창에서 USD 를 추가하거나 Master 를 열고 Discover 하세요."
                 )
                 print(
-                    f"{_PRINT_PREFIX} _run_now ABORT — step[{i}] USD_TIMELINE has empty ref and no instances",
+                    f"{_PRINT_PREFIX} _run_now ABORT — step[{i}] {t_label} has empty ref and no instances",
                     flush=True,
                 )
                 return
@@ -886,7 +946,7 @@ class LamSequenceEditor:
             ).to_dict()
             autobind_n += 1
             print(
-                f"{_PRINT_PREFIX} _run_now: step[{i}] USD_TIMELINE auto-bound to "
+                f"{_PRINT_PREFIX} _run_now: step[{i}] {t_label} auto-bound to "
                 f"first instance: {inst0.instance_id} ({inst0.prim_path})",
                 flush=True,
             )
@@ -940,7 +1000,10 @@ class LamSequenceEditor:
         steps = list(self._steps)
         paths = _collect_prim_paths_for_reset(steps)
         if not paths:
-            self._set_status("초기화할 prim 이 없습니다 — 시퀀스에 MOVE/ROTATE/USD_TIMELINE step 이 필요합니다.")
+            self._set_status(
+                "초기화할 prim 이 없습니다 — 시퀀스에 "
+                "MOVE / ROTATE / USD_TIMELINE / TIMESAMPLES_REPLAY step 이 필요합니다."
+            )
             return
 
         self._set_status(f"resetting… ({len(paths)} prim)")

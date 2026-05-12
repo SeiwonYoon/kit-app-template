@@ -18,9 +18,15 @@ from __future__ import annotations
 import os
 from typing import Optional, Tuple
 
+from .lam_asset_diagnostics import kind_to_user_label, scan_asset_kind
 from .lam_instance_registry import AnimationInstanceRegistry, slugify_instance_id
 from .lam_master_stage import MasterStage
-from .lam_types import AnimationInstance, make_guid
+from .lam_types import (
+    ASSET_KIND_UNKNOWN,
+    AnimationInstance,
+    AssetDiag,
+    make_guid,
+)
 
 
 _PRINT_PREFIX = "[LAM/L1b]"
@@ -160,6 +166,15 @@ class MultiUsdLoader:
         # 2) 자산 시간 범위 사전 조회
         s, e, tps = read_asset_time_range(source_asset)
 
+        # 2.1) 자산 종류 자동 분류 (W1 — 2026-05-11) — `[Bake]` 의 조건부 분기와
+        #      `TIMESAMPLES_REPLAY` step 의 동작 결정에 사용. 실패해도 add_usd 자체는 계속.
+        try:
+            asset_kind, asset_diag = scan_asset_kind(source_asset)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} asset scan failed: {exc} (계속 진행)", flush=True)
+            asset_kind = ASSET_KIND_UNKNOWN
+            asset_diag = AssetDiag()
+
         # 3) master stage 컨텍스트 보장 + root layer 를 edit target 으로
         if not self._master.ensure_context():
             print(f"{_PRINT_PREFIX} add_usd: master context unavailable, registering only", flush=True)
@@ -168,6 +183,8 @@ class MultiUsdLoader:
                 instance_id=final_id,
                 source_asset=source_asset,
                 s=s, e=e, tps=tps,
+                asset_kind=asset_kind,
+                asset_diag=asset_diag,
             )
         self._master.set_root_layer_edit_target()
 
@@ -181,6 +198,8 @@ class MultiUsdLoader:
                 instance_id=final_id,
                 source_asset=source_asset,
                 s=s, e=e, tps=tps,
+                asset_kind=asset_kind,
+                asset_diag=asset_diag,
             )
 
         stage = self._master.get_stage()
@@ -190,6 +209,8 @@ class MultiUsdLoader:
                 instance_id=final_id,
                 source_asset=source_asset,
                 s=s, e=e, tps=tps,
+                asset_kind=asset_kind,
+                asset_diag=asset_diag,
             )
 
         try:
@@ -222,6 +243,10 @@ class MultiUsdLoader:
             except Exception:
                 pass
 
+            # Q2 — 2026-05-12: asset_kind/asset_diag 는 register() 안에서 _notify 전에
+            # 박혀야 한다. 그렇지 않으면 registry listener (lam_window._refresh_instances)
+            # 가 인스턴스 생성 즉시 동기 호출되어 UI 가 UNKNOWN 으로 먼저 렌더되는 회귀가
+            # 발생한다. 별도로 박지 말고 반드시 인수로 전달.
             inst = self._registry.register(
                 prim_path=prim_path,
                 instance_id=final_id,
@@ -231,7 +256,10 @@ class MultiUsdLoader:
                 asset_start_time=s,
                 asset_end_time=e,
                 asset_tps=tps,
+                asset_kind=asset_kind,
+                asset_diag=asset_diag,
             )
+
             up_msg = ""
             if applied_deg is not None:
                 up_msg = f" upAxis_fix={asset_axis}->{master_axis} RotateX({applied_deg:+.0f})"
@@ -239,6 +267,12 @@ class MultiUsdLoader:
                 up_msg = f" upAxis_mismatch={asset_axis}vs{master_axis} (보정 실패)"
             print(
                 f"{_PRINT_PREFIX} add_usd OK prim={prim_path} src={ref_path} time=[{s},{e}]@{tps}fps{up_msg}",
+                flush=True,
+            )
+            # 자산 종류 진단 라인 — UI / 사용자에게 명시. add_usd 직후 1 회만 출력.
+            print(
+                f"{_PRINT_PREFIX} asset kind={kind_to_user_label(asset_kind)} | "
+                f"{asset_diag.to_log_line()}",
                 flush=True,
             )
             return inst
@@ -249,6 +283,8 @@ class MultiUsdLoader:
                 instance_id=final_id,
                 source_asset=source_asset,
                 s=s, e=e, tps=tps,
+                asset_kind=asset_kind,
+                asset_diag=asset_diag,
             )
 
     def remove_usd(self, prim_path: str) -> bool:
@@ -281,8 +317,16 @@ class MultiUsdLoader:
         s: float,
         e: float,
         tps: float,
+        asset_kind: str = ASSET_KIND_UNKNOWN,
+        asset_diag: Optional[AssetDiag] = None,
     ) -> AnimationInstance:
-        """USD author 가 안 되는 환경(unit test/CI 등) 폴백."""
+        """USD author 가 안 되는 환경(unit test/CI 등) 폴백.
+
+        Q2 — 2026-05-12: add_usd 의 메인 author 경로가 부분 실패해 이 폴백으로 떨어져도
+        분류 결과가 사라지지 않게 `asset_kind` / `asset_diag` 를 register 인수로 전달해
+        `_notify` 전에 박히도록 한다. 이전에는 register 후에 별도로 박는 방식이라
+        listener 가 UNKNOWN 상태로 먼저 UI 를 그리는 회귀가 있었다.
+        """
         return self._registry.register(
             prim_path=prim_path,
             instance_id=instance_id,
@@ -290,6 +334,8 @@ class MultiUsdLoader:
             asset_start_time=s,
             asset_end_time=e,
             asset_tps=tps,
+            asset_kind=asset_kind,
+            asset_diag=asset_diag or AssetDiag(),
         )
 
 

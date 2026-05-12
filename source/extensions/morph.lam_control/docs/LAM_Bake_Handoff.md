@@ -15,6 +15,15 @@
 - Option E (Master Stage 1 + Offscreen Stage N) 아키텍처 **구현 완료**.
 - OmniGraph 구동 자산을 timeSamples 로 변환하는 **[Bake] 파이프라인 동작 확인**.
 - 단일 인스턴스 USD_TIMELINE 독립 재생 OK. 멀티 인스턴스 동시 재생 검증은 다음 단계.
+- **자산 자동 진단 + 조건부 bake** 구현 완료 (W1~W3) — TIMESAMPLES_XFORM 은 bake 생략,
+  OMNIGRAPH 만 bake. bake 의 capture 타깃은 모든 timeSampled attr 자동 탐지 (xformOp /
+  Skel / Mesh-deform 등).
+- **시퀀스 step kind 분리** 구현 완료 (W4) — `TIMESAMPLES_REPLAY` 실무용 신설,
+  `USD_TIMELINE` 은 TBS 호환 alias (현 단계 동작 동일, 추후 TBS 방식 재구현).
+- **Bake 출력 in-memory 화** 구현 완료 (X3 — 2026-05-12) — 디스크 `*_baked.usd` 미생성.
+  bake 결과는 anonymous `Sdf.Layer` 로 메모리에만 보관 (휘발성). 인스턴스 교체 없이
+  `attach_memory_baked_layer` 단일 호출로 적용. bake 종료 시 변환된 timeSamples 형식을
+  콘솔에 dump 출력.
 - bake 속도/품질 정책 확정 — 무손실 모드 기본, opt-in 가속은 별도 결정 사항으로 남음.
 - **`morph.tbs_control_1` 변경 0** 유지.
 
@@ -434,16 +443,21 @@ source/extensions/morph.lam_control/docs/
 | R18 | bake 된 파일의 material / shader 등이 원본과 동일 유지 | **[구현]** | baked.usd 가 원본을 reference — 동일 시각 결과 보장 | 원본 파일 위치 의존 — §5 한계 메모. |
 | R19 | 옆으로 누워있는 현상 (upAxis 이중 회전) 방지 | **[구현]** | `bake_prim_to_timesamples_async` 가 `out_stage.SetStageUpAxis()` 원본과 일치 + inst_prim 자체 capture 제외 | D7 정책. |
 | R20 | baked.usd 로 교체 후 USD_TIMELINE 정상 재생 | **[구현]** | `lam_window.py` 가 bake 완료 시 `forget_instance` → `add_usd(baked)` 로 runtime 재생성 | D8 정책. |
+| R21 | add_usd 시 자산을 자동 진단해 OmniGraph / TIMESAMPLES_XFORM 등 분류 | **[구현]** | `lam_asset_diagnostics.py:scan_asset_kind` + `lam_multi_usd_loader.py` 가 instance 에 저장 | W1. 콘솔에 분류 라인 출력. |
+| R22 | TIMESAMPLES_XFORM (FBX 등 native timeSamples 자산) 은 [Bake] 자동 생략 | **[구현]** | `lam_window.py:_on_bake_instance` 의 분기 (asset_kind_bake_unnecessary) | W2. Skel/Mesh 는 경고 후 진행. |
+| R23 | bake 시 xformOp 외에도 모든 timeSampled attr 자동 탐지 (Skel / Mesh deform 포함) | **[구현]** | `lam_bake_omnigraph.py:_collect_targets` 가 `discover_animated_attrs` 사용 → fallback 으로 기존 xformOp filter 유지 | W3. 사용자가 보고한 "inspect 에선 있고 bake 에선 capture 0" 사고 방지. |
+| R24 | step kind 분리 — 실무 = TIMESAMPLES_REPLAY (Option E), 테스트 = USD_TIMELINE (TBS 호환) | **[구현]** | `lam_sequence_engine.py:STEP_KIND_*` + `_INSTANCE_PLAYBACK_KINDS` + `lam_sequence_editor.py:STEP_TYPES` | W4. 두 kind 가 현재는 동일 동작 (회귀 0). USD_TIMELINE 의 TBS 방식 재구현은 D12 — TIMESAMPLES_REPLAY 검증 후. |
+| R25 | Bake 결과를 디스크 파일 없이 **메모리만** (휘발성) — 매번 [Bake] 다시 가능, 변환된 timeSamples 형식 로그 가능 | **[구현]** | `lam_bake_omnigraph.py` 의 `output_mode='memory'` + `_log_baked_layer_dump`, `lam_instance_runtime.py:setup_offscreen_stage_from_layer`, `lam_runtime_evaluator.py:attach_memory_baked_layer`, `lam_window.py:_on_bake_instance` (in-memory 분기) | X3 (2026-05-12). 정책 D13. 사용자 요청 `prompt.txt:239-244`. |
 
 ### 매트릭스 결론
 
-- **이전부터 요구된 시나리오 20 개 항목 중**:
-  - 구현 완료 + 검증 완료 = **12 개** (R1~R5, R10~R12, R14~R15, R17~R20 일부)
-  - 구현 완료 + **검증 미진행** = **5 개** (R6, R7, R8, R13, R18)
+- **이전부터 요구된 시나리오 25 개 항목 중**:
+  - 구현 완료 + 검증 완료 = **16 개 이상** (R1~R5, R10~R12, R14~R15, R17~R20 중 사용자 직접 검증 완료 일부)
+  - 구현 완료 + **검증 미진행** = **7 개** (R6, R7, R8, R13, R18 + R21~R25 중 사용자 실측 미완)
   - **미구현** = **1 개** (R9 — multi-target step)
-  - 정책 항목 = **2 개** (R10, R12, R16)
+  - 정책 항목 = **R10 / R12 / R16** 등 3 개 + 신규 정책 D11 / D12 / D13.
 - **다음 세션 첫 번째로 처리할 것**:
-  1. [P1] 6.1 멀티 인스턴스 동시 재생 검증 → R6 의 검증 완료.
+  1. [P1] 6.1 멀티 인스턴스 동시 재생 검증 (TIMESAMPLES_REPLAY 사용) → R6 의 검증 완료.
   2. [P1] 6.2 event_*.json 동시 트리거 → R7 / R8 의 검증 완료.
   3. [P1] 6.2.1 multi-target step 구현 → R9 의 구현 완료.
 - 이 3 개가 끝나면 **사용자가 이전부터 요구한 모든 시나리오가 검증 가능 상태** 에 도달.

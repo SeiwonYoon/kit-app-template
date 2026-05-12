@@ -105,6 +105,81 @@ class PlaybackScheduler:
         )
         return True
 
+    def begin_master_timeline_mode(self, prim_path: str) -> bool:
+        """`RuntimeEvaluator.begin_master_timeline_mode` 위임 (USD_TIMELINE 테스트용)."""
+        try:
+            return bool(self._evaluator.begin_master_timeline_mode(prim_path))
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} begin_master_timeline_mode EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def begin_bake_mode(self, prim_path: str) -> bool:
+        """`RuntimeEvaluator.begin_bake_mode` 위임 — bake 진행 중 author 가드."""
+        try:
+            return bool(self._evaluator.begin_bake_mode(prim_path))
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} begin_bake_mode EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def end_bake_mode(self, prim_path: str) -> None:
+        """`RuntimeEvaluator.end_bake_mode` 위임."""
+        try:
+            self._evaluator.end_bake_mode(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} end_bake_mode EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+
+    def set_omnigraph_active_for_instance(
+        self, prim_path: str, active: bool
+    ) -> int:
+        """`RuntimeEvaluator.set_omnigraph_active_for_instance` 위임.
+
+        bake 시작 전 ``active=True`` 로 호출하여 PushGraph 등 OmniGraph 가 평가되도록
+        한 뒤 bake 를 수행하고, bake 완료 후에는 ``attach_memory_baked_layer`` 가 표식을
+        reset 하므로 다음 update tick 에서 자동으로 다시 deactivate 된다.
+        """
+        try:
+            return int(
+                self._evaluator.set_omnigraph_active_for_instance(prim_path, bool(active))
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} set_omnigraph_active_for_instance EXC prim={prim_path} "
+                f"active={active}: {exc}",
+                flush=True,
+            )
+            return 0
+
+    def end_master_timeline_mode(
+        self,
+        prim_path: str,
+        *,
+        freeze_at_tc: Optional[float] = None,
+    ) -> None:
+        """`RuntimeEvaluator.end_master_timeline_mode` 위임.
+
+        Args:
+            freeze_at_tc: 지정 시 LayerOffset(freeze_at_tc, 1e-9) 로 freeze author →
+                USD_TIMELINE step 종료 후 viewport 가 해당 timeCode 시점에 머문다.
+        """
+        try:
+            self._evaluator.end_master_timeline_mode(
+                prim_path, freeze_at_tc=freeze_at_tc
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} end_master_timeline_mode EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+
     def pause(self, prim_path: str) -> bool:
         inst = self._get(prim_path)
         if inst is None:
