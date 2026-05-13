@@ -367,30 +367,65 @@ class LamEventPlaylistWindow:
             self._log(f"{reason} — TBS_OFFSET 복원 실패: {exc}")
 
         # 4) 인스턴스 (TIMESAMPLES_REPLAY/USD_TIMELINE) — virtual_time 을 시작점으로 되돌림.
-        for pp in ref_prims:
+        #    `end_replay_mode` 도 함께 호출해 sublayer 의 freeze 오버라이드를 (0,1) 로
+        #    복원한다. evaluator USD write 가 포함되므로 main tick 에서 한꺼번에 수행.
+        def _do_reset_instances_in_main() -> None:
+            for pp in ref_prims:
+                try:
+                    inst = self._registry.get_by_prim_path(pp)
+                    if inst is None:
+                        continue
+                    inst.virtual_time = _range_start_seconds_for_instance(inst)
+                    inst.state = "stopped"
+                    for fn_name in (
+                        "end_replay_mode",
+                        "end_master_timeline_mode",
+                        "invalidate_mapping",
+                        "force_rebuild_attr_cache",
+                    ):
+                        fn = getattr(self._evaluator, fn_name, None)
+                        if fn is None:
+                            continue
+                        try:
+                            fn(pp)
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    self._log(f"{reason} — 인스턴스 복원 실패 prim={pp}: {exc}")
+
+        if ref_prims:
             try:
-                inst = self._registry.get_by_prim_path(pp)
-                if inst is None:
-                    continue
-                inst.virtual_time = _range_start_seconds_for_instance(inst)
-                inst.state = "stopped"
+                _dispatch_main_wait(_do_reset_instances_in_main, timeout=15.0)
+            except Exception as exc:
+                self._log(f"{reason} — 인스턴스 복원 dispatch 실패: {exc}")
+
+        # 5) master 타임라인 0 으로 + pause — TIMESAMPLES_REPLAY/USD_TIMELINE step 종료
+        #    시점에 멈춰있던 current_time 이 reference 평가를 끄어가지 않도록 한다.
+        def _do_reset_master_timeline_in_main() -> None:
+            try:
+                from .lam_master_timeline_play import _get_timeline
+
+                tl = _get_timeline()
+                if tl is None:
+                    return
                 try:
-                    self._evaluator.end_master_timeline_mode(pp)
+                    tl.pause()  # type: ignore[attr-defined]
                 except Exception:
                     pass
                 try:
-                    self._evaluator.invalidate_mapping(pp)
-                except Exception:
-                    pass
-                try:
-                    self._evaluator.force_rebuild_attr_cache(pp)
+                    tl.set_current_time(0.0)  # type: ignore[attr-defined]
                 except Exception:
                     pass
             except Exception as exc:
-                self._log(f"{reason} — 인스턴스 복원 실패 prim={pp}: {exc}")
+                self._log(f"{reason} — master timeline pause/seek 실패: {exc}")
+
+        try:
+            _dispatch_main_wait(_do_reset_master_timeline_in_main, timeout=5.0)
+        except Exception as exc:
+            self._log(f"{reason} — master timeline dispatch 실패: {exc}")
 
         self._log(
-            f"{reason} 완료 — prim {len(rpaths)} 개 TBS_OFFSET=0, 인스턴스 {len(ref_prims)} 개 virtual_time 시작점 복귀"
+            f"{reason} 완료 — prim {len(rpaths)} 개 TBS_OFFSET=0, 인스턴스 {len(ref_prims)} 개 virtual_time 시작점 복귀, master timeline=0"
         )
 
     # ------------------------------------------------------------------ scheduled worker

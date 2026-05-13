@@ -171,18 +171,26 @@ def restore_timeline_after_usd_timeline(
     was_playing: bool,
     prev_speed: Optional[float],
 ) -> None:
-    """USD_TIMELINE step 종료 후 Kit 타임라인 상태 best-effort 복구."""
+    """USD_TIMELINE step 종료 후 Kit 타임라인 상태 best-effort 복구.
+
+    2026-05-13 — 순서 수정: ``set_current_time`` 을 ``pause`` 보다 **먼저** 호출.
+    이전에는 (pause → speed restore → set_current_time) 순서였는데, pause 직후 다음
+    set_current_time 사이에 Hydra 가 한 frame 을 그릴 때 OmniGraph 가 ``time=0`` (혹은
+    기본 포즈) 로 평가되어 prim 이 "원래위치로 튀었다 끝난 지점으로 복귀" 하는 시각
+    artifact 가 발생했다 (사용자 보고 2026-05-13). 시각 갱신 순서를 (set_current_time
+    → pause) 로 뒤집어 timeline 이 목표 시각으로 먼저 이동한 뒤 정지하도록 한다.
+    """
     if tl is None:
         return
+    try:
+        tl.set_current_time(float(saved_time))  # type: ignore[attr-defined]
+    except Exception:
+        pass
     try:
         tl.pause()  # type: ignore[attr-defined]
     except Exception:
         pass
     _restore_timeline_speed(tl, prev_speed)
-    try:
-        tl.set_current_time(float(saved_time))  # type: ignore[attr-defined]
-    except Exception:
-        pass
     if was_playing:
         try:
             tl.play()  # type: ignore[attr-defined]

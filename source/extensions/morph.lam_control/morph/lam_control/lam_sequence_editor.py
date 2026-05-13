@@ -1098,7 +1098,12 @@ class LamSequenceEditor:
                         flush=True,
                     )
                 if self._evaluator is not None:
+                    # `end_replay_mode` 도 함께 호출 — TIMESAMPLES_REPLAY step 이 도중
+                    # stop / reset 된 경우 sublayer 에 남은 freeze 오버라이드
+                    # (LayerOffset(0,1e-9) + OmniGraph active=false) 를 (0,1) + active=true
+                    # 로 복원해 master 타임라인이 자유 평가되도록 한다.
                     for fn_name in (
+                        "end_replay_mode",
                         "end_master_timeline_mode",
                         "invalidate_mapping",
                         "force_rebuild_attr_cache",
@@ -1122,6 +1127,37 @@ class LamSequenceEditor:
             except Exception as exc:
                 self._set_status(f"reset(instance) 실패: {exc}")
                 print(f"{_PRINT_PREFIX} reset(instance) failed: {exc}", flush=True)
+
+        # master 타임라인을 0 으로 되돌리고 pause — TIMESAMPLES_REPLAY / USD_TIMELINE
+        # step 종료 시점의 current_time (예: end_frame / 30) 이 그대로 남아있으면
+        # reference 의 timeSamples 가 그 시점으로 평가되어 viewport 가 마지막 자세에
+        # 멈춘 채로 보인다. ref_prims 가 비어있는 MOVE/ROTATE 전용 시퀀스에서도 동일하게
+        # 안전 차원으로 호출 (이미 0 이면 부작용 없음). 항상 main tick 에서 수행.
+        def _do_reset_master_timeline_in_main() -> None:
+            try:
+                from .lam_master_timeline_play import _get_timeline
+
+                tl = _get_timeline()
+                if tl is None:
+                    return
+                try:
+                    tl.pause()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    tl.set_current_time(0.0)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} reset master timeline pause/seek failed: {exc}",
+                    flush=True,
+                )
+
+        try:
+            _dispatch_main_wait(_do_reset_master_timeline_in_main, timeout=5.0)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} reset master timeline dispatch failed: {exc}", flush=True)
 
         n_inst = n_inst_box["n"]
         self._set_status(

@@ -783,13 +783,15 @@ class LamSequenceRunner:
 
             self._sleep(est, allow_stop=True)
 
-            # 사용자 요청 (2026-05-12) — USD_TIMELINE step 이 끝나면 viewport 가 끝
-            # 프레임에 머무르도록 한다. 즉:
+            # 사용자 요청 (2026-05-13) — "타임라인을 막는 코드를 모두 제거" 정책에 맞춰
+            # step 종료 후에도 freeze override 는 author 하지 않는다. step 이 끝나면:
             #   (1) omni.timeline 을 끝 시간 (= play_ef/fps) 에서 pause + 그 위치 유지
-            #       (saved_time 으로 0 초 회귀 X).
-            #   (2) Option E freeze 를 LayerOffset(play_ef, 1e-9) 로 author —
-            #       이후 timeline 이 슬라이더로 0 으로 돌아가더라도 reference 가
-            #       끝 프레임 시점의 값을 평가해 viewport 가 그 자세로 멈춘다.
+            #       → reference / OmniGraph 가 그 시각을 평가하여 viewport 가 끝 자세
+            #         그대로 머무른다 (정지 직후 시점).
+            #   (2) 사용자가 timeline 슬라이더를 움직이면 prim 도 자유롭게 따라간다 —
+            #       freeze 를 박지 않으므로 timeline 재생이 막히지 않는다.
+            #   (3) ``end_master_timeline_mode`` 의 ``freeze_at_tc`` 인자는 호환을 위해
+            #       전달하되 evaluator 측에서 무시한다.
             end_time_sec = float(play_ef) / float(LAM_FIXED_FPS)
             end_tc = float(play_ef)
 
@@ -835,13 +837,47 @@ class LamSequenceRunner:
             )
 
         # ------------------------------------------------------------------ TIMESAMPLES_REPLAY (또는 USD_TIMELINE+loop) — Option E
+        # 2026-05-13 사용자 합의 (`타임라인을 막는 코드를 모두 제거`):
+        #   - LayerOffset freeze / OmniGraph deactivate 같은 sublayer override 는 일절
+        #     author 하지 않는다. evaluator 가 instance sublayer (stronger) 에 박는
+        #     default 값이 reference (weaker) 의 timeSamples 를 마스킹하는 USD value
+        #     resolution 만으로 step 재생이 성립한다.
+        #   - 본 step 시작 시 `begin_replay_mode` 가 evaluator 의 default 쓰기를
+        #     **활성화**한다 (해당 prim 을 `_evaluator_active_prims` 에 추가). 그 결과
+        #     매 update tick `evaluate_and_write(virtual_time)` 가 inst sublayer 에
+        #     default 를 박아 viewport 가 그 자세로 보인다.
+        #   - step 종료 시 default 쓰기를 끄지 **않는다** — viewport 가 마지막 vt 의
+        #     자세를 그대로 유지해야 한다는 사용자 요구. evaluator 가 그 vt 값을 계속
+        #     default 로 박아 끝 자세를 잠금.
+        #   - 사용자가 Reset 을 누르면 sequence_editor 가 `end_replay_mode` 를 호출해
+        #     default 쓰기를 끄고 inst sublayer 의 default opinion 도 청소 → reference
+        #     의 timeSamples 가 다시 winner 가 되어 master timeline 자유 재생 가능.
         # scheduler.start 도 main thread 에서 실행 (USD attribute 평가 lock 보호).
+        replay_prim = result.instance.prim_path
+
+        def _do_begin_replay_in_main() -> None:
+            try:
+                self._scheduler.begin_replay_mode(replay_prim)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} step[{idx}] begin_replay_mode failed prim={replay_prim}: {exc}",
+                    flush=True,
+                )
+
+        try:
+            _dispatch_main_wait(_do_begin_replay_in_main, timeout=10.0)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} step[{idx}] begin_replay dispatch failed: {exc}",
+                flush=True,
+            )
+
         start_ok_holder: Dict[str, bool] = {"ok": False}
 
         def _do_start_in_main() -> None:
             start_ok_holder["ok"] = bool(
                 self._scheduler.start(
-                    result.instance.prim_path,
+                    replay_prim,
                     reset=reset_each_start,
                     speed=combined_speed,
                     loop=loop,
@@ -859,14 +895,30 @@ class LamSequenceRunner:
 
         print(
             f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} matched_by={result.matched_by} "
-            f"prim={result.instance.prim_path} range={range_mode}[{range_start},{range_end}] "
+            f"prim={replay_prim} range={range_mode}[{range_start},{range_end}] "
             f"sp={combined_speed} loop={loop} ok={ok} est_duration={est:.3f}s "
             f"asset_time=[{result.instance.asset_start_time},{result.instance.asset_end_time}]"
             f"@{LAM_FIXED_FPS}fps(forced)",
             flush=True,
         )
         if not ok or loop:
+            # 시작 실패 시 freeze 도 즉시 해제 (계속 박혀 있으면 viewport 가 멈춤).
+            if not ok:
+
+                def _do_end_replay_fail() -> None:
+                    try:
+                        self._scheduler.end_replay_mode(replay_prim)
+                    except Exception:
+                        pass
+
+                try:
+                    _dispatch_main_wait(_do_end_replay_fail, timeout=5.0)
+                except Exception:
+                    pass
             return 0.0
+        # 정상 시작 — caller (`run` 메서드) 가 ``est`` 만큼 sleep 후 다음 step 으로 진행.
+        # step 종료 시 별도 cleanup 을 하지 않으므로 freeze 가 유지되어 마지막 vt 시점의
+        # 자세가 viewport 에 그대로 남는다.
         return est
 
     def _estimate_usd_timeline_duration(

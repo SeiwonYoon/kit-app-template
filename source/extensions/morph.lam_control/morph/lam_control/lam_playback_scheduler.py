@@ -116,6 +116,27 @@ class PlaybackScheduler:
             )
             return False
 
+    def begin_replay_mode(self, prim_path: str) -> bool:
+        """`RuntimeEvaluator.begin_replay_mode` 위임 (TIMESAMPLES_REPLAY step 시작)."""
+        try:
+            return bool(self._evaluator.begin_replay_mode(prim_path))
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} begin_replay_mode EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+            return False
+
+    def end_replay_mode(self, prim_path: str) -> None:
+        """`RuntimeEvaluator.end_replay_mode` 위임 (TIMESAMPLES_REPLAY step 종료)."""
+        try:
+            self._evaluator.end_replay_mode(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} end_replay_mode EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+
     def begin_bake_mode(self, prim_path: str) -> bool:
         """`RuntimeEvaluator.begin_bake_mode` 위임 — bake 진행 중 author 가드."""
         try:
