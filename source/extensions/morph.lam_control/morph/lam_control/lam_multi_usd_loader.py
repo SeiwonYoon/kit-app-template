@@ -275,6 +275,31 @@ class MultiUsdLoader:
                 f"{asset_diag.to_log_line()}",
                 flush=True,
             )
+
+            # 2026-05-13 — 실무 FBX→USD 자산에서 "1000 프레임이 800 부근에서 평가" 회귀
+            # 분석 결과 — master tcps 30 / omni.timeline framerate 24 의 불일치 +
+            # master 의 startTimeCode/endTimeCode 가 자산보다 좁아서 timeline slider 가
+            # 자산 전 구간을 커버하지 못하는 두 가지 문제를 add_usd 직후 일괄 보정.
+            #   (1) master startTime/endTime 자동 확장 — 기존 값보다 자산 측이 크면 늘림.
+            #   (2) omni.timeline start/end 도 master tcps 기준 seconds 로 동기화.
+            #   (3) `force_fixed_fps_30` 재호출 — Kit timeline framerate 가 다른 값으로
+            #       잡혀 있던 경우(setter API 빌드 차이 / carb.settings 미적용 등) 다시
+            #       30 으로 환원하고 read-back 진단을 한 줄 출력.
+            #   (4) source 자산 자체의 raw tcps 와 sample 통계를 진단 — `1000 → 800`
+            #       회귀 발생 시 master / source / timeline 셋의 정합성을 즉시 비교 가능.
+            try:
+                self._sync_stage_and_timeline_with_source(
+                    stage,
+                    source_asset=source_asset,
+                    src_start_tc=float(s),
+                    src_end_tc=float(e),
+                )
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} add_usd time-sync failed: {exc} (계속 진행)",
+                    flush=True,
+                )
+
             return inst
         except Exception as exc:
             print(f"{_PRINT_PREFIX} add_usd author failed: {exc}", flush=True)
@@ -306,7 +331,383 @@ class MultiUsdLoader:
         self._registry.unregister(prim_path)
         return ok
 
+    def clear_instance_contents(self, prim_path: str) -> dict:
+        """인스턴스 prim 자체는 유지하고 **하위 내용물만 비운다**.
+
+        Kit Stage panel 에서 ``/World/<inst>/<자식>`` 을 Delete 키로 지우려고 하면
+        "cannot delete ancestral prim" 오류가 난다 — 자식 prim 들이 자산 USD 의
+        reference 로 들어온 것이라 root layer 에서 직접 제거할 수 없기 때문이다.
+
+        본 메서드는 그 우회 경로다:
+            1) ``inst_sublayer`` (session 산하) 가 있으면 폐기 — TIMESAMPLES_REPLAY 단계
+               에서 박혀 있던 baked timeSamples / OmniGraph deactivate 표식 등이
+               전부 비워진다.
+            2) **모든 layer** (root / session / 그 산하 sublayer 모두) 에서 본
+               prim_path 에 대한 ``referenceList`` / ``payloadList`` /
+               ``variantSelections`` / ``inheritPathList`` / ``specializesList`` 의
+               ListOp 편집을 ``ClearEdits()`` 로 비운다.
+            3) root layer 의 ``PrimSpec.nameChildren`` 도 모두 제거 (root 에 spec 이
+               있는 자식만 — reference 로 들어온 composition-only 자식은 (2) 의
+               references clear 로 자연 소멸).
+            4) 인스턴스 자체는 ``stage.GetPrimAtPath(prim_path)`` 에 ``Xform`` 으로
+               유지되도록 root layer 에 ``typeName='Xform'`` spec 을 보장.
+            5) Registry 의 ``inst.baked=False`` / ``inst.source_asset=''`` 로 표시.
+               ``inst.asset_kind`` 는 ``UNKNOWN`` 으로 리셋해 다음 [Extract] / [Bake]
+               분기가 새로 결정되게 한다.
+
+        evaluator 측 ``forget_instance`` 호출은 본 메서드 사용자가 책임진다 (UI 핸들러에
+        서 수행). evaluator 가 다음 update tick 에 offscreen stage 를 재구성할 수 있게
+        하기 위해서다.
+
+        Args:
+            prim_path: 인스턴스 prim path (예: ``/World/aaa``).
+
+        Returns:
+            진단 dict — 사용자가 로그에 출력. 키:
+              ``ok`` (bool), ``cleared_refs`` (int), ``cleared_payloads`` (int),
+              ``cleared_other`` (int), ``removed_children_spec`` (int),
+              ``removed_inst_sublayer`` (bool), ``error`` (str).
+        """
+        diag = {
+            "ok": False,
+            "cleared_refs": 0,
+            "cleared_payloads": 0,
+            "cleared_other": 0,
+            "removed_children_spec": 0,
+            "removed_inst_sublayer": False,
+            "error": "",
+        }
+
+        stage = self._master.get_stage()
+        if stage is None:
+            diag["error"] = "master stage is None"
+            return diag
+
+        try:
+            from pxr import Sdf, UsdGeom  # type: ignore
+        except Exception as exc:
+            diag["error"] = f"pxr import failed: {exc}"
+            return diag
+
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            diag["error"] = f"prim not found: {prim_path}"
+            return diag
+
+        # (1) inst sublayer 폐기 — bake / extract 잔재까지 한 번에 청소.
+        try:
+            if self._master.remove_inst_sublayer(prim_path):
+                diag["removed_inst_sublayer"] = True
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} clear_instance_contents: remove_inst_sublayer 실패 "
+                f"prim={prim_path}: {exc} (계속 진행)",
+                flush=True,
+            )
+
+        # (2) 모든 layer 의 PrimSpec 에서 composition arc / nameChildren 비우기.
+        def _collect_all_layers(stage_) -> list:
+            """root / session + 두 layer 의 subLayerPaths 를 재귀적으로 모두 수집."""
+            seen_ids: set = set()
+            out: list = []
+
+            def _walk(layer):
+                if layer is None:
+                    return
+                try:
+                    lid = layer.identifier
+                except Exception:
+                    lid = id(layer)
+                if lid in seen_ids:
+                    return
+                seen_ids.add(lid)
+                out.append(layer)
+                try:
+                    sub_paths = list(layer.subLayerPaths)
+                except Exception:
+                    sub_paths = []
+                for sp in sub_paths:
+                    try:
+                        sub = Sdf.Layer.Find(sp)
+                        if sub is None:
+                            sub = Sdf.Layer.FindOrOpen(sp)
+                    except Exception:
+                        sub = None
+                    if sub is not None:
+                        _walk(sub)
+
+            try:
+                _walk(stage_.GetRootLayer())
+            except Exception:
+                pass
+            try:
+                _walk(stage_.GetSessionLayer())
+            except Exception:
+                pass
+            return out
+
+        layers = _collect_all_layers(stage)
+
+        target_sdf_path = Sdf.Path(prim_path)
+        for layer in layers:
+            try:
+                spec = layer.GetPrimAtPath(target_sdf_path)
+            except Exception:
+                spec = None
+            if spec is None:
+                continue
+
+            # composition arcs ListOp 비우기
+            for arc_attr, key in (
+                ("referenceList", "cleared_refs"),
+                ("payloadList", "cleared_payloads"),
+                ("inheritPathList", "cleared_other"),
+                ("specializesList", "cleared_other"),
+            ):
+                try:
+                    arc = getattr(spec, arc_attr, None)
+                    if arc is not None:
+                        arc.ClearEdits()
+                        diag[key] = int(diag[key]) + 1
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} clear_instance_contents: {arc_attr} ClearEdits "
+                        f"실패 layer={layer.identifier} prim={prim_path}: {exc}",
+                        flush=True,
+                    )
+
+            # variantSelections 비우기 (있다면).
+            try:
+                vs = spec.variantSelections
+                if vs:
+                    for k in list(vs.keys()):
+                        try:
+                            del vs[k]
+                            diag["cleared_other"] = int(diag["cleared_other"]) + 1
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # nameChildren 제거 — root layer 에 박힌 spec 자식만. reference 안에서
+            # 들어온 composition-only 자식 prim 은 (2) 에서 references 가 비었으므로
+            # 자연 사라진다 (composition 재평가).
+            try:
+                names = list(spec.nameChildren.keys())
+            except Exception:
+                names = []
+            for cn in names:
+                try:
+                    del spec.nameChildren[cn]
+                    diag["removed_children_spec"] = int(diag["removed_children_spec"]) + 1
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} clear_instance_contents: nameChildren del 실패 "
+                        f"layer={layer.identifier} prim={prim_path} child={cn}: {exc}",
+                        flush=True,
+                    )
+
+        # (3) 인스턴스 prim 자체는 유지 — root layer 에 Xform 으로 보장.
+        try:
+            self._master.set_root_layer_edit_target()
+            UsdGeom.Xform.Define(stage, prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} clear_instance_contents: Xform.Define 보장 실패 "
+                f"prim={prim_path}: {exc}",
+                flush=True,
+            )
+
+        # (4) Registry 측 표식 리셋 — bake/extract 상태 / asset_kind 모두 초기화.
+        try:
+            inst = self._registry.get_by_prim_path(prim_path)
+        except Exception:
+            inst = None
+        if inst is None:
+            try:
+                for it in self._registry.all_instances():
+                    if it.prim_path == prim_path:
+                        inst = it
+                        break
+            except Exception:
+                inst = None
+        if inst is not None:
+            try:
+                inst.baked = False
+            except Exception:
+                pass
+            try:
+                inst.source_asset = ""
+            except Exception:
+                pass
+            try:
+                from .lam_types import ASSET_KIND_UNKNOWN
+
+                inst.asset_kind = ASSET_KIND_UNKNOWN
+            except Exception:
+                pass
+            try:
+                inst.mirror_root_prim_path = ""
+            except Exception:
+                pass
+
+        diag["ok"] = True
+        print(
+            f"{_PRINT_PREFIX} clear_instance_contents OK prim={prim_path} "
+            f"refs={diag['cleared_refs']} payloads={diag['cleared_payloads']} "
+            f"other={diag['cleared_other']} children_spec={diag['removed_children_spec']} "
+            f"inst_sublayer_removed={diag['removed_inst_sublayer']}",
+            flush=True,
+        )
+        return diag
+
     # ----------------------------------------------------------------- private
+
+    def _sync_stage_and_timeline_with_source(
+        self,
+        stage,
+        *,
+        source_asset: str,
+        src_start_tc: float,
+        src_end_tc: float,
+    ) -> None:
+        """add_usd 직후 master stage / omni.timeline 의 timing metadata 정합성 보정.
+
+        - master 의 ``startTimeCode`` / ``endTimeCode`` 가 자산보다 좁으면 자산 범위까지
+          확장 (이미 더 넓으면 유지).
+        - master tcps (= LAM_FIXED_FPS=30) 기준 seconds 로 변환하여 ``omni.timeline`` 의
+          start/end time 을 동기화.
+        - ``master.force_fixed_fps_30()`` 를 다시 호출해 framerate / tcps / carb.settings
+          를 30 으로 재확정 + read-back 진단.
+        - source 자산 자체의 raw tcps / fps / sample 통계도 1행으로 출력.
+        """
+        try:
+            from .lam_types import LAM_FIXED_FPS
+        except Exception:
+            LAM_FIXED_FPS = 30.0  # type: ignore[assignment]
+
+        fps = float(LAM_FIXED_FPS)
+
+        # (1) source 자산의 raw 메타데이터 + sample 범위 진단.
+        raw_src = self._diagnose_source_timing(
+            source_asset, src_start_tc=src_start_tc, src_end_tc=src_end_tc
+        )
+
+        # (2) master start/end time 확장 — 사용자가 작업 중인 다른 자산이 더 넓을 수
+        #     있으므로 강제 set 이 아니라 max 로 확장. (음수 start 도 자산이 그렇다면 허용.)
+        try:
+            cur_start = float(stage.GetStartTimeCode())
+            cur_end = float(stage.GetEndTimeCode())
+        except Exception:
+            cur_start, cur_end = 0.0, 0.0
+        new_start = min(cur_start, float(src_start_tc))
+        new_end = max(cur_end, float(src_end_tc))
+        try:
+            if new_start < cur_start - 1e-6:
+                stage.SetStartTimeCode(float(new_start))
+            if new_end > cur_end + 1e-6:
+                stage.SetEndTimeCode(float(new_end))
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} stage start/end timecode set FAIL: {exc}",
+                flush=True,
+            )
+
+        # (3) omni.timeline 의 start/end seconds 동기화. fps 동기화는 (4) 가 담당.
+        try:
+            import omni.timeline as _ot  # type: ignore
+
+            tl = _ot.get_timeline_interface()
+        except Exception:
+            tl = None
+        if tl is not None:
+            try:
+                start_sec = float(new_start) / fps
+                end_sec = float(new_end) / fps
+                if hasattr(tl, "set_start_time"):
+                    tl.set_start_time(start_sec)
+                if hasattr(tl, "set_end_time"):
+                    tl.set_end_time(end_sec)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} timeline start/end set FAIL: {exc}",
+                    flush=True,
+                )
+
+        # (4) framerate / tcps / carb.settings 일괄 30 재확정 + read-back 진단.
+        try:
+            fn = getattr(self._master, "force_fixed_fps_30", None)
+            if callable(fn):
+                fn()
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} master.force_fixed_fps_30 (post add_usd) FAIL: "
+                f"{exc}",
+                flush=True,
+            )
+
+        print(
+            f"{_PRINT_PREFIX} timing_sync master tc=[{new_start:.3f},{new_end:.3f}] "
+            f"@{fps}fps source({raw_src})",
+            flush=True,
+        )
+
+    def _diagnose_source_timing(
+        self,
+        asset_path: str,
+        *,
+        src_start_tc: float,
+        src_end_tc: float,
+    ) -> str:
+        """source 자산의 raw timing metadata + sample 분포를 1행 요약 문자열로 반환.
+
+        예: ``tcps=24.0 fps=24.0 stage=[0.0,1000.0] sample_tc=[0.0,1000.0] attrs=18``
+        """
+        if not asset_path or not os.path.isfile(asset_path):
+            return "no_file"
+        try:
+            from pxr import Usd  # type: ignore
+
+            src = Usd.Stage.Open(asset_path)
+            if src is None:
+                return "open_fail"
+            try:
+                raw_tcps = float(src.GetTimeCodesPerSecond())
+            except Exception:
+                raw_tcps = -1.0
+            try:
+                raw_fps = float(src.GetFramesPerSecond())
+            except Exception:
+                raw_fps = -1.0
+            tc_min = float("inf")
+            tc_max = float("-inf")
+            n_attr = 0
+            try:
+                for p in src.Traverse():
+                    for a in p.GetAttributes():
+                        try:
+                            ts = a.GetTimeSamples()
+                        except Exception:
+                            ts = ()
+                        if not ts:
+                            continue
+                        n_attr += 1
+                        if ts[0] < tc_min:
+                            tc_min = float(ts[0])
+                        if ts[-1] > tc_max:
+                            tc_max = float(ts[-1])
+            except Exception:
+                pass
+            if tc_min == float("inf"):
+                sample_str = "samples=none"
+            else:
+                sample_str = f"sample_tc=[{tc_min:.3f},{tc_max:.3f}] attrs={n_attr}"
+            return (
+                f"tcps={raw_tcps} fps={raw_fps} "
+                f"stage=[{src_start_tc:.3f},{src_end_tc:.3f}] {sample_str}"
+            )
+        except Exception as exc:
+            return f"exc={exc}"
 
     def _register_only(
         self,

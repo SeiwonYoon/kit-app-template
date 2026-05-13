@@ -753,6 +753,7 @@ class BakeResult:
         "n_sparse_skipped_capture",
         "baked_layer",
         "output_mode",
+        "effective_inst_prim_path",
     )
 
     def __init__(
@@ -771,6 +772,7 @@ class BakeResult:
         n_sparse_skipped_capture: int = 0,
         baked_layer: Optional[Any] = None,
         output_mode: str = "file",
+        effective_inst_prim_path: str = "",
     ) -> None:
         self.ok = ok
         self.output_path = output_path
@@ -788,6 +790,10 @@ class BakeResult:
         # `output_mode == "file"` 인 경우 baked_layer 는 None.
         self.baked_layer = baked_layer
         self.output_mode = output_mode
+        # 2026-05-14 — drag&drop 결과 자동 인식 결과. 호출자는 이 값을 attach 시 mirror
+        # prim path 로 사용해야 master 의 정확한 위치에 write 된다. 정상 add_usd 흐름이면
+        # 사용자 inst_prim_path 와 동일.
+        self.effective_inst_prim_path = effective_inst_prim_path
 
     def __repr__(self) -> str:  # pragma: no cover
         mode_tag = f" mode={self.output_mode}"
@@ -1047,10 +1053,34 @@ async def bake_prim_to_timesamples_async(
             names.add("xformOpOrder")
 
     use_discovery = len(_discovered_map) > 0
+
+    # 2026-05-14 — drag&drop 자산 루트 (자산 default prim 이름과 동일한 첫 prim).
+    # bake 의 sub_path 매칭 + baked layer author + UI 의 mirror_root_prim_path 설정에
+    # 공통 사용. discovery 모드 여부와 무관하게 시도 (fallback bake 도 author 매핑에 필요).
+    drag_drop_prefix = ""
+    try:
+        from .lam_extract_from_master import discover_drag_drop_asset_root_prim
+
+        drag_drop_prefix = discover_drag_drop_asset_root_prim(
+            master_stage, inst_prim_path_str, asset_path
+        ) or ""
+    except Exception as _dd_exc:
+        drag_drop_prefix = ""
+        print(
+            f"{_PRINT_PREFIX} discover_drag_drop_asset_root_prim failed: {_dd_exc}",
+            flush=True,
+        )
+    if drag_drop_prefix and drag_drop_prefix != inst_prim_path_str:
+        print(
+            f"{_PRINT_PREFIX} discovery — drag&drop asset root: {drag_drop_prefix}",
+            flush=True,
+        )
+
     print(
         f"{_PRINT_PREFIX} discovery — animated_prims={len(_discovered_map)} "
         f"animated_attrs={sum(len(s) for s in _discovered_map.values())} "
-        f"mode={'auto' if use_discovery else 'fallback(xformOp+visibility)'}",
+        f"mode={'auto' if use_discovery else 'fallback(xformOp+visibility)'} "
+        f"prefix={drag_drop_prefix or inst_prim_path_str}",
         flush=True,
     )
 
@@ -1071,8 +1101,15 @@ async def bake_prim_to_timesamples_async(
             # auto-discovery 모드: 자산에서 발견된 (sub_path, attr_name) 만 capture.
             if use_discovery:
                 # master prim path → 자산 default-prim-relative sub_path 변환.
-                #   /World/aaa/Geom/Mesh1 → "Geom/Mesh1"
-                if pp.startswith(inst_prim_path_str + "/"):
+                #   /World/aaa/Geom/Mesh1 → "Geom/Mesh1"  (정상 add_usd 흐름)
+                #   /World/aaa/test1/N_07_Laser_Cutting/Geom/Mesh1 → "Geom/Mesh1"  (drag&drop)
+                # 후자의 경우 위 `drag_drop_prefix` 로 자동 인식된 effective prefix 를 사용.
+                effective_prefix = drag_drop_prefix or inst_prim_path_str
+                if pp.startswith(effective_prefix + "/"):
+                    sub_path = pp[len(effective_prefix) + 1:]
+                elif pp == effective_prefix:
+                    sub_path = ""
+                elif pp.startswith(inst_prim_path_str + "/"):
                     sub_path = pp[len(inst_prim_path_str) + 1:]
                 else:
                     sub_path = pp.lstrip("/")
@@ -1138,7 +1175,10 @@ async def bake_prim_to_timesamples_async(
             continue
         if tn in {"OmniGraph", "PushGraph", "OmniGraphFunction"} or tn.startswith("OG"):
             try:
-                ap = _map_inst_path_to_asset_root(inst_prim_path, asset_root, pp)
+                # drag&drop prefix 가 인식된 경우 master prim 의 effective prefix 를 자르고
+                # 자산 default prim 기준 path 로 변환해야 baked layer 와 일치한다.
+                _map_inst_root = drag_drop_prefix or inst_prim_path
+                ap = _map_inst_path_to_asset_root(_map_inst_root, asset_root, pp)
                 if ap and ap not in auto_deact_in_asset:
                     auto_deact_in_asset.append(ap)
             except Exception:
@@ -1536,9 +1576,14 @@ async def bake_prim_to_timesamples_async(
     # (2026-05-11 사용자 보고로 확인.) 알림 비용은 다음 방식으로 최소화한다:
     #  - typeName 사전 캐시 → master_stage 재조회 제거
     #  - 정적 pruning → default 1 회 author 로 timeSamples 수십~수백 회 author 축소
+    #
+    # 2026-05-14 — drag&drop prefix 가 인식되어 있으면, master 측 prim path 를 자산
+    # default prim 기준으로 자를 때 effective prefix 를 사용한다 (그래야 baked layer
+    # 의 prim path 가 `/Root/Geom/Mesh1` 처럼 자산 트리와 1:1 일치).
+    effective_inst_for_map = drag_drop_prefix or inst_prim_path
     t_author_start = time.perf_counter()
     for inst_pp, adict in capture.items():
-        asset_pp = _map_inst_path_to_asset_root(inst_prim_path, asset_root, inst_pp)
+        asset_pp = _map_inst_path_to_asset_root(effective_inst_for_map, asset_root, inst_pp)
         if not asset_pp:
             continue
         try:
@@ -1703,6 +1748,7 @@ async def bake_prim_to_timesamples_async(
         n_sparse_skipped_capture=n_sparse_skipped,
         baked_layer=final_baked_layer,
         output_mode=mode,
+        effective_inst_prim_path=(drag_drop_prefix or inst_prim_path_str),
     )
 
 

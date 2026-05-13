@@ -192,6 +192,80 @@ class AnimationInstanceRuntime:
         self._master_stage = master_stage
         self._invalidate_attr_cache()
 
+    def sync_mirror_root_prim_path_from_master(
+        self, asset_path_hint: str = ""
+    ) -> None:
+        """master 합성 + 자산 경로 기준으로 ``AnimationInstance.mirror_root_prim_path`` 설정.
+
+        Kit drag&drop 으로 자산이 ``/World/inst/test1/N_07...`` 처럼 인스턴스 직속이 아닌
+        경로에 박힌 경우에만 비어 있지 않은 경로가 설정된다. Option E 의 첫
+        ``_build_attr_cache`` 가 offscreen ``/Root`` 를 그 경로 아래에만 매핑하도록,
+        offscreen stage 를 열기 **직전**에 호출하는 것이 안전하다.
+
+        Args:
+            asset_path_hint: 호출자가 알고 있는 자산 절대 경로 (또는 ``file:/`` URI).
+                비어 있으면 ``inst.source_asset`` → master ``_discover_asset_path_from_master``
+                순서로 fallback. Bake / Extract 같이 호출 측이 이미 자산 경로를 알고 있을
+                때 명시 전달하면 ``inst.source_asset`` 미설정/지연 갱신 케이스에서도 mirror
+                매핑이 정확히 잡힌다.
+        """
+        if self._master_stage is None:
+            return
+        try:
+            from .lam_extract_from_master import (
+                _discover_asset_path_from_master,
+                discover_drag_drop_asset_root_prim,
+                normalize_asset_uri_to_path,
+            )
+
+            inst = self._instance
+            raw = normalize_asset_uri_to_path(
+                (str(asset_path_hint or "") or "").strip()
+            )
+            if not raw:
+                raw = normalize_asset_uri_to_path(
+                    (getattr(inst, "source_asset", "") or "").strip()
+                )
+            if not raw:
+                try:
+                    raw = normalize_asset_uri_to_path(
+                        _discover_asset_path_from_master(
+                            self._master_stage, self.prim_path
+                        )
+                    )
+                except Exception:
+                    raw = ""
+            mr = ""
+            if raw:
+                try:
+                    mr = (
+                        discover_drag_drop_asset_root_prim(
+                            self._master_stage, self.prim_path, raw
+                        )
+                        or ""
+                    )
+                except Exception:
+                    mr = ""
+            inst.mirror_root_prim_path = mr
+            if mr:
+                print(
+                    f"{_PRINT_PREFIX} mirror_root_prim_path={mr} prim={self.prim_path} "
+                    f"asset={raw or '(unknown)'}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"{_PRINT_PREFIX} mirror_root_prim_path=(empty) prim={self.prim_path} "
+                    f"asset={raw or '(unknown)'} — inst 직속에 mirror author",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} sync_mirror_root_prim_path_from_master FAIL "
+                f"prim={self.prim_path}: {exc}",
+                flush=True,
+            )
+
     # ------------------------------------------------------------------ setup
 
     def setup_offscreen_stage_from_layer(
@@ -199,6 +273,7 @@ class AnimationInstanceRuntime:
         baked_layer: Any,
         *,
         asset_path: str = "",
+        mirror_asset_path_hint: str = "",
     ) -> bool:
         """**X3 in-memory bake 경로** — anonymous `Sdf.Layer` 를 root 로 offscreen Stage 를 연다.
 
@@ -230,6 +305,14 @@ class AnimationInstanceRuntime:
                 flush=True,
             )
             return False
+
+        # mirror_asset_path_hint 가 있으면 우선 — Extract / Bake 가 baked layer 만 갖고
+        # 호출하는 케이스에서 인스턴스 ``source_asset`` 이 아직 비어 있어도 drag&drop
+        # 자산 루트를 정확히 인식하도록 한다. 없으면 기존 fallback (asset_path →
+        # inst.source_asset → master 합성 스캔) 사용.
+        self.sync_mirror_root_prim_path_from_master(
+            mirror_asset_path_hint or asset_path
+        )
 
         # 기존 offscreen stage 가 있으면 먼저 비움 — 같은 layer 라도 reload 일 수 있음.
         if self._offscreen_stage is not None:
@@ -322,6 +405,8 @@ class AnimationInstanceRuntime:
                 # 여기서 즉시 반환 — `Usd.Stage.Open` 무한 재시도·로그 폭주 방지.
                 return False
             self._offscreen_open_failed_key = ""
+
+        self.sync_mirror_root_prim_path_from_master(asset_path)
 
         # 이미 같은 자산이 열려 있으면 재사용.
         if self._offscreen_stage is not None and self._offscreen_asset_path == asset_path:
@@ -846,6 +931,66 @@ class AnimationInstanceRuntime:
             master_root_prim = self._master_stage.GetPrimAtPath(self.prim_path)
         except Exception:
             master_root_prim = None
+        # 2026-05-14 — drag&drop 으로 자산이 inst 직속이 아닌 자식 경로에 박힌 경우,
+        # offscreen `/Root` 트리는 master 의 **mirror_root_prim_path** 아래에만 매핑한다.
+        # 비어 있으면 기존과 동일하게 `self.prim_path` (= 인스턴스 등록 prim).
+        try:
+            mr_path = (getattr(self._instance, "mirror_root_prim_path", "") or "").strip()
+        except Exception:
+            mr_path = ""
+        if mr_path:
+            try:
+                alt = self._master_stage.GetPrimAtPath(mr_path)
+            except Exception:
+                alt = None
+            if alt and alt.IsValid():
+                master_root_prim = alt
+                print(
+                    f"{_PRINT_PREFIX} cache mirror_root={mr_path} (inst={self.prim_path})",
+                    flush=True,
+                )
+                # 2026-05-14 보강 — offscreen 측 root 도 동일 delta 만큼 진입할 수 있다.
+                # 예) Extract 의 anonymous layer 는 `/Root/test1/N_07_Laser_Cutting/...` 처럼
+                # master inst 트리 전체를 그대로 복사한 형태. 이 경우 offscreen `/Root` 대신
+                # `/Root/test1/N_07_Laser_Cutting` 으로 진입해야 master mirror_root 와 1:1
+                # 매핑된다 (그렇지 않으면 master 측에서 `mirror_root/test1/N_07_*` 자식이
+                # OverridePrim 으로 다시 author 되어 트리가 복제된다).
+                #
+                # Bake 의 baked layer 는 default prim 자체가 자산 root (`N_07_Laser_Cutting`)
+                # 라서 offscreen 측에는 delta path 가 존재하지 않는다 — 그 경우 offscreen
+                # root 를 그대로 유지한다.
+                try:
+                    delta = ""
+                    if mr_path.startswith(self.prim_path.rstrip("/") + "/"):
+                        delta = mr_path[len(self.prim_path.rstrip("/")) + 1:]
+                    if delta:
+                        try:
+                            cand_path = (
+                                str(offscreen_root_prim.GetPath()).rstrip("/")
+                                + "/"
+                                + delta
+                            )
+                            cand = self._offscreen_stage.GetPrimAtPath(cand_path)
+                        except Exception:
+                            cand = None
+                        if cand and cand.IsValid():
+                            offscreen_root_prim = cand
+                            print(
+                                f"{_PRINT_PREFIX} cache offscreen entered delta={delta!r} "
+                                f"-> {cand.GetPath()} (mirrors master {mr_path})",
+                                flush=True,
+                            )
+                except Exception as _delta_exc:
+                    print(
+                        f"{_PRINT_PREFIX} cache offscreen delta entry exc={_delta_exc}",
+                        flush=True,
+                    )
+            else:
+                print(
+                    f"{_PRINT_PREFIX} cache WARN mirror_root invalid={mr_path!r} "
+                    f"— fallback inst={self.prim_path}",
+                    flush=True,
+                )
         if not master_root_prim or not master_root_prim.IsValid():
             print(
                 f"{_PRINT_PREFIX} cache no master mirror prim_path={self.prim_path} "
@@ -870,9 +1015,13 @@ class AnimationInstanceRuntime:
             mas_child_names = [c.GetName() for c in master_root_prim.GetAllChildren()]
         except Exception:
             mas_child_names = []
+        try:
+            mas_root_path = str(master_root_prim.GetPath())
+        except Exception:
+            mas_root_path = self.prim_path
         print(
             f"{_PRINT_PREFIX} cache map off_root={off_root_path}({off_root_type}) "
-            f"-> master={self.prim_path}({mas_root_type}) master_children={mas_child_names}",
+            f"-> master={mas_root_path}({mas_root_type}) master_children={mas_child_names}",
             flush=True,
         )
 

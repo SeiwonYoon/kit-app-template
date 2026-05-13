@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 
 _PRINT_PREFIX = "[LAM/L1a]"
@@ -212,53 +212,67 @@ class MasterStage:
     # ------------------------------------------------------------------ FPS 30 고정
 
     def force_fixed_fps_30(self) -> None:
-        """Master stage 와 omni.timeline 양쪽에 LAM_FIXED_FPS(=30) 를 강제.
+        """Master stage / omni.timeline / carb.settings 3중으로 LAM_FIXED_FPS(=30) 강제.
 
         사용자 요구(2026-05-11): "하단 타임라인 창의 fps 가 60 으로 되어있어. 그 부분도
         전부 기본 설정이 30 으로 되어야 해."
 
-        본 메서드는 다음을 모두 author / 호출한다(가용한 것만, 실패는 진단 로그만 남김):
+        2026-05-13 — FBX→USD 자산 (실무 데이터) 로드 시 1000 프레임이 800 부근에서
+        평가되는 회귀 분석 결과 — master tcps 는 30 으로 박혀도 ``omni.timeline`` 의
+        실제 framerate 가 24/60 으로 작동하면 timeline slider frame ↔ stage timecode
+        매핑이 ``ratio = stage_tcps / timeline_fps`` 만큼 어긋난다. 일부 Kit 빌드에서는
+        ``set_target_framerate`` setter 가 silently fail 하므로 ``carb.settings`` 의
+        timeline 관련 키도 함께 박아 정합성을 보장한다.
+
+        본 메서드는 다음을 모두 시도한다(가용한 것만, 실패는 진단 로그만 남김):
         - `stage.SetTimeCodesPerSecond(30)`  (timeCode 평가 단위)
         - `stage.SetFramesPerSecond(30)`     (UI / FCurve 표시 단위)
-        - `omni.timeline.get_timeline_interface().set_target_framerate(30)`
-        - 일부 빌드에서만 존재하는 `set_time_codes_per_second(30)` 도 시도
+        - `timeline.set_target_framerate(30)` / `set_time_codes_per_second(30)`
+        - ``carb.settings`` 의 timeline framerate 관련 키 best-effort set
+        - 마지막에 ``timeline.get_time_codes_per_seconds()`` 등으로 실제 적용값을
+          read-back 해서 진단 로그로 출력 — 사용자가 한 줄로 확인 가능.
 
-        호출 시점: `ensure_context` / `open_master` 직후, 그리고 evaluator 시작 시.
+        호출 시점: `ensure_context` / `open_master` 직후, evaluator 시작 시,
+        그리고 ``add_usd`` 직후 (외부 요인으로 framerate 가 다시 변경되어도 환원).
         """
-        # Lazy import — 본 모듈은 pxr 미가용 환경에서도 import 가능해야 함.
         try:
             from .lam_types import LAM_FIXED_FPS
         except Exception:
             LAM_FIXED_FPS = 30.0  # type: ignore[assignment]
 
+        target = float(LAM_FIXED_FPS)
         stage = self.get_stage()
         if stage is not None:
             try:
-                cur = float(stage.GetTimeCodesPerSecond())
+                cur_tcps = float(stage.GetTimeCodesPerSecond())
             except Exception:
-                cur = -1.0
+                cur_tcps = -1.0
             try:
-                stage.SetTimeCodesPerSecond(float(LAM_FIXED_FPS))
+                cur_fps = float(stage.GetFramesPerSecond())
+            except Exception:
+                cur_fps = -1.0
+            try:
+                stage.SetTimeCodesPerSecond(target)
             except Exception as exc:
                 print(
-                    f"{_PRINT_PREFIX} master SetTimeCodesPerSecond({LAM_FIXED_FPS}) "
-                    f"FAIL: {exc}",
+                    f"{_PRINT_PREFIX} master SetTimeCodesPerSecond({target}) FAIL: {exc}",
                     flush=True,
                 )
             try:
-                stage.SetFramesPerSecond(float(LAM_FIXED_FPS))
+                stage.SetFramesPerSecond(target)
             except Exception as exc:
                 print(
-                    f"{_PRINT_PREFIX} master SetFramesPerSecond({LAM_FIXED_FPS}) "
-                    f"FAIL: {exc}",
+                    f"{_PRINT_PREFIX} master SetFramesPerSecond({target}) FAIL: {exc}",
                     flush=True,
                 )
-            if abs(cur - float(LAM_FIXED_FPS)) > 1e-6:
+            if abs(cur_tcps - target) > 1e-6 or abs(cur_fps - target) > 1e-6:
                 print(
-                    f"{_PRINT_PREFIX} master tps {cur} → {LAM_FIXED_FPS} (forced)",
+                    f"{_PRINT_PREFIX} master fps/tcps ({cur_fps}, {cur_tcps}) → "
+                    f"({target}, {target}) (forced)",
                     flush=True,
                 )
 
+        ti = None
         try:
             import omni.timeline as _ot  # type: ignore
 
@@ -266,22 +280,78 @@ class MasterStage:
         except Exception:
             ti = None
         if ti is not None:
-            for setter_name in ("set_target_framerate", "set_time_codes_per_second"):
+            for setter_name in (
+                "set_target_framerate",
+                "set_time_codes_per_seconds",
+                "set_time_codes_per_second",
+                "set_ticks_per_second",
+            ):
                 fn = getattr(ti, setter_name, None)
                 if fn is None:
                     continue
                 try:
-                    fn(float(LAM_FIXED_FPS))
-                    print(
-                        f"{_PRINT_PREFIX} timeline {setter_name}({LAM_FIXED_FPS}) OK",
-                        flush=True,
-                    )
+                    fn(target)
                 except Exception as exc:
                     print(
-                        f"{_PRINT_PREFIX} timeline {setter_name}({LAM_FIXED_FPS}) "
+                        f"{_PRINT_PREFIX} timeline {setter_name}({target}) "
                         f"FAIL: {exc}",
                         flush=True,
                     )
+
+        # carb.settings best-effort — 일부 Kit 빌드에서 timeline framerate 가 setter API
+        # 가 아닌 settings 키로만 갱신되는 경우가 있다. 키 이름이 빌드마다 달라 후보를
+        # 여러 개 시도하고 각 결과는 진단으로만 남긴다.
+        try:
+            import carb.settings  # type: ignore
+
+            settings = carb.settings.get_settings()
+        except Exception:
+            settings = None
+        if settings is not None:
+            for key in (
+                "/app/window/timeline/timeCodesPerSecond",
+                "/app/window/timeline/framesPerSecond",
+                "/app/window/timeline/playFramerate",
+                "/persistent/app/usd/timeCodesPerSecond",
+                "/persistent/app/usd/framesPerSecond",
+                "/persistent/app/window/timeline/timeCodesPerSecond",
+                "/persistent/app/window/timeline/framesPerSecond",
+            ):
+                try:
+                    settings.set(key, float(target))
+                except Exception:
+                    continue
+
+        # Read-back — 적용 결과를 한 줄로 출력해 사용자가 즉시 확인 가능.
+        read_tl: Dict[str, Any] = {}
+        if ti is not None:
+            for name in (
+                "get_time_codes_per_seconds",
+                "get_target_framerate",
+                "get_ticks_per_second",
+            ):
+                g = getattr(ti, name, None)
+                if callable(g):
+                    try:
+                        read_tl[name] = float(g())
+                    except Exception:
+                        read_tl[name] = "EXC"
+        read_st = "?"
+        read_fs = "?"
+        if stage is not None:
+            try:
+                read_st = f"{float(stage.GetTimeCodesPerSecond()):.3f}"
+            except Exception:
+                pass
+            try:
+                read_fs = f"{float(stage.GetFramesPerSecond()):.3f}"
+            except Exception:
+                pass
+        print(
+            f"{_PRINT_PREFIX} fps_sync target={target} stage(tcps={read_st}, "
+            f"fps={read_fs}) timeline={read_tl}",
+            flush=True,
+        )
 
     def make_relative_to_master(self, abs_path: str) -> str:
         """REQ-005 P-2 — master.usd 가 저장된 경우 상대 경로 변환을 시도. 실패 시 절대 경로 그대로."""

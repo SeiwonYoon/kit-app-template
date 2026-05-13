@@ -18,7 +18,7 @@ Viewport 정책 (REQ-007, 결정 A):
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from .lam_composition_discovery import CompositionDiscovery
 from .lam_external_event_runner import LamExternalEventRunner
@@ -112,7 +112,11 @@ class LamWindow:
         self._fp_save_master = None
         self._fp_open_results = None
 
-        self._registry.add_listener(self._refresh_instances)
+        # 인스턴스 목록 VStack 재빌드 — 이벤트/드로우 중 ``clear()`` 방지용 (post_update 1회).
+        self._inst_refresh_pending: bool = False
+        self._inst_refresh_sub: Optional[Any] = None
+
+        self._registry.add_listener(self._schedule_instances_ui_refresh)
 
     # ------------------------------------------------------------------ window
 
@@ -302,7 +306,7 @@ class LamWindow:
                 ui.Label("Log", height=20)
                 self._log_label = ui.Label("(no log yet)", height=80, word_wrap=True)
 
-        self._refresh_instances()
+        self._schedule_instances_ui_refresh()
 
         # REQ-008 — LAM Window 가 뜨면 시퀀스 편집기도 같이 자동으로 연다.
         try:
@@ -347,6 +351,13 @@ class LamWindow:
         except Exception:
             pass
         self._window = None
+        if self._inst_refresh_sub is not None:
+            try:
+                self._inst_refresh_sub.unsubscribe()
+            except Exception:
+                pass
+            self._inst_refresh_sub = None
+        self._inst_refresh_pending = False
 
     # ----------------------------------------------------------------- actions
 
@@ -809,11 +820,98 @@ class LamWindow:
                                 lambda p=inst.prim_path: self._on_bake_instance(p)
                             ),
                         )
+                    # 2026-05-13 신규 — [Extract] 버튼. fps mismatch 안전판.
+                    #
+                    # 사용자가 [Remove] 후 viewport 에 USD 를 drag&drop 으로 직접
+                    # `/World/<인스턴스>` 하위에 넣으면 (Kit drop handler 가 timeline
+                    # fps 까지 정상 sync) 본 버튼을 눌러 그 결과 트리에서 timeSamples 를
+                    # 추출해 in-memory layer 로 attach. TIMESAMPLES_REPLAY 그대로 사용
+                    # 가능. bake 흐름 / 기존 reference 흐름은 일절 변경하지 않는다.
+                    ui.Button(
+                        "Extract",
+                        width=72,
+                        tooltip=(
+                            "현재 master 의 /World/<인스턴스> 하위 트리에서 timeSamples 를 "
+                            "추출해 in-memory layer 로 attach 합니다. fps mismatch / 자산 "
+                            "재배치 안전판 — drag&drop 으로 자산을 박은 직후 사용. "
+                            "OmniGraph 만 있는 자산은 [Bake] 를 쓰세요."
+                        ),
+                        clicked_fn=lambda p=inst.prim_path: self._on_extract_instance(p),
+                    )
+                    # 2026-05-13 신규 — [Copy TS] 버튼. timeSamples 데이터 클립보드 복사.
+                    #
+                    # master 의 /World/<인스턴스> 하위 트리에서 모든 timeSamples 데이터를
+                    # USDA 텍스트로 직렬화해 클립보드에 박는다. 사용자가 텍스트 에디터에
+                    # 붙여넣어 FBX→USD 변환 자산의 내부 데이터를 직접 검증 가능.
+                    # OmniGraph 만 있는 자산은 클립보드 복사 없이 로그에 [Bake] 필요 안내.
+                    ui.Button(
+                        "Copy TS",
+                        width=72,
+                        tooltip=(
+                            "이 인스턴스의 timeSamples 데이터 전체를 USDA 텍스트로 "
+                            "클립보드에 복사합니다. 텍스트 에디터에 붙여넣어 FBX→USD "
+                            "내부 데이터를 검증할 때 사용. OmniGraph 자산은 복사되지 "
+                            "않고 [Bake] 가 필요하다고 로그에 표시됩니다."
+                        ),
+                        clicked_fn=lambda p=inst.prim_path: self._on_copy_timesamples_instance(p),
+                    )
+                    # 2026-05-14 신규 — [Empty] 버튼. "cannot delete ancestral prim" 회피.
+                    #
+                    # Kit Stage panel 에서 /World/<inst>/<자식> 을 Delete 키로 지우려고 하면
+                    # 자식이 reference 안에 정의된 것이라 root layer 에서 직접 제거 못함.
+                    # 본 버튼은 인스턴스 prim 의 references / payloads / inst_sublayer / 자식
+                    # prim spec 을 모두 비우고 빈 Xform 만 남긴다. 사용자는 그 다음 viewport
+                    # 에 직접 USD 를 drag&drop 으로 박을 수 있다.
+                    ui.Button(
+                        "Empty",
+                        width=70,
+                        tooltip=(
+                            "이 인스턴스 하위의 모든 reference/payload/자식 prim 을 비웁니다.\n"
+                            "/World/<인스턴스> 껍데기 (빈 Xform) 만 남기므로, 그 위에 USD 를 "
+                            "drag&drop 으로 다시 박을 수 있습니다.\n"
+                            "Stage 패널에서 'cannot delete ancestral prim' 회피 용도. "
+                            "인스턴스 등록 자체는 유지됩니다 ([Remove] 와 구분)."
+                        ),
+                        clicked_fn=lambda p=inst.prim_path: self._on_empty_instance(p),
+                    )
                     ui.Button(
                         "Remove",
                         width=70,
                         clicked_fn=lambda p=inst.prim_path: self._on_remove(p),
                     )
+
+    def _schedule_instances_ui_refresh(self) -> None:
+        """인스턴스 목록 UI 재빌드 — 이벤트/드로우 중 ``Container.clear()`` 호출 금지.
+
+        ``lam_sequence_editor._schedule_refresh`` 와 동일 패턴. Registry 알림 /
+        [Extract] / [Bake] 완료 등에서 동기 호출되면 omni.ui 가 오류를 낸다.
+        """
+        if self._inst_refresh_pending:
+            return
+        self._inst_refresh_pending = True
+
+        def _do(_e=None):
+            self._inst_refresh_pending = False
+            try:
+                self._refresh_instances()
+            finally:
+                if self._inst_refresh_sub is not None:
+                    try:
+                        self._inst_refresh_sub.unsubscribe()
+                    except Exception:
+                        pass
+                    self._inst_refresh_sub = None
+
+        try:
+            import omni.kit.app as _app  # type: ignore
+
+            stream = _app.get_app().get_post_update_event_stream()
+            self._inst_refresh_sub = stream.create_subscription_to_pop(
+                _do, name="morph.lam_control.lam_window.instances_refresh"
+            )
+        except Exception:
+            self._inst_refresh_pending = False
+            self._refresh_instances()
 
     def _on_remove(self, prim_path: str) -> None:
         ok = self._loader.remove_usd(prim_path)
@@ -827,6 +925,96 @@ class LamWindow:
                 flush=True,
             )
         self._log(f"Remove {'OK' if ok else 'FAIL'}: {prim_path}")
+
+    def _on_empty_instance(self, prim_path: str) -> None:
+        """**[Empty] 신규 path (2026-05-14)** — 인스턴스 prim 자체는 유지하고 하위만 비움.
+
+        흐름:
+            1) 진행 중 평가 / replay mode 해제 — ``end_replay_mode`` 호출.
+            2) ``MultiUsdLoader.clear_instance_contents`` 로 references / payloads /
+               inst_sublayer / 자식 prim spec 을 모두 청소.
+            3) ``RuntimeEvaluator.forget_instance`` 로 offscreen stage 도 폐기.
+            4) UI 행 갱신 (deferred) — 라벨이 UNKNOWN / Bake 미정 으로 다시 표시.
+
+        본 핸들러는 **기존 [Bake] / [Extract] / [Remove] 흐름과 독립** 한 신규 path.
+        Registry 는 그대로 유지하므로 같은 prim_path 에 사용자가 viewport drag&drop
+        으로 자산을 다시 박은 뒤 [Extract] / [Bake] 로 이어 작업할 수 있다.
+
+        Args:
+            prim_path: 인스턴스 prim_path (예: ``/World/aaa``).
+        """
+        try:
+            inst = self._registry.get_by_prim_path(prim_path)
+        except Exception:
+            inst = None
+        if inst is None:
+            for it in self._registry.all_instances():
+                if it.prim_path == prim_path:
+                    inst = it
+                    break
+        if inst is None:
+            self._log(f"Empty 실패 — 인스턴스를 찾을 수 없음: {prim_path}")
+            return
+
+        self._log(f"Empty 시작 prim={prim_path} (하위 reference/자식 모두 비우는 중...)")
+
+        # (a) replay 잔재 청소 — evaluator 가 author 해 둔 default opinion / OmniGraph
+        #     deactivate 표식 등을 먼저 비워야 sublayer clear 가 깔끔해진다.
+        try:
+            self._evaluator.end_replay_mode(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} empty pre-cleanup end_replay_mode failed "
+                f"prim={prim_path}: {exc}",
+                flush=True,
+            )
+
+        # (b) loader 가 핵심 청소 — references / payloads / nameChildren / inst_sublayer.
+        try:
+            diag = self._loader.clear_instance_contents(prim_path)
+        except Exception as exc:
+            self._log(f"Empty 예외 prim={prim_path}: {exc}")
+            return
+
+        if not diag.get("ok", False):
+            self._log(
+                f"Empty 실패 prim={prim_path}: {diag.get('error') or '알 수 없음'}"
+            )
+            return
+
+        # (c) evaluator 측 offscreen stage / attr cache 폐기 — 다음 [Bake]/[Extract] 까지
+        #     평가 대상에서 빠진다. forget_instance 는 registry 의 인스턴스를 건드리지
+        #     않는다 (offscreen runtime 만 dispose).
+        try:
+            self._evaluator.forget_instance(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} empty forget_instance failed prim={prim_path}: {exc}",
+                flush=True,
+            )
+
+        self._log(
+            f"Empty 완료 prim={prim_path}\n"
+            f"   cleared refs={diag.get('cleared_refs', 0)} "
+            f"payloads={diag.get('cleared_payloads', 0)} "
+            f"other={diag.get('cleared_other', 0)} "
+            f"children_spec={diag.get('removed_children_spec', 0)} "
+            f"inst_sublayer_removed={diag.get('removed_inst_sublayer', False)}\n"
+            f"   → 빈 Xform({prim_path}) 만 남았습니다. 다음 워크플로 참고:\n"
+            f"      · timeSamples 자산 (FBX→USD 등): viewport 에 drag&drop → [Extract] → "
+            f"TIMESAMPLES_REPLAY step 으로 재생.\n"
+            f"      · OmniGraph 자산: 본 인스턴스 [Remove] 후 상단 [USD 추가] 정상 등록 권장 "
+            f"(drag&drop + [Bake] 는 sub_path 매칭이 어긋날 수 있음)."
+        )
+
+        # (d) UI 행 갱신 — deferred (omni.ui Container.clear 회귀 방지).
+        try:
+            self._schedule_instances_ui_refresh()
+        except Exception as _ref_exc:
+            print(
+                f"{_PRINT_PREFIX} empty 후 _schedule_instances_ui_refresh 실패: {_ref_exc}",
+                flush=True,
+            )
 
     def _on_reset_all(self) -> None:
         """등록된 모든 LAM 인스턴스를 unload하고 master stage 의 /World 자식 prim 도 비운다.
@@ -945,12 +1133,57 @@ class LamWindow:
 
         # source_asset 절대 경로 해석.
         raw = (getattr(inst, "source_asset", "") or "").strip()
+
+        # 2026-05-14 — [Empty] + drag&drop 워크플로 보강.
+        # 사용자가 [Empty] 로 인스턴스 내용을 비운 뒤 viewport 에 USD 를 drag&drop 한
+        # 경우 `inst.source_asset` 는 빈 문자열인 상태가 된다. 이때 master 트리를 자동
+        # 탐색해 drag&drop 으로 박힌 자산 경로를 회수한다.
+        # 또한 drag&drop 결과는 `/World/aaa/test2/<asset>/...` 식으로 자식 prim 안에
+        # reference 가 박히는 경우가 많아 bake 의 sub_path 매칭이 어긋날 수 있으므로,
+        # OmniGraph 자산은 [USD 추가] 정상 등록 경로를 권장하는 안내를 함께 띄운다.
         if not raw:
-            self._log(f"Bake 실패 — source_asset 비어 있음 prim={prim_path}")
-            return
-        raw_norm = raw.replace("\\", "/")
+            try:
+                from .lam_extract_from_master import _discover_asset_path_from_master
+
+                master_stage = self._master.get_stage() if self._master is not None else None
+                discovered = ""
+                if master_stage is not None:
+                    discovered = _discover_asset_path_from_master(master_stage, prim_path) or ""
+            except Exception as _disc_exc:
+                discovered = ""
+                print(
+                    f"{_PRINT_PREFIX} bake auto-discover failed prim={prim_path}: {_disc_exc}",
+                    flush=True,
+                )
+
+            if discovered:
+                try:
+                    inst.source_asset = discovered
+                except Exception:
+                    pass
+                raw = discovered
+                self._log(
+                    f"Bake auto-discover: master 트리에서 자산 경로 회수 → {discovered}\n"
+                    f"   주의: drag&drop 으로 박힌 자산은 자식 prim 안에 reference 가 있어 "
+                    f"bake 의 sub_path 매칭에 실패할 수 있습니다.\n"
+                    f"   OmniGraph 자산이라면 [Remove] 후 상단 [USD 추가] 로 다시 등록하는 "
+                    f"것을 권장합니다."
+                )
+            else:
+                self._log(
+                    f"Bake 실패 — source_asset 비어 있음 prim={prim_path}\n"
+                    f"   [Empty] 후라면 viewport 에 USD 를 drag&drop 으로 먼저 박아주세요. "
+                    f"OmniGraph 자산은 [USD 추가] 정상 등록 권장."
+                )
+                return
+        # 2026-05-14 — drag&drop 으로 박힌 reference 는 종종 `file:/C:/...` URI 로
+        # 들어와 `os.path.isfile` 검사가 실패한다 (사용자 실보고 회귀). URI prefix /
+        # URL-encode 를 일반 OS 경로로 정규화.
+        from .lam_extract_from_master import normalize_asset_uri_to_path
+
+        raw_norm = normalize_asset_uri_to_path(raw)
         abs_path = ""
-        if os.path.isfile(raw_norm):
+        if raw_norm and os.path.isfile(raw_norm):
             abs_path = os.path.normpath(os.path.abspath(raw_norm))
         else:
             mp = (getattr(self._master, "master_path", "") or "").strip()
@@ -961,7 +1194,11 @@ class LamWindow:
                 if os.path.isfile(cand):
                     abs_path = cand
         if not abs_path:
-            self._log(f"Bake 실패 — 자산 경로 해석 실패: raw={raw!r}")
+            self._log(
+                f"Bake 실패 — 자산 경로 해석 실패: raw={raw!r} normalized={raw_norm!r}\n"
+                f"   drag&drop 한 자산이 omniverse:// 또는 외부 URL 인 경우 [USD 추가] "
+                f"로 정상 등록을 권장합니다 (로컬 파일 경로만 [Bake] 가 지원)."
+            )
             return
 
         from .lam_bake_omnigraph import (
@@ -1004,6 +1241,21 @@ class LamWindow:
         # bake 종료 후 후처리 — runtime 의 offscreen_stage 를 baked layer 로 교체.
         async def _runner() -> None:
             self._log(f"Bake 시작 (in-memory): src={abs_path}")
+
+            # 2026-05-14 — bake 직전에 이전 TIMESAMPLES_REPLAY 의 흔적을 청소.
+            # Extract / 이전 Bake 가 inst sublayer 의 drag&drop 자식 prim 들에 default
+            # 와 over spec 을 박아두면, 본 Bake 가 그 위에 다시 author 하면서 master
+            # 트리에 "내부 자산이 또 한 단계 복제된 듯한" 모습이 남는다. `end_replay_mode`
+            # 가 inst sublayer 를 재귀적으로 비워 master 가 깨끗한 상태에서 capture 가
+            # 시작되도록 한다 (in-memory 라 사용자 USD 파일은 변경 없음).
+            try:
+                self._evaluator.end_replay_mode(prim_path)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} bake pre-cleanup end_replay_mode failed "
+                    f"prim={prim_path}: {exc}",
+                    flush=True,
+                )
 
             # **회귀 fix (2026-05-12)** — TIMESAMPLES_REPLAY 모드용으로 evaluator 가
             # 매 update tick 에서 OmniGraph deactivate / LayerOffset freeze 를 다시
@@ -1092,12 +1344,25 @@ class LamWindow:
             # 인스턴스 교체 없음 — same prim_path 의 runtime 에 in-memory baked layer 를
             # 주입해 offscreen_stage 를 재구성한다. registry / master.usd 의 reference 는
             # 원본 자산 그대로 유지된다 (master 측은 Option E freeze 로 평가 안 함).
+            #
+            # 2026-05-14 — drag&drop 자동 인식 (effective_inst_prim_path) 결과는 baked
+            # layer 의 author path 와 매핑 시에만 사용. attach 자체는 항상 사용자가 보는
+            # `inst.prim_path` (/World/aaa) 로 호출해 evaluator 의 runtime key 와 시퀀스
+            # 엔진 / TIMESAMPLES_REPLAY 호출자가 일관되게 prim_path 를 쓸 수 있도록 한다.
             inst_prim = inst.prim_path  # noqa: B023 (closure intended)
+            eff = getattr(result, "effective_inst_prim_path", "") or inst_prim
+            if eff != inst_prim:
+                self._log(
+                    f"Bake drag&drop prefix 인식됨: {eff} "
+                    f"(baked layer 의 author path 는 자산 root 기준으로 정규화. mirror "
+                    f"write 는 사용자 prim={inst_prim} 산하에서 이름 매칭으로 진행)"
+                )
             try:
                 ok = self._evaluator.attach_memory_baked_layer(
                     inst_prim,
                     baked_layer,
                     source_asset_for_log=abs_path,
+                    mirror_asset_path_hint=abs_path,
                 )
             except Exception as exc:
                 self._log(f"Bake 후 attach_memory_baked_layer 예외: {exc}")
@@ -1123,10 +1388,10 @@ class LamWindow:
             # Q1 — 2026-05-12: attach_memory_baked_layer 가 inst.baked=True 를 박았으니
             # 인스턴스 목록을 새로 그려 [BAKED ✓ / Re-bake] 표시로 즉시 전환한다.
             try:
-                self._refresh_instances()
+                self._schedule_instances_ui_refresh()
             except Exception as _ref_exc:
                 print(
-                    f"{_PRINT_PREFIX} bake 후 _refresh_instances 실패: {_ref_exc}",
+                    f"{_PRINT_PREFIX} bake 후 _schedule_instances_ui_refresh 실패: {_ref_exc}",
                     flush=True,
                 )
 
@@ -1137,6 +1402,299 @@ class LamWindow:
             asyncio.ensure_future(_runner())
         except Exception as exc:
             self._log(f"Bake task 스케줄 실패: {exc}")
+
+    def _on_extract_instance(self, prim_path: str) -> None:
+        """**[Extract] 신규 path (2026-05-13)** — master `/World/<인스턴스>` 하위 트리의
+        timeSamples 를 anonymous layer 로 추출해 인스턴스 runtime 에 attach.
+
+        사용자 워크플로(실무 fps mismatch 안전판):
+            1. (선택) 인스턴스 행의 [Remove] 로 기존 reference 만 제거. — 또는 Stage
+               panel 에서 자식 prim 만 수동 삭제.
+            2. viewport 에 USD 파일을 **직접 drag&drop** 해서 ``/World/<인스턴스>``
+               하위에 박는다. Kit drop handler 가 timeline fps 등을 자동 sync 시킨다.
+            3. 본 버튼을 누른다. `RuntimeEvaluator.extract_and_attach_from_master` 가
+               호출되어 결과 layer 가 같은 인스턴스 runtime 의 offscreen stage 로 attach
+               된다.
+            4. 인스턴스 행이 `BAKED ✓` 로 갱신되고 (= attach 성공 표식) TIMESAMPLES_REPLAY
+               step 으로 즉시 재생 가능.
+
+        본 핸들러는 **기존 bake 핸들러(`_on_bake_instance`) / reference 흐름 / 시퀀스
+        엔진** 을 일절 건드리지 않는 신규 path 다.
+
+        Args:
+            prim_path: 인스턴스 prim_path (예: `/World/aaa`).
+        """
+        try:
+            inst = self._registry.get_by_prim_path(prim_path)
+        except Exception:
+            inst = None
+        if inst is None:
+            for it in self._registry.all_instances():
+                if it.prim_path == prim_path:
+                    inst = it
+                    break
+        if inst is None:
+            self._log(f"Extract 실패 — 인스턴스를 찾을 수 없음: {prim_path}")
+            return
+
+        # 추출 전 잔재 청소 — 이전 TIMESAMPLES_REPLAY step 이 inst sublayer 에 박아둔
+        # default opinion 이 남아 있으면 `stage.Flatten()` 결과에 그 default 가 inline
+        # 으로 따라 들어가 추출된 layer 가 정적인 자세만 갖게 된다. Reset 효과만큼
+        # 강하게는 아니고, evaluator 측 default 만 비운다.
+        try:
+            self._evaluator.end_replay_mode(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} extract pre-cleanup end_replay_mode failed "
+                f"prim={prim_path}: {exc}",
+                flush=True,
+            )
+
+        self._log(f"Extract 시작 prim={prim_path} (in-memory layer 생성 + 자산 종류 검증 중...)")
+
+        try:
+            result = self._evaluator.extract_and_attach_from_master(
+                prim_path,
+                source_asset_for_log=f"<extracted:{inst.instance_id}>",
+            )
+        except Exception as exc:
+            self._log(f"Extract 예외 prim={prim_path}: {exc}")
+            return
+
+        if result is None:
+            self._log(f"Extract 실패 prim={prim_path}: 결과 없음")
+            return
+
+        # kind label / bake mode helper — 안내 메시지에 사람이 읽을 수 있는 라벨 사용.
+        from .lam_asset_diagnostics import kind_to_user_label
+        from .lam_types import (
+            ASSET_KIND_OMNIGRAPH,
+            ASSET_KIND_STATIC,
+        )
+
+        kind = (getattr(result, "kind", "") or "").strip() or "UNKNOWN"
+        kind_label = kind_to_user_label(kind) or kind
+
+        # 결과 분기:
+        #   - ok=True  : timeSamples 추출 + attach 성공. inst.asset_kind 를 추출 결과로
+        #                갱신 → 행 라벨이 정확히 표시되고 [Bake] 가 hidden (불필요).
+        #   - kind=OMNIGRAPH : timeSamples 없음. inst.baked=False / inst.asset_kind=OMNIGRAPH
+        #                갱신 → 행에 [Bake] 버튼이 다시 표시되도록 한다.
+        #   - kind=STATIC : 안내만, 상태 표시는 STATIC.
+        #   - 그 외   : 안내만.
+
+        # 공통: 추정된 자산 경로가 있으면 inst.source_asset 도 갱신해 [Bake] 가 올바른
+        # 자산 path 를 사용하도록 한다. URI prefix (`file:/...`) 가 남아 있을 가능성을
+        # 안전망으로 한 번 더 정규화한다.
+        from .lam_extract_from_master import normalize_asset_uri_to_path
+
+        discovered_raw = (getattr(result, "discovered_asset_path", "") or "").strip()
+        discovered = normalize_asset_uri_to_path(discovered_raw)
+        if discovered:
+            try:
+                inst.source_asset = discovered
+                self._log(
+                    f"   ↳ drag&drop 자산 경로 탐지: {discovered} → inst.source_asset 갱신"
+                )
+            except Exception as _src_exc:
+                print(
+                    f"{_PRINT_PREFIX} extract: source_asset 갱신 실패 prim={prim_path} "
+                    f"exc={_src_exc}",
+                    flush=True,
+                )
+
+        if not result.ok:
+            # 추출 실패라도 자산 종류는 명확히 파악되었을 수 있다 — 상태 표시 정확화.
+            try:
+                inst.asset_kind = kind
+                inst.baked = False
+            except Exception as _kx_exc:
+                print(
+                    f"{_PRINT_PREFIX} extract: asset_kind 갱신 실패 prim={prim_path} "
+                    f"exc={_kx_exc}",
+                    flush=True,
+                )
+
+            if kind == ASSET_KIND_OMNIGRAPH:
+                self._log(
+                    f"Extract: 이 자산은 **OmniGraph** 입니다 (kind={kind_label}).\n"
+                    f"   timeSamples 가 없어 그대로 사용할 수 없습니다.\n"
+                    f"   → 인스턴스 행에 다시 표시된 **[Bake]** 버튼을 눌러 in-memory "
+                    f"timeSamples 로 변환하세요.\n"
+                    f"   stats: {result.to_log_line()}"
+                )
+            elif kind == ASSET_KIND_STATIC:
+                self._log(
+                    f"Extract: 이 자산은 **STATIC** 입니다 (시간 데이터 없음).\n"
+                    f"   재생 대상이 아닙니다 (TIMESAMPLES_REPLAY / Bake 모두 의미 없음).\n"
+                    f"   stats: {result.to_log_line()}"
+                )
+            else:
+                self._log(
+                    f"Extract 실패 prim={prim_path}: {result.error or '알 수 없음'} "
+                    f"(kind={kind_label})\n"
+                    f"   stats: {result.to_log_line()}"
+                )
+
+            # UI 행 갱신 — bake 버튼 분기가 새 kind 에 맞춰 다시 그려진다.
+            try:
+                self._schedule_instances_ui_refresh()
+            except Exception as _ref_exc:
+                print(
+                    f"{_PRINT_PREFIX} extract 후 _schedule_instances_ui_refresh 실패: {_ref_exc}",
+                    flush=True,
+                )
+            return
+
+        # 성공 — attach_memory_baked_layer 가 inst.baked=True 박았고, 우리는 kind 도
+        # 추출 결과로 정확히 갱신해서 다음 [Bake] 버튼 분기가 'hidden' (불필요) 으로
+        # 표시되게 한다 (TIMESAMPLES_XFORM/SKEL/MESH 는 bake unnecessary 분류).
+        try:
+            inst.asset_kind = kind
+        except Exception as _kx_exc:
+            print(
+                f"{_PRINT_PREFIX} extract: asset_kind 갱신 실패(성공 분기) prim={prim_path} "
+                f"exc={_kx_exc}",
+                flush=True,
+            )
+
+        self._log(
+            f"Extract 완료 prim={prim_path} kind={kind_label}\n"
+            f"   prims={result.n_prims} attrs={result.n_attrs_total} "
+            f"timeSamples_attrs={result.n_attrs_with_timesamples} "
+            f"(xform={result.n_xform_op_ts} skel={result.n_skel_anim_ts} "
+            f"mesh={result.n_mesh_points_ts} vis={result.n_visibility_ts}) "
+            f"tc=[{result.tc_min:.3f},{result.tc_max:.3f}] "
+            f"elapsed={result.elapsed_sec:.3f}s\n"
+            f"   → in-memory layer attach 완료. TIMESAMPLES_REPLAY step 에서 바로 "
+            f"재생 가능합니다."
+        )
+
+        # 인스턴스 행 라벨/표시 갱신 — attach_memory_baked_layer 가 `inst.baked=True` 박음.
+        try:
+            self._schedule_instances_ui_refresh()
+        except Exception as _ref_exc:
+            print(
+                f"{_PRINT_PREFIX} extract 후 _schedule_instances_ui_refresh 실패: {_ref_exc}",
+                flush=True,
+            )
+
+    def _on_copy_timesamples_instance(self, prim_path: str) -> None:
+        """**[Copy TS] 신규 path (2026-05-13)** — master `/World/<인스턴스>` 트리의
+        모든 ``timeSamples`` 데이터를 USDA 텍스트로 직렬화해 클립보드에 복사.
+
+        사용자 워크플로:
+            1. 인스턴스 행의 [Copy TS] 버튼 클릭.
+            2. `RuntimeEvaluator.dump_master_timesamples_usda` 가 호출되어 master 트리
+               하위의 ``timeSamples`` 데이터를 anonymous layer 로 추출 후 USDA 텍스트로
+               직렬화.
+            3. 본 핸들러가 ``omni.kit.clipboard.copy()`` 로 클립보드에 박음.
+            4. 사용자가 텍스트 에디터에 붙여넣어 FBX→USD 변환 자산의 내부 데이터를
+               확인.
+
+        Bake 가 필요한 자산 (OmniGraph 만 존재) 의 경우:
+            - 클립보드 복사하지 않음 (timeSamples 가 없으므로).
+            - 로그에 "이 자산은 [Bake] 가 필요합니다" 라고 안내.
+
+        본 핸들러는 **기존 기능 일절 변경하지 않는 신규 path**.
+
+        Args:
+            prim_path: 인스턴스 prim_path (예: `/World/aaa`).
+        """
+        try:
+            inst = self._registry.get_by_prim_path(prim_path)
+        except Exception:
+            inst = None
+        if inst is None:
+            for it in self._registry.all_instances():
+                if it.prim_path == prim_path:
+                    inst = it
+                    break
+        if inst is None:
+            self._log(f"Copy TS 실패 — 인스턴스를 찾을 수 없음: {prim_path}")
+            return
+
+        self._log(f"Copy TS 시작 prim={prim_path} (USDA 직렬화 중...)")
+
+        try:
+            ok, text, kind, result = self._evaluator.dump_master_timesamples_usda(prim_path)
+        except Exception as exc:
+            self._log(f"Copy TS 예외 prim={prim_path}: {exc}")
+            return
+
+        from .lam_asset_diagnostics import kind_to_user_label
+        from .lam_types import ASSET_KIND_OMNIGRAPH, ASSET_KIND_STATIC
+
+        kind_label = kind_to_user_label(kind) or kind
+
+        if not ok:
+            # 결과 분기 — 사용자 의도대로 "bake 필요" 안내가 명확히 나오게 한다.
+            if kind == ASSET_KIND_OMNIGRAPH:
+                self._log(
+                    f"Copy TS 생략 — 이 자산은 **OmniGraph** 입니다 (kind={kind_label}).\n"
+                    f"   timeSamples 데이터가 없어 복사할 내용이 없습니다.\n"
+                    f"   → 인스턴스 행의 **[Bake]** 버튼을 눌러 in-memory timeSamples 로 "
+                    f"변환한 뒤 다시 [Copy TS] 를 누르세요.\n"
+                    f"   stats: {result.to_log_line()}"
+                )
+            elif kind == ASSET_KIND_STATIC:
+                self._log(
+                    f"Copy TS 생략 — 이 자산은 **STATIC** 입니다 (kind={kind_label}).\n"
+                    f"   시간 데이터(timeSamples) 가 전혀 없습니다. 복사할 내용 없음.\n"
+                    f"   stats: {result.to_log_line()}"
+                )
+            else:
+                self._log(
+                    f"Copy TS 실패 prim={prim_path} kind={kind_label} "
+                    f"error={result.error or '알 수 없음'}\n"
+                    f"   stats: {result.to_log_line()}"
+                )
+            return
+
+        # 성공 — 클립보드 복사. omni.kit.clipboard.copy 가 사용 가능 (tbs_control_1 에서
+        # 이미 검증된 패턴) 이지만 import 실패 fallback 도 준비한다.
+        bytes_len = len(text.encode("utf-8", errors="ignore"))
+        copied = False
+        copy_method = ""
+        try:
+            from omni.kit.clipboard import copy as clipboard_copy  # type: ignore
+
+            clipboard_copy(text)
+            copied = True
+            copy_method = "omni.kit.clipboard"
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} Copy TS: omni.kit.clipboard 사용 실패 ({exc}), tkinter 폴백 시도",
+                flush=True,
+            )
+            # fallback — tkinter (Windows 환경 기본 포함)
+            try:
+                import tkinter  # type: ignore
+
+                tk_root = tkinter.Tk()
+                tk_root.withdraw()
+                tk_root.clipboard_clear()
+                tk_root.clipboard_append(text)
+                tk_root.update()
+                tk_root.destroy()
+                copied = True
+                copy_method = "tkinter"
+            except Exception as exc2:
+                self._log(
+                    f"Copy TS: 클립보드 API 사용 실패 — omni:{exc} / tkinter:{exc2}.\n"
+                    f"   대안: stage 의 prim_path 트리에서 직접 USDA 로 export 하세요."
+                )
+
+        if copied:
+            self._log(
+                f"Copy TS 완료 prim={prim_path} kind={kind_label}\n"
+                f"   prims={result.n_prims} ts_attrs={result.n_attrs_with_timesamples} "
+                f"(xform={result.n_xform_op_ts} skel={result.n_skel_anim_ts} "
+                f"mesh={result.n_mesh_points_ts} vis={result.n_visibility_ts}) "
+                f"tc=[{result.tc_min:.3f},{result.tc_max:.3f}]\n"
+                f"   → 클립보드에 USDA 텍스트 {bytes_len:,} bytes 복사 완료 "
+                f"(via {copy_method}). 텍스트 에디터에 붙여넣어 확인하세요."
+            )
 
     def _invalidate_attr_caches(self) -> None:
         try:

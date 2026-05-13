@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .lam_attribute_reauthor import AttributeReauthorCache
 from .lam_instance_registry import AnimationInstanceRegistry
@@ -291,6 +291,7 @@ class RuntimeEvaluator:
         baked_layer: Any,
         *,
         source_asset_for_log: str = "",
+        mirror_asset_path_hint: str = "",
     ) -> bool:
         """**X3 in-memory bake 적용** — 지정 prim 의 runtime 의 offscreen Stage 를 baked layer 로 교체.
 
@@ -361,6 +362,7 @@ class RuntimeEvaluator:
                 rt.setup_offscreen_stage_from_layer(
                     baked_layer,
                     asset_path=source_asset_for_log,
+                    mirror_asset_path_hint=mirror_asset_path_hint,
                 )
             )
         except Exception as exc:
@@ -416,6 +418,350 @@ class RuntimeEvaluator:
             flush=True,
         )
         return True
+
+    def dump_master_timesamples_usda(self, prim_path: str):
+        """**[Copy TS]** — timeSamples 를 USDA 텍스트로 직렬화 (클립보드용).
+
+        우선순위 (2026-05-14 회귀 수정):
+            1) **Option E offscreen stage** — in-memory bake / ``attach_memory_baked_layer``
+               결과는 master mirror 에 default 로만 쓰이고, master ``Flatten`` 트리에는
+               timeSamples 가 없을 수 있다. 따라서 ``rt._offscreen_stage`` 의
+               ``GetRootLayer()`` 를 먼저 직렬화한다.
+            2) 루트에 샘플이 없으면 ``offscreen_stage.Flatten()`` 결과 레이어를 시도
+               (참조만 있는 자산 등).
+            3) 그래도 없으면 기존처럼 **master** ``extract_subtree_to_anonymous_layer``
+               (drag&drop / 파일 reference 의 master 트리).
+
+        Returns:
+            ``(ok, text, kind, result)`` 4-튜플.
+        """
+        import time as _time
+
+        t0 = _time.perf_counter()
+        from .lam_asset_diagnostics import _decide_kind
+        from .lam_extract_from_master import (
+            ExtractResult,
+            dump_layer_to_usda_text,
+            extract_subtree_to_anonymous_layer,
+            scan_layer_timesample_stats,
+        )
+        from .lam_types import ASSET_KIND_UNKNOWN, AssetDiag
+
+        def _stats_to_result(
+            stats: dict,
+            *,
+            lyr: Any,
+            discovered: str,
+            data_source: str,
+        ) -> ExtractResult:
+            diag = AssetDiag(
+                n_xform_op_ts=int(stats["n_xform_op_ts"]),
+                n_skel_anim_ts=int(stats["n_skel_anim_ts"]),
+                n_mesh_points_ts=int(stats["n_mesh_points_ts"]),
+                n_visibility_ts=int(stats["n_visibility_ts"]),
+                n_other_ts=int(stats["n_other_ts"]),
+                n_omnigraph_prims=int(stats["n_omnigraph_prims"]),
+                asset_start_tc=float(stats["tc_min"]),
+                asset_end_tc=float(stats["tc_max"]),
+            )
+            try:
+                kind = str(_decide_kind(diag)) or ASSET_KIND_UNKNOWN
+            except Exception:
+                kind = ASSET_KIND_UNKNOWN
+            return ExtractResult(
+                ok=True,
+                root_prim_path=prim_path,
+                layer=lyr,
+                kind=kind,
+                n_prims=int(stats["n_prims"]),
+                n_attrs_total=int(stats["n_attrs_total"]),
+                n_attrs_with_timesamples=int(stats["n_attrs_with_timesamples"]),
+                n_xform_op_ts=int(stats["n_xform_op_ts"]),
+                n_skel_anim_ts=int(stats["n_skel_anim_ts"]),
+                n_mesh_points_ts=int(stats["n_mesh_points_ts"]),
+                n_visibility_ts=int(stats["n_visibility_ts"]),
+                n_other_ts=int(stats["n_other_ts"]),
+                n_omnigraph_prims=int(stats["n_omnigraph_prims"]),
+                tc_min=float(stats["tc_min"]),
+                tc_max=float(stats["tc_max"]),
+                elapsed_sec=float(_time.perf_counter() - t0),
+                asset_label=data_source,
+                discovered_asset_path=discovered or "",
+            )
+
+        # ------------------------------------------------------------------ 1) Offscreen
+        rt = self._runtime_by_path.get(prim_path)
+        if rt is not None:
+            st = getattr(rt, "_offscreen_stage", None)
+            if st is not None:
+                discovered = ""
+                try:
+                    discovered = str(getattr(rt, "offscreen_asset_path", "") or "")
+                except Exception:
+                    discovered = ""
+
+                candidates: list = []
+                try:
+                    rl = st.GetRootLayer()
+                    if rl is not None:
+                        candidates.append(("offscreen_root_layer", rl))
+                except Exception:
+                    pass
+                try:
+                    flat = st.Flatten()
+                    if flat is not None:
+                        candidates.append(("offscreen_stage.Flatten()", flat))
+                except Exception:
+                    pass
+
+                seen: set = set()
+                for src_name, lyr in candidates:
+                    try:
+                        lid = id(lyr)
+                        if lid in seen:
+                            continue
+                        seen.add(lid)
+                    except Exception:
+                        pass
+                    try:
+                        stats = scan_layer_timesample_stats(lyr)
+                    except Exception:
+                        continue
+                    if int(stats.get("n_attrs_with_timesamples", 0) or 0) <= 0:
+                        continue
+
+                    result = _stats_to_result(
+                        stats,
+                        lyr=lyr,
+                        discovered=discovered,
+                        data_source=src_name,
+                    )
+                    header = [
+                        "# ============================================================",
+                        "# LAM TimeSamples Dump",
+                        f"# prim_path           = {prim_path}",
+                        f"# data_source         = {src_name}",
+                        f"# offscreen_asset     = {discovered or '(none)'}",
+                        f"# kind                = {result.kind}",
+                        f"# prims               = {result.n_prims}",
+                        f"# attrs_total         = {result.n_attrs_total}",
+                        f"# attrs_with_timeSamples = {result.n_attrs_with_timesamples}",
+                        f"#   xform={result.n_xform_op_ts} skel={result.n_skel_anim_ts} "
+                        f"mesh={result.n_mesh_points_ts} vis={result.n_visibility_ts} "
+                        f"other={result.n_other_ts}",
+                        f"# omnigraph_prims     = {result.n_omnigraph_prims}",
+                        f"# timecode range      = [{result.tc_min:.3f}, {result.tc_max:.3f}]",
+                        f"# elapsed_sec         = {result.elapsed_sec:.3f}",
+                        "# ============================================================",
+                    ]
+                    try:
+                        text = dump_layer_to_usda_text(lyr, header_lines=header)
+                    except Exception as exc:
+                        text = "\n".join([*header, f"# error: dump failed: {exc}"])
+                        print(
+                            f"{_PRINT_PREFIX} dump_master_timesamples FAIL serialize "
+                            f"prim={prim_path} src={src_name} exc={exc}",
+                            flush=True,
+                        )
+                        return (False, text, result.kind, result)
+
+                    print(
+                        f"{_PRINT_PREFIX} dump_master_timesamples OK prim={prim_path} "
+                        f"src={src_name} {result.to_log_line()} text_bytes={len(text)}",
+                        flush=True,
+                    )
+                    return (True, text, result.kind, result)
+
+        # ------------------------------------------------------------------ 2) Master subtree
+        stage = None
+        if self._master is not None:
+            try:
+                stage = self._master.get_stage()
+            except Exception:
+                stage = None
+        if stage is None:
+            r = ExtractResult(
+                root_prim_path=prim_path,
+                error="master stage is None — dump 불가",
+                kind="UNKNOWN",
+            )
+            print(f"{_PRINT_PREFIX} dump_master_timesamples FAIL: {r.error}", flush=True)
+            return (False, f"# error: {r.error}", "UNKNOWN", r)
+
+        tag = prim_path.split("/")[-1] if prim_path else "anon"
+        result = extract_subtree_to_anonymous_layer(stage, prim_path, tag_hint=tag)
+
+        header = [
+            "# ============================================================",
+            "# LAM TimeSamples Dump",
+            f"# prim_path           = {prim_path}",
+            f"# data_source         = master_flatten_subtree",
+            f"# discovered_asset    = {getattr(result, 'discovered_asset_path', '') or '(none)'}",
+            f"# kind                = {result.kind}",
+            f"# prims               = {result.n_prims}",
+            f"# attrs_total         = {result.n_attrs_total}",
+            f"# attrs_with_timeSamples = {result.n_attrs_with_timesamples}",
+            f"#   xform={result.n_xform_op_ts} skel={result.n_skel_anim_ts} "
+            f"mesh={result.n_mesh_points_ts} vis={result.n_visibility_ts} "
+            f"other={result.n_other_ts}",
+            f"# omnigraph_prims     = {result.n_omnigraph_prims}",
+            f"# timecode range      = [{result.tc_min:.3f}, {result.tc_max:.3f}]",
+            f"# extract elapsed     = {result.elapsed_sec:.3f}s",
+            "# ============================================================",
+        ]
+
+        if result.n_attrs_with_timesamples <= 0:
+            text = "\n".join(header)
+            print(
+                f"{_PRINT_PREFIX} dump_master_timesamples skip prim={prim_path} "
+                f"kind={result.kind} (timeSamples=0, master+offscreen 모두 없음)",
+                flush=True,
+            )
+            return (False, text, result.kind, result)
+
+        try:
+            text = dump_layer_to_usda_text(result.layer, header_lines=header)
+        except Exception as exc:
+            text = "\n".join([*header, f"# error: dump failed: {exc}"])
+            print(
+                f"{_PRINT_PREFIX} dump_master_timesamples FAIL serialize "
+                f"prim={prim_path} exc={exc}",
+                flush=True,
+            )
+            return (False, text, result.kind, result)
+
+        print(
+            f"{_PRINT_PREFIX} dump_master_timesamples OK prim={prim_path} "
+            f"{result.to_log_line()} text_bytes={len(text)}",
+            flush=True,
+        )
+        return (True, text, result.kind, result)
+
+    def extract_and_attach_from_master(
+        self,
+        prim_path: str,
+        *,
+        source_asset_for_log: str = "",
+    ):
+        """**[Extract] 신규 path** (2026-05-13) — master 의 prim_path 하위 트리를 직접 추출.
+
+        사용자가 ``/World/<인스턴스>`` 하위에 자산을 **drag&drop** 으로 직접 넣은 경우
+        ``add_usd`` 가 박은 reference 와는 다른 형태가 된다 (Kit drop handler 가 자식
+        prim 으로 reference 박음). 이 경우 본 메서드를 호출하면:
+
+          1) ``master_stage.Flatten()`` 으로 모든 composition 평가.
+          2) ``Sdf.CopySpec`` 으로 ``prim_path`` 하위 트리만 anonymous layer 의 ``/Root``
+             아래로 복사.
+          3) 그 anonymous layer 를 ``attach_memory_baked_layer`` 로 같은 인스턴스
+             runtime 의 offscreen stage 에 attach → TIMESAMPLES_REPLAY 그대로 동작.
+
+        본 메서드는 **기존 ``attach_memory_baked_layer`` 를 그대로 활용** 하며, bake
+        와는 독립된 신규 path 다. bake 흐름 / TIMESAMPLES_REPLAY 흐름 모두 변경하지
+        않는다.
+
+        Returns:
+            ``lam_extract_from_master.ExtractResult`` — ``ok`` / ``layer`` / 통계 포함.
+        """
+        from .lam_extract_from_master import (
+            ExtractResult,
+            extract_subtree_to_anonymous_layer,
+        )
+
+        stage = None
+        if self._master is not None:
+            try:
+                stage = self._master.get_stage()
+            except Exception:
+                stage = None
+        if stage is None:
+            r = ExtractResult(
+                root_prim_path=prim_path,
+                error="master stage 가 None — extract 불가",
+            )
+            print(f"{_PRINT_PREFIX} extract FAIL: {r.error}", flush=True)
+            return r
+
+        tag = prim_path.split("/")[-1] if prim_path else "anon"
+        result = extract_subtree_to_anonymous_layer(stage, prim_path, tag_hint=tag)
+        if not result.ok or result.layer is None:
+            print(
+                f"{_PRINT_PREFIX} extract FAIL prim={prim_path} "
+                f"error={result.error!r} stats={result.to_log_line()}",
+                flush=True,
+            )
+            return result
+
+        # 2026-05-14 — attach 전에 inst.source_asset 을 result.discovered_asset_path 로
+        # 미리 갱신해, attach 안에서 호출되는 ``sync_mirror_root_prim_path_from_master``
+        # 가 drag&drop 자산 루트(``/World/inst/test1/N_07...``)를 정확히 인식하도록 한다.
+        # (window 핸들러도 추가로 갱신하지만, 시점이 attach 이후이므로 첫 attr_cache 빌드
+        # 시 너무 늦다 — 그래서 여기서 한 번 더 박는다.)
+        discovered_for_attach = ""
+        try:
+            from .lam_extract_from_master import normalize_asset_uri_to_path
+
+            discovered_for_attach = normalize_asset_uri_to_path(
+                (getattr(result, "discovered_asset_path", "") or "").strip()
+            )
+            if discovered_for_attach:
+                inst_obj = None
+                try:
+                    for it in self._registry.all_instances():
+                        if it.prim_path == prim_path:
+                            inst_obj = it
+                            break
+                except Exception:
+                    inst_obj = None
+                if inst_obj is not None and not (
+                    getattr(inst_obj, "source_asset", "") or ""
+                ).strip():
+                    inst_obj.source_asset = discovered_for_attach
+                    print(
+                        f"{_PRINT_PREFIX} extract: inst.source_asset 사전 갱신 "
+                        f"prim={prim_path} -> {discovered_for_attach}",
+                        flush=True,
+                    )
+        except Exception as _src_exc:
+            print(
+                f"{_PRINT_PREFIX} extract: source_asset 사전 갱신 실패 "
+                f"prim={prim_path}: {_src_exc}",
+                flush=True,
+            )
+
+        # bake 결과 attach 와 100% 동일 경로 — runtime 의 offscreen_stage 가 새 layer 로
+        # 재구성되고 attr_cache invalidate / inst.baked=True 표식까지 자동 처리된다.
+        try:
+            attach_ok = self.attach_memory_baked_layer(
+                prim_path,
+                result.layer,
+                source_asset_for_log=source_asset_for_log
+                or "<extracted-from-master>",
+                mirror_asset_path_hint=discovered_for_attach,
+            )
+        except Exception as exc:
+            result.ok = False
+            result.error = f"attach_memory_baked_layer 예외: {exc}"
+            print(
+                f"{_PRINT_PREFIX} extract attach EXC prim={prim_path} exc={exc}",
+                flush=True,
+            )
+            return result
+
+        if not attach_ok:
+            result.ok = False
+            result.error = "attach_memory_baked_layer returned False (runtime 없음?)"
+            print(
+                f"{_PRINT_PREFIX} extract attach FAIL prim={prim_path}",
+                flush=True,
+            )
+            return result
+
+        print(
+            f"{_PRINT_PREFIX} extract+attach OK prim={prim_path} "
+            f"{result.to_log_line()} (TIMESAMPLES_REPLAY 즉시 사용 가능)",
+            flush=True,
+        )
+        return result
 
     def force_rebuild_attr_cache(self, prim_path: str = "") -> None:
         """Option E 의 attribute 캐시를 강제로 재빌드하도록 표식만 비움.
@@ -653,6 +999,15 @@ class RuntimeEvaluator:
         """
         if not prim_path or not prim_path.startswith("/"):
             return False
+        # drag&drop 후 구성이 바뀌었는데 이전 세션의 ref 템플릿(인스턴스 루트 + source_asset)
+        # 이 캐시에 남아 있으면, bake 직전 `_set_prim_layer_offset` 이 **인스턴스 prim 에
+        # 전체 자산 reference 를 한 번 더** 박아 viewport 에 자산이 이중으로 보인다.
+        try:
+            tmpl = getattr(self, "_src_ref_tmpl_cache", None)
+            if isinstance(tmpl, dict):
+                tmpl.pop(prim_path, None)
+        except Exception:
+            pass
         stage = None
         if self._master is not None:
             try:
@@ -836,11 +1191,16 @@ class RuntimeEvaluator:
         )
 
     def _clear_inst_sublayer_attr_defaults(self, prim_path: str) -> int:
-        """인스턴스 sublayer 안의 attribute default opinion 청소.
+        """인스턴스 sublayer 안의 attribute default opinion 을 **재귀적으로** 청소.
 
         Sdf.PrimSpec 안에 evaluator 가 박은 ``default = ...`` 만 제거하고 reference /
-        payload / 자식 prim spec 등 compositional 구조는 그대로 둔다. 청소된 속성 수를
-        반환한다.
+        payload 같은 compositional opinion 은 그대로 둔다. evaluator 의 Option E mirror
+        author 는 inst_prim 그 자체뿐만 아니라 drag&drop 위치 (``.../test1/N_07_*/Geom/...``)
+        하위 자식 prim 들에도 attribute default 와 OverridePrim spec 을 남기므로, Reset /
+        재추출 / 재 Bake 직전 이 trash 들을 모두 비워야 master stage 가 깨끗해진다 (그렇지
+        않으면 다음 attach 후 stage 트리에 "내부 자산이 한 단계 더 복제된 것처럼" 보임).
+
+        반환: 제거된 attribute spec 의 수.
         """
         if self._master is None or _Usd is None or _Sdf is None:
             return 0
@@ -850,29 +1210,124 @@ class RuntimeEvaluator:
             inst_sublayer = None
         if inst_sublayer is None:
             return 0
+        base = str(prim_path or "").rstrip("/")
+        roots_to_walk: List[Any] = []
         try:
-            prim_spec = inst_sublayer.GetPrimAtPath(prim_path)
+            root_spec = inst_sublayer.GetPrimAtPath(prim_path)
         except Exception:
-            prim_spec = None
-        if prim_spec is None:
-            return 0
-        cleared = 0
-        try:
-            attr_names = list(prim_spec.attributes.keys())
-        except Exception:
-            attr_names = []
-        for name in attr_names:
+            root_spec = None
+        if root_spec is not None:
+            roots_to_walk.append(root_spec)
+        else:
+            # drag&drop 전용 — LayerOffset author 가 인스턴스 prim 이 아니라
+            # ``/World/aaa/test1`` 같은 자식 경로의 spec 에만 있을 수 있다.
             try:
-                attr_spec = prim_spec.attributes[name]
-                if attr_spec is None:
-                    continue
-                # default + timeSamples + 메타 까지 spec 자체를 제거 — evaluator 가 박은
-                # default 만 남아 있으므로 안전. 다음에 다시 begin_replay_mode 가
-                # 호출되면 evaluate_and_write 가 같은 mirror_attr 에 다시 박는다.
-                prim_spec.RemoveProperty(attr_spec)
-                cleared += 1
+                pseudo = inst_sublayer.pseudoRoot
+                for _nm, ch in list(pseudo.nameChildren.items()):
+                    try:
+                        pth = str(ch.path)
+                    except Exception:
+                        continue
+                    if pth == base or pth.startswith(base + "/"):
+                        roots_to_walk.append(ch)
             except Exception:
+                pass
+        if not roots_to_walk:
+            return 0
+
+        cleared = 0
+        # 자식 → 부모 순으로 비워야 빈 PrimSpec 을 RemovePrim 으로 안전 제거할 수 있다.
+        ordered: List[Any] = []
+
+        def _walk(spec: Any) -> None:
+            try:
+                ordered.append(spec)
+                for ch in list(spec.nameChildren):
+                    _walk(ch)
+            except Exception:
+                return
+
+        try:
+            for rs in roots_to_walk:
+                _walk(rs)
+        except Exception:
+            return cleared
+
+        # 첫 번째 root — root_spec 비교용 (인스턴스 prim spec 이 있으면 그걸 우선).
+        root_spec = roots_to_walk[0]
+        try:
+            maybe_inst = inst_sublayer.GetPrimAtPath(prim_path)
+            if maybe_inst is not None:
+                root_spec = maybe_inst
+        except Exception:
+            pass
+
+        # 후위 순회 (자식 먼저)
+        for spec in reversed(ordered):
+            try:
+                attr_names = list(spec.attributes.keys())
+            except Exception:
+                attr_names = []
+            for name in attr_names:
+                try:
+                    attr_spec = spec.attributes[name]
+                    if attr_spec is None:
+                        continue
+                    spec.RemoveProperty(attr_spec)
+                    cleared += 1
+                except Exception:
+                    continue
+            # evaluator 가 만든 OverridePrim spec — attribute / 자식이 모두 사라지고
+            # compositional opinion (reference / payload / typeName / specifier=def) 도
+            # 없으면 빈 over spec 만 남는다. master 트리에 보이지 않도록 제거.
+            try:
+                has_children = bool(list(spec.nameChildren))
+            except Exception:
+                has_children = True
+            try:
+                has_attrs = bool(list(spec.attributes))
+            except Exception:
+                has_attrs = True
+            if has_children or has_attrs:
                 continue
+            try:
+                specifier = spec.specifier
+            except Exception:
+                specifier = None
+            try:
+                has_refs = bool(spec.referenceList.GetAddedOrExplicitItems()) if hasattr(spec, "referenceList") else False
+            except Exception:
+                has_refs = False
+            try:
+                has_payloads = bool(spec.payloadList.GetAddedOrExplicitItems()) if hasattr(spec, "payloadList") else False
+            except Exception:
+                has_payloads = False
+            try:
+                tn = str(spec.typeName) if hasattr(spec, "typeName") else ""
+            except Exception:
+                tn = ""
+            is_over = False
+            try:
+                is_over = (specifier == _Sdf.SpecifierOver)
+            except Exception:
+                is_over = False
+            if not is_over or has_refs or has_payloads or tn:
+                continue
+            # root_spec 자체는 master_stage 합성용 entry 라서 남겨둔다 — attribute 만 비운다.
+            try:
+                if spec is root_spec:
+                    continue
+            except Exception:
+                pass
+            try:
+                parent = spec.nameParent
+                if parent is not None:
+                    parent.RemoveNameChild(spec)
+            except Exception:
+                try:
+                    inst_sublayer.RemovePrim(spec.path)
+                except Exception:
+                    continue
         return cleared
 
     def begin_master_timeline_mode(self, prim_path: str) -> bool:
@@ -1741,29 +2196,23 @@ class RuntimeEvaluator:
 
     # ---------------- Hotfix7 — Per-instance Sublayer Override (Opt-1) ----------------
 
-    def _extract_source_ref_template(self, stage, prim_path: str):
-        """master USD 의 PrimStack 에서 첫 번째 reference/payload 1개를 추출해
-        (assetPath, primPath, customData) 만 가진 _Sdf.Reference template 을 반환.
-
-        - 이 template 의 LayerOffset 은 무시되며, sublayer 에 다시 author 할 때
-          새로운 LayerOffset(offset, scale) 로 덮어쓴다.
-        - 못 찾으면 registry.source_asset 으로 fallback.
-        """
+    def _walk_prim_stack_first_ref_or_payload(
+        self, stage, usd_prim_path: str
+    ):
+        """주어진 prim path 의 PrimStack 에서 lam_inst_* 가 아닌 레이어의 ref/payload 1개."""
         if _Sdf is None or stage is None:
             return None
         try:
-            prim = stage.GetPrimAtPath(prim_path)
+            prim = stage.GetPrimAtPath(usd_prim_path)
             if not prim or not prim.IsValid():
                 return None
             for spec in prim.GetPrimStack():
-                # 본인이 추가한 sublayer 의 spec 은 건너뛴다(자기 자신 참조 방지).
                 try:
                     layer_id = spec.layer.identifier if spec.layer else ""
                 except Exception:
                     layer_id = ""
                 if layer_id and ("lam_inst_" in layer_id):
                     continue
-                # 1순위 reference
                 try:
                     refs = list(spec.referenceList.GetAddedOrExplicitItems()) if spec.referenceList else []
                 except Exception:
@@ -1776,7 +2225,6 @@ class RuntimeEvaluator:
                     except Exception:
                         cd = {}
                     return ("ref", r.assetPath, r.primPath, cd)
-                # 2순위 payload
                 try:
                     pays = list(spec.payloadList.GetAddedOrExplicitItems()) if spec.payloadList else []
                 except Exception:
@@ -1787,11 +2235,79 @@ class RuntimeEvaluator:
                     return ("pay", p.assetPath, p.primPath, {})
         except Exception:
             return None
-        # registry fallback
+        return None
+
+    def _extract_source_ref_template(self, stage, prim_path: str):
+        """master PrimStack 에서 ref/payload 템플릿 + **sublayer 에 author 할 prim 경로** 추출.
+
+        반환: ``(kind, assetPath, primPathInAsset, customData, author_prim_path)`` 5-튜플.
+
+        - ``author_prim_path`` 는 대부분 ``prim_path``(인스턴스) 이다.
+        - **Empty + drag&drop** 처럼 자산 ref 가 인스턴스 직속이 아니라 ``/World/aaa/test1``
+          등 자식에만 있으면, registry ``source_asset`` 으로 인스턴스 루트에 전체 자산을
+          또 reference 하면 자산이 **이중 합성**된다. 이 경우 drag 앵커 prim 에서 ref 를
+          읽어 ``author_prim_path = 앵커`` 로 반환한다.
+        - 인스턴스 prim 에 직접 ref 가 있으면 그걸 우선 사용한다.
+        """
+        if _Sdf is None or stage is None:
+            return None
+        inst_path = (prim_path or "").rstrip("/")
+        if not inst_path.startswith("/"):
+            return None
+
+        hit = self._walk_prim_stack_first_ref_or_payload(stage, inst_path)
+        if hit is not None:
+            return (*hit, inst_path)
+
+        # 인스턴스 직속 ref 없음 — drag&drop 앵커에서 ref 찾기 (registry 루트 fallback 전).
+        try:
+            from .lam_extract_from_master import (
+                _discover_asset_path_from_master,
+                discover_drag_drop_asset_root_prim,
+                normalize_asset_uri_to_path,
+            )
+
+            inst = self._registry.get_by_prim_path(prim_path)
+            sp = ""
+            if inst is not None:
+                sp = normalize_asset_uri_to_path(
+                    (getattr(inst, "source_asset", "") or "").strip()
+                )
+            if not sp:
+                sp = normalize_asset_uri_to_path(
+                    _discover_asset_path_from_master(stage, inst_path) or ""
+                )
+            anchor = ""
+            if sp:
+                anchor = (
+                    discover_drag_drop_asset_root_prim(stage, inst_path, sp) or ""
+                ).rstrip("/")
+            if anchor and anchor != inst_path:
+                hit2 = self._walk_prim_stack_first_ref_or_payload(stage, anchor)
+                if hit2 is not None:
+                    print(
+                        f"{_PRINT_PREFIX} ref-template from drag anchor prim={anchor} "
+                        f"(inst={inst_path}, avoids duplicate root ref)",
+                        flush=True,
+                    )
+                    return (*hit2, anchor)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} ref-template drag-anchor probe failed prim={inst_path}: {exc}",
+                flush=True,
+            )
+
+        # 레거시: [USD 추가] 로 인스턴스 prim 자체에 reference 가 박힌 흐름.
         try:
             inst = self._registry.get_by_prim_path(prim_path)
             if inst is not None and getattr(inst, "source_asset", None):
-                return ("ref", str(inst.source_asset), _Sdf.Path.emptyPath, {})
+                return (
+                    "ref",
+                    str(inst.source_asset),
+                    _Sdf.Path.emptyPath,
+                    {},
+                    inst_path,
+                )
         except Exception:
             pass
         return None
@@ -1846,7 +2362,14 @@ class RuntimeEvaluator:
                     )
                 return False
             tmpl[prim_path] = src
-        kind, asset_path, prim_path_in_asset, custom_data = src
+        if len(src) == 5:
+            kind, asset_path, prim_path_in_asset, custom_data, author_prim_path = src
+        else:
+            kind, asset_path, prim_path_in_asset, custom_data = src  # type: ignore[misc]
+            author_prim_path = prim_path
+        author_prim_path = (author_prim_path or prim_path).strip()
+        if not author_prim_path.startswith("/"):
+            author_prim_path = prim_path
 
         # 2) 인스턴스 전용 sublayer 확보(없으면 생성하여 root layer 의 strongest 슬롯에 삽입).
         inst = self._registry.get_by_prim_path(prim_path)
@@ -1865,9 +2388,9 @@ class RuntimeEvaluator:
         # 3) sublayer 안에 prim spec 만들고 reference/payload 1개 explicit set.
         try:
             with _Sdf.ChangeBlock():
-                sub_spec = sublayer.GetPrimAtPath(prim_path)
+                sub_spec = sublayer.GetPrimAtPath(author_prim_path)
                 if sub_spec is None:
-                    sub_spec = _Sdf.CreatePrimInLayer(sublayer, _Sdf.Path(prim_path))
+                    sub_spec = _Sdf.CreatePrimInLayer(sublayer, _Sdf.Path(author_prim_path))
                 if sub_spec is None:
                     return False
                 # 핫픽스 9 — Specifier.Def 로 강한 prim spec 으로 만든다.
@@ -1919,7 +2442,7 @@ class RuntimeEvaluator:
             # 같은 timeline evaluation 을 share 하면 LayerOffset 이 무력화된다.
             # SetInstanceable(False) 로 instancing 을 명시적으로 disable.
             try:
-                p_now = stage.GetPrimAtPath(prim_path)
+                p_now = stage.GetPrimAtPath(author_prim_path)
                 if p_now and p_now.IsValid():
                     try:
                         if p_now.IsInstanceable():
@@ -1988,8 +2511,9 @@ class RuntimeEvaluator:
                 except Exception:
                     pass
                 print(
-                    f"{_PRINT_PREFIX} sublayer mapping authored prim={prim_path} "
-                    f"layer={sub_id} kind={kind} asset={asset_path} src_prim={prim_path_in_asset} "
+                    f"{_PRINT_PREFIX} sublayer mapping authored inst={prim_path} "
+                    f"sublayer_spec={author_prim_path} layer={sub_id} kind={kind} "
+                    f"asset={asset_path} src_prim={prim_path_in_asset} "
                     f"offset={offset:.3f} scale={scale:.3f} "
                     f"composed_refs={composed_refs} composed_pays={composed_pays}",
                     flush=True,

@@ -187,6 +187,11 @@ class AnimationInstance:
     # baked layer 가 휘발 → 다음 세션은 다시 False 로 시작 (D13 정책).
     baked: bool = False
 
+    # Option E mirror 루트 (2026-05-14) — drag&drop 으로 자산이 `/World/inst/test1/...`
+    # 처럼 한 단계 더 깊게 박힌 경우, offscreen `/Root` 트리를 master 의 **이 경로** 아래에
+    # 매핑한다. 비어 있으면 `prim_path` 와 동일하게 동작(기존 add_usd 직접 reference).
+    mirror_root_prim_path: str = ""
+
     def __post_init__(self) -> None:
         # FPS 30 고정 정책 — 입력값이 어떤 값이든 항상 LAM_FIXED_FPS 로 정규화.
         # asset_start_time / asset_end_time 은 timeCode (frame 번호) 그대로 — LAM 은
