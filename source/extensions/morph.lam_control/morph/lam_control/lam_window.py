@@ -476,7 +476,10 @@ class LamWindow:
         if self._sequence_editor is None:
             seq_dir = os.path.join(_find_lam_data_root(), "lam_event_sequences")
             self._sequence_editor = LamSequenceEditor(
-                self._registry, self._scheduler, default_dir=seq_dir
+                self._registry,
+                self._scheduler,
+                default_dir=seq_dir,
+                evaluator=self._evaluator,
             )
         self._sequence_editor.show()
 

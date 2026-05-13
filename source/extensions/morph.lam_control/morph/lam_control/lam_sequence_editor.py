@@ -41,13 +41,36 @@ from typing import Any, Callable, Dict, List, Optional
 from .lam_id_resolver import resolve_step_ref
 from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_playback_scheduler import PlaybackScheduler
+from .lam_runtime_evaluator import RuntimeEvaluator
 from .lam_sequence_engine import LamSequenceRunner
-from .lam_types import RESOLVE_AUTO, RESOLVE_MISSING, RESOLVE_OK, StepRef
+from .lam_types import LAM_FIXED_FPS, RESOLVE_AUTO, RESOLVE_MISSING, RESOLVE_OK, StepRef
 
 
 _PRINT_PREFIX = "[LAM/EDITOR]"
 
 WINDOW_TITLE = "LAM Sequence Editor"
+
+
+def _range_start_seconds_for_instance(inst) -> float:
+    """`inst.range = (mode, s, e)` 기준 시작 초 값 (LAM 고정 30 fps).
+
+    `lam_event_playlist_window._range_start_seconds_for_instance` 와 동일 규칙.
+    Reset 버튼이 TIMESAMPLES_REPLAY/USD_TIMELINE 인스턴스의 `virtual_time` 을
+    "이 인스턴스가 정의한 시작점" 으로 되돌리기 위해 사용.
+    """
+    try:
+        mode, s, _e = inst.range
+    except Exception:
+        mode, s, _e = "full", 0.0, 0.0
+    tps = float(LAM_FIXED_FPS)
+    asset_s = float(getattr(inst, "asset_start_time", 0.0) or 0.0)
+    asset_e = float(getattr(inst, "asset_end_time", 0.0) or 0.0)
+    if mode == "frames":
+        return float(s) / tps
+    if mode == "ratio":
+        length = max(0.0, asset_e - asset_s) / tps
+        return (asset_s / tps) + max(0.0, min(1.0, float(s))) * length
+    return asset_s / tps
 
 STEP_TYPES = ["USD_TIMELINE", "TIMESAMPLES_REPLAY", "MOVE", "ROTATE", "DELAY"]
 
@@ -148,9 +171,13 @@ class LamSequenceEditor:
         scheduler: PlaybackScheduler,
         *,
         default_dir: Optional[str] = None,
+        evaluator: Optional[RuntimeEvaluator] = None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
+        # Reset 버튼이 TIMESAMPLES_REPLAY / USD_TIMELINE 인스턴스의 virtual_time / master
+        # timeline 모드까지 초기화하기 위해 evaluator 가 필요. 호환을 위해 None 허용.
+        self._evaluator: Optional[RuntimeEvaluator] = evaluator
         self._steps: List[Dict[str, Any]] = []
         self._window = None
         self._steps_inner = None
@@ -209,8 +236,11 @@ class LamSequenceEditor:
                         clicked_fn=self._reset_now,
                         width=60,
                         tooltip=(
-                            "현재 스텝에 등장하는 prim 들의 TBS_OFFSET (Translate/Rotate) 을 0 으로\n"
-                            "되돌려 초기 위치/자세로 복귀시킵니다. 시퀀스를 재생하지는 않습니다."
+                            "현재 스텝에 등장하는 prim/인스턴스를 초기 상태로 복원합니다.\n"
+                            "- MOVE/ROTATE/REPLAY/TIMELINE prim 의 TBS_OFFSET (Translate/Rotate) 을 0 으로.\n"
+                            "- TIMESAMPLES_REPLAY / USD_TIMELINE 인스턴스의 virtual_time 을 시작점으로,\n"
+                            "  state 를 stopped 로 되돌리고 master timeline 모드도 종료합니다.\n"
+                            "시퀀스를 재생하지는 않습니다."
                         ),
                     )
                     ui.Spacer()
@@ -958,25 +988,28 @@ class LamSequenceEditor:
     # -------------------------------------------------------------------- reset
 
     def _reset_now(self) -> None:
-        """현재 스텝에 등장하는 prim 들의 TBS_OFFSET 을 0 으로 되돌린다(재생 X).
+        """현재 스텝에 등장하는 prim/인스턴스를 초기 상태로 되돌린다(재생 X).
 
         - 진행 중인 시퀀스가 있으면 먼저 stop 후 reset.
-        - MOVE/ROTATE step 의 `prim`, USD_TIMELINE step 의 `ref.prim_path` 에서 prim 수집.
-        - 실제 USD write 는 main thread 에서(_dispatch_main).
+        - MOVE/ROTATE / USD_TIMELINE / TIMESAMPLES_REPLAY step 의 prim 을 수집해
+          **TBS_OFFSET (Translate/Rotate) 을 0 으로** 되돌린다 (자세 / 위치 초기화).
+        - USD_TIMELINE / TIMESAMPLES_REPLAY step 의 `ref.prim_path` 인스턴스에 대해
+          `virtual_time` 을 자기 시작점으로, `state` 를 stopped 로 되돌리고
+          `evaluator.end_master_timeline_mode` / `invalidate_mapping` /
+          `force_rebuild_attr_cache` 까지 호출해 timeSamples / timeline 으로 움직였던
+          시각·자세까지 모두 초기화한다.
+
+        USD write 는 main thread 에서. `_dispatch_main_wait` 는 main 스레드에서 직접 호출 시
+        교착이 나므로 본 함수 자체를 백그라운드 스레드에서 실행한다 (Event Playlist 의 Return
+        버튼과 동일 패턴).
         """
-        from .lam_sequence_engine import (
-            _collect_prim_paths_for_reset,
-            _dispatch_main,
-            _reset_tbs_offset_ops_for_paths,
-        )
-
-        if self._runner is not None:
-            try:
-                self._runner.stop()
-            except Exception:
-                pass
-
         steps = list(self._steps)
+        if not steps:
+            self._set_status("초기화할 스텝이 없습니다.")
+            return
+
+        from .lam_sequence_engine import _collect_prim_paths_for_reset
+
         paths = _collect_prim_paths_for_reset(steps)
         if not paths:
             self._set_status(
@@ -987,17 +1020,118 @@ class LamSequenceEditor:
 
         self._set_status(f"resetting… ({len(paths)} prim)")
         print(f"{_PRINT_PREFIX} reset requested for {len(paths)} prim(s): {paths}", flush=True)
+        threading.Thread(
+            target=self._do_reset_worker,
+            args=(steps, paths),
+            name="lam_seq_editor_reset",
+            daemon=True,
+        ).start()
 
-        def _do_in_main() -> None:
+    def _do_reset_worker(self, steps: List[Dict[str, Any]], paths: List[str]) -> None:
+        """`_reset_now` 의 백그라운드 작업자.
+
+        - 시퀀스 러너 중단.
+        - TBS_OFFSET 0 으로 (main tick 에서 USD write, 완료까지 대기).
+        - REPLAY/TIMELINE 인스턴스 virtual_time / state / evaluator 모드 정리.
+        """
+        from .lam_sequence_engine import (
+            _dispatch_main_wait,
+            _reset_tbs_offset_ops_for_paths,
+        )
+
+        if self._runner is not None:
             try:
-                _reset_tbs_offset_ops_for_paths(paths)
-                self._set_status(f"reset done ({len(paths)} prim)")
-                print(f"{_PRINT_PREFIX} reset done ({len(paths)} prim)", flush=True)
-            except Exception as exc:
-                self._set_status(f"reset failed: {exc}")
-                print(f"{_PRINT_PREFIX} reset failed: {exc}", flush=True)
+                self._runner.stop()
+            except Exception:
+                pass
 
-        _dispatch_main(_do_in_main)
+        try:
+            ok = _dispatch_main_wait(
+                lambda: _reset_tbs_offset_ops_for_paths(paths),
+                timeout=15.0,
+            )
+            if not ok:
+                self._set_status("reset(TBS_OFFSET) 시간 초과 — 다음 tick 에서 반영 예정")
+        except Exception as exc:
+            self._set_status(f"reset(TBS_OFFSET) 실패: {exc}")
+            print(f"{_PRINT_PREFIX} reset(TBS_OFFSET) failed: {exc}", flush=True)
+
+        ref_prims: List[str] = []
+        seen: set = set()
+        for st in steps:
+            if not isinstance(st, dict):
+                continue
+            t = str(st.get("type") or "").upper()
+            if t not in ("USD_TIMELINE", "TIMESAMPLES_REPLAY"):
+                continue
+            try:
+                ref = StepRef.from_dict(st.get("ref"))
+            except Exception:
+                continue
+            pp = (ref.prim_path or "").strip()
+            if pp.startswith("/") and pp not in seen:
+                seen.add(pp)
+                ref_prims.append(pp)
+
+        # 인스턴스 정리는 evaluator 의 USD write (`end_master_timeline_mode` 안의
+        # `_set_prim_layer_offset` / `_set_omnigraph_active_in_sublayer` /
+        # `_ensure_option_e_freeze`) 가 포함되므로 **main thread 의 다음 tick** 에서
+        # 한꺼번에 수행한다. 백그라운드에서 직접 호출하면 main 의 evaluator update 와
+        # 동시 USD write 로 freeze 가 발생한다 (2026-05-12 회귀 fix).
+        n_inst_box: Dict[str, int] = {"n": 0}
+
+        def _do_reset_instances_in_main() -> None:
+            for pp in ref_prims:
+                try:
+                    inst = self._registry.get_by_prim_path(pp)
+                except Exception:
+                    inst = None
+                if inst is None:
+                    continue
+                try:
+                    inst.virtual_time = _range_start_seconds_for_instance(inst)
+                    inst.state = "stopped"
+                    n_inst_box["n"] += 1
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} reset instance virtual_time failed prim={pp}: {exc}",
+                        flush=True,
+                    )
+                if self._evaluator is not None:
+                    for fn_name in (
+                        "end_master_timeline_mode",
+                        "invalidate_mapping",
+                        "force_rebuild_attr_cache",
+                    ):
+                        fn = getattr(self._evaluator, fn_name, None)
+                        if fn is None:
+                            continue
+                        try:
+                            fn(pp)
+                        except Exception as exc:
+                            print(
+                                f"{_PRINT_PREFIX} reset evaluator.{fn_name} failed prim={pp}: {exc}",
+                                flush=True,
+                            )
+
+        if ref_prims:
+            try:
+                ok_inst = _dispatch_main_wait(_do_reset_instances_in_main, timeout=15.0)
+                if not ok_inst:
+                    self._set_status("reset(instance) 시간 초과 — 다음 tick 에서 반영 예정")
+            except Exception as exc:
+                self._set_status(f"reset(instance) 실패: {exc}")
+                print(f"{_PRINT_PREFIX} reset(instance) failed: {exc}", flush=True)
+
+        n_inst = n_inst_box["n"]
+        self._set_status(
+            f"reset done — prim {len(paths)} 개 TBS_OFFSET=0, 인스턴스 {n_inst} 개 virtual_time 시작점 복귀"
+        )
+        print(
+            f"{_PRINT_PREFIX} reset done ({len(paths)} prim TBS_OFFSET=0, "
+            f"{n_inst} instance virtual_time reset)",
+            flush=True,
+        )
 
     # ----------------------------------------------------------------- json io
 
