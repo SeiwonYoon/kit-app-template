@@ -502,6 +502,7 @@ class LamWindow:
                 registry=self._registry,
                 scheduler=self._scheduler,
                 sequence_dir=seq_dir,
+                evaluator=self._evaluator,
             )
         self._json_test_window.show()
 

@@ -54,7 +54,7 @@ WINDOW_TITLE = "LAM Sequence Editor"
 def _range_start_seconds_for_instance(inst) -> float:
     """`inst.range = (mode, s, e)` 기준 시작 초 값 (LAM 고정 30 fps).
 
-    `lam_event_playlist_window._range_start_seconds_for_instance` 와 동일 규칙.
+    `lam_json_test_window._range_start_seconds_for_instance` 와 동일 규칙.
     Reset 버튼이 TIMESAMPLES_REPLAY/USD_TIMELINE 인스턴스의 `virtual_time` 을
     "이 인스턴스가 정의한 시작점" 으로 되돌리기 위해 사용.
     """
@@ -1000,7 +1000,7 @@ class LamSequenceEditor:
           시각·자세까지 모두 초기화한다.
 
         USD write 는 main thread 에서. `_dispatch_main_wait` 는 main 스레드에서 직접 호출 시
-        교착이 나므로 본 함수 자체를 백그라운드 스레드에서 실행한다 (Event Playlist 의 Return
+        교착이 나므로 본 함수 자체를 백그라운드 스레드에서 실행한다 (LAM JSON Chain Tester 의 Return
         버튼과 동일 패턴).
         """
         steps = list(self._steps)

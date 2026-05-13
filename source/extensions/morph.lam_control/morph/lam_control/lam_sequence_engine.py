@@ -400,7 +400,7 @@ class LamSequenceRunner:
             cancel_all_move_rotate: True(기본) — 시퀀스 편집기 Stop 과 동일하게 전역
                 translate/rotate 애니메이션을 모두 중단한다.
                 False — `_stop_flag` 만 세워 루프만 빠져나가게 하고, 전역
-                `stop_all_*` 는 호출하지 않는다. `lam_event_playlist_window` 가 동일
+                `stop_all_*` 는 호출하지 않는다. `lam_json_test_window` 가 동일
                 prim / 인스턴스 충돌 시 선점(preempt) 할 때 사용한다(다른 JSON 의
                 MOVE/ROTATE 를 건드리지 않기 위함).
         """
