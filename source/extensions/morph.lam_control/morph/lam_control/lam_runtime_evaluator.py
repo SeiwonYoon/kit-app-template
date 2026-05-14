@@ -163,6 +163,9 @@ class RuntimeEvaluator:
         #   - `end_replay_mode(prim)` : discard + 해당 prim 의 inst sublayer 에 박혀 있던
         #     default opinion 을 청소 (Reset 버튼에서만 호출).
         self._evaluator_active_prims: Set[str] = set()
+        # TimeSamples 평가 시 timeCode 를 정수 프레임으로 맞출지 (Euler 보간 튐 완화).
+        # 기본 ON — LAM Window 인스턴스 목록 헤더 체크박스로 즉시 토글.
+        self._snap_timecode_to_frame: bool = True
 
     # ------------------------------------------------------------------ wiring
 
@@ -203,6 +206,13 @@ class RuntimeEvaluator:
     def get_use_option_e(self) -> bool:
         """현재 Option E 경로 활성 여부."""
         return self._RUNTIME_USE_OPTION_E
+
+    def set_snap_timecode_to_frame(self, enabled: bool) -> None:
+        """timeSamples / Option E 평가 시 ``round(vt * LAM_FIXED_FPS)`` 로 정수 timeCode 만 사용."""
+        self._snap_timecode_to_frame = bool(enabled)
+
+    def get_snap_timecode_to_frame(self) -> bool:
+        return self._snap_timecode_to_frame
 
     def dump_option_e_state(self) -> str:
         """Option E 운영 상태를 콘솔에 한꺼번에 print + 같은 문자열로 반환.
@@ -1575,7 +1585,10 @@ class RuntimeEvaluator:
         if stage is not None:
             try:
                 wrote = self._reauthor.reauthor_at(
-                    stage, inst, eval_seconds=new_t + float(inst.offset_sec)
+                    stage,
+                    inst,
+                    eval_seconds=new_t + float(inst.offset_sec),
+                    snap_timecode_to_frame=self._snap_timecode_to_frame,
                 )
                 # 진단 — 인스턴스 첫 reauthor 결과 1회 print. wrote=0 이면 USD value resolution
                 # 한계(=가설 B) 가능성. cache built 결과는 attribute_reauthor 모듈에서 별도로 출력됨.
@@ -1796,7 +1809,10 @@ class RuntimeEvaluator:
                         )
 
             try:
-                rt.evaluate_and_write(inst.virtual_time)
+                rt.evaluate_and_write(
+                    inst.virtual_time,
+                    snap_timecode_to_frame=self._snap_timecode_to_frame,
+                )
             except Exception as exc:
                 print(
                     f"{_PRINT_PREFIX} runtime.evaluate_and_write FAIL "

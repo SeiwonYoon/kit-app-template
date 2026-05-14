@@ -103,7 +103,7 @@ class AnimationInstanceRuntime:
         rt.setup_offscreen_stage(asset_path)
         rt.setup_master_mirror_prim()       # master prim 보장
         # 매 frame:
-        rt.evaluate_and_write(virtual_time)
+        rt.evaluate_and_write(virtual_time, snap_timecode_to_frame=True)
         # 종료:
         rt.dispose()
         ```
@@ -550,12 +550,19 @@ class AnimationInstanceRuntime:
 
     # ------------------------------------------------------------------ evaluate
 
-    def evaluate_and_write(self, virtual_time: Optional[float] = None) -> int:
+    def evaluate_and_write(
+        self,
+        virtual_time: Optional[float] = None,
+        *,
+        snap_timecode_to_frame: bool = True,
+    ) -> int:
         """1 frame 평가: offscreen stage 에서 자기 vt 의 attribute 값을 읽고
         master mirror attribute 에 default value 로 write.
 
         Args:
             virtual_time: 평가할 가상 시간 (초). None 이면 `instance.virtual_time` 사용.
+            snap_timecode_to_frame: True 이면 ``round(vt * LAM_FIXED_FPS)`` 로 정수
+                timeCode 만 사용(타임라인 재생에 가깝게, Euler 보간 튐 완화).
 
         Returns:
             이번 호출에서 실제로 write 된 attribute 개수. 0 이면 평가 대상이 없거나
@@ -573,6 +580,8 @@ class AnimationInstanceRuntime:
         # FPS 30 고정 — 자산 헤더 / inst.asset_tps 모두 무시하고 LAM_FIXED_FPS 사용.
         tps = LAM_FIXED_FPS
         timecode = vt * float(tps)
+        if snap_timecode_to_frame:
+            timecode = float(round(timecode))
 
         # 1) 캐시 보장.
         if not self._attr_cache_built:

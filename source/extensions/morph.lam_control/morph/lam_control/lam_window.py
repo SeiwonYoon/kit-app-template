@@ -106,6 +106,7 @@ class LamWindow:
         self._results_path_model = None
         self._sim_speed_model = None
         self._log_label = None
+        self._snap_timecode_model = None  # 인스턴스 목록 헤더 — 정수 timeCode 스냅 토글
         # 다이얼로그 보유 슬롯(중복 생성 방지).
         self._fp_open_usd = None
         self._fp_open_master = None
@@ -234,11 +235,44 @@ class LamWindow:
                 with cf_inst:
                     with ui.VStack(spacing=2):
                         # 헤더 줄 — 컬럼 라벨 + 현재 합성 상태를 다른 이름으로 저장 버튼.
-                        with ui.HStack(spacing=4, height=20):
+                        with ui.HStack(spacing=4, height=24):
                             ui.Label(
                                 "prim_path / instance_id / kind / source_asset",
                                 height=18,
+                                width=280,
                             )
+                            self._snap_timecode_model = ui.SimpleBoolModel(True)
+                            try:
+                                self._evaluator.set_snap_timecode_to_frame(True)
+                            except Exception:
+                                pass
+
+                            def _on_snap_tc_changed(m, _self=self) -> None:
+                                try:
+                                    v = bool(m.get_value_as_bool())
+                                except Exception:
+                                    v = True
+                                try:
+                                    _self._evaluator.set_snap_timecode_to_frame(v)
+                                except Exception as exc:
+                                    _self._log(f"timeCode 스냅 설정 실패: {exc}")
+                                    return
+                                _self._log(f"TimeSamples 정수 timeCode 스냅: {'ON' if v else 'OFF'}")
+
+                            try:
+                                self._snap_timecode_model.add_value_changed_fn(_on_snap_tc_changed)
+                            except Exception:
+                                pass
+                            ui.CheckBox(
+                                model=self._snap_timecode_model,
+                                width=22,
+                                tooltip=(
+                                    "ON(기본): timeCode 를 정수 프레임으로 맞춤 — 타임라인 재생에 가깝고 "
+                                    "Euler 보간 튐을 줄이는 데 도움.\n"
+                                    "OFF: 부동소수 timeCode(기존 동작)."
+                                ),
+                            )
+                            ui.Label("정수 TC", width=52, tooltip="timeSamples 평가 시 정수 timeCode 스냅")
                             ui.Spacer()
                             ui.Button(
                                 "Save As…",

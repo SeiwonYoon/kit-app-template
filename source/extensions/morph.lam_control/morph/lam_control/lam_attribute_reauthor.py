@@ -7,6 +7,8 @@ L5 RuntimeEvaluator 가 매 프레임 호출하는 reauthor 의 실제 구현.
   1회 캐시한다(인스턴스 첫 play 진입 시). 이 attribute 들이 "애니메이션 대상".
 - 매 프레임:
     timeCode = (virtual_time + offset_sec) * asset_tps
+    (선택) ``snap_timecode_to_frame`` 가 True 이면 ``timeCode = round(timeCode)`` 로
+    정수 프레임에만 샘플 — 타임라인 재생에 가깝게 밟아 Euler 보간 튐을 완화.
     val = attr.Get(timeCode)   ← USD 자체의 evaluation API. omni.timeline 미사용.
     attr.Set(val)              ← root layer (현재 EditTarget) 에 default value 로 author.
 - USD value resolution: stronger layer 의 default 는 weaker layer (reference) 의 timeSamples 를
@@ -140,6 +142,8 @@ class AttributeReauthorCache:
         stage,
         inst: AnimationInstance,
         eval_seconds: float,
+        *,
+        snap_timecode_to_frame: bool = True,
     ) -> int:
         """인스턴스의 모든 애니메이션 attribute 를 평가하고 default 값으로 reauthor.
 
@@ -153,6 +157,8 @@ class AttributeReauthorCache:
 
         tps = LAM_FIXED_FPS
         timeCode = float(eval_seconds) * tps
+        if snap_timecode_to_frame:
+            timeCode = float(round(timeCode))
 
         wrote = 0
         for entry in entries:
