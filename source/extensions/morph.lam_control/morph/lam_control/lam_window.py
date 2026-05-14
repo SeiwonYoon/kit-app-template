@@ -29,6 +29,7 @@ from .lam_multi_usd_loader import MultiUsdLoader
 from .lam_playback_scheduler import PlaybackScheduler
 from .lam_runtime_evaluator import RuntimeEvaluator
 from .lam_sequence_editor import LamSequenceEditor
+from .simulation_play import LamSimulationCsvPlayWindow
 from .lam_viewport import LamViewport
 
 
@@ -97,6 +98,7 @@ class LamWindow:
         self._registry.add_listener(self._invalidate_attr_caches)
         self._sequence_editor: Optional[LamSequenceEditor] = None
         self._json_test_window: Optional[LamJsonTestWindow] = None
+        self._csv_sim_window: Optional[LamSimulationCsvPlayWindow] = None
         self._external_runner: Optional[LamExternalEventRunner] = None
         self._window = None
         self._instances_inner = None
@@ -297,6 +299,7 @@ class LamWindow:
                         with ui.HStack(spacing=4, height=24):
                             ui.Button("LAM Sequence Editor 열기", clicked_fn=self._open_editor, width=200)
                             ui.Button("JSON 테스트 창 열기", clicked_fn=self._open_json_test, width=180)
+                            ui.Button("CSV 시뮬 재생…", clicked_fn=self._open_csv_sim_play, width=140)
                             ui.Spacer()
                         with ui.HStack(spacing=4, height=24):
                             ui.Button("Master 진단 (등록 결과 확인)", clicked_fn=self._on_diagnose, width=210)
@@ -361,6 +364,12 @@ class LamWindow:
         except Exception:
             pass
         self._json_test_window = None
+        try:
+            if self._csv_sim_window is not None:
+                self._csv_sim_window.destroy()
+        except Exception:
+            pass
+        self._csv_sim_window = None
         try:
             if self._external_runner is not None:
                 self._external_runner.stop()
@@ -539,6 +548,15 @@ class LamWindow:
                 evaluator=self._evaluator,
             )
         self._json_test_window.show()
+
+    def _open_csv_sim_play(self) -> None:
+        """``lam/csv`` CSV 선택 + Play 스켈레톤 창 (``simulation_play.py``)."""
+        if self._csv_sim_window is None:
+            self._csv_sim_window = LamSimulationCsvPlayWindow(
+                registry=self._registry,
+                scheduler=self._scheduler,
+            )
+        self._csv_sim_window.show()
 
     def _on_run_external(self) -> None:
         if self._results_path_model is None:

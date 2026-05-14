@@ -1,6 +1,6 @@
 """LAM 시퀀스 엔진.
 
-step 종류: USD_TIMELINE / TIMESAMPLES_REPLAY / MOVE / ROTATE / DELAY.
+step 종류: USD_TIMELINE / TIMESAMPLES_REPLAY / MOVE / ROTATE / DELAY / SET_PRIM_VISIBILITY.
 
 - `TIMESAMPLES_REPLAY` = **실무용** — Option E (offscreen stage + master mirror default write).
   멀티 인스턴스 독립 재생.
@@ -67,6 +67,7 @@ STEP_KIND_TIMESAMPLES_REPLAY: str = "TIMESAMPLES_REPLAY"
 STEP_KIND_MOVE: str = "MOVE"
 STEP_KIND_ROTATE: str = "ROTATE"
 STEP_KIND_DELAY: str = "DELAY"
+STEP_KIND_SET_PRIM_VISIBILITY: str = "SET_PRIM_VISIBILITY"
 
 # 두 step kind 모두 "ref 로 인스턴스를 지정하고 Option E 로 재생" 하는 의미를 가짐.
 # 현재는 동일 핸들러를 공유 — 추후 USD_TIMELINE 의 TBS 방식 재구현 시 분기 필요.
@@ -215,6 +216,11 @@ def _collect_prim_paths_for_reset(steps: List[dict]) -> List[str]:
             continue
         t = str(step.get("type") or "").upper()
         if t in (STEP_KIND_MOVE, STEP_KIND_ROTATE):
+            for p in _resolve_prim_paths(st, str(step.get("prim") or "")):
+                if p not in seen:
+                    seen.add(p)
+                    out.append(p)
+        elif t == STEP_KIND_SET_PRIM_VISIBILITY:
             for p in _resolve_prim_paths(st, str(step.get("prim") or "")):
                 if p not in seen:
                     seen.add(p)
@@ -601,6 +607,8 @@ class LamSequenceRunner:
                 # DELAY 는 caller 에서 wait 하므로 여기서는 sleep 안 한다.
                 sp = float(max(0.01, speed_scale or 1.0))
                 duration = float(step.get("duration", 1.0) or 1.0) / sp
+            elif t == STEP_KIND_SET_PRIM_VISIBILITY:
+                duration = self._start_set_prim_visibility(idx, step, speed_scale)
             else:
                 print(f"{_PRINT_PREFIX} step[{idx}] unknown type={t!r}", flush=True)
         except Exception as exc:
@@ -1093,6 +1101,54 @@ class LamSequenceRunner:
         )
         _dispatch_main(_do_in_main)
         return duration
+
+    # -------------------------------------------------------- SET_PRIM_VISIBILITY
+
+    def _start_set_prim_visibility(self, idx: int, step: dict, speed_scale: float) -> float:
+        """Imageable prim 의 visibility 를 즉시 설정한 뒤 ``duration`` 초만큼 그룹 대기에 사용."""
+        from pxr import UsdGeom  # type: ignore
+
+        prim_id = str(step.get("prim") or "")
+        visible = bool(step.get("visible", True))
+        sp = float(max(0.01, speed_scale or 1.0))
+        tail = float(step.get("duration", 0.02) or 0.02) / sp
+        stage = _stage()
+        paths = _resolve_prim_paths(stage, prim_id)
+        if not paths:
+            print(
+                f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY skip — prim={prim_id!r}",
+                flush=True,
+            )
+            return max(0.0, tail)
+
+        def _do_in_main() -> None:
+            st = _stage()
+            if st is None:
+                return
+            for p in paths:
+                try:
+                    prim = st.GetPrimAtPath(p)
+                    if not prim or not prim.IsValid():
+                        continue
+                    img = UsdGeom.Imageable(prim)
+                    if not img:
+                        continue
+                    if visible:
+                        img.MakeVisible()
+                    else:
+                        img.MakeInvisible()
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} (main) SET_PRIM_VISIBILITY failed path={p}: {exc}",
+                        flush=True,
+                    )
+
+        _dispatch_main_wait(_do_in_main, timeout=5.0)
+        print(
+            f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY paths={paths} visible={visible} tail={tail:.3f}s",
+            flush=True,
+        )
+        return max(0.0, tail)
 
     # --------------------------------------------------------------- (initial-rotate cache removed)
     #
