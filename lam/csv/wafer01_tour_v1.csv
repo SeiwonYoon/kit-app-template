@@ -1,0 +1,15 @@
+eqp_id,module_nm,cassette_id,eqp_start_tm,eqp_end_tm,process_tm
+1,AtmArm-EndEffector11,1,0,2,2
+1,CoolStationAL3PML2,1,2,4,2
+1,AtmArm-EndEffector11,1,4,6,2
+1,AirLock1-iSlot1,1,6,8,2
+1,TransferChamber-EndEffector1,1,8,10,2
+1,PM1-PML3,1,10,12,2
+1,TransferChamber-EndEffector1,1,12,14,2
+1,PM1-PML5,1,14,16,2
+1,TransferChamber-EndEffector1,1,16,18,2
+1,AirLock2-iSlot2,1,18,20,2
+1,AtmArm-EndEffector11,1,20,22,2
+1,CoolStationAL1PML3,1,22,24,2
+1,AtmArm-EndEffector11,1,24,26,2
+1,ATM-FOUP1-iSlot1,1,26,28,2
