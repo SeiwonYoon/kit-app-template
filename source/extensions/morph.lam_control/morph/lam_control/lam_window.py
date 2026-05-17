@@ -33,6 +33,23 @@ from .simulation_play import LamSimulationCsvPlayWindow
 from .lam_viewport import LamViewport
 
 
+# ---------------------------------------------------------------------------
+# 앱 시작 시 합성(Master) USD 자동 로드 — 필요 시 아래만 수정
+# ---------------------------------------------------------------------------
+# True 이면 LAM Window 첫 show() 시 default_load_usd_path 를 「② 기존 합성 USD 열기」와
+# 동일하게 로드(Discover + Extract 자동). False 이면 기존과 동일(수동).
+load_automatically = False
+
+# 절대 경로 예 (Windows):
+#   default_load_usd_path = r"C:\Users\ptK\Documents\kit-app-template_mine\lam\usd\master.usd"
+# 절대 경로 예 (Linux/macOS):
+#   default_load_usd_path = "/home/user/kit-app-template_mine/lam/usd/master.usd"
+# 프로젝트(레포) 루트 기준 상대 경로 예 — lam/ 가 repo 직하위일 때:
+#   default_load_usd_path = "lam/usd/master.usd"
+#   default_load_usd_path = r"lam\usd\master.usd"
+default_load_usd_path = "lam/usd/master.usd"
+
+
 _PRINT_PREFIX = "[LAM/WIN]"
 
 WINDOW_TITLE = "LAM Multi-USD Load"
@@ -69,6 +86,25 @@ def _find_lam_data_root() -> str:
 def _ext_data_dir() -> str:
     """레거시 호환 — 새 lam/ 폴더 위치를 반환."""
     return _find_lam_data_root()
+
+
+def _find_project_root() -> str:
+    """프로젝트(레포) 루트 — `lam/` 폴더의 부모 디렉터리."""
+    return os.path.dirname(_find_lam_data_root())
+
+
+def resolve_default_load_usd_path(raw: str) -> str:
+    """`default_load_usd_path` 를 Open Master 에 쓸 절대 경로로 변환.
+
+    - 절대 경로면 normpath 만 적용.
+    - 상대 경로면 프로젝트 루트(`_find_project_root()`) 기준으로 join.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    if os.path.isabs(s):
+        return os.path.normpath(s)
+    return os.path.normpath(os.path.join(_find_project_root(), s))
 
 
 class LamWindow:
@@ -351,6 +387,8 @@ class LamWindow:
         except Exception as exc:
             print(f"{_PRINT_PREFIX} auto open editor failed: {exc}", flush=True)
 
+        self._try_autoload_master_on_startup()
+
     def destroy(self) -> None:
         try:
             if self._sequence_editor is not None:
@@ -431,17 +469,60 @@ class LamWindow:
         if self._master_path_model is None:
             return
         path = (self._master_path_model.get_value_as_string() or "").strip()
+        if path:
+            resolved = resolve_default_load_usd_path(path)
+            if resolved and resolved != path and os.path.isfile(resolved):
+                path = resolved
+                try:
+                    self._master_path_model.set_value(resolved)
+                except Exception:
+                    pass
+        self._open_master_at_path(path)
+
+    def _open_master_at_path(self, path: str, *, log_prefix: str = "") -> bool:
+        """합성 USD 열기 — Discover + Extract 자동 (Open Master / 시작 자동 로드 공통)."""
+        prefix = f"{log_prefix} — " if log_prefix else ""
+        path = (path or "").strip()
         if not path:
-            self._log("Master path 가 비어 있습니다.")
-            return
+            self._log(f"{prefix}Master path 가 비어 있습니다.")
+            return False
         ok = self._master.open_master(path)
-        self._log(f"Open Master {'OK' if ok else 'FAIL'}: {path}")
+        self._log(f"{prefix}Open Master {'OK' if ok else 'FAIL'}: {path}")
         if ok:
             try:
                 self._master.set_root_layer_edit_target()
             except Exception:
                 pass
-            self._on_discover()
+            self._clear_registry_for_master_reload()
+            added = self._discovery.discover()
+            self._log(f"{prefix}Discover added={len(added)}")
+            extract_prefix = log_prefix or "Open Master"
+            self._auto_extract_after_master_open(log_prefix=extract_prefix)
+        return ok
+
+    def _try_autoload_master_on_startup(self) -> None:
+        """`load_automatically` 가 True 일 때 첫 show() 에서 합성 USD 를 연다."""
+        if not load_automatically:
+            return
+        resolved = resolve_default_load_usd_path(default_load_usd_path)
+        if not resolved:
+            self._log("자동 로드: default_load_usd_path 가 비어 있습니다.")
+            print(f"{_PRINT_PREFIX} autoload: empty default_load_usd_path", flush=True)
+            return
+        if self._master_path_model is not None:
+            try:
+                self._master_path_model.set_value(resolved)
+            except Exception:
+                pass
+        if not os.path.isfile(resolved):
+            self._log(f"자동 로드 실패 — 파일 없음:\n  {resolved}")
+            print(
+                f"{_PRINT_PREFIX} autoload: file not found: {resolved}",
+                flush=True,
+            )
+            return
+        self._log(f"자동 로드 시작: {resolved}")
+        self._open_master_at_path(resolved, log_prefix="자동 로드")
 
     def _on_save_master(self) -> None:
         """경로 텍스트박스의 현재 경로로 저장(다이얼로그 없이)."""
@@ -459,9 +540,36 @@ class LamWindow:
         except Exception:
             pass
 
+    def _clear_registry_for_master_reload(self) -> None:
+        """합성 USD 재오픈 직전 — 이전 세션 registry / evaluator runtime 정리."""
+        for inst in list(self._registry.all_instances()):
+            try:
+                self._evaluator.forget_instance(inst.prim_path)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} open_master forget_instance failed "
+                    f"prim={inst.prim_path}: {exc}",
+                    flush=True,
+                )
+        self._registry.clear_all()
+
     def _on_discover(self) -> None:
         added = self._discovery.discover()
         self._log(f"Discover added={len(added)}")
+
+    def _auto_extract_after_master_open(self, *, log_prefix: str = "Open Master") -> None:
+        """합성 USD Open 직후 — 등록된 각 인스턴스에 Extract 를 일괄 실행."""
+        instances = self._registry.all_instances()
+        if not instances:
+            return
+        self._log(
+            f"{log_prefix} — 등록 인스턴스 {len(instances)}개에 대해 Extract 자동 실행..."
+        )
+        for inst in instances:
+            self._run_extract_for_instance(
+                inst.prim_path,
+                log_prefix=log_prefix,
+            )
 
     def _on_diagnose(self) -> None:
         """master stage 의 현재 prim 들과 viewport 마운트 상태를 Log 에 dump."""
@@ -1477,6 +1585,12 @@ class LamWindow:
         Args:
             prim_path: 인스턴스 prim_path (예: `/World/aaa`).
         """
+        self._run_extract_for_instance(prim_path, log_prefix="")
+
+    def _run_extract_for_instance(self, prim_path: str, *, log_prefix: str = "") -> None:
+        """Extract 공통 구현 — [Extract] 버튼 및 Open Master 자동 Extract 가 공유."""
+        prefix = f"{log_prefix} — " if log_prefix else ""
+
         try:
             inst = self._registry.get_by_prim_path(prim_path)
         except Exception:
@@ -1487,7 +1601,7 @@ class LamWindow:
                     inst = it
                     break
         if inst is None:
-            self._log(f"Extract 실패 — 인스턴스를 찾을 수 없음: {prim_path}")
+            self._log(f"{prefix}Extract 실패 — 인스턴스를 찾을 수 없음: {prim_path}")
             return
 
         # 추출 전 잔재 청소 — 이전 TIMESAMPLES_REPLAY step 이 inst sublayer 에 박아둔
@@ -1503,7 +1617,10 @@ class LamWindow:
                 flush=True,
             )
 
-        self._log(f"Extract 시작 prim={prim_path} (in-memory layer 생성 + 자산 종류 검증 중...)")
+        self._log(
+            f"{prefix}Extract 시작 prim={prim_path} "
+            f"(in-memory layer 생성 + 자산 종류 검증 중...)"
+        )
 
         try:
             result = self._evaluator.extract_and_attach_from_master(
@@ -1511,11 +1628,11 @@ class LamWindow:
                 source_asset_for_log=f"<extracted:{inst.instance_id}>",
             )
         except Exception as exc:
-            self._log(f"Extract 예외 prim={prim_path}: {exc}")
+            self._log(f"{prefix}Extract 예외 prim={prim_path}: {exc}")
             return
 
         if result is None:
-            self._log(f"Extract 실패 prim={prim_path}: 결과 없음")
+            self._log(f"{prefix}Extract 실패 prim={prim_path}: 결과 없음")
             return
 
         # kind label / bake mode helper — 안내 메시지에 사람이 읽을 수 있는 라벨 사용.
@@ -1570,7 +1687,7 @@ class LamWindow:
 
             if kind == ASSET_KIND_OMNIGRAPH:
                 self._log(
-                    f"Extract: 이 자산은 **OmniGraph** 입니다 (kind={kind_label}).\n"
+                    f"{prefix}Extract: 이 자산은 **OmniGraph** 입니다 (kind={kind_label}).\n"
                     f"   timeSamples 가 없어 그대로 사용할 수 없습니다.\n"
                     f"   → 인스턴스 행에 다시 표시된 **[Bake]** 버튼을 눌러 in-memory "
                     f"timeSamples 로 변환하세요.\n"
@@ -1578,13 +1695,13 @@ class LamWindow:
                 )
             elif kind == ASSET_KIND_STATIC:
                 self._log(
-                    f"Extract: 이 자산은 **STATIC** 입니다 (시간 데이터 없음).\n"
+                    f"{prefix}Extract: 이 자산은 **STATIC** 입니다 (시간 데이터 없음).\n"
                     f"   재생 대상이 아닙니다 (TIMESAMPLES_REPLAY / Bake 모두 의미 없음).\n"
                     f"   stats: {result.to_log_line()}"
                 )
             else:
                 self._log(
-                    f"Extract 실패 prim={prim_path}: {result.error or '알 수 없음'} "
+                    f"{prefix}Extract 실패 prim={prim_path}: {result.error or '알 수 없음'} "
                     f"(kind={kind_label})\n"
                     f"   stats: {result.to_log_line()}"
                 )
@@ -1612,7 +1729,7 @@ class LamWindow:
             )
 
         self._log(
-            f"Extract 완료 prim={prim_path} kind={kind_label}\n"
+            f"{prefix}Extract 완료 prim={prim_path} kind={kind_label}\n"
             f"   prims={result.n_prims} attrs={result.n_attrs_total} "
             f"timeSamples_attrs={result.n_attrs_with_timesamples} "
             f"(xform={result.n_xform_op_ts} skel={result.n_skel_anim_ts} "
@@ -1771,4 +1888,9 @@ class LamWindow:
             pass
 
 
-__all__ = ["LamWindow"]
+__all__ = [
+    "LamWindow",
+    "load_automatically",
+    "default_load_usd_path",
+    "resolve_default_load_usd_path",
+]

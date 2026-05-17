@@ -9,6 +9,11 @@ master stage 를 traverse 하여 "재생 가능한 인스턴스 후보" 를 발�
 - R3 최후: prim 의 임의 attribute 가 timeSamples 보유
 
 R1 > R2 > R3. 동일 prim 이 다중 규칙으로 발견되어도 인스턴스는 1개만.
+
+등록 범위 (2026-05-17):
+- R1 은 `lam:instance` 가 있는 prim (통상 `/World/<instance_id>`).
+- R2/R3 은 `/World` 의 **직계 자식** prim 만 — reference 내부·drag&drop 하위 경로는
+  별도 인스턴스로 올리지 않는다 (합성 USD 재오픈 시 목록이 2~3개로 유지되도록).
 """
 
 from __future__ import annotations
@@ -25,6 +30,25 @@ from .lam_types import AnimationInstance
 _PRINT_PREFIX = "[LAM/L2]"
 
 _DEFAULT_TPS = 30.0
+
+
+def _has_lam_instance_custom_data(prim) -> bool:
+    """USD save/load 후 customData 형식이 달라져도 R1 이 동작하도록 best-effort 판별."""
+    try:
+        v = prim.GetCustomDataByKey("lam:instance")
+        if v is True or v == 1 or v == "true":
+            return True
+        if isinstance(v, str) and v.strip().lower() in ("true", "1", "yes"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_world_direct_child(prim_path: str) -> bool:
+    """`/World/<name>` 형태의 인스턴스 루트 prim 인지 (깊이 2)."""
+    parts = [p for p in (prim_path or "").split("/") if p]
+    return len(parts) == 2 and parts[0] == "World"
 
 
 def _stage_local_time_range(prim) -> tuple[float, float, float]:
@@ -107,9 +131,13 @@ class CompositionDiscovery:
             if self._registry.get_by_prim_path(prim_path) is not None:
                 continue  # 이미 등록됨
 
-            inst = self._try_r1(prim, prim_path) \
-                or self._try_r2(prim, prim_path) \
-                or self._try_r3(prim, prim_path)
+            if _has_lam_instance_custom_data(prim):
+                inst = self._try_r1(prim, prim_path)
+            elif _is_world_direct_child(prim_path):
+                inst = self._try_r2(prim, prim_path) or self._try_r3(prim, prim_path)
+            else:
+                continue
+
             if inst is not None:
                 added.append(inst)
 
@@ -119,7 +147,7 @@ class CompositionDiscovery:
     # ----------------------------------------------------------------- R1
     def _try_r1(self, prim, prim_path: str) -> AnimationInstance | None:
         try:
-            if not prim.GetCustomDataByKey("lam:instance"):
+            if not _has_lam_instance_custom_data(prim):
                 return None
             source_asset = prim.GetCustomDataByKey("lam:source_asset") or ""
             metadata = {

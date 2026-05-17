@@ -167,6 +167,16 @@ class AnimationInstanceRegistry:
             self._notify()
         return inst
 
+    def clear_all(self) -> int:
+        """등록된 인스턴스를 모두 제거(master 재오픈 시 stale 항목 방지)."""
+        with self._lock:
+            n = len(self._by_prim)
+            self._by_prim.clear()
+        if n:
+            print(f"{_PRINT_PREFIX} clear_all n={n}", flush=True)
+            self._notify()
+        return n
+
     def from_metadata(
         self,
         *,
