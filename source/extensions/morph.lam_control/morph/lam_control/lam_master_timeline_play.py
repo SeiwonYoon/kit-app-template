@@ -1,7 +1,10 @@
-"""LAM — USD_TIMELINE 테스트용 `omni.timeline` 재생 (TBS `play_usd_animation` 축약판).
+"""USD_TIMELINE step — master `omni.timeline` playback (TBS `play_usd_animation` subset).
 
-- `morph.tbs_control_1` 는 import 하지 않는다 (REQ-002).
-- **main thread** 에서만 호출할 것 (`lam_sequence_engine._dispatch_main_wait` 경유).
+- Master stage frame range `[start_frame, end_frame)` 재생·배속·pause (`begin_play_frame_range` 등).
+- Step 전후 global timeline 스냅샷/복구로 OmniGraph 평가 시각 점프 artifact 완화.
+- **main thread only** — `lam_sequence_engine._dispatch_main_wait` 경유; `morph.tbs_control_1` 미import (REQ-002).
+- 수정 시 영향 / related: `lam_sequence_engine` (USD_TIMELINE), `lam_offset_correction` (step 직전),
+  `lam_master_stage` (master context).
 """
 
 from __future__ import annotations

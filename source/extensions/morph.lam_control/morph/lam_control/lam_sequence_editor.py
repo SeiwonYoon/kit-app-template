@@ -1,7 +1,7 @@
 """LAM 시퀀스 편집기 (P2 — TBS Sequence Editor 와 동일한 4 종 step UI + LAM 추가 step).
 
 【 step 종류 】
-  STEP_TYPES = ["USD_TIMELINE", "TIMESAMPLES_REPLAY", "MOVE", "ROTATE", "DELAY"]
+  STEP_TYPES = ["USD_TIMELINE", "TIMESAMPLES_REPLAY", "MOVE", "ROTATE", "DELAY", "PRIM_VISIBILITY"]
 
   - `USD_TIMELINE` / `TIMESAMPLES_REPLAY` 둘 다 LAM 인스턴스 (`ref`) 를 지정하는 재생 step.
       * `TIMESAMPLES_REPLAY` = **실무용** — Option E offscreen 평가 (멀티 인스턴스 독립).
@@ -72,7 +72,16 @@ def _range_start_seconds_for_instance(inst) -> float:
         return (asset_s / tps) + max(0.0, min(1.0, float(s))) * length
     return asset_s / tps
 
-STEP_TYPES = ["USD_TIMELINE", "TIMESAMPLES_REPLAY", "MOVE", "ROTATE", "DELAY"]
+STEP_TYPES = ["USD_TIMELINE", "TIMESAMPLES_REPLAY", "MOVE", "ROTATE", "DELAY", "PRIM_VISIBILITY"]
+
+PRIM_VISIBILITY_MODES = ("hide", "show")
+
+# JSON 로드 시 에디터 canonical type 으로 정규화.
+_LOAD_TYPE_ALIASES = {
+    "SET_PRIM_VISIBILITY": "PRIM_VISIBILITY",
+    "PRIM_HIDE": "PRIM_VISIBILITY",
+    "PRIM_SHOW": "PRIM_VISIBILITY",
+}
 
 # UI / 핸들러 측에서 USD_TIMELINE 과 TIMESAMPLES_REPLAY 를 동일하게 처리해야 할 때 사용.
 # 두 kind 모두 LAM 인스턴스(ref) 를 지정해 시간 데이터를 재생한다.
@@ -149,6 +158,16 @@ def _default_step_for_type(t: str) -> Dict[str, Any]:
             "step_delay_ms": 0,
             "description": "",
         }
+    if t == "PRIM_VISIBILITY":
+        return {
+            "type": "PRIM_VISIBILITY",
+            "mode": "hide",
+            "prim": "",
+            "duration": 0.02,
+            "run_with_previous": False,
+            "step_delay_ms": 0,
+            "description": "",
+        }
     # DELAY
     return {
         "type": "DELAY",
@@ -159,6 +178,32 @@ def _default_step_for_type(t: str) -> Dict[str, Any]:
         "step_delay_ms": 0,
         "description": "",
     }
+
+
+def _coerce_loaded_step(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """파일/JSON 텍스트의 step dict → canonical step (알 수 없는 type 은 None)."""
+    if not isinstance(raw, dict):
+        return None
+    raw_type = str(raw.get("type", "")).upper()
+    canonical = _LOAD_TYPE_ALIASES.get(raw_type, raw_type)
+    if canonical not in STEP_TYPES:
+        return None
+    step = _default_step_for_type(canonical)
+    for k, v in raw.items():
+        step[k] = v
+    step["type"] = canonical
+    if raw_type == "SET_PRIM_VISIBILITY":
+        step["mode"] = "show" if bool(raw.get("visible", True)) else "hide"
+    elif raw_type == "PRIM_HIDE":
+        step["mode"] = "hide"
+    elif raw_type == "PRIM_SHOW":
+        step["mode"] = "show"
+    elif canonical == "PRIM_VISIBILITY":
+        mode = str(step.get("mode", "hide") or "hide").strip().lower()
+        step["mode"] = mode if mode in PRIM_VISIBILITY_MODES else "hide"
+    if canonical == "DELAY" and "duration" not in raw and "seconds" in raw:
+        step["duration"] = float(raw.get("seconds", 1.0) or 1.0)
+    return step
 
 
 # --------------------------------------------------------------------- editor
@@ -362,6 +407,12 @@ class LamSequenceEditor:
                 self._render_step(ui, idx, step)
 
     def _render_step(self, ui, idx: int, step: Dict[str, Any]) -> None:
+        raw_t = str(step.get("type") or "").upper()
+        if raw_t in _LOAD_TYPE_ALIASES:
+            coerced = _coerce_loaded_step(step)
+            if coerced is not None:
+                step.clear()
+                step.update(coerced)
         title = f"Step {idx+1}: {step.get('type', '?')}"
         with ui.CollapsableFrame(title, height=0):
             with ui.VStack(spacing=4, padding=4):
@@ -419,9 +470,12 @@ class LamSequenceEditor:
                             self._ui_step_rotate(ui, step)
                         elif t == "DELAY":
                             self._ui_step_delay(ui, step)
-                        # 공용 timing + hide
+                        elif t == "PRIM_VISIBILITY":
+                            self._ui_step_prim_visibility(ui, step)
+                        # 공용 timing + hide (PRIM_VISIBILITY 는 sticky — hide_enabled 미사용)
                         self._ui_step_timing(ui, step)
-                        self._ui_step_hide_options(ui, step)
+                        if t != "PRIM_VISIBILITY":
+                            self._ui_step_hide_options(ui, step)
                 ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
 
     # -------------------------------------------------------- USD_TIMELINE / TIMESAMPLES_REPLAY UI
@@ -714,6 +768,46 @@ class LamSequenceEditor:
             )
             ui.Spacer()
 
+    # --------------------------------------------------------- PRIM_VISIBILITY UI
+
+    def _ui_step_prim_visibility(self, ui, step: Dict[str, Any]) -> None:
+        """sticky hide/show — 스텝당 prim 1개, 이후 스텝까지 visibility 유지."""
+        mode = str(step.get("mode", "hide") or "hide").strip().lower()
+        if mode not in PRIM_VISIBILITY_MODES:
+            mode = "hide"
+            step["mode"] = mode
+        mode_idx = PRIM_VISIBILITY_MODES.index(mode)
+
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("동작", width=50)
+            mode_cb = ui.ComboBox(mode_idx, *PRIM_VISIBILITY_MODES)
+
+            def _on_mode(model, *_a, s=step):
+                sel = model.get_item_value_model().as_int
+                s["mode"] = PRIM_VISIBILITY_MODES[sel] if 0 <= sel < len(PRIM_VISIBILITY_MODES) else "hide"
+
+            mode_cb.model.add_item_changed_fn(_on_mode)
+
+        prim_model = ui.SimpleStringModel(str(step.get("prim", "")))
+        prim_model.add_value_changed_fn(
+            lambda _m, s=step, m=prim_model: s.__setitem__("prim", m.get_value_as_string())
+        )
+        with ui.HStack(spacing=4, height=28):
+            ui.Label("PRIM", width=50)
+            ui.StringField(model=prim_model, height=28, style=INPUT_FIELD_STYLE)
+            ui.Button(
+                "Stage",
+                width=60,
+                height=28,
+                clicked_fn=lambda m=prim_model: self._fill_selected_prim(m, first_only=True),
+            )
+        ui.Label(
+            "hide: 이 스텝 이후 강제 숨김 · show: 이 스텝 이후 무조건 표시 (in 클립 직후 웨이퍼 전환용).",
+            height=0,
+            word_wrap=True,
+            style={"color": 0xFF9AA4B2},
+        )
+
     # ----------------------------------------------------------------- DELAY UI
 
     def _ui_step_delay(self, ui, step: Dict[str, Any]) -> None:
@@ -876,8 +970,8 @@ class LamSequenceEditor:
 
     # ----------------------------------------------------------------- helpers
 
-    def _fill_selected_prim(self, model) -> None:
-        """omni.usd 의 현재 selection 으로 prim 텍스트박스 채움 (콤마 구분)."""
+    def _fill_selected_prim(self, model, *, first_only: bool = False) -> None:
+        """omni.usd 의 현재 selection 으로 prim 텍스트박스 채움 (기본: 콤마 구분, first_only: 첫 경로만)."""
         try:
             import omni.usd as ou  # type: ignore
 
@@ -887,7 +981,7 @@ class LamSequenceEditor:
             if not paths:
                 self._set_status("Stage 에서 prim 을 선택한 뒤 다시 누르세요.")
                 return
-            joined = ",".join(paths)
+            joined = paths[0] if first_only else ",".join(paths)
             try:
                 model.set_value(joined)
             except Exception:
@@ -1223,17 +1317,9 @@ class LamSequenceEditor:
             return 0
         cleaned: List[Dict[str, Any]] = []
         for raw in data:
-            if not isinstance(raw, dict):
-                continue
-            t = str(raw.get("type", "")).upper()
-            if t not in STEP_TYPES:
-                continue
-            step = _default_step_for_type(t)
-            for k, v in raw.items():
-                step[k] = v
-            if t == "DELAY" and "duration" not in raw and "seconds" in raw:
-                step["duration"] = float(raw.get("seconds", 1.0) or 1.0)
-            cleaned.append(step)
+            step = _coerce_loaded_step(raw)
+            if step is not None:
+                cleaned.append(step)
         self._steps = cleaned
         self._schedule_refresh()
         return len(cleaned)

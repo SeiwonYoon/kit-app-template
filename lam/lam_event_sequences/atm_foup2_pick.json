@@ -1,0 +1,27 @@
+[
+  {
+    "type": "PRIM_VISIBILITY",
+    "mode": "show",
+    "prim": "{SLOT_WAFER}",
+    "duration": 0.02,
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": "atm_foup2_pick — SLOT wafer (편집)"
+  },
+  {
+    "type": "PRIM_VISIBILITY",
+    "mode": "hide",
+    "prim": "{ARM_WAFER}",
+    "duration": 0.02,
+    "run_with_previous": true,
+    "step_delay_ms": 0,
+    "description": "atm_foup2_pick — ARM wafer (편집)"
+  },
+  {
+    "type": "DELAY",
+    "duration": 0.5,
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": "atm_foup2_pick — TIMESAMPLES_REPLAY 등을 여기에 추가"
+  }
+]

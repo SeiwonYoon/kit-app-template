@@ -1,6 +1,7 @@
 """LAM 시퀀스 엔진.
 
-step 종류: USD_TIMELINE / TIMESAMPLES_REPLAY / MOVE / ROTATE / DELAY / SET_PRIM_VISIBILITY.
+step 종류: USD_TIMELINE / TIMESAMPLES_REPLAY / MOVE / ROTATE / DELAY /
+SET_PRIM_VISIBILITY / PRIM_VISIBILITY (hide·show, sticky).
 
 - `TIMESAMPLES_REPLAY` = **실무용** — Option E (offscreen stage + master mirror default write).
   멀티 인스턴스 독립 재생.
@@ -68,6 +69,36 @@ STEP_KIND_MOVE: str = "MOVE"
 STEP_KIND_ROTATE: str = "ROTATE"
 STEP_KIND_DELAY: str = "DELAY"
 STEP_KIND_SET_PRIM_VISIBILITY: str = "SET_PRIM_VISIBILITY"
+STEP_KIND_PRIM_VISIBILITY: str = "PRIM_VISIBILITY"
+# 하위 호환·JSON 별칭 (에디터 ComboBox 는 PRIM_VISIBILITY 만 노출).
+STEP_KIND_PRIM_HIDE: str = "PRIM_HIDE"
+STEP_KIND_PRIM_SHOW: str = "PRIM_SHOW"
+
+_PRIM_VISIBILITY_KINDS = frozenset({
+    STEP_KIND_SET_PRIM_VISIBILITY,
+    STEP_KIND_PRIM_VISIBILITY,
+    STEP_KIND_PRIM_HIDE,
+    STEP_KIND_PRIM_SHOW,
+})
+
+
+def step_kind_is_prim_visibility(kind: str) -> bool:
+    """Imageable prim 의 sticky visibility (hide/show) step."""
+    return (kind or "").upper() in _PRIM_VISIBILITY_KINDS
+
+
+def prim_visibility_step_visible(step: dict) -> bool:
+    """PRIM_VISIBILITY / SET_PRIM_VISIBILITY / PRIM_HIDE|SHOW → 표시 여부."""
+    t = str(step.get("type") or "").upper()
+    if t == STEP_KIND_PRIM_SHOW:
+        return True
+    if t in (STEP_KIND_PRIM_HIDE,):
+        return False
+    if t == STEP_KIND_SET_PRIM_VISIBILITY:
+        return bool(step.get("visible", True))
+    mode = str(step.get("mode", "hide") or "hide").strip().lower()
+    return mode == "show"
+
 
 # 두 step kind 모두 "ref 로 인스턴스를 지정하고 Option E 로 재생" 하는 의미를 가짐.
 # 현재는 동일 핸들러를 공유 — 추후 USD_TIMELINE 의 TBS 방식 재구현 시 분기 필요.
@@ -220,7 +251,7 @@ def _collect_prim_paths_for_reset(steps: List[dict]) -> List[str]:
                 if p not in seen:
                     seen.add(p)
                     out.append(p)
-        elif t == STEP_KIND_SET_PRIM_VISIBILITY:
+        elif step_kind_is_prim_visibility(t):
             for p in _resolve_prim_paths(st, str(step.get("prim") or "")):
                 if p not in seen:
                     seen.add(p)
@@ -607,7 +638,7 @@ class LamSequenceRunner:
                 # DELAY 는 caller 에서 wait 하므로 여기서는 sleep 안 한다.
                 sp = float(max(0.01, speed_scale or 1.0))
                 duration = float(step.get("duration", 1.0) or 1.0) / sp
-            elif t == STEP_KIND_SET_PRIM_VISIBILITY:
+            elif step_kind_is_prim_visibility(t):
                 duration = self._start_set_prim_visibility(idx, step, speed_scale)
             else:
                 print(f"{_PRINT_PREFIX} step[{idx}] unknown type={t!r}", flush=True)
@@ -949,6 +980,10 @@ class LamSequenceRunner:
         return length_sec / float(max(0.01, combined_speed))
 
     # ----------------------------------------------------------------- MOVE
+    # ``move_from_initial=True``: (dx,dy,dz) = TBS_OFFSET **절대 목표** (기준 0 = 905.92mm).
+    #   자동 Z: dz=25.928 [TBS/mm] — ``lam_slot_z_config`` + ``build_steps_for_event``.
+    # ``move_from_initial=False``: 현재 위치에서 (dx,dy,dz) 만큼 **델타** 이동.
+    # 실제 USD write: ``lam_translate_animation`` (main thread).
 
     def _start_move(self, idx: int, step: dict, speed_scale: float) -> float:
         from . import lam_translate_animation as _ltx
@@ -1140,11 +1175,11 @@ class LamSequenceRunner:
     # -------------------------------------------------------- SET_PRIM_VISIBILITY
 
     def _start_set_prim_visibility(self, idx: int, step: dict, speed_scale: float) -> float:
-        """Imageable prim 의 visibility 를 즉시 설정한 뒤 ``duration`` 초만큼 그룹 대기에 사용."""
+        """Imageable prim visibility 를 즉시 설정(sticky). ``duration`` 은 그룹 대기용 tail."""
         from pxr import UsdGeom  # type: ignore
 
         prim_id = str(step.get("prim") or "")
-        visible = bool(step.get("visible", True))
+        visible = prim_visibility_step_visible(step)
         sp = float(max(0.01, speed_scale or 1.0))
         tail = float(step.get("duration", 0.02) or 0.02) / sp
         stage = _stage()

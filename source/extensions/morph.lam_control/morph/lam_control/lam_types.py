@@ -1,7 +1,10 @@
-"""LAM 데이터 모델 — `AnimationInstance` 와 보조 타입.
+"""LAM shared data model — `AnimationInstance` and helper types (REQ-004).
 
-USD_Timeline_Spec.md REQ-004 의 데이터 모델을 코드로 굳힌 것이다.
-이 dataclass 는 L3 Registry 가 단일 진실 원천(SoT)으로 보유한다.
+- `AnimationInstance`, `StepRef`, `ResolveResult`, asset-kind 상수·bake 분류 헬퍼 정의.
+- `LAM_FIXED_FPS` (30) 로 timeCode↔초 변환 고정 — 자산 tps 와 무관하게 LAM 전역 정책.
+- Registry·evaluator·sequence step binding 이 본 타입 필드를 단일 SoT 로 공유.
+- 수정 시 영향 / related: `lam_instance_registry`, `lam_id_resolver`, `lam_runtime_evaluator`,
+  `lam_attribute_reauthor`, `lam_playback_scheduler`, `lam_asset_diagnostics`.
 """
 
 from __future__ import annotations
