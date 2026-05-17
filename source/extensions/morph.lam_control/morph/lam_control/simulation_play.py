@@ -676,8 +676,16 @@ def _lam_ts_step(
 
 
 def _lam_move_step(
-    prim: str, dx: float, dy: float, dz: float, duration: float, desc: str
+    prim: str,
+    dx: float,
+    dy: float,
+    dz: float,
+    duration: float,
+    desc: str,
+    *,
+    move_from_initial: bool = False,
 ) -> Dict[str, Any]:
+    """MOVE 스텝. ``move_from_initial=True`` 이면 (dx,dy,dz) 는 TBS_OFFSET 절대 좌표."""
     return {
         "type": "MOVE",
         "prim": prim,
@@ -685,6 +693,7 @@ def _lam_move_step(
         "dx": float(dx),
         "dy": float(dy),
         "dz": float(dz),
+        "move_from_initial": bool(move_from_initial),
         **_lam_step_tail(desc),
     }
 

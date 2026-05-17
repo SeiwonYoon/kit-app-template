@@ -88,6 +88,18 @@ def _set_prim_translate(prim, position) -> None:
         pass
 
 
+def read_tbs_offset_translate_xyz(prim_path: str) -> tuple[float, float, float]:
+    """prim 의 ``TBS_OFFSET`` TranslateOp 현재값 (x, y, z). 없으면 (0,0,0)."""
+    stage = _stage()
+    if not stage:
+        return (0.0, 0.0, 0.0)
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return (0.0, 0.0, 0.0)
+    v = _get_prim_local_translate(prim)
+    return (float(v[0]), float(v[1]), float(v[2]))
+
+
 def zero_tbs_offset_translate_at_path(prim_path: str) -> None:
     """`TBS_OFFSET` TranslateOp 을 (0,0,0) 으로 설정(Run(reset) 시 초기 위치 복귀)."""
     stage = _stage()
@@ -271,6 +283,7 @@ def _on_update(e) -> None:
 
 __all__ = [
     "is_translate_animation_running",
+    "read_tbs_offset_translate_xyz",
     "run_prim_translate_animation",
     "stop_prim_translate_animation",
     "stop_all_translate_animations",

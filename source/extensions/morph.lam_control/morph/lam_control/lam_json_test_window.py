@@ -1300,7 +1300,8 @@ class LamJsonTestWindow:
         if t in ("MOVE",):
             return (
                 f"prim={st.get('prim','?')} dur={st.get('duration','?')} "
-                f"dx={st.get('dx',0)} dy={st.get('dy',0)} dz={st.get('dz',0)}"
+                f"dx={st.get('dx',0)} dy={st.get('dy',0)} dz={st.get('dz',0)} "
+                f"move_from_initial={st.get('move_from_initial', False)}"
             )
         if t in ("ROTATE",):
             return (

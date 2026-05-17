@@ -124,6 +124,7 @@ def _default_step_for_type(t: str) -> Dict[str, Any]:
             "dx": 100.0,
             "dy": 0.0,
             "dz": 0.0,
+            "move_from_initial": False,
             "hide_enabled": False,
             "hide_prims": "",
             "run_with_previous": False,
@@ -630,6 +631,24 @@ class LamSequenceEditor:
             ui.FloatField(model=dy_m, width=70, height=28, style=INPUT_FIELD_STYLE)
             ui.Label("dZ", width=24)
             ui.FloatField(model=dz_m, width=70, height=28, style=INPUT_FIELD_STYLE)
+            ui.Spacer()
+
+        # move_from_initial — 입력값을 TBS_OFFSET 기준 **절대 좌표** 로 해석 (ROTATE 의 rotate_from_initial 과 동일).
+        move_init_m = ui.SimpleBoolModel(bool(step.get("move_from_initial", False)))
+        move_init_m.add_value_changed_fn(
+            lambda _m, s=step, m=move_init_m: s.__setitem__("move_from_initial", bool(m.get_value_as_bool()))
+        )
+        with ui.HStack(spacing=4, height=28):
+            ui.CheckBox(model=move_init_m, width=20, style=CHECKBOX_WHITE_STYLE)
+            ui.Label(
+                "최초 위치 기준(절대 좌표) · TBS_OFFSET",
+                height=0,
+                tooltip=(
+                    "켜진 스텝의 (dx,dy,dz) 는 TBS_OFFSET Translate 의 **목표 절대 좌표** 입니다.\n"
+                    "예: dx=900 → x=900 위치로 이동. 이미 x=900 이면 추가 이동 없음.\n"
+                    "체크 해제 시: 현재 TBS_OFFSET 에 (dx,dy,dz) 만큼 **델타** 이동."
+                ),
+            )
             ui.Spacer()
 
     # --------------------------------------------------------------- ROTATE UI

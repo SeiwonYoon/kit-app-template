@@ -959,8 +959,10 @@ class LamSequenceRunner:
         dx = float(step.get("dx", 0.0) or 0.0)
         dy = float(step.get("dy", 0.0) or 0.0)
         dz = float(step.get("dz", 0.0) or 0.0)
+        from_initial = bool(step.get("move_from_initial", False))
         print(
-            f"{_PRINT_PREFIX} _start_move idx={idx} prim_id={prim_id!r} d=({dx},{dy},{dz}) dur={duration}",
+            f"{_PRINT_PREFIX} _start_move idx={idx} prim_id={prim_id!r} "
+            f"input=({dx},{dy},{dz}) from_initial={from_initial} dur={duration}",
             flush=True,
         )
         stage = _stage()
@@ -973,24 +975,57 @@ class LamSequenceRunner:
             )
             return 0.0
 
+        if not from_initial and abs(dx) < 1e-9 and abs(dy) < 1e-9 and abs(dz) < 1e-9:
+            print(
+                f"{_PRINT_PREFIX} step[{idx}] MOVE skip — zero delta (move_from_initial=False)",
+                flush=True,
+            )
+            return 0.0
+
         # USD write 는 반드시 main thread 에서 (lam_sequence_engine 상단 _dispatch_main 주석 참조).
         def _do_in_main() -> None:
             for p in paths:
                 try:
                     _ltx.stop_prim_translate_animation(p)
+                    if from_initial:
+                        cur = _ltx.read_tbs_offset_translate_xyz(p)
+                        ddx = float(dx) - float(cur[0])
+                        ddy = float(dy) - float(cur[1])
+                        ddz = float(dz) - float(cur[2])
+                        if abs(ddx) < 1e-9 and abs(ddy) < 1e-9 and abs(ddz) < 1e-9:
+                            print(
+                                f"{_PRINT_PREFIX} (main) step[{idx}] MOVE(initial) skip path={p!r} "
+                                f"already at target ({dx},{dy},{dz})",
+                                flush=True,
+                            )
+                            continue
+                        seg_delta = (ddx, ddy, ddz)
+                    else:
+                        seg_delta = (dx, dy, dz)
                     _ltx.run_prim_translate_animation(
                         p,
-                        [{"duration": duration, "delta": (dx, dy, dz)}],
+                        [{"duration": duration, "delta": seg_delta}],
                         loop=False,
                     )
-                    print(f"{_PRINT_PREFIX} (main) MOVE started prim={p}", flush=True)
+                    if from_initial:
+                        print(
+                            f"{_PRINT_PREFIX} (main) MOVE(initial) prim={p} "
+                            f"target=({dx},{dy},{dz}) delta={seg_delta} dur={duration}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"{_PRINT_PREFIX} (main) MOVE prim={p} d={seg_delta} dur={duration}",
+                            flush=True,
+                        )
                 except Exception as exc:
                     print(f"{_PRINT_PREFIX} (main) MOVE failed prim={p}: {exc}", flush=True)
 
         print(f"{_PRINT_PREFIX} _start_move idx={idx} dispatching to main thread", flush=True)
         _dispatch_main(_do_in_main)
         print(
-            f"{_PRINT_PREFIX} step[{idx}] MOVE dispatched prim={paths} d=({dx},{dy},{dz}) dur={duration}",
+            f"{_PRINT_PREFIX} step[{idx}] MOVE dispatched prim={paths} "
+            f"from_initial={from_initial} dur={duration}",
             flush=True,
         )
         return duration
