@@ -38,7 +38,7 @@ from .lam_viewport import LamViewport
 # ---------------------------------------------------------------------------
 # True 이면 LAM Window 첫 show() 시 default_load_usd_path 를 「② 기존 합성 USD 열기」와
 # 동일하게 로드(Discover + Extract 자동). False 이면 기존과 동일(수동).
-load_automatically = False
+load_automatically = True
 
 # 절대 경로 예 (Windows):
 #   default_load_usd_path = r"C:\Users\ptK\Documents\kit-app-template_mine\lam\usd\master.usd"
@@ -47,7 +47,8 @@ load_automatically = False
 # 프로젝트(레포) 루트 기준 상대 경로 예 — lam/ 가 repo 직하위일 때:
 #   default_load_usd_path = "lam/usd/master.usd"
 #   default_load_usd_path = r"lam\usd\master.usd"
-default_load_usd_path = "lam/usd/master.usd"
+# default_load_usd_path = "lam/usd/master.usd"
+default_load_usd_path = "C:/Users/ptK/Documents/kit-app-template_mine/lam/usd/combine_1.usd"
 
 
 _PRINT_PREFIX = "[LAM/WIN]"
@@ -154,6 +155,8 @@ class LamWindow:
         # 인스턴스 목록 VStack 재빌드 — 이벤트/드로우 중 ``clear()`` 방지용 (post_update 1회).
         self._inst_refresh_pending: bool = False
         self._inst_refresh_sub: Optional[Any] = None
+        # 시작 자동 로드 — Kit Timeline UI 초기화와 겹치지 않도록 post_update 지연.
+        self._autoload_sub: Optional[Any] = None
 
         self._registry.add_listener(self._schedule_instances_ui_refresh)
 
@@ -387,7 +390,7 @@ class LamWindow:
         except Exception as exc:
             print(f"{_PRINT_PREFIX} auto open editor failed: {exc}", flush=True)
 
-        self._try_autoload_master_on_startup()
+        self._schedule_autoload_master_on_startup()
 
     def destroy(self) -> None:
         try:
@@ -439,6 +442,12 @@ class LamWindow:
                 pass
             self._inst_refresh_sub = None
         self._inst_refresh_pending = False
+        if self._autoload_sub is not None:
+            try:
+                self._autoload_sub.unsubscribe()
+            except Exception:
+                pass
+            self._autoload_sub = None
 
     # ----------------------------------------------------------------- actions
 
@@ -499,6 +508,46 @@ class LamWindow:
             extract_prefix = log_prefix or "Open Master"
             self._auto_extract_after_master_open(log_prefix=extract_prefix)
         return ok
+
+    def _schedule_autoload_master_on_startup(self) -> None:
+        """`load_automatically` 시 합성 로드를 몇 프레임 뒤에 실행.
+
+        `open_master` 직후 omni.anim.window.timeline 이 selection 이벤트로
+        keyframe UI 를 rebuild 하는데, 아직 ``_keyframes_container`` 가 None 이면
+        AttributeError 가 난다(Kit 측 타이밍 이슈). UI·Timeline 초기화 후에 로드한다.
+        """
+        if not load_automatically:
+            return
+        if self._autoload_sub is not None:
+            return
+
+        frames_left = [3]
+
+        def _do(_e=None):
+            if frames_left[0] > 0:
+                frames_left[0] -= 1
+                return
+            if self._autoload_sub is not None:
+                try:
+                    self._autoload_sub.unsubscribe()
+                except Exception:
+                    pass
+                self._autoload_sub = None
+            self._try_autoload_master_on_startup()
+
+        try:
+            import omni.kit.app as _app  # type: ignore
+
+            stream = _app.get_app().get_post_update_event_stream()
+            self._autoload_sub = stream.create_subscription_to_pop(
+                _do, name="morph.lam_control.lam_window.autoload_master"
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} autoload schedule failed: {exc} (즉시 시도)",
+                flush=True,
+            )
+            self._try_autoload_master_on_startup()
 
     def _try_autoload_master_on_startup(self) -> None:
         """`load_automatically` 가 True 일 때 첫 show() 에서 합성 USD 를 연다."""
