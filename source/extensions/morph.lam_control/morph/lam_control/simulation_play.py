@@ -26,6 +26,9 @@ import csv
 import json
 import ast
 import os
+import re
+import time
+from datetime import datetime
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -111,11 +114,97 @@ VTM_END_EFFECTOR_SWAP_HANDS: bool = False
 FOUP1_CASSETTE_ID_MIN: int = 1
 FOUP1_CASSETTE_ID_MAX: int = 25
 _PRINT_PREFIX: str = "[LAM/SIMPLAY]"
-# 매크로·CSV 이송 스텝의 **프레임 재생** 은 ``TIMESAMPLES_REPLAY`` 만 사용한다.
-# 프레임 재생은 event JSON 의 ``TIMESAMPLES_REPLAY`` (``LamSequenceRunner``).
+# CSV Play 콘솔: True 이면 한 줄 요약만 (진행시간·동작·JSON·실행여부)
+_csv_play_compact_log: bool = False
+# CSV/매크로 재생: event JSON 안의 **모든 스텝** (MOVE·ROTATE·DELAY·visibility·TIMESAMPLES_REPLAY 등)을
+# ``LamSequenceRunner`` 가 순서대로 실행. 팔 프레임 클립은 TIMESAMPLES_REPLAY 가 있을 때만 추가 재생.
 LOGICAL_SLOT_ATM_ARM: str = "LOGICAL:ATM_ARM"
 LOGICAL_SLOT_VTM_EE_L: str = "LOGICAL:VTM_EE_L"
 LOGICAL_SLOT_VTM_EE_R: str = "LOGICAL:VTM_EE_R"
+
+
+# ---------------------------------------------------------------------------
+# 1b) CSV ``module_nm`` → ``slot_key`` (EAP 실무 문자열 + prompt1 §332–363)
+# ---------------------------------------------------------------------------
+
+
+def build_default_module_nm_to_slot_key() -> Dict[str, str]:
+    """CSV ``module_nm`` → 내부 ``slot_key``. CoolStationAL3/4 → buffer, AL1 → cooling."""
+    ee_l = LOGICAL_SLOT_VTM_EE_R if VTM_END_EFFECTOR_SWAP_HANDS else LOGICAL_SLOT_VTM_EE_L
+    ee_r = LOGICAL_SLOT_VTM_EE_L if VTM_END_EFFECTOR_SWAP_HANDS else LOGICAL_SLOT_VTM_EE_R
+    m: Dict[str, str] = {
+        "AtmArm-EndEffector11": LOGICAL_SLOT_ATM_ARM,
+        "AtmArm-EndEfferctor11": LOGICAL_SLOT_ATM_ARM,
+        "TransferChamber-EndEffector1": ee_l,
+        "TransferChamber-EndEffector2": ee_r,
+    }
+    for i in (1, 2):
+        m[f"AirLock1-iSlot{i}"] = f"airlock1_{i}"
+        m[f"AirLock2-iSlot{i}"] = f"airlock2_{i}"
+        m[f"AirLock2-oSlot{i}"] = f"airlock2_{i}"
+    for i in range(1, 8):
+        m[f"CoolStationAL1PML{i}"] = f"cooling_{i}"
+    for i in range(1, 26):
+        m[f"CoolStationAL3PML{i}"] = f"buffer3_{i}"
+        m[f"CoolStationAL4PML{i}"] = f"buffer4_{i}"
+    for i in range(1, 6):
+        m[f"PM{i}-PML1"] = f"chamber{i}"
+        m[f"PM{i}PML1"] = f"chamber{i}"
+    for foup_n in (1, 2, 3):
+        for slot in range(1, 26):
+            m[f"ATM-FOUP{foup_n}-iSlot{slot}"] = f"foup{foup_n}_{slot}"
+    return m
+
+
+MODULE_NM_TO_SLOT_KEY: Dict[str, str] = build_default_module_nm_to_slot_key()
+
+
+def rebuild_module_nm_slot_mapping() -> None:
+    """``VTM_END_EFFECTOR_SWAP_HANDS`` 변경 후 VTM EE 매핑 재생성."""
+    global MODULE_NM_TO_SLOT_KEY
+    MODULE_NM_TO_SLOT_KEY = build_default_module_nm_to_slot_key()
+
+
+def parse_module_nm_to_slot_key(module_nm: str) -> Optional[str]:
+    """``module_nm`` → ``slot_key`` (고정 dict + CoolStation/PM/Airlock 정규식)."""
+    nm = (module_nm or "").strip()
+    if not nm:
+        return None
+    sk = MODULE_NM_TO_SLOT_KEY.get(nm)
+    if sk:
+        return sk
+    m = re.fullmatch(r"CoolStationAL(\d+)PML?(\d+)", nm, re.IGNORECASE)
+    if m:
+        al_n, slot_n = int(m.group(1)), int(m.group(2))
+        if al_n in (3, 4):
+            return f"buffer{al_n}_{slot_n}"
+        return f"cooling_{slot_n}"
+    m = re.fullmatch(r"PM(\d+)-PML\d+", nm, re.IGNORECASE)
+    if m:
+        return f"chamber{int(m.group(1))}"
+    m = re.fullmatch(r"PM(\d+)PML\d+", nm, re.IGNORECASE)
+    if m:
+        return f"chamber{int(m.group(1))}"
+    m = re.fullmatch(r"AirLock(\d+)-[io]Slot(\d+)", nm, re.IGNORECASE)
+    if m:
+        return f"airlock{int(m.group(1))}_{int(m.group(2))}"
+    m = re.fullmatch(r"TransferChamber-EndEffector(\d+)", nm, re.IGNORECASE)
+    if m:
+        n = int(m.group(1))
+        return LOGICAL_SLOT_VTM_EE_R if VTM_END_EFFECTOR_SWAP_HANDS and n == 1 else (
+            LOGICAL_SLOT_VTM_EE_L if VTM_END_EFFECTOR_SWAP_HANDS and n == 2 else (
+                LOGICAL_SLOT_VTM_EE_L if n == 1 else LOGICAL_SLOT_VTM_EE_R
+            )
+        )
+    low = re.sub(r"[^a-z0-9]", "", nm.lower())
+    if "atmarm" in low and "effect" in low:
+        return LOGICAL_SLOT_ATM_ARM
+    return None
+
+
+def slot_key_for_module_nm(module_nm: str) -> Optional[str]:
+    """``module_nm`` → ``slot_key`` (``parse_module_nm_to_slot_key`` 별칭)."""
+    return parse_module_nm_to_slot_key(module_nm)
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +356,19 @@ LamSimJsonSteps = List[Dict[str, Any]]
 LAM_SIM_LAST_BUILT_JSON: str = ""
 
 
+def set_csv_playback_compact_log(enabled: bool) -> None:
+    """CSV Play 중 상세 로그 억제 (LAM/EVENT, LAM/SEQ, dwell 타임라인 등)."""
+    global _csv_play_compact_log
+    _csv_play_compact_log = bool(enabled)
+
+
+def is_csv_playback_compact_log() -> bool:
+    return _csv_play_compact_log
+
+
 def _lam_sim_log_build(context: str, message: str) -> None:
+    if is_csv_playback_compact_log():
+        return
     """스텝 조립 시 현장 점검용 로그(누락 설정·수정 위치 안내)."""
     print(f"{_PRINT_PREFIX} [build:{context}] {message}", flush=True)
 
@@ -312,6 +413,34 @@ def _lam_estimate_raw_duration_sec(steps: LamSimJsonSteps) -> float:
     return max(0.05, total)
 
 
+def _summarize_lam_sim_steps_ko(steps: LamSimJsonSteps) -> str:
+    """JSON 스텝 구성 요약 (로그·UI용). TIMESAMPLES 유무와 무관하게 전 스텝이 실행됨."""
+    if not steps:
+        return "(스텝 없음)"
+    counts: Dict[str, int] = {}
+    for st in steps:
+        t = str(st.get("type") or "?").upper()
+        counts[t] = counts.get(t, 0) + 1
+    order = (
+        "MOVE",
+        "ROTATE",
+        "DELAY",
+        "PRIM_VISIBILITY",
+        "SET_PRIM_VISIBILITY",
+        "TIMESAMPLES_REPLAY",
+        "USD_TIMELINE",
+    )
+    parts: List[str] = []
+    for key in order:
+        if key in counts:
+            parts.append(f"{key}×{counts[key]}")
+    for key in sorted(counts.keys()):
+        if key not in order:
+            parts.append(f"{key}×{counts[key]}")
+    est = _lam_estimate_raw_duration_sec(steps)
+    return f"{', '.join(parts)} (1x 합산 약 {est:.2f}s)"
+
+
 def lam_sim_steps_from_json_string(s: str) -> LamSimJsonSteps:
     data = json.loads(s)
     if not isinstance(data, list):
@@ -329,8 +458,11 @@ def run_lam_sim_steps(
 ) -> None:
     """JSON/매크로에서 만든 스텝 list → **실제 Kit 재생** (단일 진입점).
 
-    내부: ``lam_sequence_engine.LamSequenceRunner.run(steps)`` — MOVE/visibility/TIMESAMPLES 실행.
-    ``target_duration_sec``: 매크로 ``duration_sec=`` 로 전체 길이 맞출 때 배속 조정.
+    ``LamSequenceRunner`` 가 JSON 에 정의된 **모든 스텝 타입**을 순서대로 실행한다
+    (MOVE·ROTATE·DELAY·visibility·TIMESAMPLES_REPLAY 등). TIMESAMPLES 가 없어도
+    나머지 스텝은 그대로 재생된다.
+    ``speed_scale``: 대기·MOVE·프레임 등 **해당 블록 전체** 배속.
+    ``target_duration_sec``: 매크로 ``duration_sec=`` 로 블록 길이 맞출 때만 추가 조정.
     """
     if not steps:
         print(f"{_PRINT_PREFIX} run_lam_sim_steps: 빈 스텝", flush=True)
@@ -605,47 +737,80 @@ def _classify_transfer_robot(prev_sk: str, next_sk: str) -> str:
     return "ATM"
 
 
-def _transfer_event_hint(prev: DwellRecord, curr: DwellRecord) -> str:
-    """CSV 이송에 대응하는 event JSON 이름(로그용)."""
+def _vtm_hand_side_for_transfer(prev_sk: str, curr_sk: str, *, pick_into_arm: bool) -> str:
+    """VTM 이송 시 ``left`` / ``right`` (EE 논리 슬롯 기준)."""
+    if pick_into_arm:
+        if curr_sk == LOGICAL_SLOT_VTM_EE_L:
+            return "left"
+        if curr_sk == LOGICAL_SLOT_VTM_EE_R:
+            return "right"
+    else:
+        if prev_sk == LOGICAL_SLOT_VTM_EE_L:
+            return "left"
+        if prev_sk == LOGICAL_SLOT_VTM_EE_R:
+            return "right"
+    return "left"
+
+
+def _event_json_paths_for_display(event_name: str) -> Tuple[str, str]:
+    """이벤트 JSON (repo 상대 표기, 절대 경로)."""
+    from .lam_event_sequences import event_json_path
+
+    rel = f"lam/lam_event_sequences/{event_name}.json"
+    try:
+        p = event_json_path(event_name)
+        return rel, str(p.resolve())
+    except Exception:
+        return rel, rel
+
+
+def _resolve_transfer_event_name(
+    prev: DwellRecord, curr: DwellRecord
+) -> Tuple[str, Optional[int]]:
+    """CSV 이송 → ``lam_event_sequences`` 이벤트명·슬롯 번호."""
     from .lam_event_sequences import atm_event_name_for_slot, vtm_event_name_for_slot
 
     robot = _classify_transfer_robot(prev.slot_key, curr.slot_key)
-    try:
-        if robot == "ATM":
-            if curr.slot_key == LOGICAL_SLOT_ATM_ARM:
-                sk, po = prev.slot_key, "pick"
-            elif prev.slot_key == LOGICAL_SLOT_ATM_ARM:
-                sk, po = curr.slot_key, "place"
-            else:
-                sk, po = curr.slot_key, "place"
-            name, num = atm_event_name_for_slot(sk, po)
+    if robot == "ATM":
+        if curr.slot_key == LOGICAL_SLOT_ATM_ARM:
+            sk, po = prev.slot_key, "pick"
+        elif prev.slot_key == LOGICAL_SLOT_ATM_ARM:
+            sk, po = curr.slot_key, "place"
         else:
-            pick_into_arm = curr.slot_key in (LOGICAL_SLOT_VTM_EE_L, LOGICAL_SLOT_VTM_EE_R)
-            place_from_arm = prev.slot_key in (LOGICAL_SLOT_VTM_EE_L, LOGICAL_SLOT_VTM_EE_R)
-            if pick_into_arm:
-                target, po = prev.slot_key, "pick"
-            elif place_from_arm:
-                target, po = curr.slot_key, "place"
-            else:
-                target = (
-                    curr.slot_key
-                    if vtm_clip_station_key_for_slot(curr.slot_key)
-                    else (
-                        prev.slot_key
-                        if vtm_clip_station_key_for_slot(prev.slot_key)
-                        else curr.slot_key
-                    )
-                )
-                po = "pick"
-            hand = (
-                _vtm_hand_side_for_transfer(prev.slot_key, curr.slot_key, pick_into_arm=pick_into_arm)
-                if pick_into_arm or place_from_arm
-                else "left"
+            sk, po = curr.slot_key, "place"
+        return atm_event_name_for_slot(sk, po)
+    pick_into_arm = curr.slot_key in (LOGICAL_SLOT_VTM_EE_L, LOGICAL_SLOT_VTM_EE_R)
+    place_from_arm = prev.slot_key in (LOGICAL_SLOT_VTM_EE_L, LOGICAL_SLOT_VTM_EE_R)
+    if pick_into_arm:
+        target, po = prev.slot_key, "pick"
+    elif place_from_arm:
+        target, po = curr.slot_key, "place"
+    else:
+        target = (
+            curr.slot_key
+            if vtm_clip_station_key_for_slot(curr.slot_key)
+            else (
+                prev.slot_key
+                if vtm_clip_station_key_for_slot(prev.slot_key)
+                else curr.slot_key
             )
-            name, num = vtm_event_name_for_slot(target, hand, po)
+        )
+        po = "pick"
+    hand = (
+        _vtm_hand_side_for_transfer(prev.slot_key, curr.slot_key, pick_into_arm=pick_into_arm)
+        if pick_into_arm or place_from_arm
+        else "left"
+    )
+    return vtm_event_name_for_slot(target, hand, po)
+
+
+def _transfer_event_hint(prev: DwellRecord, curr: DwellRecord) -> str:
+    """CSV 이송에 대응하는 event JSON 이름(로그용)."""
+    try:
+        name, num = _resolve_transfer_event_name(prev, curr)
         if num is not None:
-            return f"{name}(slot_number={num})"
-        return name
+            return f"build_steps_for_event({name!r}, slot_number={num})  →  {name}({num})"
+        return f"build_steps_for_event({name!r})  →  {name}()"
     except ValueError as exc:
         return f"(event unresolved: {exc})"
 
@@ -669,8 +834,8 @@ def log_virtual_timeline_from_dwells(dwells: List[DwellRecord]) -> None:
         t0, t1 = d.start_sec, d.end_sec
         if i == 0:
             print(
-                f"{_PRINT_PREFIX} [t={t0:.3f}s] INIT wafer cassette={d.cassette_id} "
-                f"first_dwell slot={d.slot_key} module={d.module_nm!r}",
+                f"{_PRINT_PREFIX} [t={t0:.3f}s] INIT wafer lot={d.lot_id!r} foup={d.foup_index} "
+                f"cassette={d.cassette_id} slot={d.slot_key} module={d.module_nm!r}",
                 flush=True,
             )
         else:
@@ -681,8 +846,8 @@ def log_virtual_timeline_from_dwells(dwells: List[DwellRecord]) -> None:
         z_s = f"z_abs_m={z!r}" if z is not None else "z_abs_m=(none)"
 
         print(
-            f"{_PRINT_PREFIX} [t={t0:.3f}s..{t1:.3f}s] DWELL#{i} cassette={d.cassette_id} "
-            f"slot={d.slot_key} module={d.module_nm!r}",
+            f"{_PRINT_PREFIX} [t={t0:.3f}s..{t1:.3f}s] DWELL#{i} lot={d.lot_id!r} foup={d.foup_index} "
+            f"cassette={d.cassette_id} slot={d.slot_key} module={d.module_nm!r}",
             flush=True,
         )
         print(
@@ -737,19 +902,15 @@ def _log_virtual_transfer(prev: DwellRecord, curr: DwellRecord) -> None:
 
 @dataclass(frozen=True)
 class ParsedCsvRow:
-    """CSV 한 행에서 시뮬에 필요한 6개 필드만 담는다.
+    """CSV 한 행 — dwell(머무름) 구간.
 
-    Attributes:
-        eqp_id: 장비/호기 식별 (로그용).
-        module_nm: 장비 모듈명. ``MODULE_NM_TO_SLOT_KEY`` 로 ``slot_key`` 로 변환된다.
-        cassette_id: 랏 내 웨이퍼 번호 (FOUP1 이면 보통 1~25).
-        eqp_start_tm: 이 모듈에 **들어온** 시각 [s] (CSV 원본을 ``parse_time_to_seconds`` 로 변환).
-        eqp_end_tm: 이 모듈에서 **나간** 시각 [s].
-        process_tm: 공정/체류 시간 열 (현재 로그에만 사용, 추후 스텝 길이에 반영 가능).
+    ``eqp_start_tm`` / ``eqp_end_tm`` 은 ``normalize_csv_timeline()`` 이후 **전역 0초 기준** [s].
+    ``lot_id`` 는 등장 순서로 foup1..3 에 매핑 (``foup_index``).
     """
 
     eqp_id: str
     module_nm: str
+    lot_id: str
     cassette_id: int
     eqp_start_tm: float
     eqp_end_tm: float
@@ -758,18 +919,11 @@ class ParsedCsvRow:
 
 @dataclass(frozen=True)
 class DwellRecord:
-    """한 웨이퍼가 한 ``slot_key`` 에 머문 시간 구간 [start_sec, end_sec).
-
-    Attributes:
-        cassette_id: 어떤 웨이퍼인지 (FOUP 랏 번호 등).
-        module_nm: 원본 CSV 모듈명 (추적·로그용).
-        slot_key: 내부 고정 슬롯 또는 ``LOGICAL:*`` (팔 위 웨이퍼).
-        start_sec, end_sec: 구간 [초].
-        process_tm: CSV 의 process_tm (참고).
-        eqp_id: CSV 의 eqp_id.
-    """
+    """한 웨이퍼(lot+cassette)가 한 ``slot_key`` 에 머문 구간 [start_sec, end_sec)."""
 
     cassette_id: int
+    lot_id: str
+    foup_index: int
     module_nm: str
     slot_key: str
     start_sec: float
@@ -778,23 +932,135 @@ class DwellRecord:
     eqp_id: str
 
 
+@dataclass(frozen=True)
+class CsvPlaybackScheduleEntry:
+    """CSV 재생 UI·로그용 시간순 한 줄 (dwell / pick / transfer / place)."""
+
+    time_sec: float
+    sort_order: int
+    category: str
+    title_ko: str
+    csv_read_ko: str = ""
+    meaning_ko: str = ""
+    exec_ko: str = ""
+    step_count: int = 0
+    event_name: str = ""
+    json_path: str = ""
+
+
+@dataclass(frozen=True)
+class CsvTimedPlaybackBlock:
+    """CSV ``eqp_start_tm`` (또는 place 의 ``end_sec``) 에 맞춰 재생할 한 덩어리.
+
+    ``steps`` 가 비어 있으면 해당 시각에 **로그만** (dwell 체류). JSON 실행은 ``steps`` 가 있을 때만.
+    """
+
+    time_sec: float
+    sort_order: int
+    category: str
+    label: str
+    steps: LamSimJsonSteps
+    schedule: Optional[CsvPlaybackScheduleEntry] = None
+
+
+_SCHEDULE_CATEGORY_ORDER: Dict[str, int] = {
+    "pick": 0,
+    "transfer": 1,
+    "place": 2,
+    "dwell": 3,
+}
+
+_SCHEDULE_CATEGORY_KO: Dict[str, str] = {
+    "dwell": "체류",
+    "pick": "FOUP 픽업",
+    "transfer": "이송",
+    "place": "FOUP 반환",
+}
+
+
 # ---------------------------------------------------------------------------
 # 5) 시간 파싱
 # ---------------------------------------------------------------------------
 
 
-def parse_time_to_seconds(value: Any) -> float:
-    """CSV 시간 셀을 초 단위 실수로 변환한다.
+def _parse_datetime_to_seconds(value: Any) -> float:
+    """``2026-04-13 05:53:49.140000`` 형태 → epoch 초 (float)."""
+    s = str(value or "").strip()
+    if not s:
+        return 0.0
+    if "." in s:
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S.%f")
+    else:
+        dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    return float(dt.timestamp())
 
-    ``TIME_PARSE_MODE == "seconds_float"`` 일 때: 빈 문자열은 0, 그 외 ``float`` 변환.
-    향후 분·``HH:MM`` 등은 이 함수에 분기 추가.
-    """
+
+def parse_time_to_seconds(value: Any) -> float:
+    """CSV 시간 셀 → [s]. 숫자 또는 날짜·시간 문자열."""
     if value is None or (isinstance(value, str) and not str(value).strip()):
         return 0.0
+    s = str(value).strip()
+    if re.search(r"\d{4}-\d{2}-\d{2}", s):
+        return _parse_datetime_to_seconds(s)
     if TIME_PARSE_MODE == "seconds_float":
-        return float(value)
-    # TODO: 분/복합 문자열 파서
-    return float(value)
+        return float(s)
+    return float(s)
+
+
+def _parse_csv_time_field(raw: Dict[str, str], primary: str, iso_alt: str = "") -> float:
+    """``eqp_start_tm`` 우선, 없으면 ``eqp_start_iso`` 등 ISO 열."""
+    if iso_alt and (raw.get(iso_alt) or "").strip():
+        return parse_time_to_seconds(raw.get(iso_alt))
+    return parse_time_to_seconds(raw.get(primary))
+
+
+def build_lot_id_to_foup_index(rows: Iterable[ParsedCsvRow]) -> Dict[str, int]:
+    """``eqp_start_tm`` 순 **lot_id 최초 등장** → foup1, foup2, foup3 (prompt1 §332-1)."""
+    ordered = sorted(rows, key=lambda r: (r.eqp_start_tm, r.cassette_id, r.module_nm))
+    out: Dict[str, int] = {}
+    n = 0
+    for r in ordered:
+        lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_id}"
+        if lid not in out:
+            n += 1
+            out[lid] = n
+    return out
+
+
+def normalize_csv_timeline(rows: List[ParsedCsvRow]) -> List[ParsedCsvRow]:
+    """전역 타임라인: 최소 ``eqp_start_tm`` = 0, ``process_tm`` 분→초 보정(필요 시)."""
+    if not rows:
+        return rows
+    adjusted: List[ParsedCsvRow] = []
+    for r in rows:
+        pt = float(r.process_tm)
+        dwell = float(r.eqp_end_tm) - float(r.eqp_start_tm)
+        if dwell > 1e-6 and pt > 0 and pt < 180 and abs(dwell - pt * 60.0) < abs(dwell - pt):
+            pt = pt * 60.0
+        adjusted.append(
+            ParsedCsvRow(
+                eqp_id=r.eqp_id,
+                module_nm=r.module_nm,
+                lot_id=r.lot_id,
+                cassette_id=r.cassette_id,
+                eqp_start_tm=float(r.eqp_start_tm),
+                eqp_end_tm=float(r.eqp_end_tm),
+                process_tm=pt,
+            )
+        )
+    t0 = min(x.eqp_start_tm for x in adjusted)
+    return [
+        ParsedCsvRow(
+            eqp_id=x.eqp_id,
+            module_nm=x.module_nm,
+            lot_id=x.lot_id,
+            cassette_id=x.cassette_id,
+            eqp_start_tm=float(x.eqp_start_tm) - t0,
+            eqp_end_tm=float(x.eqp_end_tm) - t0,
+            process_tm=x.process_tm,
+        )
+        for x in adjusted
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -808,10 +1074,10 @@ def resolve_csv_path(path: Optional[str] = None) -> Path:
 
 
 def read_csv_rows(csv_path: Path) -> List[ParsedCsvRow]:
-    """UTF-8 CSV 를 읽어 ``ParsedCsvRow`` 리스트로 반환한다.
+    """UTF-8 CSV → ``ParsedCsvRow`` (정규화 전).
 
-    첫 행은 헤더. 필수 열:
-        ``eqp_id``, ``module_nm``, ``cassette_id``, ``eqp_start_tm``, ``eqp_end_tm``, ``process_tm``
+    필수: ``eqp_id``, ``module_nm``, ``eqp_start_tm``, ``eqp_end_tm``, ``process_tm``
+    + ``cassette_id`` 또는 ``cassette_slot``. 선택: ``lot_id``, ``eqp_*_iso``.
     """
     if not csv_path.is_file():
         raise FileNotFoundError(f"{_PRINT_PREFIX} CSV not found: {csv_path}")
@@ -819,63 +1085,78 @@ def read_csv_rows(csv_path: Path) -> List[ParsedCsvRow]:
     rows: List[ParsedCsvRow] = []
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
-        required = (
-            "eqp_id",
-            "module_nm",
-            "cassette_id",
-            "eqp_start_tm",
-            "eqp_end_tm",
-            "process_tm",
-        )
-        header = reader.fieldnames or ()
-        miss = [c for c in required if c not in header]
-        if miss:
-            raise ValueError(f"{_PRINT_PREFIX} CSV missing columns: {miss}")
+        header = list(reader.fieldnames or ())
+        if "cassette_id" not in header and "cassette_slot" in header:
+            pass
+        elif "cassette_id" not in header:
+            raise ValueError(f"{_PRINT_PREFIX} CSV missing cassette_id or cassette_slot column")
+        for need in ("eqp_id", "module_nm", "eqp_start_tm", "eqp_end_tm", "process_tm"):
+            if need not in header:
+                raise ValueError(f"{_PRINT_PREFIX} CSV missing column: {need}")
 
         for raw in reader:
+            cid_raw = raw.get("cassette_id") if "cassette_id" in header else raw.get("cassette_slot")
             try:
-                cid = int(str(raw["cassette_id"]).strip())
+                cid = int(str(cid_raw).strip())
             except Exception as exc:
                 raise ValueError(f"{_PRINT_PREFIX} bad cassette_id: {raw!r}") from exc
+            pt_raw = raw.get("process_tm") or raw.get("proccess_tm") or "0"
             rows.append(
                 ParsedCsvRow(
                     eqp_id=str(raw.get("eqp_id") or "").strip(),
                     module_nm=str(raw.get("module_nm") or "").strip(),
+                    lot_id=str(raw.get("lot_id") or "").strip(),
                     cassette_id=cid,
-                    eqp_start_tm=parse_time_to_seconds(raw.get("eqp_start_tm")),
-                    eqp_end_tm=parse_time_to_seconds(raw.get("eqp_end_tm")),
-                    process_tm=parse_time_to_seconds(raw.get("process_tm")),
+                    eqp_start_tm=_parse_csv_time_field(raw, "eqp_start_tm", "eqp_start_iso"),
+                    eqp_end_tm=_parse_csv_time_field(raw, "eqp_end_tm", "eqp_end_iso"),
+                    process_tm=parse_time_to_seconds(pt_raw),
                 )
             )
     return rows
 
 
-def slot_key_for_module_nm(module_nm: str) -> Optional[str]:
-    """``module_nm`` 에 대응하는 ``slot_key`` 를 반환. 맵에 없으면 None (미지원 모듈)."""
-    return MODULE_NM_TO_SLOT_KEY.get(module_nm)
+def load_csv_dwell_timeline(csv_path: Path) -> List[DwellRecord]:
+    """EAP CSV 전체 파이프라인: 읽기 → t=0 정규화 → lot→foup → dwell (시간순 정렬)."""
+    raw = normalize_csv_timeline(read_csv_rows(csv_path))
+    lot_to_foup = build_lot_id_to_foup_index(raw)
+    dwells = sort_dwells_for_playback(rows_to_dwell_records(raw, lot_to_foup))
+    if not is_csv_playback_compact_log():
+        print(
+            f"{_PRINT_PREFIX} CSV timeline: rows={len(raw)} dwells={len(dwells)} "
+            f"lots→foup={lot_to_foup}",
+            flush=True,
+        )
+    return dwells
 
 
-def rows_to_dwell_records(rows: Iterable[ParsedCsvRow]) -> List[DwellRecord]:
-    """``ParsedCsvRow`` 를 ``DwellRecord`` 로 바꾼다.
-
-    ``module_nm`` 이 ``MODULE_NM_TO_SLOT_KEY`` 에 없으면 해당 행은 건너뛰고 로그만 남긴다.
-    ``eqp_end_tm < eqp_start_tm`` 인 행도 스킵.
-    """
+def rows_to_dwell_records(
+    rows: Iterable[ParsedCsvRow],
+    lot_id_to_foup: Optional[Dict[str, int]] = None,
+) -> List[DwellRecord]:
+    """``ParsedCsvRow`` → ``DwellRecord`` (미지원 ``module_nm`` 은 스킵)."""
+    lot_map = lot_id_to_foup or build_lot_id_to_foup_index(rows)
     out: List[DwellRecord] = []
     for r in rows:
-        sk = slot_key_for_module_nm(r.module_nm)
+        sk = parse_module_nm_to_slot_key(r.module_nm)
         if sk is None:
-            print(f"{_PRINT_PREFIX} skip unknown module_nm={r.module_nm!r}", flush=True)
+            if not is_csv_playback_compact_log():
+                print(f"{_PRINT_PREFIX} skip unknown module_nm={r.module_nm!r}", flush=True)
             continue
         if r.eqp_end_tm < r.eqp_start_tm:
-            print(
-                f"{_PRINT_PREFIX} skip inverted time cassette={r.cassette_id} mod={r.module_nm}",
-                flush=True,
-            )
+            if not is_csv_playback_compact_log():
+                print(
+                    f"{_PRINT_PREFIX} skip inverted time lot={r.lot_id!r} cassette={r.cassette_id} "
+                    f"mod={r.module_nm}",
+                    flush=True,
+                )
             continue
+        lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_id}"
+        foup_i = int(lot_map.get(lid, 1))
         out.append(
             DwellRecord(
                 cassette_id=r.cassette_id,
+                lot_id=lid,
+                foup_index=foup_i,
                 module_nm=r.module_nm,
                 slot_key=sk,
                 start_sec=r.eqp_start_tm,
@@ -888,11 +1169,12 @@ def rows_to_dwell_records(rows: Iterable[ParsedCsvRow]) -> List[DwellRecord]:
 
 
 def sort_dwells_for_playback(dwells: List[DwellRecord]) -> List[DwellRecord]:
-    """여러 웨이퍼 dwell 을 한 타임라인으로 재생할 때의 정렬 순서.
+    """전역 타임라인 정렬 — ``eqp_start_tm`` (= ``start_sec``) 오름차순 (prompt1 §363)."""
+    return sorted(dwells, key=lambda d: (d.start_sec, d.lot_id, d.cassette_id, d.module_nm))
 
-    정렬 키: ``start_sec`` 오름차순, 같으면 ``cassette_id``, 그다음 ``module_nm``.
-    """
-    return sorted(dwells, key=lambda d: (d.start_sec, d.cassette_id, d.module_nm))
+
+def _same_wafer_dwell(prev: DwellRecord, curr: DwellRecord) -> bool:
+    return prev.lot_id == curr.lot_id and prev.cassette_id == curr.cassette_id
 
 
 # ---------------------------------------------------------------------------
@@ -929,14 +1211,14 @@ def _csv_transfer_target_duration_sec(prev: DwellRecord, curr: DwellRecord) -> f
 
 
 def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamSimJsonSteps:
-    """연속 dwell (동일 ``cassette_id``) 사이 이송 → ``lam_event_sequences/<이벤트>.json`` 실행."""
+    """동일 웨이퍼(lot+cassette) 의 연속 dwell 사이 이송 — **다음 module_nm** 기준 (prompt1 §332-2)."""
     from .lam_event_sequences import atm_event_name_for_slot, build_steps_for_event, vtm_event_name_for_slot
 
-    if prev.cassette_id != curr.cassette_id:
+    if not _same_wafer_dwell(prev, curr):
         _lam_sim_log_build(
             "transfer",
-            f"이송 생략(cassette 불일치): {prev.cassette_id} -> {curr.cassette_id} "
-            f"{prev.slot_key!r} -> {curr.slot_key!r}.",
+            f"이송 생략(웨이퍼 불일치): lot {prev.lot_id!r}/{prev.cassette_id} -> "
+            f"{curr.lot_id!r}/{curr.cassette_id} ({prev.slot_key!r} -> {curr.slot_key!r}).",
         )
         return []
     refresh_lam_sim_runtime_tables_from_config()
@@ -1001,6 +1283,656 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
             f"lam/lam_event_sequences/*.json 및 prim/Z 설정 확인.",
         )
     return steps
+
+
+def _foup_slot_key(foup_index: int, cassette_id: int) -> str:
+    return f"foup{int(foup_index)}_{int(cassette_id)}"
+
+
+def build_foup_pick_place_steps(
+    *,
+    foup_index: int,
+    cassette_id: int,
+    pick_or_place: str,
+) -> LamSimJsonSteps:
+    """투어 시작 pick / 종료 place — ``atm_foupN_pick/place(slot)``."""
+    from .lam_event_sequences import atm_event_name_for_slot, build_steps_for_event
+
+    sk = _foup_slot_key(foup_index, cassette_id)
+    event, num = atm_event_name_for_slot(sk, pick_or_place)
+    return build_steps_for_event(
+        event,
+        slot_number=num,
+        vtm_ee_swap=VTM_END_EFFECTOR_SWAP_HANDS,
+    )
+
+
+def _slot_key_label_ko(slot_key: str) -> str:
+    if slot_key == LOGICAL_SLOT_ATM_ARM:
+        return "ATM 팔(EndEffector)"
+    if slot_key == LOGICAL_SLOT_VTM_EE_L:
+        return "VTM 좌측 EE"
+    if slot_key == LOGICAL_SLOT_VTM_EE_R:
+        return "VTM 우측 EE"
+    if slot_key.startswith("foup"):
+        return f"FOUP 슬롯 {slot_key}"
+    if slot_key.startswith("chamber"):
+        return f"챔버 {slot_key.replace('chamber', '')}"
+    if slot_key.startswith("buffer"):
+        return f"버퍼 {slot_key}"
+    if slot_key.startswith("cooling_"):
+        return f"쿨링 {slot_key.replace('cooling_', '')}번"
+    if slot_key.startswith("airlock"):
+        return f"에어록 {slot_key}"
+    return slot_key
+
+
+def _resolve_foup_event_name(
+    foup_index: int, cassette_id: int, pick_or_place: str
+) -> Tuple[str, Optional[int]]:
+    from .lam_event_sequences import atm_event_name_for_slot
+
+    sk = _foup_slot_key(foup_index, cassette_id)
+    return atm_event_name_for_slot(sk, pick_or_place)
+
+
+def _foup_exec_hint(foup_index: int, cassette_id: int, pick_or_place: str) -> str:
+    event, num = _resolve_foup_event_name(foup_index, cassette_id, pick_or_place)
+    po_ko = "픽업(pick)" if pick_or_place == "pick" else "반환(place)"
+    if num is not None:
+        return (
+            f"build_steps_for_event({event!r}, slot_number={num})  "
+            f"→  lam_sim_actions.{event}({num})  [{po_ko}]"
+        )
+    return f"build_steps_for_event({event!r})  [{po_ko}]"
+
+
+def _schedule_entry_json_fields(event_name: str) -> Tuple[str, str]:
+    """``(event_name, json_path 절대)`` — 스케줄·콘솔 공통."""
+    if not event_name:
+        return "", ""
+    _rel, abs_path = _event_json_paths_for_display(event_name)
+    return event_name, abs_path
+
+
+def _dwell_schedule_entry(d: DwellRecord) -> CsvPlaybackScheduleEntry:
+    dur = max(0.0, float(d.end_sec) - float(d.start_sec))
+    return CsvPlaybackScheduleEntry(
+        time_sec=float(d.start_sec),
+        sort_order=_SCHEDULE_CATEGORY_ORDER["dwell"],
+        category="dwell",
+        title_ko=(
+            f"[CSV 체류] lot={d.lot_id!r} · FOUP{d.foup_index} · 웨이퍼#{d.cassette_id} · "
+            f"{_slot_key_label_ko(d.slot_key)}"
+        ),
+        csv_read_ko=(
+            f"module_nm={d.module_nm!r}, eqp_id={d.eqp_id!r}, "
+            f"시작={d.start_sec:.3f}s, 종료={d.end_sec:.3f}s, process_tm={d.process_tm:.3f}s"
+        ),
+        meaning_ko=(
+            f"웨이퍼가 이 슬롯에 약 {dur:.1f}s 머무름 (체류). process_tm 은 애니 길이가 아님 — "
+            f"이 구간에는 별도 로봇 애니를 넣지 않음."
+        ),
+        exec_ko="(실행 없음 — dwell 구간)",
+        step_count=0,
+        event_name="",
+        json_path="",
+    )
+
+
+def _pick_schedule_entry(
+    *,
+    time_sec: float,
+    foup_index: int,
+    cassette_id: int,
+    lot_id: str,
+    steps: LamSimJsonSteps,
+) -> CsvPlaybackScheduleEntry:
+    event, _num = _resolve_foup_event_name(foup_index, cassette_id, "pick")
+    _ev, json_path = _schedule_entry_json_fields(event)
+    return CsvPlaybackScheduleEntry(
+        time_sec=float(time_sec),
+        sort_order=_SCHEDULE_CATEGORY_ORDER["pick"],
+        category="pick",
+        title_ko=(
+            f"[재생] FOUP{foup_index} → ATM 팔 픽업 · lot={lot_id!r} · 웨이퍼#{cassette_id}"
+        ),
+        csv_read_ko=(
+            "투어 첫 dwell 이 AtmArm 이므로, CSV 이전에 FOUP 에서 웨이퍼를 집어 올림 "
+            f"(foup{foup_index}_{cassette_id})."
+        ),
+        meaning_ko="공정 투어 시작 — FOUP 슬롯에서 ATM EndEffector 로 pick.",
+        exec_ko=_foup_exec_hint(foup_index, cassette_id, "pick"),
+        step_count=len(steps),
+        event_name=event,
+        json_path=json_path,
+    )
+
+
+def _place_schedule_entry(
+    *,
+    time_sec: float,
+    foup_index: int,
+    cassette_id: int,
+    lot_id: str,
+    steps: LamSimJsonSteps,
+) -> CsvPlaybackScheduleEntry:
+    event, _num = _resolve_foup_event_name(foup_index, cassette_id, "place")
+    _ev, json_path = _schedule_entry_json_fields(event)
+    return CsvPlaybackScheduleEntry(
+        time_sec=float(time_sec),
+        sort_order=_SCHEDULE_CATEGORY_ORDER["place"],
+        category="place",
+        title_ko=(
+            f"[재생] ATM 팔 → FOUP{foup_index} 반환 · lot={lot_id!r} · 웨이퍼#{cassette_id}"
+        ),
+        csv_read_ko=(
+            "투어 마지막 dwell 이 AtmArm 이고 다음 CSV 행이 없음 → FOUP 에 place."
+        ),
+        meaning_ko="공정 투어 종료 — 웨이퍼를 FOUP 슬롯에 되돌림.",
+        exec_ko=_foup_exec_hint(foup_index, cassette_id, "place"),
+        step_count=len(steps),
+        event_name=event,
+        json_path=json_path,
+    )
+
+
+def _transfer_schedule_entry(
+    prev: DwellRecord,
+    curr: DwellRecord,
+    steps: LamSimJsonSteps,
+) -> CsvPlaybackScheduleEntry:
+    hint = _transfer_event_hint(prev, curr)
+    robot = _classify_transfer_robot(prev.slot_key, curr.slot_key)
+    try:
+        event, _num = _resolve_transfer_event_name(prev, curr)
+        _ev, json_path = _schedule_entry_json_fields(event)
+    except ValueError:
+        event, json_path = "", ""
+    return CsvPlaybackScheduleEntry(
+        time_sec=float(curr.start_sec),
+        sort_order=_SCHEDULE_CATEGORY_ORDER["transfer"],
+        category="transfer",
+        title_ko=(
+            f"[재생] 이송({robot}) · lot={curr.lot_id!r} · 웨이퍼#{curr.cassette_id} · "
+            f"{_slot_key_label_ko(prev.slot_key)} → {_slot_key_label_ko(curr.slot_key)}"
+        ),
+        csv_read_ko=(
+            f"이전 행 module_nm={prev.module_nm!r} (끝 {prev.end_sec:.3f}s) → "
+            f"다음 행 module_nm={curr.module_nm!r} (시작 {curr.start_sec:.3f}s)"
+        ),
+        meaning_ko=(
+            "CSV 규칙: 한 행은 '머무름'만 표시. 이송 애니는 **다음 module_nm** 으로 "
+            "어디로 옮겼는지 추론해 이벤트 JSON 을 실행."
+        ),
+        exec_ko=hint,
+        step_count=len(steps),
+        event_name=event,
+        json_path=json_path,
+    )
+
+
+def _short_schedule_title(title_ko: str) -> str:
+    for prefix in ("[CSV 체류] ", "[재생] "):
+        if title_ko.startswith(prefix):
+            return title_ko[len(prefix) :]
+    return title_ko
+
+
+def _json_exec_label(e: CsvPlaybackScheduleEntry, *, executed: bool) -> str:
+    if e.category == "dwell":
+        return "(JSON 없음)"
+    if not e.event_name:
+        return "(이벤트 없음)"
+    rel = f"{e.event_name}.json"
+    if e.json_path and not Path(e.json_path).is_file():
+        return f"{rel} ⚠파일없음"
+    if executed and e.step_count > 0:
+        return f"{rel} ✓실행"
+    if e.step_count > 0:
+        return f"{rel} (실행 예정)"
+    return rel
+
+
+def _print_csv_compact_line(
+    index: int,
+    e: CsvPlaybackScheduleEntry,
+    *,
+    wall_elapsed_sec: float,
+    executed: bool,
+) -> None:
+    """콘솔 한 줄: 진행(CSV t)·실경과·동작·JSON·실행여부."""
+    cat = _SCHEDULE_CATEGORY_KO.get(e.category, e.category)
+    action = _short_schedule_title(e.title_ko)
+    json_lbl = _json_exec_label(e, executed=executed)
+    print(
+        f"{_PRINT_PREFIX} [{index:02d}] CSV t={e.time_sec:7.2f}s | "
+        f"경과 {wall_elapsed_sec:6.2f}s | {cat} | {action} | {json_lbl}",
+        flush=True,
+    )
+
+
+def _lines_for_schedule_entry(
+    e: CsvPlaybackScheduleEntry,
+    index: int,
+    *,
+    speed_scale: float = 1.0,
+    steps_summary: str = "",
+    play_now: bool = False,
+    wall_elapsed_sec: Optional[float] = None,
+    waited_sec: float = 0.0,
+) -> List[str]:
+    """UI 타임라인·콘솔 Play 로그 공통 본문 (한글)."""
+    cat_ko = _SCHEDULE_CATEGORY_KO.get(e.category, e.category)
+    sp = max(0.1, float(speed_scale or 1.0))
+    extra = ""
+    if wall_elapsed_sec is not None:
+        extra += f" | 실경과 {wall_elapsed_sec:.3f}s"
+    if waited_sec > 0.05:
+        extra += f" | 대기 {waited_sec:.2f}s"
+    if play_now:
+        extra += " | ▶ 지금 실행"
+    lines: List[str] = [
+        f"── [{index:02d}] t={e.time_sec:8.3f}s │ {cat_ko}{extra} ──",
+        e.title_ko,
+    ]
+    if e.event_name:
+        rel, _abs = _event_json_paths_for_display(e.event_name)
+        if e.json_path:
+            missing = not Path(e.json_path).is_file()
+            flag = " ⚠ 파일 없음" if missing else ""
+            lines.append(f"  · JSON 파일: {rel}")
+            lines.append(f"  · 경로: {e.json_path}{flag}")
+        else:
+            lines.append(f"  · JSON 파일: {rel}")
+    if e.csv_read_ko:
+        lines.append(f"  · 읽은 값: {e.csv_read_ko}")
+    if e.meaning_ko:
+        lines.append(f"  · 의미: {e.meaning_ko}")
+    if e.exec_ko:
+        lines.append(f"  · 실행: {e.exec_ko}")
+    if play_now and e.step_count > 0:
+        lines.append(
+            f"  · 동작: JSON 스텝 {e.step_count}개 [{steps_summary}] 재생 시작 (배속 {sp:g}x)"
+        )
+    elif e.step_count > 0:
+        if steps_summary:
+            lines.append(
+                f"  · JSON 스텝: {e.step_count}개 [{steps_summary}] "
+                f"(정의된 타입 전부 실행, Play 시 배속 {sp:g}x)"
+            )
+        else:
+            lines.append(
+                f"  · JSON 스텝: {e.step_count}개 (이벤트 JSON + 자동 Z MOVE)"
+            )
+    elif e.category == "dwell":
+        lines.append("  · 동작: (애니 없음 — CSV 체류 구간 로그만)")
+    return lines
+
+
+def _print_schedule_lines(lines: List[str]) -> None:
+    for line in lines:
+        print(f"{_PRINT_PREFIX} {line}", flush=True)
+
+
+def format_csv_playback_schedule(
+    entries: List[CsvPlaybackScheduleEntry],
+    *,
+    speed_scale: float = 1.0,
+) -> str:
+    """UI·미리보기용 간단 타임라인 (콘솔 Play 와 동일 형식)."""
+    if not entries:
+        return "(CSV 타임라인 없음)"
+    n_act = sum(1 for e in entries if e.category != "dwell")
+    sp = max(0.1, float(speed_scale or 1.0))
+    lines = [
+        f"=== CSV 타임라인 (t=0 기준 · {len(entries)}건 · JSON {n_act}건 · 배속 {sp:g}x) ===",
+        "형식: [번호] CSV t | 동작 | JSON |",
+        "",
+    ]
+    for i, e in enumerate(entries, 1):
+        cat = _SCHEDULE_CATEGORY_KO.get(e.category, e.category)
+        action = _short_schedule_title(e.title_ko)
+        json_lbl = _json_exec_label(e, executed=False)
+        lines.append(
+            f"[{i:02d}] t={e.time_sec:7.2f}s | {cat} | {action} | {json_lbl}"
+        )
+    return "\n".join(lines)
+
+
+def _block_from_schedule(
+    sched: CsvPlaybackScheduleEntry,
+    steps: LamSimJsonSteps,
+    *,
+    label: str,
+) -> CsvTimedPlaybackBlock:
+    return CsvTimedPlaybackBlock(
+        time_sec=float(sched.time_sec),
+        sort_order=int(sched.sort_order),
+        category=str(sched.category),
+        label=label,
+        steps=list(steps),
+        schedule=sched,
+    )
+
+
+def build_csv_playback_plan(
+    dwells: List[DwellRecord],
+) -> Tuple[List[CsvPlaybackScheduleEntry], List[CsvTimedPlaybackBlock]]:
+    """dwell 체류 + pick/transfer/place 를 CSV 시각 순 **타임 블록** 으로 만든다."""
+    schedule: List[CsvPlaybackScheduleEntry] = []
+    blocks: List[CsvTimedPlaybackBlock] = []
+
+    for d in sort_dwells_for_playback(dwells):
+        ent = _dwell_schedule_entry(d)
+        schedule.append(ent)
+        blocks.append(
+            CsvTimedPlaybackBlock(
+                time_sec=ent.time_sec,
+                sort_order=ent.sort_order,
+                category=ent.category,
+                label=f"dwell:{d.module_nm}",
+                steps=[],
+                schedule=ent,
+            )
+        )
+
+    if not dwells:
+        return schedule, blocks
+
+    tours: Dict[Tuple[str, int], List[DwellRecord]] = {}
+    for d in dwells:
+        key = (d.lot_id, d.cassette_id)
+        tours.setdefault(key, []).append(d)
+    for key in list(tours.keys()):
+        tours[key].sort(key=lambda x: x.start_sec)
+
+    for (lot_id, cassette_id), tour in sorted(tours.items(), key=lambda kv: kv[1][0].start_sec):
+        foup_n = tour[0].foup_index
+        first, last = tour[0], tour[-1]
+
+        if first.slot_key == LOGICAL_SLOT_ATM_ARM:
+            try:
+                pick_st = build_foup_pick_place_steps(
+                    foup_index=foup_n,
+                    cassette_id=cassette_id,
+                    pick_or_place="pick",
+                )
+                if pick_st:
+                    ent = _pick_schedule_entry(
+                        time_sec=first.start_sec,
+                        foup_index=foup_n,
+                        cassette_id=cassette_id,
+                        lot_id=lot_id,
+                        steps=pick_st,
+                    )
+                    schedule.append(ent)
+                    blocks.append(
+                        _block_from_schedule(
+                            ent, pick_st, label=f"foup{foup_n}_pick({cassette_id})"
+                        )
+                    )
+            except Exception as exc:
+                _lam_sim_log_build("csv_tour", f"FOUP pick skip: {exc}")
+
+        for i in range(len(tour) - 1):
+            prev_d, curr_d = tour[i], tour[i + 1]
+            tr = build_steps_for_dwell_transfer(prev_d, curr_d)
+            if tr:
+                ent = _transfer_schedule_entry(prev_d, curr_d, tr)
+                schedule.append(ent)
+                blocks.append(_block_from_schedule(ent, tr, label="transfer"))
+
+        if last.slot_key == LOGICAL_SLOT_ATM_ARM:
+            try:
+                place_st = build_foup_pick_place_steps(
+                    foup_index=foup_n,
+                    cassette_id=cassette_id,
+                    pick_or_place="place",
+                )
+                if place_st:
+                    ent = _place_schedule_entry(
+                        time_sec=last.end_sec,
+                        foup_index=foup_n,
+                        cassette_id=cassette_id,
+                        lot_id=lot_id,
+                        steps=place_st,
+                    )
+                    schedule.append(ent)
+                    blocks.append(
+                        _block_from_schedule(
+                            ent, place_st, label=f"foup{foup_n}_place({cassette_id})"
+                        )
+                    )
+            except Exception as exc:
+                _lam_sim_log_build("csv_tour", f"FOUP place skip: {exc}")
+
+    schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
+    blocks.sort(key=lambda b: (b.time_sec, b.sort_order))
+    return schedule, blocks
+
+
+def build_csv_timed_playback_blocks(dwells: List[DwellRecord]) -> List[CsvTimedPlaybackBlock]:
+    """CSV 시각 동기 재생용 블록만 반환."""
+    _, blocks = build_csv_playback_plan(dwells)
+    return blocks
+
+
+def build_csv_playback_steps_from_dwells(dwells: List[DwellRecord]) -> LamSimJsonSteps:
+    """모든 액션 블록 스텝을 순서대로 이어 붙임 (배속·CSV 대기 없음 — 레거시/검증용)."""
+    out: LamSimJsonSteps = []
+    for blk in build_csv_timed_playback_blocks(dwells):
+        out.extend(blk.steps)
+    return out
+
+
+def build_csv_playback_schedule(dwells: List[DwellRecord]) -> List[CsvPlaybackScheduleEntry]:
+    """시간순 스케줄 항목만 반환."""
+    schedule, _ = build_csv_playback_plan(dwells)
+    return schedule
+
+
+# CSV Play 중지 — 백그라운드 대기(sleep)·LamSequenceRunner 루프 공통
+_csv_play_stop_event = threading.Event()
+_csv_play_runner_lock = threading.Lock()
+_csv_play_active_runner: Any = None
+
+
+def clear_csv_playback_stop() -> None:
+    """새 CSV Play 시작 전 호출."""
+    _csv_play_stop_event.clear()
+
+
+def csv_playback_stop_requested() -> bool:
+    return _csv_play_stop_event.is_set()
+
+
+def request_stop_csv_playback(
+    registry: Any = None,
+    scheduler: Any = None,
+) -> None:
+    """CSV Play 중지 — 대기 루프 탈출 + 진행 중 Runner·애니·스케줄러 정지."""
+    _ = registry
+    _csv_play_stop_event.set()
+    with _csv_play_runner_lock:
+        runner = _csv_play_active_runner
+    if runner is not None:
+        try:
+            runner.stop(cancel_all_move_rotate=True)
+        except Exception as exc:
+            if not is_csv_playback_compact_log():
+                print(f"{_PRINT_PREFIX} CSV Play 중지 Runner 경고: {exc}", flush=True)
+    try:
+        from . import lam_rotate_animation as _lrx
+        from . import lam_translate_animation as _ltx
+
+        _ltx.stop_all_translate_animations()
+        _lrx.stop_all_rotate_animations()
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} CSV Play 중지 애니 경고: {exc}", flush=True)
+    if scheduler is not None:
+        try:
+            stop_fn = getattr(scheduler, "stop_all", None)
+            if callable(stop_fn):
+                stop_fn()
+        except Exception as exc:
+            if not is_csv_playback_compact_log():
+                print(f"{_PRINT_PREFIX} CSV Play 중지 scheduler 경고: {exc}", flush=True)
+
+
+def _sleep_csv_playback(sec: float) -> bool:
+    """최대 ``sec`` 초 대기. ``False`` = 중지 요청으로 조기 종료."""
+    if csv_playback_stop_requested():
+        return False
+    if sec <= 1e-6:
+        return True
+    end = time.monotonic() + float(sec)
+    while time.monotonic() < end:
+        if csv_playback_stop_requested():
+            return False
+        time.sleep(min(0.1, max(0.0, end - time.monotonic())))
+    return not csv_playback_stop_requested()
+
+
+def _run_lam_sim_steps_cancellable(
+    registry: Any,
+    scheduler: Any,
+    steps: LamSimJsonSteps,
+    *,
+    speed_scale: float = 1.0,
+) -> None:
+    """``run_lam_sim_steps`` 와 동일하나 CSV 중지 시 Runner 를 끊을 수 있게 등록."""
+    global _csv_play_active_runner
+    if not steps or csv_playback_stop_requested():
+        return
+    try:
+        from .lam_sequence_engine import LamSequenceRunner
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} LamSequenceRunner import 실패: {exc}", flush=True)
+        return
+    runner = LamSequenceRunner(registry, scheduler)
+    with _csv_play_runner_lock:
+        _csv_play_active_runner = runner
+    try:
+        sp = float(max(0.01, speed_scale or 1.0))
+        quiet = is_csv_playback_compact_log()
+        runner.run(
+            list(steps),
+            reset_each_start=False,
+            speed_scale=sp,
+            quiet=quiet,
+        )
+    finally:
+        with _csv_play_runner_lock:
+            _csv_play_active_runner = None
+
+
+def _log_csv_playback_block(
+    block: CsvTimedPlaybackBlock,
+    index: int,
+    *,
+    speed_scale: float,
+    wall_elapsed_sec: float,
+    waited_sec: float,
+) -> None:
+    """CSV 시각에 도달했을 때 콘솔 로그 (UI 타임라인과 동일 형식)."""
+    sched = block.schedule
+    steps_summary = _summarize_lam_sim_steps_ko(block.steps) if block.steps else ""
+    if sched is not None:
+        _print_schedule_lines(
+            _lines_for_schedule_entry(
+                sched,
+                index,
+                speed_scale=speed_scale,
+                steps_summary=steps_summary,
+                play_now=True,
+                wall_elapsed_sec=wall_elapsed_sec,
+                waited_sec=waited_sec,
+            )
+        )
+    else:
+        sp = max(0.01, float(speed_scale or 1.0))
+        print(
+            f"{_PRINT_PREFIX} ── [{index:02d}] t={block.time_sec:8.3f}s │ {block.label} "
+            f"| 실경과 {wall_elapsed_sec:.3f}s | 배속 {sp:g}x | ▶ 지금 실행 ──",
+            flush=True,
+        )
+
+
+def run_csv_timed_playback(
+    registry: Any,
+    scheduler: Any,
+    blocks: List[CsvTimedPlaybackBlock],
+    *,
+    speed_scale: float = 1.0,
+) -> None:
+    """CSV ``eqp_start_tm`` 에 맞춰 대기 → 로그 → 이벤트 JSON **전 스텝** 실행 (``speed_scale`` 배속)."""
+    sp = float(max(0.01, speed_scale or 1.0))
+    ordered = sorted(blocks, key=lambda b: (b.time_sec, b.sort_order))
+    if not ordered:
+        print(f"{_PRINT_PREFIX} CSV timed playback: 블록 없음", flush=True)
+        return
+
+    t_end_csv = max(b.time_sec for b in ordered)
+    n_act = sum(1 for b in ordered if b.steps)
+    print(
+        f"{_PRINT_PREFIX} CSV Play 시작 | 항목 {len(ordered)}건 (JSON {n_act}건) | "
+        f"CSV ~{t_end_csv:.0f}s | 배속 {sp:g}x → 실시간 ~{t_end_csv / sp:.0f}s",
+        flush=True,
+    )
+
+    t0 = time.monotonic()
+    stopped = False
+    for i, block in enumerate(ordered, 1):
+        if csv_playback_stop_requested():
+            stopped = True
+            break
+        target_wall = t0 + float(block.time_sec) / sp
+        now = time.monotonic()
+        waited = max(0.0, target_wall - now)
+        if waited > 0.001 and not _sleep_csv_playback(waited):
+            stopped = True
+            break
+        if csv_playback_stop_requested():
+            stopped = True
+            break
+        wall_elapsed = time.monotonic() - t0
+        sched = block.schedule
+        if sched is not None:
+            if block.steps:
+                _run_lam_sim_steps_cancellable(
+                    registry, scheduler, block.steps, speed_scale=sp
+                )
+                _print_csv_compact_line(i, sched, wall_elapsed_sec=wall_elapsed, executed=True)
+            else:
+                _print_csv_compact_line(i, sched, wall_elapsed_sec=wall_elapsed, executed=False)
+        if csv_playback_stop_requested():
+            stopped = True
+            break
+
+    total_wall = time.monotonic() - t0
+    if stopped:
+        print(
+            f"{_PRINT_PREFIX} CSV Play 중지 | 실경과 {total_wall:.1f}s",
+            flush=True,
+        )
+    else:
+        print(
+            f"{_PRINT_PREFIX} CSV Play 완료 | 실경과 {total_wall:.1f}s",
+            flush=True,
+        )
+
+
+def preview_csv_playback_schedule(
+    csv_path: Optional[str] = None,
+    *,
+    speed_scale: float = 1.0,
+) -> str:
+    """CSV 경로 → UI 표시용 타임라인 문자열."""
+    path = resolve_csv_path(csv_path)
+    dwells = load_csv_dwell_timeline(path)
+    entries = build_csv_playback_schedule(dwells)
+    return format_csv_playback_schedule(entries, speed_scale=speed_scale)
 
 
 def scale_speed_factor(*, t_raw: float, T_target: float) -> float:
@@ -1078,77 +2010,33 @@ def run_simulation_from_csv(
     csv_path: Optional[str] = None,
     speed_scale: float = 1.0,
 ) -> None:
-    """CSV dwell 타임라인을 읽고, dwell 간 이송 스텝을 합쳐 ``LamSequenceRunner.run`` 으로 재생한다.
+    """CSV ``eqp_start_tm`` 동기 재생: 시각까지 대기 → 로그 → 이벤트 JSON (``speed_scale`` 배속).
 
-    동작:
-        1. ``refresh_lam_sim_runtime_tables_from_config()`` 로 Prim/Z 캐시 갱신.
-        2. dwell 파싱·정렬 후 ``log_virtual_timeline_from_dwells`` 로 로그 출력.
-        3. 인접 dwell 쌍마다 ``build_steps_for_dwell_transfer`` 로 스텝 생성 후 Runner 호출.
-
-    Args:
-        registry: Kit ``AnimationInstanceRegistry`` (확장에서 주입).
-        scheduler: ``PlaybackScheduler``.
-        csv_path: None 이면 ``DEFAULT_CSV_PATH`` 또는 환경변수 ``LAM_SIM_CSV``.
-        speed_scale: Runner 에 넘길 배속 하한 0.01 클램프 적용 값.
+    dwell 구간은 해당 CSV 시각에 **로그만**, pick/transfer/place 는 같은 시각에
+    ``run_lam_sim_steps(..., speed_scale=...)`` 로 애니 실행.
 
     Note:
         UI 스레드 안전을 위해 **백그라운드 스레드**에서 호출할 것.
     """
-    path = resolve_csv_path(csv_path)
-    refresh_lam_sim_runtime_tables_from_config()
-    raw_rows = read_csv_rows(path)
-    dwells = sort_dwells_for_playback(rows_to_dwell_records(raw_rows))
-    print(f"{_PRINT_PREFIX} loaded dwells={len(dwells)} from {path}", flush=True)
-    log_virtual_timeline_from_dwells(dwells)
-
-    all_steps: List[Dict[str, Any]] = []
-    if len(dwells) < 2:
-        print(
-            f"{_PRINT_PREFIX} Play: dwell {len(dwells)}개 — 이송 구간이 없어 Runner 를 호출하지 않습니다.",
-            flush=True,
-        )
-    else:
-        for i in range(1, len(dwells)):
-            prev, curr = dwells[i - 1], dwells[i]
-            all_steps.extend(build_steps_for_dwell_transfer(prev, curr))
-
-    if not all_steps:
-        print(
-            f"{_PRINT_PREFIX} Play: 이송 스텝이 비어 있음 (dwell={len(dwells)}, event JSON·prim·Z 확인).",
-            flush=True,
-        )
-        return
-
-    # 지연 import — Kit 밖에서 모듈 로드 시 omni 실패 방지.
+    clear_csv_playback_stop()
+    set_csv_playback_compact_log(True)
     try:
-        from .lam_sequence_engine import LamSequenceRunner
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} LamSequenceRunner import failed: {exc}", flush=True)
-        return
+        path = resolve_csv_path(csv_path)
+        refresh_lam_sim_runtime_tables_from_config()
+        dwells = load_csv_dwell_timeline(path)
 
-    runner = LamSequenceRunner(registry, scheduler)
-    n_ts_all = sum(1 for s in all_steps if str(s.get("type")).upper() == "TIMESAMPLES_REPLAY")
-    n_del_all = sum(1 for s in all_steps if str(s.get("type")).upper() == "DELAY")
-    n_move = sum(1 for s in all_steps if str(s.get("type")).upper() == "MOVE")
-    n_rot = sum(1 for s in all_steps if str(s.get("type")).upper() == "ROTATE")
-    n_vis = sum(
-        1
-        for s in all_steps
-        if str(s.get("type")).upper() in ("SET_PRIM_VISIBILITY", "PRIM_VISIBILITY")
-    )
-    print(
-        f"{_PRINT_PREFIX} Play: LamSequenceRunner.run total_steps={len(all_steps)} "
-        f"TIMESAMPLES_REPLAY={n_ts_all} DELAY={n_del_all} MOVE={n_move} ROTATE={n_rot} VIS={n_vis} "
-        f"speed_scale={speed_scale!r}",
-        flush=True,
-    )
-    if n_ts_all == 0:
-        _lam_sim_log_build(
-            "csv_play",
-            "이 CSV 런에 TIMESAMPLES_REPLAY 스텝이 없습니다. "
-            "`lam/lam_event_sequences/<이벤트>.json` 에 재생 구간을 추가하세요.",
-        )
-    runner.run(all_steps, reset_each_start=False, speed_scale=float(max(0.01, speed_scale)))
+        _, blocks = build_csv_playback_plan(dwells)
+        action_blocks = [b for b in blocks if b.steps]
+        if not action_blocks:
+            print(
+                f"{_PRINT_PREFIX} CSV Play: JSON 실행 없음 (event JSON·prim·Z 확인).",
+                flush=True,
+            )
+            return
+
+        run_csv_timed_playback(registry, scheduler, blocks, speed_scale=speed_scale)
+    finally:
+        set_csv_playback_compact_log(False)
 
 
 # ---------------------------------------------------------------------------
@@ -1201,9 +2089,20 @@ class LamSimulationCsvPlayWindow:
         self._log_label: Any = None
         self._script_model: Any = None
         self._func_combo: Any = None
+        self._schedule_model: Any = None
+        self._speed_model: Any = None
+        self._csv_play_thread: Optional[threading.Thread] = None
 
     def destroy(self) -> None:
         """윈도우·콤보·로그 위젯 참조를 해제한다 (``lam_window`` 종료 시 호출)."""
+        request_stop_csv_playback(self._registry, self._scheduler)
+        t = self._csv_play_thread
+        if t is not None and t.is_alive():
+            try:
+                t.join(timeout=2.0)
+            except Exception:
+                pass
+        self._csv_play_thread = None
         try:
             if self._window is not None:
                 self._window.destroy()
@@ -1214,6 +2113,8 @@ class LamSimulationCsvPlayWindow:
         self._log_label = None
         self._script_model = None
         self._func_combo = None
+        self._schedule_model = None
+        self._speed_model = None
 
     def _log(self, msg: str) -> None:
         print(f"{_PRINT_PREFIX} {msg}", flush=True)
@@ -1239,7 +2140,7 @@ class LamSimulationCsvPlayWindow:
 
         self._csv_paths = list_lam_csv_paths()
         macro_names = list_macro_function_names()
-        self._window = ui.Window(self.WINDOW_TITLE, width=600, height=680)
+        self._window = ui.Window(self.WINDOW_TITLE, width=640, height=920)
         with self._window.frame:
             with ui.VStack(spacing=6):
                 ui.Label(
@@ -1261,8 +2162,59 @@ class LamSimulationCsvPlayWindow:
                         width=120,
                         clicked_fn=self._on_refresh_clicked,
                     )
+                    ui.Button(
+                        "타임라인 갱신",
+                        width=110,
+                        clicked_fn=self._on_schedule_refresh_clicked,
+                        tooltip="콤보에서 고른 CSV 를 다시 파싱해 아래 목록 갱신",
+                    )
                     ui.Button("CSV Play", width=90, clicked_fn=self._on_play_clicked)
+                    ui.Button(
+                        "CSV 중지",
+                        width=90,
+                        clicked_fn=self._on_csv_stop_clicked,
+                        tooltip="진행 중 CSV Play·대기·애니메이션 중지",
+                    )
                     ui.Spacer()
+                with ui.HStack(spacing=6, height=28):
+                    ui.Label("재생 배속", width=70)
+                    try:
+                        from omni.ui import SimpleFloatModel  # type: ignore
+
+                        self._speed_model = SimpleFloatModel(1.0)
+                        ui.FloatField(model=self._speed_model, width=72)
+                    except Exception:
+                        self._speed_model = None
+                        ui.Label("(배속 UI 없음)", width=100)
+                    ui.Button("1x", width=36, clicked_fn=lambda: self._set_speed_preset(1.0))
+                    ui.Button("5x", width=36, clicked_fn=lambda: self._set_speed_preset(5.0))
+                    ui.Label(
+                        "(CSV t까지 대기 + JSON 전 스텝 실행, 둘 다 ÷배속)",
+                        width=300,
+                    )
+                    ui.Spacer()
+                ui.Label(
+                    "CSV 재생 타임라인 (시간순 · 한글) — 목록 새로고침 시 갱신",
+                    height=18,
+                )
+                try:
+                    from omni.ui import SimpleStringModel  # type: ignore
+                except Exception:
+                    SimpleStringModel = None  # type: ignore
+                if SimpleStringModel is not None:
+                    self._schedule_model = SimpleStringModel("(CSV 선택 후 타임라인이 표시됩니다.)")
+                    try:
+                        ui.StringField(
+                            model=self._schedule_model,
+                            height=240,
+                            multiline=True,
+                            read_only=True,
+                        )
+                    except TypeError:
+                        ui.StringField(model=self._schedule_model, height=240)
+                else:
+                    ui.Label("타임라인 표시 불가 (SimpleStringModel 없음).", height=40)
+                self._refresh_csv_schedule_preview()
                 ui.Separator()
                 with ui.CollapsableFrame(f"이벤트 함수 목록 ({len(macro_names)}개)", height=0):
                     with ui.VStack(spacing=4, padding=4):
@@ -1319,10 +2271,84 @@ class LamSimulationCsvPlayWindow:
                     ui.Spacer()
                 self._log_label = ui.Label("(대기)", height=80, word_wrap=True)
 
+    def _selected_csv_path(self) -> Optional[Path]:
+        if not self._csv_paths or self._combo is None:
+            return None
+        idx = _read_combo_index(self._combo)
+        idx = max(0, min(idx, len(self._csv_paths) - 1))
+        return self._csv_paths[idx]
+
+    def _set_schedule_model_text(self, text: str) -> None:
+        m = self._schedule_model
+        if m is None:
+            return
+        try:
+            m.set_value(text)
+        except Exception:
+            try:
+                m.set_value_as_string(text)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    def _read_speed_scale(self) -> float:
+        m = self._speed_model
+        if m is None:
+            return 1.0
+        try:
+            return float(max(0.1, min(20.0, float(m.get_value_as_float()))))
+        except Exception:
+            return 1.0
+
+    def _set_speed_preset(self, value: float) -> None:
+        m = self._speed_model
+        if m is None:
+            self._log("배속 UI 없음")
+            return
+        try:
+            m.set_value(float(value))
+        except Exception:
+            pass
+        self._log(f"재생 배속 = {value:g}x")
+        self._refresh_csv_schedule_preview()
+
+    def _refresh_csv_schedule_preview(self, path: Optional[Path] = None) -> None:
+        """선택된 CSV 를 파싱해 타임라인 텍스트를 갱신한다 (메인 스레드)."""
+        if self._schedule_model is None:
+            return
+        p = path or self._selected_csv_path()
+        if p is None:
+            self._set_schedule_model_text("(CSV 파일이 없습니다. lam/csv 에 .csv 를 추가하세요.)")
+            return
+        try:
+            text = preview_csv_playback_schedule(str(p), speed_scale=self._read_speed_scale())
+            self._set_schedule_model_text(text)
+        except Exception as exc:
+            self._set_schedule_model_text(f"타임라인 생성 실패 ({p.name}):\n{exc}")
+            print(f"{_PRINT_PREFIX} schedule preview error: {exc}", flush=True)
+
     def _on_refresh_clicked(self) -> None:
         """창을 닫았다가 다시 열어 ``lam/csv`` 목록을 재스캔."""
         self.destroy()
         self.show()
+
+    def _on_schedule_refresh_clicked(self) -> None:
+        path = self._selected_csv_path()
+        if path is None:
+            self._log("CSV 없음 — 타임라인을 갱신할 파일이 없습니다.")
+            return
+        self._refresh_csv_schedule_preview(path)
+        self._log(f"타임라인 갱신: {path.name}")
+
+    def _csv_play_thread_alive(self) -> bool:
+        t = self._csv_play_thread
+        return t is not None and t.is_alive()
+
+    def _on_csv_stop_clicked(self) -> None:
+        if not self._csv_play_thread_alive():
+            self._log("CSV Play 가 실행 중이 아닙니다.")
+            return
+        request_stop_csv_playback(self._registry, self._scheduler)
+        self._log("CSV Play 중지 요청 — 콘솔에서 'CSV Play 중지됨' 확인.")
 
     def _on_play_clicked(self) -> None:
         if not self._csv_paths:
@@ -1331,10 +2357,23 @@ class LamSimulationCsvPlayWindow:
         if self._combo is None:
             self._log("Combo 없음")
             return
-        idx = _read_combo_index(self._combo)
-        idx = max(0, min(idx, len(self._csv_paths) - 1))
-        path = self._csv_paths[idx]
-        self._log(f"Play 시작 (thread): {path.name}")
+        if self._csv_play_thread_alive():
+            self._log("이미 CSV Play 실행 중 — [CSV 중지] 후 다시 Play 하세요.")
+            return
+        path = self._selected_csv_path()
+        if path is None:
+            self._log("CSV 경로 없음")
+            return
+        self._refresh_csv_schedule_preview(path)
+        n_items = 0
+        try:
+            n_items = self._schedule_model.as_string.count("── [")  # type: ignore[union-attr]
+        except Exception:
+            pass
+        sp = self._read_speed_scale()
+        self._log(
+            f"Play 시작 (thread): {path.name} — 배속 {sp:g}x, 타임라인 {n_items}항목"
+        )
 
         def _worker() -> None:
             try:
@@ -1342,12 +2381,17 @@ class LamSimulationCsvPlayWindow:
                     self._registry,
                     self._scheduler,
                     csv_path=str(path),
+                    speed_scale=sp,
                 )
-                print(f"{_PRINT_PREFIX} play thread finished: {path.name}", flush=True)
             except Exception as exc:
-                print(f"{_PRINT_PREFIX} play thread error: {exc}", flush=True)
+                print(f"{_PRINT_PREFIX} CSV Play 오류: {exc}", flush=True)
+            finally:
+                self._csv_play_thread = None
 
-        threading.Thread(target=_worker, daemon=True, name="lam-sim-csv-play").start()
+        self._csv_play_thread = threading.Thread(
+            target=_worker, daemon=True, name="lam-sim-csv-play"
+        )
+        self._csv_play_thread.start()
 
     def _read_script_editor_text(self) -> str:
         m = self._script_model
@@ -1442,11 +2486,11 @@ def dry_run_print_dwells(csv_path: Optional[str] = None, *, limit: int = 50) -> 
     ``limit`` 을 넘는 뒷부분은 ``...`` 한 줄로만 표시.
     """
     path = resolve_csv_path(csv_path)
-    dwells = sort_dwells_for_playback(rows_to_dwell_records(read_csv_rows(path)))
+    dwells = load_csv_dwell_timeline(path)
     for i, d in enumerate(dwells[:limit]):
         print(
-            f"{_PRINT_PREFIX} [{i}] cassette={d.cassette_id} slot={d.slot_key} "
-            f"[{d.start_sec},{d.end_sec}) module={d.module_nm!r}",
+            f"{_PRINT_PREFIX} [{i}] lot={d.lot_id!r} foup={d.foup_index} cassette={d.cassette_id} "
+            f"slot={d.slot_key} [{d.start_sec:.3f},{d.end_sec:.3f}) module={d.module_nm!r}",
             flush=True,
         )
     if len(dwells) > limit:
@@ -1489,6 +2533,24 @@ __all__ = [
     "list_lam_csv_paths",
     "build_default_module_nm_to_slot_key",
     "rebuild_module_nm_slot_mapping",
+    "parse_module_nm_to_slot_key",
+    "load_csv_dwell_timeline",
+    "build_csv_playback_steps_from_dwells",
+    "build_csv_playback_plan",
+    "build_csv_timed_playback_blocks",
+    "build_csv_playback_schedule",
+    "format_csv_playback_schedule",
+    "preview_csv_playback_schedule",
+    "run_csv_timed_playback",
+    "request_stop_csv_playback",
+    "clear_csv_playback_stop",
+    "csv_playback_stop_requested",
+    "set_csv_playback_compact_log",
+    "is_csv_playback_compact_log",
+    "CsvPlaybackScheduleEntry",
+    "CsvTimedPlaybackBlock",
+    "build_lot_id_to_foup_index",
+    "normalize_csv_timeline",
     "build_default_wafer_prim_paths",
     "load_wafer_prim_by_slot_key",
     "parse_time_to_seconds",

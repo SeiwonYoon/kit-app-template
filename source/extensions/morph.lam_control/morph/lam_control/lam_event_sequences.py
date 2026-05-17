@@ -148,8 +148,19 @@ def _summarize_steps_for_log(steps: List[Dict[str, Any]]) -> str:
     return ", ".join(parts) + hint
 
 
+def _event_verbose_log_enabled() -> bool:
+    try:
+        from .simulation_play import is_csv_playback_compact_log
+
+        return not is_csv_playback_compact_log()
+    except Exception:
+        return True
+
+
 def log_event_invoke(event_name: str, *, slot_number: Optional[int] = None) -> None:
     """함수 호출 시 콘솔에 상세 설명 (JSON 경로·슬롯·동작)."""
+    if not _event_verbose_log_enabled():
+        return
     name = (event_name or "").strip()
     sk = slot_key_for_event(name, slot_number)
     path = event_json_path(name)
@@ -173,6 +184,8 @@ def log_slot_z_resolution(
     move_target_m: Optional[float],
 ) -> None:
     """이벤트 실행 시 자동 Z MOVE 에 쓰인 값 (SSOT → 시뮬 목표)."""
+    if not _event_verbose_log_enabled():
+        return
     d = slot_z_diagnostic(slot_key, robot=robot)
     print(f"{_PRINT_PREFIX} --- Z 슬롯 ({event_name} → {slot_key!r}, robot={robot}) ---", flush=True)
     if not d.get("defined"):
@@ -202,6 +215,8 @@ def log_slot_z_resolution(
 
 def log_event_steps_built(event_name: str, steps: List[Dict[str, Any]], *, slot_number: Optional[int] = None) -> None:
     """스텝 조립 후 요약 로그."""
+    if not _event_verbose_log_enabled():
+        return
     summary = _summarize_steps_for_log(steps)
     print(
         f"{_PRINT_PREFIX} {event_name}: 실행 스텝 {len(steps)}개 — {summary}",
@@ -448,7 +463,7 @@ def _substitute_templates(obj: Any, mapping: Dict[str, str]) -> Any:
 
 def _resolve_wafer_path(slot_key: str, wafer_map: Dict[str, str]) -> str:
     p = (wafer_map.get(slot_key) or "").strip()
-    if not p:
+    if not p and _event_verbose_log_enabled():
         print(
             f"{_PRINT_PREFIX} wafer prim 없음 slot_key={slot_key!r} — "
             f"lam_wafer_prim_paths.py 확인",
@@ -559,11 +574,12 @@ def build_steps_for_event(
         z_move_prim = (cfg.atm_height_prim_path or ATM_Z_MOVE_PRIM_PATH or "").strip()
     else:
         z_move_prim = (cfg.vtm_position_prim_path or VTM_Z_MOVE_PRIM_PATH or "").strip()
-    print(
-        f"{_PRINT_PREFIX}   Z 장비 prim ({robot}): {z_move_prim!r}  "
-        f"(SSOT: lam_slot_z_config.py → ATM_Z_MOVE_PRIM_PATH / VTM_Z_MOVE_PRIM_PATH)",
-        flush=True,
-    )
+    if _event_verbose_log_enabled():
+        print(
+            f"{_PRINT_PREFIX}   Z 장비 prim ({robot}): {z_move_prim!r}  "
+            f"(SSOT: lam_slot_z_config.py → ATM_Z_MOVE_PRIM_PATH / VTM_Z_MOVE_PRIM_PATH)",
+            flush=True,
+        )
     # dz [TBS/mm]: 기준 905.92mm = 0 → foup1_1 은 25.928 (slot_z_move_target_m)
     move_target_z = cfg.slot_z_move_target_m(sk, robot=robot)
 
@@ -591,9 +607,9 @@ def build_steps_for_event(
                 description_suffix=desc_extra,
             )
         )
-    elif not z_move_prim:
+    elif not z_move_prim and _event_verbose_log_enabled():
         print(f"{_PRINT_PREFIX} {name}: Z MOVE prim 경로 비어 있음 (robot={robot})", flush=True)
-    elif move_target_z is None:
+    elif move_target_z is None and _event_verbose_log_enabled():
         print(f"{_PRINT_PREFIX} {name}: slot Z 미정의 slot_key={sk!r}", flush=True)
 
     # JSON 첫 스텝을 Z 와 동시 시작 (run_with_previous)

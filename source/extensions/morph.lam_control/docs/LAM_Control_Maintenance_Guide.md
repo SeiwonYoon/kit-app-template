@@ -100,7 +100,7 @@ lam_sim_actions._action()
 - **한 줄 매크로:** `simulation_play.run_lam_sim_script_line()` (~390행)
 - **CSV 투어:** `simulation_play.run_simulation_from_csv()` — dwell 사이 이송에 `build_steps_for_event` 사용
 - **시퀀스 편집기 Run:** `lam_sequence_editor.py` — 동일 `LamSequenceRunner.run()`
-- **CSV 창 초기화:** `simulation_play.reset_lam_sim_to_initial_state()` — §9
+- **CSV 창 초기화:** `simulation_play.reset_lam_sim_to_initial_state()` — §11
 
 ---
 
@@ -204,7 +204,8 @@ lam_sim_actions._action()
 | MOVE 실행 | `lam_sequence_engine.py` | `_start_move` |
 | 46 함수 | `lam_sim_actions.py` | 모듈 docstring |
 | wafer 치환 | `lam_wafer_prim_paths.py` | `WAFER_PRIM_BY_SLOT_KEY` |
-| 초기화 | `simulation_play.py` | §9 `reset_lam_sim_to_initial_state` |
+| 초기화 | `simulation_play.py` | §11 `reset_lam_sim_to_initial_state` |
+| EAP CSV | `simulation_play.py` | `load_csv_dwell_timeline`, `build_csv_playback_steps_from_dwells` |
 
 ---
 
@@ -226,7 +227,49 @@ lam/lam_event_sequences/*.json
 
 ---
 
-## 10. CSV 시뮬 창 — 초기화 버튼
+## 10. EAP CSV 파싱·재생 규칙 (`simulation_play.py`)
+
+실무 CSV (`prompt1.txt` §332–363) 기준 파이프라인:
+
+| 단계 | 함수 | 설명 |
+|------|------|------|
+| 읽기 | `read_csv_rows` | `lot_id`, `cassette_id`/`cassette_slot`, `eqp_*_tm` 또는 `eqp_*_iso` |
+| t=0 | `normalize_csv_timeline` | 전역 최소 `eqp_start_tm` = 0; `process_tm` 분→초 휴리스틱(필요 시) |
+| FOUP | `build_lot_id_to_foup_index` | `eqp_start_tm` 순 **lot_id 최초 등장** → foup1, foup2, … |
+| dwell | `rows_to_dwell_records` | 한 행 = 한 슬롯 **머무름**; `parse_module_nm_to_slot_key` |
+| 정렬 | `sort_dwells_for_playback` | **전역** `eqp_start_tm` 오름차순 |
+| 재생 | `run_csv_timed_playback` | CSV ``t`` 까지 ``sleep`` → 로그 → `run_lam_sim_steps(speed_scale=…)` |
+| 블록 | `build_csv_timed_playback_blocks` | dwell(로그만) + pick/transfer/place(JSON) |
+
+**해석**
+
+- `process_tm` = 체류 시간(애니 길이 아님). 이송 애니는 JSON `TIMESAMPLES_REPLAY` + Z MOVE duration.
+- 이송은 **다음 `module_nm`** 으로 추론 (`build_steps_for_dwell_transfer`).
+- 웨이퍼 키 = `lot_id` + `cassette_id` (동일 cassette라도 lot 다르면 별도 웨이퍼).
+- 투어 **시작/끝**이 `AtmArm-*` 이면 `atm_foupN_pick/place(slot)` 자동 삽입.
+- `CoolStationAL3/4PML*` → `buffer3_*` / `buffer4_*`; `AL1` → `cooling_*`; `PMn-PML1` / `PMnPML1` → `chambern`.
+
+**검증 (Kit 없이)**
+
+```bash
+cd source/extensions/morph.lam_control
+set PYTHONPATH=morph
+python morph/lam_control/simulation_play.py lam/csv/eap_tasjr91_sample_v1.csv
+```
+
+**UI 타임라인:** CSV 시뮬 창 **재생 배속**(1x/5x 등) + **CSV 재생 타임라인** 미리보기.
+Play 시 `run_csv_timed_playback`: CSV ``eqp_start_tm`` 까지 대기(÷배속) → 콘솔 한글 로그 → JSON 실행.
+dwell 은 해당 시각 **로그만**, pick/transfer/place 는 그 시각에 이벤트 JSON **안의 모든 스텝**
+(MOVE·Z·visibility·DELAY·TIMESAMPLES_REPLAY 있으면 포함)을 `run_lam_sim_steps(speed_scale=…)` 로 실행.
+TIMESAMPLES 가 없어도 JSON 에 있는 MOVE/Z 등은 **그대로** 재생된다. 배속은 CSV 대기·스텝 재생 **모두** ÷배속.
+
+> ``morph.tbs_control_1`` 은 import/수정하지 않음. 배속은 LAM ``LamSequenceRunner.run(speed_scale)`` 만 사용.
+
+**CSV 중지:** 시뮬 창 **CSV 중지** → ``request_stop_csv_playback()`` (대기 sleep 탈출 + ``LamSequenceRunner.stop()`` + ``scheduler.stop_all()``).
+
+---
+
+## 11. CSV 시뮬 창 — 초기화 버튼
 
 | UI | 코드 |
 |----|------|
@@ -245,9 +288,10 @@ Z “원래 위치” = **기준 905.92 mm 를 TBS 0 으로 둔 상태** (MOVE `
 
 ---
 
-## 11. 변경 이력 (문서)
+## 12. 변경 이력 (문서)
 
 | 날짜 | 내용 |
 |------|------|
 | 2026-05-17 | 초판 — 이벤트 JSON·Z MOVE·prim SSOT·로그 FAQ |
 | 2026-05-17 | §9 CSV 창 초기화 버튼 |
+| 2026-05-17 | §10 EAP CSV 파싱·재생 규칙 |

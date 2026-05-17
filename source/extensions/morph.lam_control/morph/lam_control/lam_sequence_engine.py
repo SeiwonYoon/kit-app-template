@@ -60,6 +60,14 @@ from . import lam_rotate_animation as _lrx_preload  # type: ignore  # noqa: E402
 
 
 _PRINT_PREFIX = "[LAM/SEQ]"
+_runner_quiet_log: bool = False
+
+
+def _seq_log(msg: str = "", **kwargs: Any) -> None:
+    if _runner_quiet_log:
+        return
+    if msg:
+        print(msg, **kwargs)
 
 
 # step kind 상수 — 추후 dispatch / UI 가 공통으로 참조.
@@ -142,11 +150,11 @@ def _resolve_prim_paths(stage, prim_id: str) -> List[str]:
                 if p and p.IsValid():
                     out.append(s)
                 else:
-                    print(f"{_PRINT_PREFIX} prim_path not in stage: {s}", flush=True)
+                    _seq_log(f"{_PRINT_PREFIX} prim_path not in stage: {s}", flush=True)
             except Exception:
-                print(f"{_PRINT_PREFIX} prim_path resolve failed: {s}", flush=True)
+                _seq_log(f"{_PRINT_PREFIX} prim_path resolve failed: {s}", flush=True)
         else:
-            print(f"{_PRINT_PREFIX} only absolute /World/... paths supported, got: {s}", flush=True)
+            _seq_log(f"{_PRINT_PREFIX} only absolute /World/... paths supported, got: {s}", flush=True)
     return out
 
 
@@ -187,7 +195,7 @@ def _dispatch_main(fn: Callable[[], None]) -> None:
         try:
             fn()
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} dispatch_main fn failed: {exc}", flush=True)
+            _seq_log(f"{_PRINT_PREFIX} dispatch_main fn failed: {exc}", flush=True)
         finally:
             try:
                 if box["sub"] is not None:
@@ -203,7 +211,7 @@ def _dispatch_main(fn: Callable[[], None]) -> None:
         )
     except Exception as exc:
         # fallback — Kit 가 없는 환경/테스트. 그냥 직접 호출 (이 환경에선 deadlock 도 없을 것).
-        print(f"{_PRINT_PREFIX} dispatch_main fallback (direct call): {exc}", flush=True)
+        _seq_log(f"{_PRINT_PREFIX} dispatch_main fallback (direct call): {exc}", flush=True)
         _do(None)
 
 
@@ -227,7 +235,7 @@ def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> boo
     _dispatch_main(wrapped)
     ok = done.wait(timeout=float(timeout))
     if not ok:
-        print(f"{_PRINT_PREFIX} _dispatch_main_wait TIMEOUT after {timeout}s", flush=True)
+        _seq_log(f"{_PRINT_PREFIX} _dispatch_main_wait TIMEOUT after {timeout}s", flush=True)
         return False
     if err[0] is not None:
         raise err[0]
@@ -337,7 +345,7 @@ def _refresh_instance_asset_time_from_stage(instance) -> tuple[float, float, flo
                 mx = b if (mx is None or b > mx) else mx
                 n_attr += 1
     except Exception as exc:
-        print(f"{_PRINT_PREFIX} fallback timeSamples scan failed prim={prim_path}: {exc}", flush=True)
+        _seq_log(f"{_PRINT_PREFIX} fallback timeSamples scan failed prim={prim_path}: {exc}", flush=True)
 
     if mn is not None and mx is not None and mx > mn:
         # FPS 30 고정 정책 — tps 는 항상 LAM_FIXED_FPS.
@@ -348,14 +356,14 @@ def _refresh_instance_asset_time_from_stage(instance) -> tuple[float, float, flo
             instance.asset_tps = float(tps)
         except Exception:
             pass
-        print(
+        _seq_log(
             f"{_PRINT_PREFIX} fallback asset timeline filled prim={prim_path} "
             f"timeSamples [{mn},{mx}]@{tps}fps(forced)  (n_attr_with_samples={n_attr})",
             flush=True,
         )
         return (float(mn), float(mx), float(tps))
 
-    print(
+    _seq_log(
         f"{_PRINT_PREFIX} fallback found NO timeSamples prim={prim_path} "
         f"(자산이 정적이거나 reference 가 비어있을 수 있음). instance asset_time stays "
         f"[{s},{e}]@{tps}fps",
@@ -401,7 +409,7 @@ def _reset_tbs_offset_ops_for_paths(paths: List[str]) -> None:
             _ltx.zero_tbs_offset_translate_at_path(p)
             _lrx.zero_tbs_offset_rotate_at_path(p)
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} zero TBS_OFFSET failed path={p}: {exc}", flush=True)
+            _seq_log(f"{_PRINT_PREFIX} zero TBS_OFFSET failed path={p}: {exc}", flush=True)
 
 
 # --------------------------------------------------------------------- runner
@@ -463,81 +471,81 @@ class LamSequenceRunner:
         reset_each_start: bool = False,
         speed_scale: float = 1.0,
         on_complete: Optional[Callable[[], None]] = None,
+        quiet: bool = False,
     ) -> None:
         """동기 차단형 시퀀스 실행. background thread 에서 호출 권장."""
-        self._stop_flag.clear()
-        steps = list(steps or [])
-        if not steps:
+        global _runner_quiet_log
+        prev_quiet = _runner_quiet_log
+        _runner_quiet_log = _runner_quiet_log or bool(quiet)
+        try:
+            self._stop_flag.clear()
+            steps = list(steps or [])
+            if not steps:
+                if on_complete:
+                    try:
+                        on_complete()
+                    except Exception:
+                        pass
+                return
+
+            sp = float(max(0.01, speed_scale or 1.0))
+
+            if reset_each_start:
+                rpaths = _collect_prim_paths_for_reset(steps)
+                _seq_log(
+                    f"{_PRINT_PREFIX} reset_each_start: zero TBS_OFFSET for {len(rpaths)} prim(s)",
+                    flush=True,
+                )
+                try:
+                    _dispatch_main_wait(lambda: _reset_tbs_offset_ops_for_paths(rpaths), timeout=15.0)
+                except Exception as exc:
+                    _seq_log(f"{_PRINT_PREFIX} reset TBS_OFFSET failed: {exc}", flush=True)
+
+            first = steps[0] or {}
+            self._start_from_current = bool(first.get("_start_from_current", False))
+            raw_paths = str(first.get("_start_from_current_paths", "") or "").strip()
+            self._start_from_current_paths = [
+                t.strip() for t in raw_paths.split(",") if t.strip()
+            ]
+            self._start_snapshot = self._parse_start_snapshot(first.get("_start_snapshot", {}))
+            if self._start_snapshot:
+                try:
+                    self._apply_start_snapshot(self._start_snapshot)
+                except Exception as exc:
+                    _seq_log(f"{_PRINT_PREFIX} _apply_start_snapshot failed: {exc}", flush=True)
+
+            d0_ms = int(first.get("step_delay_ms", 0) or 0)
+            d0 = max(0.0, (d0_ms / 1000.0) / sp)
+            if d0 > 0:
+                self._sleep(d0)
+
+            a = 0
+            while a < len(steps):
+                if self._stop_flag.is_set():
+                    _seq_log(f"{_PRINT_PREFIX} stop requested at step[{a}]", flush=True)
+                    break
+                b = _group_end_index(steps, a)
+                self._execute_group(steps, a, b, sp, reset_each_start)
+                next_idx = b + 1
+                if next_idx < len(steps):
+                    delay_ms_next = int((steps[next_idx] or {}).get("step_delay_ms", 0) or 0)
+                    delay_next = max(0.0, (delay_ms_next / 1000.0) / sp)
+                    if delay_next > 0:
+                        self._sleep(delay_next)
+                a = next_idx
+
+            try:
+                self._hide.clear_all()
+            except Exception:
+                pass
+
             if on_complete:
                 try:
                     on_complete()
                 except Exception:
                     pass
-            return
-
-        sp = float(max(0.01, speed_scale or 1.0))
-
-        # Run(reset): 시퀀스에 나오는 prim 들의 TBS_OFFSET 를 0 으로 되돌린 뒤 재생.
-        # (그렇지 않으면 MOVE 가 현재 누적 오프셋을 시작점으로 삼아 "현재 위치에서만" 움직임.)
-        if reset_each_start:
-            rpaths = _collect_prim_paths_for_reset(steps)
-            print(
-                f"{_PRINT_PREFIX} reset_each_start: zero TBS_OFFSET for {len(rpaths)} prim(s)",
-                flush=True,
-            )
-            try:
-                _dispatch_main_wait(lambda: _reset_tbs_offset_ops_for_paths(rpaths), timeout=15.0)
-            except Exception as exc:
-                print(f"{_PRINT_PREFIX} reset TBS_OFFSET failed: {exc}", flush=True)
-
-        # 첫 step 메타 (TBS 와 동일 schema). LAM 의 baseline 모델 차이 — _start_from_current
-        # 자체는 LAM 에서 거의 default 동작이지만 (LAM 은 baseline 강제 복원이 없음),
-        # _start_snapshot 만 의미가 살아 있다 → 시작 직전에 prim 별 m16 을 TBS_OFFSET 두 op
-        # 로 분해 author 한다.
-        first = steps[0] or {}
-        self._start_from_current = bool(first.get("_start_from_current", False))
-        raw_paths = str(first.get("_start_from_current_paths", "") or "").strip()
-        self._start_from_current_paths = [
-            t.strip() for t in raw_paths.split(",") if t.strip()
-        ]
-        self._start_snapshot = self._parse_start_snapshot(first.get("_start_snapshot", {}))
-        if self._start_snapshot:
-            try:
-                self._apply_start_snapshot(self._start_snapshot)
-            except Exception as exc:
-                print(f"{_PRINT_PREFIX} _apply_start_snapshot failed: {exc}", flush=True)
-
-        # 첫 step 의 step_delay_ms 는 시퀀스 시작 전 초기 대기.
-        d0_ms = int(first.get("step_delay_ms", 0) or 0)
-        d0 = max(0.0, (d0_ms / 1000.0) / sp)
-        if d0 > 0:
-            self._sleep(d0)
-
-        a = 0
-        while a < len(steps):
-            if self._stop_flag.is_set():
-                print(f"{_PRINT_PREFIX} stop requested at step[{a}]", flush=True)
-                break
-            b = _group_end_index(steps, a)
-            self._execute_group(steps, a, b, sp, reset_each_start)
-            next_idx = b + 1
-            if next_idx < len(steps):
-                delay_ms_next = int((steps[next_idx] or {}).get("step_delay_ms", 0) or 0)
-                delay_next = max(0.0, (delay_ms_next / 1000.0) / sp)
-                if delay_next > 0:
-                    self._sleep(delay_next)
-            a = next_idx
-
-        try:
-            self._hide.clear_all()
-        except Exception:
-            pass
-
-        if on_complete:
-            try:
-                on_complete()
-            except Exception:
-                pass
+        finally:
+            _runner_quiet_log = prev_quiet
 
     # ------------------------------------------------------------------ group
 
@@ -641,9 +649,9 @@ class LamSequenceRunner:
             elif step_kind_is_prim_visibility(t):
                 duration = self._start_set_prim_visibility(idx, step, speed_scale)
             else:
-                print(f"{_PRINT_PREFIX} step[{idx}] unknown type={t!r}", flush=True)
+                _seq_log(f"{_PRINT_PREFIX} step[{idx}] unknown type={t!r}", flush=True)
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} step[{idx}] {t} failed: {exc}", flush=True)
+            _seq_log(f"{_PRINT_PREFIX} step[{idx}] {t} failed: {exc}", flush=True)
         finally:
             # duration 이 끝난 뒤 hide 해제. 작은 지연(0.2s) 으로 step 경계 깜빡임 방지.
             if hidden_paths:
@@ -683,7 +691,7 @@ class LamSequenceRunner:
                 pass
 
         if result.status == RESOLVE_MISSING or result.instance is None:
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} MISSING ref={ref.to_dict()}",
                 flush=True,
             )
@@ -696,7 +704,7 @@ class LamSequenceRunner:
         # 되어 USD_TIMELINE step 이 즉시 끝나 보인다(=재생 안 보임).
         try:
             inst_dbg = result.instance
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} inst prim={inst_dbg.prim_path} "
                 f"asset_time=[{inst_dbg.asset_start_time},{inst_dbg.asset_end_time}]"
                 f"@{inst_dbg.asset_tps}fps "
@@ -705,7 +713,7 @@ class LamSequenceRunner:
                 flush=True,
             )
         except Exception as _exc:
-            print(f"{_PRINT_PREFIX} step[{idx}] inst dbg print failed: {_exc}", flush=True)
+            _seq_log(f"{_PRINT_PREFIX} step[{idx}] inst dbg print failed: {_exc}", flush=True)
 
         # 폴백 — 자산 timeline 이 (0,0) 이면 prim 산하 timeSamples 에서 추출 시도.
         # 메인 스레드에서 USD read 가 일어나도록 dispatch_main_wait 으로 안전하게.
@@ -719,7 +727,7 @@ class LamSequenceRunner:
                     timeout=5.0,
                 )
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} step[{idx}] asset timeline fallback failed: {exc}", flush=True)
+            _seq_log(f"{_PRINT_PREFIX} step[{idx}] asset timeline fallback failed: {exc}", flush=True)
 
         # offset_correction (REQ-011, TBS 와 동일 의미). 기본 OFF.
         if bool(step.get("offset_correction_enabled", False)):
@@ -739,7 +747,7 @@ class LamSequenceRunner:
                     paths_for_offset, start_seconds_in, asset_tps=tps
                 )
             except Exception as exc:
-                print(f"{_PRINT_PREFIX} step[{idx}] offset_correction failed: {exc}", flush=True)
+                _seq_log(f"{_PRINT_PREFIX} step[{idx}] offset_correction failed: {exc}", flush=True)
 
         per_step_speed = float(_val("speed_scale", 1.0) or 1.0)
         per_step_speed = float(max(0.01, per_step_speed))
@@ -776,7 +784,7 @@ class LamSequenceRunner:
                 play_sf = float(result.instance.asset_start_time)
                 play_ef = float(result.instance.asset_end_time)
             if play_ef <= play_sf:
-                print(
+                _seq_log(
                     f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE skip — invalid frame range "
                     f"[{play_sf},{play_ef}]",
                     flush=True,
@@ -804,7 +812,7 @@ class LamSequenceRunner:
                     speed_scale=combined_speed,
                     fps=LAM_FIXED_FPS,
                 )
-                print(
+                _seq_log(
                     f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE master-timeline "
                     f"prim={prim_path} frames=[{play_sf},{play_ef}] "
                     f"begin_ok={ok_b} play_ok={ok_p}",
@@ -814,7 +822,7 @@ class LamSequenceRunner:
             try:
                 _dispatch_main_wait(_tl_begin, timeout=15.0)
             except Exception as exc:
-                print(
+                _seq_log(
                     f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE begin failed: {exc}",
                     flush=True,
                 )
@@ -853,12 +861,12 @@ class LamSequenceRunner:
             try:
                 _dispatch_main_wait(_tl_end, timeout=15.0)
             except Exception as exc:
-                print(
+                _seq_log(
                     f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE end failed: {exc}",
                     flush=True,
                 )
 
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE matched_by={result.matched_by} "
                 f"prim={prim_path} range=frames[{play_sf},{play_ef}] "
                 f"sp={combined_speed} loop={loop} mode=MASTER_TIMELINE est_duration={est:.3f}s "
@@ -869,7 +877,7 @@ class LamSequenceRunner:
             return 0.0
 
         if step_kind_label == STEP_KIND_USD_TIMELINE and loop:
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE loop=True — Option E 로 폴백 "
                 f"(master omni.timeline 루프는 미구현)",
                 flush=True,
@@ -898,7 +906,7 @@ class LamSequenceRunner:
             try:
                 self._scheduler.begin_replay_mode(replay_prim)
             except Exception as exc:
-                print(
+                _seq_log(
                     f"{_PRINT_PREFIX} step[{idx}] begin_replay_mode failed prim={replay_prim}: {exc}",
                     flush=True,
                 )
@@ -906,7 +914,7 @@ class LamSequenceRunner:
         try:
             _dispatch_main_wait(_do_begin_replay_in_main, timeout=10.0)
         except Exception as exc:
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] begin_replay dispatch failed: {exc}",
                 flush=True,
             )
@@ -929,10 +937,10 @@ class LamSequenceRunner:
         try:
             _dispatch_main_wait(_do_start_in_main, timeout=10.0)
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} step[{idx}] scheduler.start failed: {exc}", flush=True)
+            _seq_log(f"{_PRINT_PREFIX} step[{idx}] scheduler.start failed: {exc}", flush=True)
         ok = start_ok_holder["ok"]
 
-        print(
+        _seq_log(
             f"{_PRINT_PREFIX} step[{idx}] {step_kind_label} matched_by={result.matched_by} "
             f"prim={replay_prim} range={range_mode}[{range_start},{range_end}] "
             f"sp={combined_speed} loop={loop} ok={ok} est_duration={est:.3f}s "
@@ -995,23 +1003,23 @@ class LamSequenceRunner:
         dy = float(step.get("dy", 0.0) or 0.0)
         dz = float(step.get("dz", 0.0) or 0.0)
         from_initial = bool(step.get("move_from_initial", False))
-        print(
+        _seq_log(
             f"{_PRINT_PREFIX} _start_move idx={idx} prim_id={prim_id!r} "
             f"input=({dx},{dy},{dz}) from_initial={from_initial} dur={duration}",
             flush=True,
         )
         stage = _stage()
         paths = _resolve_prim_paths(stage, prim_id)
-        print(f"{_PRINT_PREFIX} _start_move idx={idx} resolved_paths={paths}", flush=True)
+        _seq_log(f"{_PRINT_PREFIX} _start_move idx={idx} resolved_paths={paths}", flush=True)
         if not paths or duration <= 0:
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] MOVE skip — prim={prim_id!r} paths={paths} dur={duration}",
                 flush=True,
             )
             return 0.0
 
         if not from_initial and abs(dx) < 1e-9 and abs(dy) < 1e-9 and abs(dz) < 1e-9:
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] MOVE skip — zero delta (move_from_initial=False)",
                 flush=True,
             )
@@ -1028,7 +1036,7 @@ class LamSequenceRunner:
                         ddy = float(dy) - float(cur[1])
                         ddz = float(dz) - float(cur[2])
                         if abs(ddx) < 1e-9 and abs(ddy) < 1e-9 and abs(ddz) < 1e-9:
-                            print(
+                            _seq_log(
                                 f"{_PRINT_PREFIX} (main) step[{idx}] MOVE(initial) skip path={p!r} "
                                 f"already at target ({dx},{dy},{dz})",
                                 flush=True,
@@ -1043,22 +1051,22 @@ class LamSequenceRunner:
                         loop=False,
                     )
                     if from_initial:
-                        print(
+                        _seq_log(
                             f"{_PRINT_PREFIX} (main) MOVE(initial) prim={p} "
                             f"target=({dx},{dy},{dz}) delta={seg_delta} dur={duration}",
                             flush=True,
                         )
                     else:
-                        print(
+                        _seq_log(
                             f"{_PRINT_PREFIX} (main) MOVE prim={p} d={seg_delta} dur={duration}",
                             flush=True,
                         )
                 except Exception as exc:
-                    print(f"{_PRINT_PREFIX} (main) MOVE failed prim={p}: {exc}", flush=True)
+                    _seq_log(f"{_PRINT_PREFIX} (main) MOVE failed prim={p}: {exc}", flush=True)
 
-        print(f"{_PRINT_PREFIX} _start_move idx={idx} dispatching to main thread", flush=True)
+        _seq_log(f"{_PRINT_PREFIX} _start_move idx={idx} dispatching to main thread", flush=True)
         _dispatch_main(_do_in_main)
-        print(
+        _seq_log(
             f"{_PRINT_PREFIX} step[{idx}] MOVE dispatched prim={paths} "
             f"from_initial={from_initial} dur={duration}",
             flush=True,
@@ -1082,7 +1090,7 @@ class LamSequenceRunner:
         stage = _stage()
         paths = _resolve_prim_paths(stage, prim_id)
         if not paths or duration <= 0:
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] ROTATE skip — prim={prim_id!r} paths={paths} dur={duration}",
                 flush=True,
             )
@@ -1130,7 +1138,7 @@ class LamSequenceRunner:
                         abs(d[0]) < 1e-9 and abs(d[1]) < 1e-9 and abs(d[2]) < 1e-9
                         for d in per_prim_payload.values()
                     ):
-                        print(
+                        _seq_log(
                             f"{_PRINT_PREFIX} (main) step[{idx}] ROTATE(initial) skip — "
                             f"already at target (input={rx},{ry},{rz})",
                             flush=True,
@@ -1150,21 +1158,21 @@ class LamSequenceRunner:
                         loop=False,
                     )
                 if from_initial:
-                    print(
+                    _seq_log(
                         f"{_PRINT_PREFIX} (main) ROTATE simple(from_initial) prim={paths} "
                         f"input=({rx},{ry},{rz}) per_prim_delta={per_prim_payload} dur={duration}",
                         flush=True,
                     )
                 else:
-                    print(
+                    _seq_log(
                         f"{_PRINT_PREFIX} (main) ROTATE simple prim={paths} "
                         f"r=({rx},{ry},{rz}) dur={duration}",
                         flush=True,
                     )
             except Exception as exc:
-                print(f"{_PRINT_PREFIX} (main) ROTATE failed: {exc}", flush=True)
+                _seq_log(f"{_PRINT_PREFIX} (main) ROTATE failed: {exc}", flush=True)
 
-        print(
+        _seq_log(
             f"{_PRINT_PREFIX} _start_rotate idx={idx} dispatching to main thread "
             f"prim={paths} r=({rx},{ry},{rz}) from_initial={from_initial} dur={duration}",
             flush=True,
@@ -1185,7 +1193,7 @@ class LamSequenceRunner:
         stage = _stage()
         paths = _resolve_prim_paths(stage, prim_id)
         if not paths:
-            print(
+            _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY skip — prim={prim_id!r}",
                 flush=True,
             )
@@ -1208,13 +1216,13 @@ class LamSequenceRunner:
                     else:
                         img.MakeInvisible()
                 except Exception as exc:
-                    print(
+                    _seq_log(
                         f"{_PRINT_PREFIX} (main) SET_PRIM_VISIBILITY failed path={p}: {exc}",
                         flush=True,
                     )
 
         _dispatch_main_wait(_do_in_main, timeout=5.0)
-        print(
+        _seq_log(
             f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY paths={paths} visible={visible} tail={tail:.3f}s",
             flush=True,
         )
@@ -1345,7 +1353,7 @@ class LamSequenceRunner:
                 if r is not None:
                     _lrx._set_prim_rotate_xyz(prim, r)
             except Exception as exc:
-                print(f"{_PRINT_PREFIX} _apply_start_snapshot path={path}: {exc}", flush=True)
+                _seq_log(f"{_PRINT_PREFIX} _apply_start_snapshot path={path}: {exc}", flush=True)
 
 
 __all__ = ["LamSequenceRunner"]
