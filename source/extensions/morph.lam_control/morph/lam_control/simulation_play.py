@@ -835,7 +835,7 @@ def log_virtual_timeline_from_dwells(dwells: List[DwellRecord]) -> None:
         if i == 0:
             print(
                 f"{_PRINT_PREFIX} [t={t0:.3f}s] INIT wafer lot={d.lot_id!r} foup={d.foup_index} "
-                f"cassette={d.cassette_id} slot={d.slot_key} module={d.module_nm!r}",
+                f"cassette={d.cassette_slot} slot={d.slot_key} module={d.module_nm!r}",
                 flush=True,
             )
         else:
@@ -847,7 +847,7 @@ def log_virtual_timeline_from_dwells(dwells: List[DwellRecord]) -> None:
 
         print(
             f"{_PRINT_PREFIX} [t={t0:.3f}s..{t1:.3f}s] DWELL#{i} lot={d.lot_id!r} foup={d.foup_index} "
-            f"cassette={d.cassette_id} slot={d.slot_key} module={d.module_nm!r}",
+            f"cassette={d.cassette_slot} slot={d.slot_key} module={d.module_nm!r}",
             flush=True,
         )
         print(
@@ -865,7 +865,7 @@ def log_virtual_timeline_from_dwells(dwells: List[DwellRecord]) -> None:
 
     last = dwells[-1]
     print(
-        f"{_PRINT_PREFIX} [t={last.end_sec:.3f}s] END virtual run cassette={last.cassette_id} "
+        f"{_PRINT_PREFIX} [t={last.end_sec:.3f}s] END virtual run cassette={last.cassette_slot} "
         f"last_slot={last.slot_key}",
         flush=True,
     )
@@ -880,7 +880,7 @@ def _log_virtual_transfer(prev: DwellRecord, curr: DwellRecord) -> None:
 
     print(
         f"{_PRINT_PREFIX} ----- TRANSFER @ t={t:.3f}s robot={robot} "
-        f"{prev.slot_key} -> {curr.slot_key} (cassette={curr.cassette_id}) -----",
+        f"{prev.slot_key} -> {curr.slot_key} (cassette={curr.cassette_slot}) -----",
         flush=True,
     )
     print(
@@ -911,7 +911,7 @@ class ParsedCsvRow:
     eqp_id: str
     module_nm: str
     lot_id: str
-    cassette_id: int
+    cassette_slot: int
     eqp_start_tm: float
     eqp_end_tm: float
     process_tm: float
@@ -921,7 +921,7 @@ class ParsedCsvRow:
 class DwellRecord:
     """한 웨이퍼(lot+cassette)가 한 ``slot_key`` 에 머문 구간 [start_sec, end_sec)."""
 
-    cassette_id: int
+    cassette_slot: int
     lot_id: str
     foup_index: int
     module_nm: str
@@ -1016,11 +1016,11 @@ def _parse_csv_time_field(raw: Dict[str, str], primary: str, iso_alt: str = "") 
 
 def build_lot_id_to_foup_index(rows: Iterable[ParsedCsvRow]) -> Dict[str, int]:
     """``eqp_start_tm`` 순 **lot_id 최초 등장** → foup1, foup2, foup3 (prompt1 §332-1)."""
-    ordered = sorted(rows, key=lambda r: (r.eqp_start_tm, r.cassette_id, r.module_nm))
+    ordered = sorted(rows, key=lambda r: (r.eqp_start_tm, r.cassette_slot, r.module_nm))
     out: Dict[str, int] = {}
     n = 0
     for r in ordered:
-        lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_id}"
+        lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_slot}"
         if lid not in out:
             n += 1
             out[lid] = n
@@ -1042,7 +1042,7 @@ def normalize_csv_timeline(rows: List[ParsedCsvRow]) -> List[ParsedCsvRow]:
                 eqp_id=r.eqp_id,
                 module_nm=r.module_nm,
                 lot_id=r.lot_id,
-                cassette_id=r.cassette_id,
+                cassette_slot=r.cassette_slot,
                 eqp_start_tm=float(r.eqp_start_tm),
                 eqp_end_tm=float(r.eqp_end_tm),
                 process_tm=pt,
@@ -1054,7 +1054,7 @@ def normalize_csv_timeline(rows: List[ParsedCsvRow]) -> List[ParsedCsvRow]:
             eqp_id=x.eqp_id,
             module_nm=x.module_nm,
             lot_id=x.lot_id,
-            cassette_id=x.cassette_id,
+            cassette_slot=x.cassette_slot,
             eqp_start_tm=float(x.eqp_start_tm) - t0,
             eqp_end_tm=float(x.eqp_end_tm) - t0,
             process_tm=x.process_tm,
@@ -1077,7 +1077,7 @@ def read_csv_rows(csv_path: Path) -> List[ParsedCsvRow]:
     """UTF-8 CSV → ``ParsedCsvRow`` (정규화 전).
 
     필수: ``eqp_id``, ``module_nm``, ``eqp_start_tm``, ``eqp_end_tm``, ``process_tm``
-    + ``cassette_id`` 또는 ``cassette_slot``. 선택: ``lot_id``, ``eqp_*_iso``.
+    + ``cassette_slot`` (구 헤더 ``cassette_id`` 도 허용). 선택: ``lot_id``, ``eqp_*_iso``.
     """
     if not csv_path.is_file():
         raise FileNotFoundError(f"{_PRINT_PREFIX} CSV not found: {csv_path}")
@@ -1086,27 +1086,28 @@ def read_csv_rows(csv_path: Path) -> List[ParsedCsvRow]:
     with csv_path.open("r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         header = list(reader.fieldnames or ())
-        if "cassette_id" not in header and "cassette_slot" in header:
-            pass
-        elif "cassette_id" not in header:
-            raise ValueError(f"{_PRINT_PREFIX} CSV missing cassette_id or cassette_slot column")
+        if "cassette_slot" not in header and "cassette_id" not in header:
+            raise ValueError(f"{_PRINT_PREFIX} CSV missing cassette_slot column")
         for need in ("eqp_id", "module_nm", "eqp_start_tm", "eqp_end_tm", "process_tm"):
             if need not in header:
                 raise ValueError(f"{_PRINT_PREFIX} CSV missing column: {need}")
 
         for raw in reader:
-            cid_raw = raw.get("cassette_id") if "cassette_id" in header else raw.get("cassette_slot")
+            if "cassette_slot" in header:
+                cs_raw = raw.get("cassette_slot")
+            else:
+                cs_raw = raw.get("cassette_id")
             try:
-                cid = int(str(cid_raw).strip())
+                cs = int(str(cs_raw).strip())
             except Exception as exc:
-                raise ValueError(f"{_PRINT_PREFIX} bad cassette_id: {raw!r}") from exc
+                raise ValueError(f"{_PRINT_PREFIX} bad cassette_slot: {raw!r}") from exc
             pt_raw = raw.get("process_tm") or raw.get("proccess_tm") or "0"
             rows.append(
                 ParsedCsvRow(
                     eqp_id=str(raw.get("eqp_id") or "").strip(),
                     module_nm=str(raw.get("module_nm") or "").strip(),
                     lot_id=str(raw.get("lot_id") or "").strip(),
-                    cassette_id=cid,
+                    cassette_slot=cs,
                     eqp_start_tm=_parse_csv_time_field(raw, "eqp_start_tm", "eqp_start_iso"),
                     eqp_end_tm=_parse_csv_time_field(raw, "eqp_end_tm", "eqp_end_iso"),
                     process_tm=parse_time_to_seconds(pt_raw),
@@ -1145,16 +1146,16 @@ def rows_to_dwell_records(
         if r.eqp_end_tm < r.eqp_start_tm:
             if not is_csv_playback_compact_log():
                 print(
-                    f"{_PRINT_PREFIX} skip inverted time lot={r.lot_id!r} cassette={r.cassette_id} "
+                    f"{_PRINT_PREFIX} skip inverted time lot={r.lot_id!r} cassette={r.cassette_slot} "
                     f"mod={r.module_nm}",
                     flush=True,
                 )
             continue
-        lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_id}"
+        lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_slot}"
         foup_i = int(lot_map.get(lid, 1))
         out.append(
             DwellRecord(
-                cassette_id=r.cassette_id,
+                cassette_slot=r.cassette_slot,
                 lot_id=lid,
                 foup_index=foup_i,
                 module_nm=r.module_nm,
@@ -1170,11 +1171,11 @@ def rows_to_dwell_records(
 
 def sort_dwells_for_playback(dwells: List[DwellRecord]) -> List[DwellRecord]:
     """전역 타임라인 정렬 — ``eqp_start_tm`` (= ``start_sec``) 오름차순 (prompt1 §363)."""
-    return sorted(dwells, key=lambda d: (d.start_sec, d.lot_id, d.cassette_id, d.module_nm))
+    return sorted(dwells, key=lambda d: (d.start_sec, d.lot_id, d.cassette_slot, d.module_nm))
 
 
 def _same_wafer_dwell(prev: DwellRecord, curr: DwellRecord) -> bool:
-    return prev.lot_id == curr.lot_id and prev.cassette_id == curr.cassette_id
+    return prev.lot_id == curr.lot_id and prev.cassette_slot == curr.cassette_slot
 
 
 # ---------------------------------------------------------------------------
@@ -1217,8 +1218,8 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
     if not _same_wafer_dwell(prev, curr):
         _lam_sim_log_build(
             "transfer",
-            f"이송 생략(웨이퍼 불일치): lot {prev.lot_id!r}/{prev.cassette_id} -> "
-            f"{curr.lot_id!r}/{curr.cassette_id} ({prev.slot_key!r} -> {curr.slot_key!r}).",
+            f"이송 생략(웨이퍼 불일치): lot {prev.lot_id!r}/{prev.cassette_slot} -> "
+            f"{curr.lot_id!r}/{curr.cassette_slot} ({prev.slot_key!r} -> {curr.slot_key!r}).",
         )
         return []
     refresh_lam_sim_runtime_tables_from_config()
@@ -1285,20 +1286,20 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
     return steps
 
 
-def _foup_slot_key(foup_index: int, cassette_id: int) -> str:
-    return f"foup{int(foup_index)}_{int(cassette_id)}"
+def _foup_slot_key(foup_index: int, cassette_slot: int) -> str:
+    return f"foup{int(foup_index)}_{int(cassette_slot)}"
 
 
 def build_foup_pick_place_steps(
     *,
     foup_index: int,
-    cassette_id: int,
+    cassette_slot: int,
     pick_or_place: str,
 ) -> LamSimJsonSteps:
     """투어 시작 pick / 종료 place — ``atm_foupN_pick/place(slot)``."""
     from .lam_event_sequences import atm_event_name_for_slot, build_steps_for_event
 
-    sk = _foup_slot_key(foup_index, cassette_id)
+    sk = _foup_slot_key(foup_index, cassette_slot)
     event, num = atm_event_name_for_slot(sk, pick_or_place)
     return build_steps_for_event(
         event,
@@ -1328,16 +1329,16 @@ def _slot_key_label_ko(slot_key: str) -> str:
 
 
 def _resolve_foup_event_name(
-    foup_index: int, cassette_id: int, pick_or_place: str
+    foup_index: int, cassette_slot: int, pick_or_place: str
 ) -> Tuple[str, Optional[int]]:
     from .lam_event_sequences import atm_event_name_for_slot
 
-    sk = _foup_slot_key(foup_index, cassette_id)
+    sk = _foup_slot_key(foup_index, cassette_slot)
     return atm_event_name_for_slot(sk, pick_or_place)
 
 
-def _foup_exec_hint(foup_index: int, cassette_id: int, pick_or_place: str) -> str:
-    event, num = _resolve_foup_event_name(foup_index, cassette_id, pick_or_place)
+def _foup_exec_hint(foup_index: int, cassette_slot: int, pick_or_place: str) -> str:
+    event, num = _resolve_foup_event_name(foup_index, cassette_slot, pick_or_place)
     po_ko = "픽업(pick)" if pick_or_place == "pick" else "반환(place)"
     if num is not None:
         return (
@@ -1362,7 +1363,7 @@ def _dwell_schedule_entry(d: DwellRecord) -> CsvPlaybackScheduleEntry:
         sort_order=_SCHEDULE_CATEGORY_ORDER["dwell"],
         category="dwell",
         title_ko=(
-            f"[CSV 체류] lot={d.lot_id!r} · FOUP{d.foup_index} · 웨이퍼#{d.cassette_id} · "
+            f"[CSV 체류] lot={d.lot_id!r} · FOUP{d.foup_index} · 웨이퍼#{d.cassette_slot} · "
             f"{_slot_key_label_ko(d.slot_key)}"
         ),
         csv_read_ko=(
@@ -1384,25 +1385,25 @@ def _pick_schedule_entry(
     *,
     time_sec: float,
     foup_index: int,
-    cassette_id: int,
+    cassette_slot: int,
     lot_id: str,
     steps: LamSimJsonSteps,
 ) -> CsvPlaybackScheduleEntry:
-    event, _num = _resolve_foup_event_name(foup_index, cassette_id, "pick")
+    event, _num = _resolve_foup_event_name(foup_index, cassette_slot, "pick")
     _ev, json_path = _schedule_entry_json_fields(event)
     return CsvPlaybackScheduleEntry(
         time_sec=float(time_sec),
         sort_order=_SCHEDULE_CATEGORY_ORDER["pick"],
         category="pick",
         title_ko=(
-            f"[재생] FOUP{foup_index} → ATM 팔 픽업 · lot={lot_id!r} · 웨이퍼#{cassette_id}"
+            f"[재생] FOUP{foup_index} → ATM 팔 픽업 · lot={lot_id!r} · 웨이퍼#{cassette_slot}"
         ),
         csv_read_ko=(
             "투어 첫 dwell 이 AtmArm 이므로, CSV 이전에 FOUP 에서 웨이퍼를 집어 올림 "
-            f"(foup{foup_index}_{cassette_id})."
+            f"(foup{foup_index}_{cassette_slot})."
         ),
         meaning_ko="공정 투어 시작 — FOUP 슬롯에서 ATM EndEffector 로 pick.",
-        exec_ko=_foup_exec_hint(foup_index, cassette_id, "pick"),
+        exec_ko=_foup_exec_hint(foup_index, cassette_slot, "pick"),
         step_count=len(steps),
         event_name=event,
         json_path=json_path,
@@ -1413,24 +1414,24 @@ def _place_schedule_entry(
     *,
     time_sec: float,
     foup_index: int,
-    cassette_id: int,
+    cassette_slot: int,
     lot_id: str,
     steps: LamSimJsonSteps,
 ) -> CsvPlaybackScheduleEntry:
-    event, _num = _resolve_foup_event_name(foup_index, cassette_id, "place")
+    event, _num = _resolve_foup_event_name(foup_index, cassette_slot, "place")
     _ev, json_path = _schedule_entry_json_fields(event)
     return CsvPlaybackScheduleEntry(
         time_sec=float(time_sec),
         sort_order=_SCHEDULE_CATEGORY_ORDER["place"],
         category="place",
         title_ko=(
-            f"[재생] ATM 팔 → FOUP{foup_index} 반환 · lot={lot_id!r} · 웨이퍼#{cassette_id}"
+            f"[재생] ATM 팔 → FOUP{foup_index} 반환 · lot={lot_id!r} · 웨이퍼#{cassette_slot}"
         ),
         csv_read_ko=(
             "투어 마지막 dwell 이 AtmArm 이고 다음 CSV 행이 없음 → FOUP 에 place."
         ),
         meaning_ko="공정 투어 종료 — 웨이퍼를 FOUP 슬롯에 되돌림.",
-        exec_ko=_foup_exec_hint(foup_index, cassette_id, "place"),
+        exec_ko=_foup_exec_hint(foup_index, cassette_slot, "place"),
         step_count=len(steps),
         event_name=event,
         json_path=json_path,
@@ -1454,7 +1455,7 @@ def _transfer_schedule_entry(
         sort_order=_SCHEDULE_CATEGORY_ORDER["transfer"],
         category="transfer",
         title_ko=(
-            f"[재생] 이송({robot}) · lot={curr.lot_id!r} · 웨이퍼#{curr.cassette_id} · "
+            f"[재생] 이송({robot}) · lot={curr.lot_id!r} · 웨이퍼#{curr.cassette_slot} · "
             f"{_slot_key_label_ko(prev.slot_key)} → {_slot_key_label_ko(curr.slot_key)}"
         ),
         csv_read_ko=(
@@ -1642,12 +1643,12 @@ def build_csv_playback_plan(
 
     tours: Dict[Tuple[str, int], List[DwellRecord]] = {}
     for d in dwells:
-        key = (d.lot_id, d.cassette_id)
+        key = (d.lot_id, d.cassette_slot)
         tours.setdefault(key, []).append(d)
     for key in list(tours.keys()):
         tours[key].sort(key=lambda x: x.start_sec)
 
-    for (lot_id, cassette_id), tour in sorted(tours.items(), key=lambda kv: kv[1][0].start_sec):
+    for (lot_id, cassette_slot), tour in sorted(tours.items(), key=lambda kv: kv[1][0].start_sec):
         foup_n = tour[0].foup_index
         first, last = tour[0], tour[-1]
 
@@ -1655,21 +1656,21 @@ def build_csv_playback_plan(
             try:
                 pick_st = build_foup_pick_place_steps(
                     foup_index=foup_n,
-                    cassette_id=cassette_id,
+                    cassette_slot=cassette_slot,
                     pick_or_place="pick",
                 )
                 if pick_st:
                     ent = _pick_schedule_entry(
                         time_sec=first.start_sec,
                         foup_index=foup_n,
-                        cassette_id=cassette_id,
+                        cassette_slot=cassette_slot,
                         lot_id=lot_id,
                         steps=pick_st,
                     )
                     schedule.append(ent)
                     blocks.append(
                         _block_from_schedule(
-                            ent, pick_st, label=f"foup{foup_n}_pick({cassette_id})"
+                            ent, pick_st, label=f"foup{foup_n}_pick({cassette_slot})"
                         )
                     )
             except Exception as exc:
@@ -1687,21 +1688,21 @@ def build_csv_playback_plan(
             try:
                 place_st = build_foup_pick_place_steps(
                     foup_index=foup_n,
-                    cassette_id=cassette_id,
+                    cassette_slot=cassette_slot,
                     pick_or_place="place",
                 )
                 if place_st:
                     ent = _place_schedule_entry(
                         time_sec=last.end_sec,
                         foup_index=foup_n,
-                        cassette_id=cassette_id,
+                        cassette_slot=cassette_slot,
                         lot_id=lot_id,
                         steps=place_st,
                     )
                     schedule.append(ent)
                     blocks.append(
                         _block_from_schedule(
-                            ent, place_st, label=f"foup{foup_n}_place({cassette_id})"
+                            ent, place_st, label=f"foup{foup_n}_place({cassette_slot})"
                         )
                     )
             except Exception as exc:
@@ -2489,7 +2490,7 @@ def dry_run_print_dwells(csv_path: Optional[str] = None, *, limit: int = 50) -> 
     dwells = load_csv_dwell_timeline(path)
     for i, d in enumerate(dwells[:limit]):
         print(
-            f"{_PRINT_PREFIX} [{i}] lot={d.lot_id!r} foup={d.foup_index} cassette={d.cassette_id} "
+            f"{_PRINT_PREFIX} [{i}] lot={d.lot_id!r} foup={d.foup_index} cassette={d.cassette_slot} "
             f"slot={d.slot_key} [{d.start_sec:.3f},{d.end_sec:.3f}) module={d.module_nm!r}",
             flush=True,
         )

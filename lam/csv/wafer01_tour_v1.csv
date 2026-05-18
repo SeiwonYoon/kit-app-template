@@ -1,4 +1,4 @@
-eqp_id,module_nm,cassette_id,eqp_start_tm,eqp_end_tm,process_tm
+eqp_id,module_nm,cassette_slot,eqp_start_tm,eqp_end_tm,process_tm
 1,AtmArm-EndEffector11,1,0,2,2
 1,CoolStationAL3PML2,1,2,4,2
 1,AtmArm-EndEffector11,1,4,6,2

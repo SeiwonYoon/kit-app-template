@@ -1,4 +1,4 @@
-eqp_id,module_nm,lot_id,cassette_id,eqp_start_tm,eqp_end_tm,process_tm,eqp_start_iso,eqp_end_iso
+eqp_id,module_nm,lot_id,cassette_slot,eqp_start_tm,eqp_end_tm,process_tm,eqp_start_iso,eqp_end_iso
 4EKFA417,AtmArm-EndEfferctor11,TASJR91,17,0.000000,14.847000,14.820000,2026-04-13 05:53:49.140000,2026-04-13 05:54:03.987000
 4EKFA417,AirLock1-iSlot1,TASJR91,17,14.847000,42.560000,27.720000,2026-04-13 05:54:03.987000,2026-04-13 05:54:31.700000
 4EKFA417,TransferChamber-EndEffector2,TASJR91,17,42.560000,57.510000,14.950020,2026-04-13 05:54:31.700000,2026-04-13 05:54:46.650000
