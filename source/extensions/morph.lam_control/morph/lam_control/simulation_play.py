@@ -2319,6 +2319,71 @@ def _csv_play_progress_ticker_loop(
                 pass
 
 
+# CSV Play 시작 시 1회만 보이게 할 FOUP 슬롯 (각 25).
+_CSV_PLAY_INITIAL_VISIBLE_FOUP_SLOT_KEYS = frozenset(
+    f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
+)
+
+
+def apply_csv_play_initial_wafer_visibility() -> None:
+    """CSV Play **시작 1회**: FOUP1~3 슬롯(각 25) 웨이퍼만 보이게, 나머지는 숨김.
+
+    이후 이벤트 JSON ``PRIM_VISIBILITY`` 등은 기존대로 동작한다(강제 없음).
+    """
+    from pxr import UsdGeom  # type: ignore
+
+    from .lam_sequence_engine import _dispatch_main_wait, _stage
+
+    wafer_map = WAFER_PRIM_BY_SLOT_KEY or load_wafer_prim_by_slot_key()
+    if not wafer_map:
+        return
+
+    show_paths: List[str] = []
+    hide_paths: List[str] = []
+    for slot_key, path in wafer_map.items():
+        p = (path or "").strip()
+        if not p:
+            continue
+        if slot_key in _CSV_PLAY_INITIAL_VISIBLE_FOUP_SLOT_KEYS:
+            show_paths.append(p)
+        else:
+            hide_paths.append(p)
+
+    def _set_path_visible(stage: Any, path: str, visible: bool) -> None:
+        try:
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                return
+            img = UsdGeom.Imageable(prim)
+            if not img:
+                return
+            if visible:
+                img.MakeVisible()
+            else:
+                img.MakeInvisible()
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} CSV Play 초기 visibility 실패 path={path!r}: {exc}",
+                flush=True,
+            )
+
+    def _do_in_main() -> None:
+        st = _stage()
+        if st is None:
+            return
+        for p in hide_paths:
+            _set_path_visible(st, p, False)
+        for p in show_paths:
+            _set_path_visible(st, p, True)
+
+    if _dispatch_main_wait(_do_in_main, timeout=10.0):
+        print(
+            f"{_PRINT_PREFIX} CSV Play 초기 웨이퍼 visibility: "
+            f"FOUP 보임 {len(show_paths)} · 숨김 {len(hide_paths)}",
+            flush=True,
+        )
+
+
 def run_csv_timed_playback(
     registry: Any,
     scheduler: Any,
@@ -2332,6 +2397,8 @@ def run_csv_timed_playback(
     if not ordered:
         print(f"{_PRINT_PREFIX} CSV timed playback: 블록 없음", flush=True)
         return
+
+    apply_csv_play_initial_wafer_visibility()
 
     csv_total = max(float(b.time_sec) for b in ordered)
     wall_total_est = csv_total / sp
@@ -3274,6 +3341,7 @@ __all__ = [
     "build_csv_playback_schedule",
     "format_csv_playback_schedule",
     "preview_csv_playback_schedule",
+    "apply_csv_play_initial_wafer_visibility",
     "run_csv_timed_playback",
     "request_stop_csv_playback",
     "clear_csv_playback_stop",

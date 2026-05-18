@@ -33,8 +33,13 @@ Z_TBS_MOVE_UNIT_PER_MM: float = 1.0
 # Z 동시 이동 대상 prim — Kit USD 실제 HeightStage/VTM Z 경로 (**여기만 수정**)
 # → ``build_steps_for_event`` 자동 MOVE 의 ``prim`` 필드
 # =============================================================================
-ATM_Z_MOVE_PRIM_PATH: str = "/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/link0"
-VTM_Z_MOVE_PRIM_PATH: str = "/World/LAM/_VIRTUAL/VTM/ZStage"
+ATM_Z_MOVE_PRIM_PATH: str = (
+    "/WORLD/atm/LAM_ATM_Robot_v01/ATM_Robot_Root/ATM_Body_CTL/ATM_Cylinder_CTL"
+)
+VTM_Z_MOVE_PRIM_PATH: str = (
+    "/WORLD/vtm/LAM_VTM_Robot_v01/VTM_Robot_Root/VTM_Cylinder_Rotation_CTL/"
+    "VTM_Cylinder_Position_CTL"
+)
 
 # =============================================================================
 # ATM — 기준 Z (prompt: 기준 z = 905.92)
