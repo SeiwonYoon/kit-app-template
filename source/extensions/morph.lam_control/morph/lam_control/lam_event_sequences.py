@@ -535,13 +535,21 @@ def build_steps_for_event(
     log_event_invoke(name, slot_number=slot_number)
 
     # --- 2) JSON 파일 로드 (없으면 스캐폴드만 생성, 덮어쓰기 안 함) ---
-    ensure_event_json_scaffolds(overwrite=False)
+    try:
+        from .simulation_play import is_csv_bulk_build_active
+
+        bulk = is_csv_bulk_build_active()
+    except Exception:
+        bulk = False
+    if not bulk:
+        ensure_event_json_scaffolds(overwrite=False)
     path = event_json_path(name)
     if not path.is_file():
         raise FileNotFoundError(f"이벤트 JSON 없음: {path}")
 
     # --- 3) slot_key · wafer prim 매핑 (치환용) ---
-    refresh_lam_sim_runtime_tables_from_config()
+    if not bulk:
+        refresh_lam_sim_runtime_tables_from_config()
     wafer_map = load_wafer_prim_by_slot_key()
     sk = slot_key_for_event(name, slot_number)
     arm_sk = arm_slot_key_for_event(name, vtm_ee_swap=vtm_ee_swap)
