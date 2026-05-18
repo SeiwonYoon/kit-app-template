@@ -2075,7 +2075,7 @@ def build_csv_playback_schedule(dwells: List[DwellRecord]) -> List[CsvPlaybackSc
     return schedule
 
 
-# CSV Play 실시간 진행 (콘솔·UI 1초 갱신)
+# CSV Play 실시간 진행 (UI 1초 갱신 — 콘솔 1초 틱 로그 없음)
 _csv_play_progress_ui_cb: Optional[Callable[[float, float, float, float], None]] = None
 _csv_play_progress_stop = threading.Event()
 
@@ -2297,26 +2297,21 @@ def _csv_play_progress_ticker_loop(
     csv_total: float,
     speed_scale: float,
 ) -> None:
-    """Play 중 1초마다 전체/현재 CSV 시각·실경과 출력."""
+    """Play 중 1초마다 UI 진행률 콜백만 갱신 (콘솔 로그 없음)."""
     sp = float(max(0.01, speed_scale or 1.0))
     wall_total_est = float(csv_total) / sp if csv_total > 0 else 0.0
     ui_cb = _csv_play_progress_ui_cb
+    if ui_cb is None:
+        return
     while not _csv_play_progress_stop.wait(1.0):
         if csv_playback_stop_requested():
             break
         wall_elapsed = time.monotonic() - t0
         csv_t = min(float(csv_total), wall_elapsed * sp)
-        pct = (100.0 * csv_t / csv_total) if csv_total > 1e-6 else 0.0
-        line = (
-            f"▶ 재생 {pct:.1f}% | CSV t {csv_t:.1f}/{csv_total:.1f}s | "
-            f"실경과 {wall_elapsed:.0f}s/{wall_total_est:.0f}s"
-        )
-        print(f"{_PRINT_PREFIX} {line}", flush=True)
-        if ui_cb is not None:
-            try:
-                ui_cb(csv_t, csv_total, wall_elapsed, wall_total_est)
-            except Exception:
-                pass
+        try:
+            ui_cb(csv_t, csv_total, wall_elapsed, wall_total_est)
+        except Exception:
+            pass
 
 
 # CSV Play 시작 시 1회만 보이게 할 FOUP 슬롯 (각 25).

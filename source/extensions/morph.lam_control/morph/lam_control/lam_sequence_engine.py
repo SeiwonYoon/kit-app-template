@@ -17,8 +17,10 @@ SET_PRIM_VISIBILITY / PRIM_VISIBILITY (hide·show, sticky).
   (시퀀스 편집기·외부 이벤트 러너·JSON 테스트 창 모두 별도 thread 에서 호출).
 - USD_TIMELINE step 은 `Scheduler.start()` 후 `estimated_duration_sec` 만큼 wall-clock
   sleep 으로 wait (loop=True 면 wait 없이 즉시 진행).
-- MOVE/ROTATE step 은 LAM 측 animator 호출(=update tick subscription) 후 duration 만큼
-  sleep. animator 자체는 main-thread update 에서 보간 진행.
+- MOVE/ROTATE step 은 LAM 측 animator 호출(=update tick subscription) 후 JSON ``duration``
+  만큼 1차 대기한 뒤, **실제 보간이 끝날 때까지** 폴링한다(다음 step 이
+  ``stop_prim_*`` 로 끊기지 않도록). TIMESAMPLES_REPLAY 는 ``inst.state != playing``
+  까지 동일하게 대기한다.
 - DELAY step 은 `time.sleep(duration / speed_scale)`.
 
 【 그룹/지연 (TBS 와 동일) 】
@@ -559,58 +561,189 @@ class LamSequenceRunner:
     ) -> None:
         """그룹 [a..b] 실행: leader 즉시, follower 는 step_delay_ms 만큼 지연 후 시작.
 
-        anchor (b) 의 estimated duration 까지 wait 한다. follower 자기 duration 은
-        anchor 와 무관하게 background 에서 진행되므로, 본 함수는 anchor 종료만 보장.
+        anchor 의 estimated duration 1차 대기 후, 그룹에 포함된 MOVE/ROTATE/TIMESAMPLES 가
+        **실제로 끝날 때까지** 추가 폴링한다(다음 step 이 진행 중 anim 을 stop 하지 않도록).
         """
         if self._stop_flag.is_set():
             return
         leader_idx = a
         anchor_idx = b
         t_group_start = time.monotonic()
+        motion_tx, motion_rot, motion_replay = self._collect_motion_targets_from_steps(steps, a, b)
+        motion_extra_timeout = self._estimate_group_motion_extra_timeout(
+            steps, a, b, speed_scale
+        )
 
         # leader 즉시 시작.
         leader_dur = self._start_step(leader_idx, steps[leader_idx], speed_scale, reset_each_start)
+        follower_threads: List[threading.Thread] = []
         if leader_idx == anchor_idx:
-            # 단일 step 그룹.
             self._wait_for(t_group_start + leader_dur)
+        else:
+            anchor_finish_at_holder: Dict[str, float] = {"t": t_group_start + leader_dur}
+
+            for i in range(a + 1, b + 1):
+                step_i = steps[i] or {}
+                delay_sec = max(
+                    0.0, (int(step_i.get("step_delay_ms", 0) or 0) / 1000.0) / speed_scale
+                )
+
+                def _runner_for(
+                    idx: int = i, step: dict = step_i, delay: float = delay_sec
+                ) -> None:
+                    if delay > 0:
+                        self._sleep(delay, allow_stop=True)
+                    if self._stop_flag.is_set():
+                        return
+                    start_at = time.monotonic()
+                    dur = self._start_step(idx, step, speed_scale, reset_each_start)
+                    if idx == anchor_idx:
+                        anchor_finish_at_holder["t"] = start_at + dur
+
+                t = threading.Thread(
+                    target=_runner_for, name=f"lam_seq_follower_{i}", daemon=True
+                )
+                t.start()
+                follower_threads.append(t)
+
+            anchor_step = steps[anchor_idx] or {}
+            anchor_delay_sec = max(
+                0.0, (int(anchor_step.get("step_delay_ms", 0) or 0) / 1000.0) / speed_scale
+            )
+            self._sleep(anchor_delay_sec + 0.05, allow_stop=True)
+            self._wait_for(anchor_finish_at_holder["t"])
+            join_timeout = motion_extra_timeout + 5.0
+            for ft in follower_threads:
+                ft.join(timeout=join_timeout)
+
+        self._wait_for_motion_complete(
+            motion_tx,
+            motion_rot,
+            motion_replay,
+            max_extra_sec=motion_extra_timeout,
+        )
+
+    def _collect_motion_targets_from_steps(
+        self, steps: List[dict], a: int, b: int
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """그룹 step 에서 MOVE/ROTATE prim 경로와 TIMESAMPLES 인스턴스 prim 을 수집."""
+        tx: List[str] = []
+        rot: List[str] = []
+        replay: List[str] = []
+        stage = _stage()
+        for i in range(a, b + 1):
+            step = steps[i] or {}
+            t = str(step.get("type") or "").upper()
+            if t == STEP_KIND_MOVE:
+                tx.extend(_resolve_prim_paths(stage, str(step.get("prim") or "")))
+            elif t == STEP_KIND_ROTATE:
+                rot.extend(_resolve_prim_paths(stage, str(step.get("prim") or "")))
+            elif step_kind_is_instance_playback(t):
+                ref = StepRef.from_dict(step.get("ref"))
+                result = resolve_step_ref(self._registry.all_instances(), ref)
+                if result.instance is not None:
+                    replay.append(str(result.instance.prim_path))
+
+        def _dedupe(paths: List[str]) -> List[str]:
+            seen: set[str] = set()
+            out: List[str] = []
+            for p in paths:
+                if p and p not in seen:
+                    seen.add(p)
+                    out.append(p)
+            return out
+
+        return _dedupe(tx), _dedupe(rot), _dedupe(replay)
+
+    def _estimate_group_motion_extra_timeout(
+        self, steps: List[dict], a: int, b: int, speed_scale: float
+    ) -> float:
+        """그룹 motion 완료 폴링 상한 [s] — JSON duration 합의 1.5배 + 여유."""
+        sp = float(max(0.01, speed_scale or 1.0))
+        total = 0.0
+        for i in range(a, b + 1):
+            step = steps[i] or {}
+            t = str(step.get("type") or "").upper()
+            if t in (STEP_KIND_MOVE, STEP_KIND_ROTATE, STEP_KIND_DELAY):
+                total += float(step.get("duration", 0.0) or 0.0) / sp
+            elif step_kind_is_instance_playback(t):
+                ref = StepRef.from_dict(step.get("ref"))
+                result = resolve_step_ref(self._registry.all_instances(), ref)
+                if result.instance is not None:
+                    play = step.get("play") or {}
+                    s_frame = play.get("start_frame", step.get("start_frame"))
+                    e_frame = play.get("end_frame", step.get("end_frame"))
+                    if s_frame is not None and e_frame is not None:
+                        rng_mode = "frames"
+                        rng_start = float(s_frame)
+                        rng_end = float(e_frame)
+                    else:
+                        rng_mode = str(play.get("range_mode", step.get("range_mode", "full")))
+                        rng_start = float(
+                            play.get("range_start", step.get("range_start", 0.0)) or 0.0
+                        )
+                        rng_end = float(
+                            play.get("range_end", step.get("range_end", 0.0)) or 0.0
+                        )
+                    per_sp = float(
+                        max(
+                            0.01,
+                            float(play.get("speed_scale", step.get("speed_scale", 1.0)) or 1.0)
+                            * sp,
+                        )
+                    )
+                    total += self._estimate_usd_timeline_duration(
+                        result.instance,
+                        range_mode=rng_mode,
+                        range_start=rng_start,
+                        range_end=rng_end,
+                        combined_speed=per_sp,
+                    )
+                else:
+                    total += 5.0
+            total += max(0.0, int(step.get("step_delay_ms", 0) or 0) / 1000.0) / sp
+        return min(300.0, max(2.0, total * 1.5 + 2.0))
+
+    def _wait_for_motion_complete(
+        self,
+        translate_paths: List[str],
+        rotate_paths: List[str],
+        replay_prims: List[str],
+        *,
+        max_extra_sec: float,
+    ) -> None:
+        """추정 duration 대기 후에도 anim/replay 가 살아 있으면 완료까지 폴링."""
+        if not translate_paths and not rotate_paths and not replay_prims:
             return
 
-        # follower 들 dispatch (각자 별도 thread 에서 step_delay_ms 만큼 sleep 후 start).
-        follower_threads: List[threading.Thread] = []
-        # anchor 종료 시점 추적용.
-        anchor_finish_at_holder: Dict[str, float] = {"t": t_group_start + leader_dur}
+        deadline = time.monotonic() + max(0.5, float(max_extra_sec))
+        poll = 0.033
 
-        for i in range(a + 1, b + 1):
-            step_i = steps[i] or {}
-            delay_sec = max(0.0, (int(step_i.get("step_delay_ms", 0) or 0) / 1000.0) / speed_scale)
+        def _any_busy() -> bool:
+            for p in translate_paths:
+                if _ltx_preload.is_prim_translate_animation_running(p):
+                    return True
+            for p in rotate_paths:
+                if _lrx_preload.is_prim_rotate_animation_running(p):
+                    return True
+            for rp in replay_prims:
+                inst = self._registry.get_by_prim_path(rp)
+                if inst is not None and str(inst.state) == "playing":
+                    return True
+            return False
 
-            def _runner_for(idx: int = i, step: dict = step_i, delay: float = delay_sec) -> None:
-                if delay > 0:
-                    self._sleep(delay, allow_stop=True)
-                if self._stop_flag.is_set():
-                    return
-                start_at = time.monotonic()
-                dur = self._start_step(idx, step, speed_scale, reset_each_start)
-                if idx == anchor_idx:
-                    anchor_finish_at_holder["t"] = start_at + dur
-
-            t = threading.Thread(target=_runner_for, name=f"lam_seq_follower_{i}", daemon=True)
-            t.start()
-            follower_threads.append(t)
-
-        # anchor 가 leader 가 아닌 경우 — anchor follower thread 가 anchor_finish_at_holder["t"]
-        # 를 갱신할 때까지 잠깐 wait 해야 한다. anchor follower 는 자기 step_delay_ms 만큼
-        # 처음 sleep 하므로 그만큼은 최소 wait.
-        # 가장 보수적: 모든 follower thread 가 _start_step 호출까지 진행될 시간(=각 follower 의
-        # step_delay_ms 의 max + 100ms 버퍼) 동안 wait 후 anchor_finish_at_holder["t"] 사용.
-        anchor_step = steps[anchor_idx] or {}
-        anchor_delay_sec = max(
-            0.0, (int(anchor_step.get("step_delay_ms", 0) or 0) / 1000.0) / speed_scale
-        )
-        # anchor follower 가 _start_step 호출을 끝낼 추정 시각 + 약간의 마진.
-        self._sleep(anchor_delay_sec + 0.05, allow_stop=True)
-        # 이 시점에 anchor_finish_at_holder["t"] 가 anchor 의 종료 시각으로 갱신되어 있을 것.
-        self._wait_for(anchor_finish_at_holder["t"])
+        while not self._stop_flag.is_set():
+            if not _any_busy():
+                return
+            if time.monotonic() >= deadline:
+                _seq_log(
+                    f"{_PRINT_PREFIX} motion complete wait timeout "
+                    f"(tx={len(translate_paths)} rot={len(rotate_paths)} "
+                    f"replay={len(replay_prims)})",
+                    flush=True,
+                )
+                return
+            self._sleep(poll, allow_stop=True)
 
     # ------------------------------------------------------------------ step
 

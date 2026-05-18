@@ -48,6 +48,11 @@ def is_rotate_animation_running() -> bool:
     return bool(_rot_animations)
 
 
+def is_prim_rotate_animation_running(prim_path: str) -> bool:
+    """지정 prim 에 대한 TBS_OFFSET rotate 보간이 진행 중인지."""
+    return bool(prim_path) and prim_path in _rot_animations
+
+
 def _get_or_create_offset_rotate_op(prim):
     try:
         x = UsdGeom.Xformable(prim)
@@ -327,6 +332,7 @@ def _on_update(e) -> None:
 
 __all__ = [
     "is_rotate_animation_running",
+    "is_prim_rotate_animation_running",
     "run_prim_rotate_animation",
     "stop_world_pivot_rotate_animation",
     "stop_prim_rotate_animation",
