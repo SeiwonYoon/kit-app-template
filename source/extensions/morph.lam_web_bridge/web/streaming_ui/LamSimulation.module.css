@@ -1,0 +1,170 @@
+/* LamSimulation — lam_panel.css / TbsSimulation 과 동일 톤 */
+.wrap {
+  box-sizing: border-box;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  color: #dddddd;
+  line-height: 1.35;
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 8px;
+}
+
+.wrap * {
+  box-sizing: border-box;
+}
+
+.banner {
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+
+.bannerWarn {
+  background: #3d2e1a;
+  color: #f5d4a0;
+}
+
+.bannerOk {
+  background: #1a2d24;
+  color: #a8e6c8;
+}
+
+.section {
+  background: #1e2530;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.section h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #9fd4ff;
+}
+
+.hint {
+  margin: 0 0 8px;
+  color: #888888;
+  font-size: 12px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.row label {
+  min-width: 88px;
+  color: #888888;
+  font-size: 12px;
+}
+
+.blockLabel {
+  display: block;
+  margin: 8px 0 4px;
+  color: #888888;
+  font-size: 12px;
+}
+
+.pathInput {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 8px;
+  background: #3b4250;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #dddddd;
+}
+
+.select {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 8px;
+  background: #3b4250;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #dddddd;
+}
+
+.row input[type="number"] {
+  width: 72px;
+  padding: 6px 8px;
+  background: #3b4250;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #dddddd;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.toolbar button,
+.row button {
+  padding: 6px 12px;
+  background: #2d3544;
+  border: 1px solid #4a5568;
+  border-radius: 4px;
+  color: #dddddd;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.toolbar button:hover:not(:disabled),
+.row button:hover:not(:disabled) {
+  background: #3d4a5c;
+}
+
+.toolbar button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.readonlyArea {
+  width: 100%;
+  padding: 8px;
+  background: #151920;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #cccccc;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  resize: vertical;
+}
+
+.readonlyLine {
+  width: 100%;
+  padding: 6px 8px;
+  background: #151920;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #cccccc;
+  font-size: 12px;
+}
+
+.statusLine {
+  font-size: 12px;
+  margin-top: 4px;
+  word-break: break-all;
+}
+
+.dim {
+  color: #888888;
+}
+
+.logLine {
+  padding: 8px;
+  background: #151920;
+  border-radius: 4px;
+  border: 1px solid #3a3a3a;
+}

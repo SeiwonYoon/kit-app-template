@@ -10,6 +10,8 @@
   3. 메인 창과 시퀀스 편집기/외부 이벤트 러너에게 주입하고
   4. 종료 시 위 모두를 안전하게 종료한다.
 
+웹 HTTP 브리지는 ``morph.lam_web_bridge`` 확장이 담당한다 (``remote_api`` 세션).
+
 본 모듈은 어떤 경우에도 `morph.tbs_control_1.*` 를 import 하지 않는다.
 (USD_Timeline_Spec.md REQ-002 0줄 변경 원칙, §12 절대 보호 영역)
 """
@@ -22,7 +24,7 @@ from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_playback_scheduler import PlaybackScheduler
 from .lam_runtime_evaluator import RuntimeEvaluator
 from .lam_window import LamWindow
-
+from .remote_api import LamKitSession, clear_session, set_session
 
 _PRINT_PREFIX = "[LAM]"
 
@@ -52,8 +54,19 @@ class LamControlExtension(omni.ext.IExt):
         self._window.show()
         self._evaluator.start()
 
+        assert self._registry is not None and self._scheduler is not None
+        assert self._window is not None
+        set_session(
+            LamKitSession(
+                registry=self._registry,
+                scheduler=self._scheduler,
+                open_master_at_path=self._window._open_master_at_path,
+            )
+        )
+
     def on_shutdown(self) -> None:
         print(f"{_PRINT_PREFIX} on_shutdown", flush=True)
+        clear_session()
         try:
             if self._window is not None:
                 self._window.destroy()

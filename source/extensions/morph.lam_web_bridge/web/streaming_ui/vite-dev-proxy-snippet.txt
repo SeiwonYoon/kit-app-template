@@ -1,0 +1,16 @@
+[Vite 개발 서버에서 /api 를 Kit LAM 브리지(8720)로 넘기기]
+
+vite.config.ts 의 server.proxy (이 폴더 기본 설정에 포함됨):
+
+  proxy: {
+    "/api": {
+      target: "http://127.0.0.1:8720",
+      changeOrigin: true,
+    },
+  },
+
+프록시 사용 시 .env:
+  VITE_TBS_KIT_API_BASE=
+
+직접 연결 시:
+  VITE_TBS_KIT_API_BASE=http://127.0.0.1:8720

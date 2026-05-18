@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LAM Kit 원격 — 합성 USD &amp; CSV Play</title>
+    <link rel="stylesheet" href="lam_panel.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div id="connBanner" class="banner warn">상태 확인 중…</div>
+
+      <section>
+        <h2>② 합성 USD 열기</h2>
+        <p class="hint">
+          Kit LAM Window 의 Open Master 와 동일 — Discover + Extract 자동
+        </p>
+        <div class="row">
+          <label for="f_master_path">경로</label>
+          <input class="w-path" type="text" id="f_master_path" />
+        </div>
+        <div class="toolbar">
+          <button type="button" id="btnOpenMaster">Open Master</button>
+        </div>
+        <div class="status-line" id="masterStatus"></div>
+        <div class="status-line dim" id="instanceCount"></div>
+      </section>
+
+      <section>
+        <h2>CSV 시뮬 재생</h2>
+        <div class="row">
+          <label for="f_csv_dir">CSV 폴더</label>
+          <input class="w-path" type="text" id="f_csv_dir" />
+        </div>
+        <div class="row">
+          <label for="f_csv_file">CSV 파일</label>
+          <select id="f_csv_file" class="w-select"></select>
+        </div>
+        <div class="toolbar">
+          <button type="button" id="btnCsvRefresh">목록 새로고침</button>
+          <button type="button" id="btnTimelineRefresh">타임라인 갱신</button>
+          <button type="button" id="btnCsvPlay">CSV Play</button>
+          <button type="button" id="btnCsvStop">CSV 중지</button>
+        </div>
+        <div class="row">
+          <label for="f_speed">재생 배속</label>
+          <input type="number" id="f_speed" value="1" step="0.1" min="0.1" max="20" />
+          <button type="button" id="btnSpeed1">1x</button>
+          <button type="button" id="btnSpeed5">5x</button>
+        </div>
+        <p class="hint">CSV t까지 대기 + JSON 전 스텝 실행 (둘 다 ÷배속)</p>
+        <label class="block-label" for="f_schedule">CSV 재생 타임라인</label>
+        <textarea id="f_schedule" class="readonly-area" readonly rows="14"></textarea>
+        <label class="block-label" for="f_progress">빌드·재생 진행</label>
+        <input type="text" id="f_progress" class="readonly-line" readonly />
+      </section>
+
+      <div class="status-line log-line" id="logLine">(대기)</div>
+    </div>
+  </body>
+  <script src="lam_panel.js"></script>
+</html>

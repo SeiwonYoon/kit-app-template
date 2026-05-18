@@ -1,7 +1,7 @@
 [package]
 title = "LAM Control"
 version = "0.1.0"
-description = "LAM 멀티 USD 독립 타임라인 재생 + LAM 시퀀스 편집기 + 외부 이벤트 러너 (morph.tbs_control_1 와 코드 분리)."
+description = "LAM 멀티 USD 독립 타임라인 재생 + LAM 시퀀스 편집기 + 외부 이벤트 러너. HTTP 원격 UI는 morph.lam_web_bridge."
 category = "Example"
 keywords = ["kit", "extension", "lam", "usd", "animation", "multi-usd"]
 changelog = "docs/CHANGELOG.md"
@@ -26,4 +26,4 @@ readme = "docs/README.md"
 name = "morph.lam_control"
 
 [documentation]
-pages = ["docs/LAM_Spec.md", "docs/CHANGELOG.md"]
+pages = ["docs/LAM_Spec.md", "docs/LAM_Web_UI.md", "docs/CHANGELOG.md"]

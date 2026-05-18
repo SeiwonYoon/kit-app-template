@@ -1,0 +1,18 @@
+[package]
+title = "LAM Web Bridge"
+version = "0.1.0"
+description = "LAM HTTP 원격 UI (8720) — morph.lam_control 세션에 연결. 웹 정적 파일 + REST API."
+category = "Example"
+keywords = ["kit", "extension", "lam", "web", "http", "remote"]
+
+[dependencies]
+"morph.lam_control" = {}
+"omni.kit.uiapp" = {}
+
+[settings]
+
+[[python.module]]
+name = "morph.lam_web_bridge"
+
+[documentation]
+pages = ["docs/LAM_Web_UI_Guide.md"]
