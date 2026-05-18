@@ -80,12 +80,17 @@ def get_lam_csv_dir() -> Path:
     return d
 
 
-def list_lam_csv_paths() -> List[Path]:
-    """``lam/csv`` 이하의 ``*.csv`` 파일 경로 목록을 파일명(대소문자 무시)순으로 반환한다."""
-    d = get_lam_csv_dir()
+def list_csv_paths_in_directory(directory: str | Path) -> List[Path]:
+    """지정 폴더의 ``*.csv`` 파일 경로 목록 (파일명 대소문자 무시 정렬)."""
+    d = Path(directory).expanduser()
     if not d.is_dir():
         return []
     return sorted(d.glob("*.csv"), key=lambda p: p.name.lower())
+
+
+def list_lam_csv_paths() -> List[Path]:
+    """``lam/csv`` 이하의 ``*.csv`` 파일 경로 목록을 파일명(대소문자 무시)순으로 반환한다."""
+    return list_csv_paths_in_directory(get_lam_csv_dir())
 
 
 def _default_csv_path() -> str:
@@ -2646,6 +2651,8 @@ class LamSimulationCsvPlayWindow:
         self._scheduler = scheduler
         self._window: Any = None
         self._combo: Any = None
+        self._csv_dir_model: Any = None
+        self._csv_file_stack: Any = None
         self._csv_paths: List[Path] = []
         self._log_label: Any = None
         self._script_model: Any = None
@@ -2689,6 +2696,8 @@ class LamSimulationCsvPlayWindow:
             pass
         self._window = None
         self._combo = None
+        self._csv_dir_model = None
+        self._csv_file_stack = None
         self._log_label = None
         self._script_model = None
         self._func_combo = None
@@ -2719,8 +2728,11 @@ class LamSimulationCsvPlayWindow:
             except Exception:
                 self._window = None
 
-        self._csv_paths = list_lam_csv_paths()
         macro_names = list_macro_function_names()
+        try:
+            from omni.ui import SimpleStringModel  # type: ignore
+        except Exception:
+            SimpleStringModel = None  # type: ignore
         self._window = ui.Window(self.WINDOW_TITLE, width=640, height=920)
         with self._window.frame:
             with ui.VStack(spacing=6):
@@ -2730,18 +2742,28 @@ class LamSimulationCsvPlayWindow:
                     word_wrap=True,
                     height=36,
                 )
-                ui.Label(f"폴더: {get_lam_csv_dir()}", height=20, word_wrap=True)
-                if not self._csv_paths:
-                    ui.Label("CSV 없음 — ``lam/csv`` 에 ``.csv`` 추가.", height=28)
+                ui.Label("CSV 폴더", height=16)
+                if SimpleStringModel is not None:
+                    self._csv_dir_model = SimpleStringModel(str(get_lam_csv_dir()))
+                    try:
+                        ui.StringField(
+                            model=self._csv_dir_model,
+                            height=22,
+                            tooltip="CSV가 있는 폴더 경로 — [목록 새로고침]으로 드롭다운 갱신",
+                        )
+                    except TypeError:
+                        ui.StringField(model=self._csv_dir_model, height=22)
                 else:
-                    names = [p.name for p in self._csv_paths]
-                    ui.Label("CSV 파일", height=16)
-                    self._combo = ui.ComboBox(0, *names, width=520, height=26)
+                    ui.Label(str(get_lam_csv_dir()), height=22, word_wrap=True)
+                with ui.VStack(spacing=4) as csv_file_stack:
+                    self._csv_file_stack = csv_file_stack
+                self._reload_csv_list(preserve_selection=False)
                 with ui.HStack(spacing=6, height=28):
                     ui.Button(
                         "목록 새로고침",
                         width=120,
                         clicked_fn=self._on_refresh_clicked,
+                        tooltip="위 폴더 경로에서 *.csv 를 다시 읽어 드롭다운 갱신",
                     )
                     ui.Button(
                         "타임라인 갱신",
@@ -2860,6 +2882,68 @@ class LamSimulationCsvPlayWindow:
                     )
                     ui.Spacer()
                 self._log_label = ui.Label("(대기)", height=80, word_wrap=True)
+
+    def _read_csv_dir_text(self) -> str:
+        m = self._csv_dir_model
+        if m is None:
+            return str(get_lam_csv_dir())
+        for getter in ("get_value_as_string", "get_value"):
+            try:
+                fn = getattr(m, getter, None)
+                if callable(fn):
+                    return str(fn()).strip()
+            except Exception:
+                continue
+        return str(get_lam_csv_dir())
+
+    def _reload_csv_list(self, *, preserve_selection: bool = True) -> None:
+        """폴더 텍스트 기준으로 ``_csv_paths`` · CSV ComboBox 를 갱신."""
+        prev_name: Optional[str] = None
+        if preserve_selection:
+            prev = self._selected_csv_path()
+            if prev is not None:
+                prev_name = prev.name
+
+        dir_text = self._read_csv_dir_text()
+        d = Path(dir_text).expanduser()
+        if not d.is_dir():
+            self._csv_paths = []
+            self._rebuild_csv_combo_ui(selected_index=0)
+            self._log(f"폴더 없음 — 경로 확인 후 [목록 새로고침]: {dir_text}")
+            return
+
+        self._csv_paths = list_csv_paths_in_directory(d)
+        idx = 0
+        if prev_name:
+            for i, p in enumerate(self._csv_paths):
+                if p.name == prev_name:
+                    idx = i
+                    break
+        self._rebuild_csv_combo_ui(selected_index=idx)
+        self._log(f"CSV {len(self._csv_paths)}개 — {d}")
+
+    def _rebuild_csv_combo_ui(self, *, selected_index: int = 0) -> None:
+        try:
+            import omni.ui as ui  # type: ignore
+        except Exception:
+            return
+        stack = self._csv_file_stack
+        if stack is None:
+            return
+        try:
+            stack.clear()
+        except Exception as exc:
+            self._log(f"CSV 목록 UI 갱신 실패: {exc}")
+            return
+        with stack:
+            if not self._csv_paths:
+                ui.Label("CSV 없음 — 폴더에 .csv 파일을 추가하세요.", height=28)
+                self._combo = None
+            else:
+                names = [p.name for p in self._csv_paths]
+                ui.Label("CSV 파일", height=16)
+                idx = max(0, min(int(selected_index), len(names) - 1))
+                self._combo = ui.ComboBox(idx, *names, width=520, height=26)
 
     def _selected_csv_path(self) -> Optional[Path]:
         if not self._csv_paths or self._combo is None:
@@ -3059,9 +3143,9 @@ class LamSimulationCsvPlayWindow:
             self._start_background_csv_build(p, reason="타임라인 갱신")
 
     def _on_refresh_clicked(self) -> None:
-        """창을 닫았다가 다시 열어 ``lam/csv`` 목록을 재스캔."""
-        self.destroy()
-        self.show()
+        """폴더 텍스트 박스 경로에서 ``*.csv`` 목록을 다시 읽어 드롭다운 갱신."""
+        self._reload_csv_list(preserve_selection=True)
+        self._refresh_csv_schedule_preview(fast_only=True)
 
     def _on_schedule_refresh_clicked(self) -> None:
         path = self._selected_csv_path()
@@ -3326,6 +3410,7 @@ __all__ = [
     "_find_lam_data_root",
     "get_lam_csv_dir",
     "list_lam_csv_paths",
+    "list_csv_paths_in_directory",
     "build_default_module_nm_to_slot_key",
     "rebuild_module_nm_slot_mapping",
     "parse_module_nm_to_slot_key",
