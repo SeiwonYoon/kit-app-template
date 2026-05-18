@@ -75,7 +75,12 @@ A·B·C 모두 **같은 HTTP API**(`8720` 브리지)만 호출합니다. UI 구�
 
 ### 3.0 사전 조건
 
-1. **Kit 앱**을 실행한다 (`morph.lam_control` + **`morph.lam_web_bridge`** 가 로드되어야 8720 사용 가능).
+1. **저장소 빌드 1회** — 새 확장 `morph.lam_web_bridge` 추가 후 최초 1회는 반드시 실행:
+   ```powershell
+   .\repo.bat build
+   ```
+   (`_build/apps/exts.deps.generated.kit` 에 확장이 등록되어야 Kit이 의존성을 찾습니다.)
+2. **Kit 앱**을 실행한다 (`morph.lam_control` + **`morph.lam_web_bridge`** 가 로드되어야 8720 사용 가능).
 2. **TBS 확장과 동시에 8720 포트를 쓰지 않는다** — 둘 다 브리지를 켜면 포트 충돌 가능. LAM만 쓸 때는 TBS 원격 UI를 끄거나 포트를 나눈다.
 3. 환경 변수 (Kit 실행 **전**에 설정):
 
@@ -431,6 +436,7 @@ Kit `LamSimulationCsvPlayWindow` 하단의 **매크로/이벤트 함수 실행**
 
 | 증상 | 확인 |
 |------|------|
+| `Failed to resolve extension dependencies` / `morph.lam_web_bridge` none found | `.\repo.bat build` 실행 후 Kit 재시작 (`exts.deps.generated.kit` 갱신) |
 | 페이지 안 열림 | Kit 로그에 `[LAM Remote UI]` 있는지, 포트 8720 사용 중인지 |
 | 배너 «연결 실패» | Kit 실행 여부, 방화벽, `TBS_REMOTE_UI_BIND` |
 | Open Master 시 Kit 멈춤 | `_cmd_*` 안에서 `_run_on_main` 중첩 호출 여부 |

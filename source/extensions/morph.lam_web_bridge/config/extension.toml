@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "LAM HTTP 원격 UI (8720) — morph.lam_control 세션에 연결. 웹 정적 파일 + REST API."
 category = "Example"
 keywords = ["kit", "extension", "lam", "web", "http", "remote"]
+readme = "docs/README.md"
 
 [dependencies]
 "morph.lam_control" = {}
