@@ -2179,6 +2179,7 @@ _csv_play_active_runner: Any = None
 def clear_csv_playback_stop() -> None:
     """새 CSV Play 시작 전 호출."""
     _csv_play_stop_event.clear()
+    _csv_play_material_test_stop.clear()
 
 
 def csv_playback_stop_requested() -> bool:
@@ -2192,6 +2193,7 @@ def request_stop_csv_playback(
     """CSV Play 중지 — 대기 루프 탈출 + 진행 중 Runner·애니·스케줄러 정지."""
     _ = registry
     _csv_play_stop_event.set()
+    _csv_play_material_test_stop.set()
     with _csv_play_runner_lock:
         runner = _csv_play_active_runner
     if runner is not None:
@@ -2384,6 +2386,129 @@ def apply_csv_play_initial_wafer_visibility() -> None:
         )
 
 
+# CSV Play material binding 테스트 스케줄 (setTimeout 유사, Play 중지 시 탈출)
+_csv_play_material_test_stop = threading.Event()
+
+
+def apply_material_binding_to_prim(mesh_prim_path: str, material_prim_path: str) -> bool:
+    """합성 stage 에서 mesh prim 에 material 을 바인딩 (main thread USD write).
+
+    실패 시 ``False`` 반환·로그만 남기고 예외는 밖으로 전파하지 않는다.
+    """
+    mesh_path = (mesh_prim_path or "").strip()
+    mat_path = (material_prim_path or "").strip()
+    if not mesh_path or not mat_path:
+        print(
+            f"{_PRINT_PREFIX} material bind skip — 빈 경로 mesh={mesh_path!r} mat={mat_path!r}",
+            flush=True,
+        )
+        return False
+
+    outcome: Dict[str, Any] = {"ok": False, "msg": ""}
+
+    def _do_in_main() -> None:
+        from pxr import Usd, UsdShade  # type: ignore
+
+        from .lam_sequence_engine import _stage
+
+        stage = _stage()
+        if stage is None:
+            outcome["msg"] = "stage 없음"
+            return
+        try:
+            stage.SetEditTarget(Usd.EditTarget(stage.GetRootLayer()))
+        except Exception as exc:
+            outcome["msg"] = f"edit target: {exc}"
+            return
+
+        mesh_prim = stage.GetPrimAtPath(mesh_path)
+        if not mesh_prim or not mesh_prim.IsValid():
+            outcome["msg"] = f"mesh prim 없음: {mesh_path}"
+            return
+        mat_prim = stage.GetPrimAtPath(mat_path)
+        if not mat_prim or not mat_prim.IsValid():
+            outcome["msg"] = f"material prim 없음: {mat_path}"
+            return
+        try:
+            material = UsdShade.Material(mat_prim)
+            bind_api = UsdShade.MaterialBindingAPI.Apply(mesh_prim)
+            bind_api.Bind(material)
+            outcome["ok"] = True
+            outcome["msg"] = "OK"
+        except Exception as exc:
+            outcome["msg"] = str(exc)
+
+    try:
+        from .lam_sequence_engine import _dispatch_main_wait
+
+        if not _dispatch_main_wait(_do_in_main, timeout=15.0):
+            print(
+                f"{_PRINT_PREFIX} material bind timeout mesh={mesh_path} mat={mat_path}",
+                flush=True,
+            )
+            return False
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} material bind dispatch 실패 mesh={mesh_path}: {exc}",
+            flush=True,
+        )
+        return False
+
+    if outcome["ok"]:
+        print(
+            f"{_PRINT_PREFIX} material bind OK mesh={mesh_path} mat={mat_path}",
+            flush=True,
+        )
+        return True
+    print(
+        f"{_PRINT_PREFIX} material bind 실패 mesh={mesh_path} mat={mat_path} — {outcome['msg']}",
+        flush=True,
+    )
+    return False
+
+
+def _csv_play_material_binding_test_worker(
+    calls: List[Tuple[str, str, float]],
+) -> None:
+    """``calls``: ``(mesh_path, material_path, delay_sec_from_play_start)`` — 오름차순 권장."""
+    t0 = time.monotonic()
+    for mesh_path, mat_path, delay_sec in calls:
+        target = t0 + max(0.0, float(delay_sec))
+        while time.monotonic() < target:
+            if (
+                _csv_play_material_test_stop.is_set()
+                or csv_playback_stop_requested()
+            ):
+                return
+            time.sleep(min(0.05, target - time.monotonic()))
+        if _csv_play_material_test_stop.is_set() or csv_playback_stop_requested():
+            return
+        apply_material_binding_to_prim(mesh_path, mat_path)
+
+
+def start_csv_play_material_binding_test(
+    calls: Optional[List[Tuple[str, str, float]]] = None,
+) -> None:
+    """CSV Play 시작 직후 material 바인딩을 wall-clock 기준으로 예약 (기본 3회 / 0·1·2초).
+
+    테스트 시 ``run_csv_timed_playback`` 안의 호출 블록 주석을 해제한다.
+    """
+    if calls is None:
+        calls = [
+            ("/World/MyMesh", "/World/Looks/MyMaterial", 0.0),
+            ("/World/MyMesh2", "/World/Looks/MyMaterial2", 1.0),
+            ("/World/MyMesh3", "/World/Looks/MyMaterial3", 2.0),
+        ]
+    ordered = sorted(calls, key=lambda c: float(c[2]))
+    _csv_play_material_test_stop.clear()
+    threading.Thread(
+        target=_csv_play_material_binding_test_worker,
+        args=(ordered,),
+        daemon=True,
+        name="lam-csv-play-material-test",
+    ).start()
+
+
 def run_csv_timed_playback(
     registry: Any,
     scheduler: Any,
@@ -2399,6 +2524,22 @@ def run_csv_timed_playback(
         return
 
     apply_csv_play_initial_wafer_visibility()
+
+    # -------------------------------------------------------------------------
+    # CSV Play material binding 테스트 (주석 해제 후 mesh / material 경로 수정)
+    # Play 시작 기준 setTimeout 유사: 즉시 1회 → 1초 후 → 2초 후 (총 3회).
+    #
+    # start_csv_play_material_binding_test(
+    #     [
+    #         ("/World/MyMesh", "/World/Looks/MyMaterial", 0.0),
+    #         ("/World/MyMesh2", "/World/Looks/MyMaterial2", 1.0),
+    #         ("/World/MyMesh3", "/World/Looks/MyMaterial3", 2.0),
+    #     ],
+    # )
+    #
+    # 또는 개별 호출만 쓰려면 (스케줄러 없이 직접 — Play 스레드에서 1회만 권장):
+    # apply_material_binding_to_prim("/World/MyMesh", "/World/Looks/MyMaterial")
+    # -------------------------------------------------------------------------
 
     csv_total = max(float(b.time_sec) for b in ordered)
     wall_total_est = csv_total / sp
@@ -2447,6 +2588,7 @@ def run_csv_timed_playback(
                 break
     finally:
         _csv_play_progress_stop.set()
+        _csv_play_material_test_stop.set()
         try:
             ticker.join(timeout=2.0)
         except Exception:
@@ -3422,6 +3564,8 @@ __all__ = [
     "format_csv_playback_schedule",
     "preview_csv_playback_schedule",
     "apply_csv_play_initial_wafer_visibility",
+    "apply_material_binding_to_prim",
+    "start_csv_play_material_binding_test",
     "run_csv_timed_playback",
     "request_stop_csv_playback",
     "clear_csv_playback_stop",
