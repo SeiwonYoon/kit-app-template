@@ -53,7 +53,7 @@ load_automatically = True
 #   default_load_usd_path = r"lam\usd\master.usd"
 # default_load_usd_path = "lam/usd/master.usd"
 default_load_usd_path = "C:/Users/ptK/Documents/kit-app-template_mine/lam/usd/combine_1.usd"
-# default_load_usd_path = "lam/usd/LAM_0514_v02/FBX/Combine_01.usd"
+# default_load_usd_path = "lam/usd/LAM_v02/FBX/Combine_01.usd"
 
 
 _PRINT_PREFIX = "[LAM/WIN]"

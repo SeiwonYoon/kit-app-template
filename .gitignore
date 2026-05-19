@@ -38,3 +38,7 @@ deps/**/user.toml
 *.etli
 *.etl
 /data/
+
+# LAM web bridge — Vite `npm run build` / `npm install` (generated, do not commit)
+source/extensions/morph.lam_web_bridge/web/streaming_ui/dist/
+source/extensions/morph.lam_web_bridge/web/streaming_ui/node_modules/

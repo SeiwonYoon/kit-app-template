@@ -93,16 +93,51 @@ export default function LamSimulation() {
   const csvSelectedRef = useRef(csvSelected);
   const speedRef = useRef(speed);
 
+  /** true 이면 폴링이 해당 필드를 덮어쓰지 않음 */
+  const userTouchedRef = useRef({
+    master: false,
+    csvDir: false,
+    csvFile: false,
+    speed: false,
+  });
+  const initialSyncDoneRef = useRef(false);
+
   masterPathRef.current = masterPath;
   csvDirRef.current = csvDir;
   csvSelectedRef.current = csvSelected;
   speedRef.current = speed;
 
   const applyState = useCallback((s: LamApiState) => {
-    if (s.master_path != null) setMasterPath(s.master_path);
-    if (s.csv_dir != null) setCsvDir(s.csv_dir);
-    if (s.csv_files != null) setCsvFiles(s.csv_files);
-    if (s.csv_selected != null) setCsvSelected(s.csv_selected);
+    const touched = userTouchedRef.current;
+    const first = !initialSyncDoneRef.current;
+    if (first) {
+      initialSyncDoneRef.current = true;
+    }
+
+    if ((first || !touched.master) && s.master_path != null) {
+      setMasterPath(s.master_path);
+    }
+    if ((first || !touched.csvDir) && s.csv_dir != null) {
+      setCsvDir(s.csv_dir);
+    }
+    if (s.csv_files != null) {
+      setCsvFiles(s.csv_files);
+      if (first || !touched.csvFile) {
+        if (s.csv_selected != null) setCsvSelected(s.csv_selected);
+      } else if (csvSelectedRef.current) {
+        const still = s.csv_files.some(
+          (it) =>
+            (it.path ?? "") === csvSelectedRef.current ||
+            (it.name ?? "") === csvSelectedRef.current
+        );
+        if (!still && s.csv_files.length > 0) {
+          setCsvSelected(s.csv_files[0].path ?? "");
+        }
+      }
+    } else if ((first || !touched.csvFile) && s.csv_selected != null) {
+      setCsvSelected(s.csv_selected);
+    }
+
     if (s.schedule != null) setSchedule(s.schedule);
     if (s.progress != null) setProgress(s.progress);
     if (s.log != null) setLog(s.log);
@@ -137,12 +172,22 @@ export default function LamSimulation() {
 
   const refreshCsvList = useCallback(async () => {
     try {
+      const keepPath = csvSelectedRef.current;
       const j = await apiCommand({
         cmd: "csv_refresh_list",
         csv_dir: csvDirRef.current.trim(),
       });
+      userTouchedRef.current.csvDir = false;
       const items = (j?.items as CsvFileItem[] | undefined) ?? [];
-      if (items.length) setCsvSelected(items[0].path ?? "");
+      if (items.length) {
+        const pick =
+          keepPath &&
+          items.some((it) => (it.path ?? "") === keepPath || (it.name ?? "") === keepPath)
+            ? keepPath
+            : (items[0].path ?? "");
+        setCsvSelected(pick);
+        userTouchedRef.current.csvFile = true;
+      }
       await pollState();
     } catch (e) {
       setLog(`목록 새로고침 실패: ${e instanceof Error ? e.message : String(e)}`);
@@ -152,6 +197,7 @@ export default function LamSimulation() {
   const onOpenMaster = useCallback(async () => {
     try {
       await apiCommand({ cmd: "open_master", path: masterPathRef.current.trim() });
+      userTouchedRef.current.master = false;
       await pollState();
     } catch (e) {
       setLog(`Open Master 실패: ${e instanceof Error ? e.message : String(e)}`);
@@ -161,6 +207,8 @@ export default function LamSimulation() {
   const onTimelineRefresh = useCallback(async () => {
     try {
       await apiCommand({ cmd: "csv_timeline_refresh", ...csvPayload() });
+      userTouchedRef.current.csvDir = false;
+      userTouchedRef.current.csvFile = false;
       await pollState();
     } catch (e) {
       setLog(`타임라인 갱신 실패: ${e instanceof Error ? e.message : String(e)}`);
@@ -170,6 +218,8 @@ export default function LamSimulation() {
   const onCsvPlay = useCallback(async () => {
     try {
       await apiCommand({ cmd: "csv_play", ...csvPayload() });
+      userTouchedRef.current.csvDir = false;
+      userTouchedRef.current.csvFile = false;
       await pollState();
     } catch (e) {
       setLog(`CSV Play 실패: ${e instanceof Error ? e.message : String(e)}`);
@@ -189,13 +239,16 @@ export default function LamSimulation() {
     let cancelled = false;
     (async () => {
       await pollState();
-      if (!cancelled) await refreshCsvList();
+      if (!cancelled && csvFiles.length === 0) {
+        await refreshCsvList();
+      }
     })();
     const id = window.setInterval(() => void pollState(), POLL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(id);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount once
   }, [pollState, refreshCsvList]);
 
   const statusBadge =
@@ -224,7 +277,10 @@ export default function LamSimulation() {
             className={styles.pathInput}
             type="text"
             value={masterPath}
-            onChange={(e) => setMasterPath(e.target.value)}
+            onChange={(e) => {
+              userTouchedRef.current.master = true;
+              setMasterPath(e.target.value);
+            }}
           />
         </div>
         <div className={styles.toolbar}>
@@ -245,7 +301,10 @@ export default function LamSimulation() {
             className={styles.pathInput}
             type="text"
             value={csvDir}
-            onChange={(e) => setCsvDir(e.target.value)}
+            onChange={(e) => {
+              userTouchedRef.current.csvDir = true;
+              setCsvDir(e.target.value);
+            }}
           />
         </div>
         <div className={styles.row}>
@@ -254,7 +313,10 @@ export default function LamSimulation() {
             id="lam-csv-file"
             className={styles.select}
             value={csvSelected}
-            onChange={(e) => setCsvSelected(e.target.value)}
+            onChange={(e) => {
+              userTouchedRef.current.csvFile = true;
+              setCsvSelected(e.target.value);
+            }}
           >
             {csvFiles.length === 0 ? (
               <option value="">(CSV 없음)</option>
@@ -290,12 +352,27 @@ export default function LamSimulation() {
             min={0.1}
             max={20}
             value={speed}
-            onChange={(e) => setSpeed(clampSpeed(parseFloat(e.target.value)))}
+            onChange={(e) => {
+              userTouchedRef.current.speed = true;
+              setSpeed(clampSpeed(parseFloat(e.target.value)));
+            }}
           />
-          <button type="button" onClick={() => setSpeed(1)}>
+          <button
+            type="button"
+            onClick={() => {
+              userTouchedRef.current.speed = true;
+              setSpeed(1);
+            }}
+          >
             1x
           </button>
-          <button type="button" onClick={() => setSpeed(5)}>
+          <button
+            type="button"
+            onClick={() => {
+              userTouchedRef.current.speed = true;
+              setSpeed(5);
+            }}
+          >
             5x
           </button>
         </div>
