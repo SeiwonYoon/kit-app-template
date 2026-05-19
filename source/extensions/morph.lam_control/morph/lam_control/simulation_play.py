@@ -2960,6 +2960,8 @@ class LamSimulationCsvPlayWindow:
         self._csv_build_thread: Optional[threading.Thread] = None
         self._prepared_playback: Optional[CachedCsvPlayback] = None
         self._build_ui_ticker: Optional[_SecondsIntervalProgress] = None
+        # Viewport HUD 등 ``ui.Window`` 없이 Play API 만 쓸 때 선택 인덱스.
+        self._csv_selected_index: int = 0
 
     def destroy(self) -> None:
         """윈도우·콤보·로그 위젯 참조를 해제한다 (``lam_window`` 종료 시 호출)."""
@@ -3009,6 +3011,36 @@ class LamSimulationCsvPlayWindow:
                 self._log_label.text = msg
         except Exception:
             pass
+
+    def ensure_playback_models(self) -> None:
+        """Viewport CSV HUD 가 전용 ``ui.Window`` 없이 Play API 를 쓸 때 모델·목록만 준비."""
+        if self._csv_dir_model is not None:
+            return
+        try:
+            from omni.ui import SimpleFloatModel, SimpleStringModel  # type: ignore
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} ensure_playback_models: omni.ui — {exc}", flush=True)
+            return
+        self._csv_dir_model = SimpleStringModel(str(get_lam_csv_dir()))
+        self._speed_model = SimpleFloatModel(1.0)
+        self._reload_csv_list(preserve_selection=False)
+
+    def set_csv_combo_index(self, index: int) -> None:
+        """CSV 파일 드롭다운 인덱스 (HUD ↔ 본창 공유)."""
+        if not self._csv_paths:
+            self._csv_selected_index = 0
+            return
+        self._csv_selected_index = max(0, min(int(index), len(self._csv_paths) - 1))
+        if self._csv_file_stack is not None:
+            self._rebuild_csv_combo_ui(selected_index=self._csv_selected_index)
+
+    def get_csv_combo_index(self) -> int:
+        if self._combo is not None:
+            return _read_combo_index(self._combo)
+        return int(self._csv_selected_index)
+
+    def csv_file_display_names(self) -> List[str]:
+        return [p.name for p in self._csv_paths]
 
     def show(self) -> None:
         try:
@@ -3219,6 +3251,12 @@ class LamSimulationCsvPlayWindow:
         self._log(f"CSV {len(self._csv_paths)}개 — {d}")
 
     def _rebuild_csv_combo_ui(self, *, selected_index: int = 0) -> None:
+        if self._csv_paths:
+            self._csv_selected_index = max(
+                0, min(int(selected_index), len(self._csv_paths) - 1)
+            )
+        else:
+            self._csv_selected_index = 0
         try:
             import omni.ui as ui  # type: ignore
         except Exception:
@@ -3242,9 +3280,12 @@ class LamSimulationCsvPlayWindow:
                 self._combo = ui.ComboBox(idx, *names, width=520, height=26)
 
     def _selected_csv_path(self) -> Optional[Path]:
-        if not self._csv_paths or self._combo is None:
+        if not self._csv_paths:
             return None
-        idx = _read_combo_index(self._combo)
+        if self._combo is not None:
+            idx = _read_combo_index(self._combo)
+        else:
+            idx = int(self._csv_selected_index)
         idx = max(0, min(idx, len(self._csv_paths) - 1))
         return self._csv_paths[idx]
 
@@ -3465,9 +3506,6 @@ class LamSimulationCsvPlayWindow:
     def _on_play_clicked(self) -> None:
         if not self._csv_paths:
             self._log("CSV 없음 — lam/csv 에 파일을 추가하세요.")
-            return
-        if self._combo is None:
-            self._log("Combo 없음")
             return
         if self._csv_play_thread_alive():
             self._log("이미 CSV Play 실행 중 — [CSV 중지] 후 다시 Play 하세요.")

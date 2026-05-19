@@ -31,6 +31,10 @@ from .lam_runtime_evaluator import RuntimeEvaluator
 from .lam_sequence_editor import LamSequenceEditor
 from .simulation_play import LamSimulationCsvPlayWindow
 from .lam_viewport import LamViewport
+from .lam_csv_viewport_hud import (
+    LAM_CSV_VIEWPORT_CONTROLS_ENABLED,
+    LamCsvViewportControlsHud,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +141,7 @@ class LamWindow:
         self._sequence_editor: Optional[LamSequenceEditor] = None
         self._json_test_window: Optional[LamJsonTestWindow] = None
         self._csv_sim_window: Optional[LamSimulationCsvPlayWindow] = None
+        self._csv_viewport_hud: Optional[LamCsvViewportControlsHud] = None
         self._external_runner: Optional[LamExternalEventRunner] = None
         self._window = None
         self._instances_inner = None
@@ -175,6 +180,7 @@ class LamWindow:
                 self._window.visible = True
                 # 시퀀스 편집기도 같이 살린다(REQ-008).
                 self._open_editor()
+                self._sync_csv_viewport_hud()
                 return
             except Exception:
                 self._window = None
@@ -392,6 +398,30 @@ class LamWindow:
             print(f"{_PRINT_PREFIX} auto open editor failed: {exc}", flush=True)
 
         self._schedule_autoload_master_on_startup()
+        self._sync_csv_viewport_hud()
+
+    def _sync_csv_viewport_hud(self) -> None:
+        """``LAM_CSV_VIEWPORT_CONTROLS_ENABLED`` 일 때만 Viewport CSV 미니 패널."""
+        if not LAM_CSV_VIEWPORT_CONTROLS_ENABLED:
+            if self._csv_viewport_hud is not None:
+                try:
+                    self._csv_viewport_hud.destroy()
+                except Exception:
+                    pass
+                self._csv_viewport_hud = None
+            return
+        if self._csv_sim_window is None:
+            self._csv_sim_window = LamSimulationCsvPlayWindow(
+                registry=self._registry,
+                scheduler=self._scheduler,
+            )
+        self._csv_sim_window.ensure_playback_models()
+        if self._csv_viewport_hud is None:
+            self._csv_viewport_hud = LamCsvViewportControlsHud(
+                self._csv_sim_window,
+                viewport=self._viewport,
+            )
+        self._csv_viewport_hud.sync_layers()
 
     def destroy(self) -> None:
         try:
@@ -412,6 +442,12 @@ class LamWindow:
         except Exception:
             pass
         self._csv_sim_window = None
+        try:
+            if self._csv_viewport_hud is not None:
+                self._csv_viewport_hud.destroy()
+        except Exception:
+            pass
+        self._csv_viewport_hud = None
         try:
             if self._external_runner is not None:
                 self._external_runner.stop()
@@ -663,6 +699,8 @@ class LamWindow:
         self._log(
             f"LAM Viewport 강제 열기 {'OK' if ok else 'FAIL'} | {self._viewport.status_text()}"
         )
+        if ok:
+            self._sync_csv_viewport_hud()
 
     def _on_diagnose_option_e(self) -> None:
         """Option E 운영 상태를 한 번에 콘솔에 dump 하고 한 줄 요약을 Log 라벨에 표시."""

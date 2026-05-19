@@ -267,6 +267,8 @@ TIMESAMPLES 가 없어도 JSON 에 있는 MOVE/Z 등은 **그대로** 재생된�
 
 **CSV 중지:** 시뮬 창 **CSV 중지** → ``request_stop_csv_playback()`` (대기 sleep 탈출 + ``LamSequenceRunner.stop()`` + ``scheduler.stop_all()``).
 
+**Viewport CSV 미니 패널 (선택):** ``lam_csv_viewport_hud.py`` 상단 ``LAM_CSV_VIEWPORT_CONTROLS_ENABLED = True`` — LAM Window 표시 시 Viewport 우측 상단에 폴더·파일·목록/타임라인/Play/중지·배속만 오버레이. 기존 **LAM CSV 시뮬 재생** ``ui.Window`` 는 변경 없음.
+
 ---
 
 ## 11. CSV 시뮬 창 — 초기화 버튼
