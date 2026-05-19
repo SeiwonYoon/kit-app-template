@@ -238,7 +238,7 @@ lam/lam_event_sequences/*.json
 | FOUP | `build_lot_id_to_foup_index` | `eqp_start_tm` 순 **lot_id 최초 등장** → foup1, foup2, … |
 | dwell | `rows_to_dwell_records` | 한 행 = 한 슬롯 **머무름**; `parse_module_nm_to_slot_key` |
 | 정렬 | `sort_dwells_for_playback` | **전역** `eqp_start_tm` 오름차순 |
-| 재생 | `run_csv_timed_playback` | CSV ``t`` 까지 ``sleep`` → 로그 → `run_lam_sim_steps(speed_scale=…)` |
+| 재생 | `run_csv_timed_playback` | 블록별 스레드: CSV ``t`` 까지 ``sleep`` → 로그/JSON · ATM·VTM 레인 병렬, 동일 레인 선점 |
 | 블록 | `build_csv_timed_playback_blocks` | dwell(로그만) + pick/transfer/place(JSON) |
 
 **해석**
@@ -258,9 +258,9 @@ python morph/lam_control/simulation_play.py lam/csv/eap_tasjr91_sample_v1.csv
 ```
 
 **UI 타임라인:** CSV 시뮬 창 **재생 배속**(1x/5x 등) + **CSV 재생 타임라인** 미리보기.
-Play 시 `run_csv_timed_playback`: CSV ``eqp_start_tm`` 까지 대기(÷배속) → 콘솔 한글 로그 → JSON 실행.
+Play 시 `run_csv_timed_playback`: 각 블록이 **자체 스레드**에서 CSV ``eqp_start_tm``(÷배속)까지 대기 후 실행 — **이전 JSON 완료를 기다리지 않음**. **ATM** 과 **VTM** 은 동시 재생 가능; **같은 레인**(예: VTM 연속 이송)은 새 이벤트가 이전 Runner·해당 레인 Z/인스턴스만 선점 후 시작.
 dwell 은 해당 시각 **로그만**, pick/transfer/place 는 그 시각에 이벤트 JSON **안의 모든 스텝**
-(MOVE·Z·visibility·DELAY·TIMESAMPLES_REPLAY 있으면 포함)을 `run_lam_sim_steps(speed_scale=…)` 로 실행.
+(MOVE·Z·visibility·DELAY·TIMESAMPLES_REPLAY 있으면 포함)을 `LamSequenceRunner.run(speed_scale=…)` 로 실행.
 TIMESAMPLES 가 없어도 JSON 에 있는 MOVE/Z 등은 **그대로** 재생된다. 배속은 CSV 대기·스텝 재생 **모두** ÷배속.
 
 > ``morph.tbs_control_1`` 은 import/수정하지 않음. 배속은 LAM ``LamSequenceRunner.run(speed_scale)`` 만 사용.

@@ -2173,7 +2173,9 @@ class _SecondsIntervalProgress:
 # CSV Play 중지 — 백그라운드 대기(sleep)·LamSequenceRunner 루프 공통
 _csv_play_stop_event = threading.Event()
 _csv_play_runner_lock = threading.Lock()
-_csv_play_active_runner: Any = None
+_csv_play_active_runners: List[Any] = []
+
+_CSV_PLAYBACK_LANES = ("atm", "vtm")
 
 
 def clear_csv_playback_stop() -> None:
@@ -2186,6 +2188,104 @@ def csv_playback_stop_requested() -> bool:
     return _csv_play_stop_event.is_set()
 
 
+def _csv_play_register_runner(runner: Any) -> None:
+    with _csv_play_runner_lock:
+        _csv_play_active_runners.append(runner)
+
+
+def _csv_play_unregister_runner(runner: Any) -> None:
+    with _csv_play_runner_lock:
+        try:
+            _csv_play_active_runners.remove(runner)
+        except ValueError:
+            pass
+
+
+def _playback_lane_from_block(block: CsvTimedPlaybackBlock) -> Optional[str]:
+    """CSV 블록 → ``atm`` / ``vtm`` 레인 (동일 레인은 선점·직렬). 없으면 ``None``."""
+    sched = block.schedule
+    if sched is not None and sched.event_name:
+        en = str(sched.event_name).strip().lower()
+        if en.startswith("vtm_"):
+            return "vtm"
+        if en.startswith("atm_"):
+            return "atm"
+    label = (block.label or "").lower()
+    if "vtm" in label or "이송(vtm" in label:
+        return "vtm"
+    if "atm" in label or "foup" in label:
+        return "atm"
+    return None
+
+
+def _stop_lane_playback_motion(
+    lane: str,
+    registry: Any,
+    scheduler: Any,
+) -> None:
+    """같은 장비 레인 선점 — 해당 레인 Z·인스턴스만 정지 (다른 레인 애니 유지)."""
+    from . import lam_rotate_animation as _lrx
+    from . import lam_translate_animation as _ltx
+
+    z_prim = VTM_Z_MOVE_PRIM_PATH if lane == "vtm" else ATM_Z_MOVE_PRIM_PATH
+    try:
+        _ltx.stop_prim_translate_animation(z_prim)
+        _lrx.stop_prim_rotate_animation(z_prim)
+    except Exception:
+        pass
+    prefix = "/World/vtm/" if lane == "vtm" else "/World/atm/"
+    if registry is None or scheduler is None:
+        return
+    stop_fn = getattr(scheduler, "stop", None)
+    if not callable(stop_fn):
+        return
+    try:
+        for inst in registry.all_instances():
+            pp = str(getattr(inst, "prim_path", "") or "")
+            if pp.startswith(prefix):
+                try:
+                    stop_fn(pp)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+class _CsvPlaybackLaneCoordinator:
+    """ATM / VTM 레인별 선점 — 서로 다른 레인은 동시 재생."""
+
+    def __init__(self) -> None:
+        self._lane_locks = {lane: threading.Lock() for lane in _CSV_PLAYBACK_LANES}
+        self._active_runner: Dict[str, Any] = {lane: None for lane in _CSV_PLAYBACK_LANES}
+
+    def preempt_lane(
+        self,
+        lane: str,
+        runner: Any,
+        *,
+        registry: Any,
+        scheduler: Any,
+    ) -> None:
+        if lane not in self._lane_locks:
+            return
+        with self._lane_locks[lane]:
+            prev = self._active_runner.get(lane)
+            if prev is not None and prev is not runner:
+                try:
+                    prev.stop(cancel_all_move_rotate=False)
+                except Exception:
+                    pass
+                _stop_lane_playback_motion(lane, registry, scheduler)
+            self._active_runner[lane] = runner
+
+    def release_lane(self, lane: str, runner: Any) -> None:
+        if lane not in self._lane_locks:
+            return
+        with self._lane_locks[lane]:
+            if self._active_runner.get(lane) is runner:
+                self._active_runner[lane] = None
+
+
 def request_stop_csv_playback(
     registry: Any = None,
     scheduler: Any = None,
@@ -2195,8 +2295,8 @@ def request_stop_csv_playback(
     _csv_play_stop_event.set()
     _csv_play_material_test_stop.set()
     with _csv_play_runner_lock:
-        runner = _csv_play_active_runner
-    if runner is not None:
+        runners = list(_csv_play_active_runners)
+    for runner in runners:
         try:
             runner.stop(cancel_all_move_rotate=True)
         except Exception as exc:
@@ -2240,9 +2340,10 @@ def _run_lam_sim_steps_cancellable(
     steps: LamSimJsonSteps,
     *,
     speed_scale: float = 1.0,
+    lane: Optional[str] = None,
+    lane_coordinator: Optional[_CsvPlaybackLaneCoordinator] = None,
 ) -> None:
     """``run_lam_sim_steps`` 와 동일하나 CSV 중지 시 Runner 를 끊을 수 있게 등록."""
-    global _csv_play_active_runner
     if not steps or csv_playback_stop_requested():
         return
     try:
@@ -2251,9 +2352,12 @@ def _run_lam_sim_steps_cancellable(
         print(f"{_PRINT_PREFIX} LamSequenceRunner import 실패: {exc}", flush=True)
         return
     runner = LamSequenceRunner(registry, scheduler)
-    with _csv_play_runner_lock:
-        _csv_play_active_runner = runner
+    _csv_play_register_runner(runner)
     try:
+        if lane and lane_coordinator is not None:
+            lane_coordinator.preempt_lane(
+                lane, runner, registry=registry, scheduler=scheduler
+            )
         sp = float(max(0.01, speed_scale or 1.0))
         quiet = is_csv_playback_compact_log()
         runner.run(
@@ -2263,8 +2367,50 @@ def _run_lam_sim_steps_cancellable(
             quiet=quiet,
         )
     finally:
-        with _csv_play_runner_lock:
-            _csv_play_active_runner = None
+        _csv_play_unregister_runner(runner)
+        if lane and lane_coordinator is not None:
+            lane_coordinator.release_lane(lane, runner)
+
+
+def _csv_playback_block_worker(
+    block: CsvTimedPlaybackBlock,
+    index: int,
+    registry: Any,
+    scheduler: Any,
+    *,
+    t0: float,
+    speed_scale: float,
+    lane_coordinator: _CsvPlaybackLaneCoordinator,
+) -> None:
+    """블록 1개: CSV 시각까지 대기 → (dwell 로그 | 레인별 JSON 실행). 메인 루프 비블로킹."""
+    sp = float(max(0.01, speed_scale or 1.0))
+    target_wall = t0 + float(block.time_sec) / sp
+    wait = max(0.0, target_wall - time.monotonic())
+    if wait > 0.001 and not _sleep_csv_playback(wait):
+        return
+    if csv_playback_stop_requested():
+        return
+
+    wall_elapsed = time.monotonic() - t0
+    sched = block.schedule
+    if sched is None:
+        return
+
+    if not block.steps:
+        _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=False)
+        return
+
+    lane = _playback_lane_from_block(block)
+    _run_lam_sim_steps_cancellable(
+        registry,
+        scheduler,
+        block.steps,
+        speed_scale=sp,
+        lane=lane,
+        lane_coordinator=lane_coordinator,
+    )
+    if not csv_playback_stop_requested():
+        _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=True)
 
 
 def _log_csv_playback_block(
@@ -2516,7 +2662,13 @@ def run_csv_timed_playback(
     *,
     speed_scale: float = 1.0,
 ) -> None:
-    """CSV ``eqp_start_tm`` 에 맞춰 대기 → 로그 → 이벤트 JSON **전 스텝** 실행 (``speed_scale`` 배속)."""
+    """CSV ``eqp_start_tm`` 스케줄 재생 (``speed_scale`` 배속).
+
+    - 각 블록은 **자체 스레드**에서 CSV 시각까지 대기 후 실행 (이전 블록 완료를 기다리지 않음).
+    - **ATM** / **VTM** 레인은 서로 **병렬** 가능.
+    - **동일 레인** (예: VTM↔VTM) 은 새 이벤트 시 이전 Runner·해당 레인 애니만 선점 후 실행.
+    - dwell(``steps`` 없음) 은 해당 시각에 로그만.
+    """
     sp = float(max(0.01, speed_scale or 1.0))
     ordered = sorted(blocks, key=lambda b: (b.time_sec, b.sort_order))
     if not ordered:
@@ -2545,12 +2697,14 @@ def run_csv_timed_playback(
     wall_total_est = csv_total / sp
     print(
         f"{_PRINT_PREFIX} ▶ 재생 시작 | CSV 전체 ~{csv_total:.1f}s | "
-        f"배속 {sp:g}x → 실시간 ~{wall_total_est:.0f}s",
+        f"배속 {sp:g}x → 실시간 ~{wall_total_est:.0f}s | "
+        f"모드: CSV 시각 스케줄 · ATM/VTM 레인 병렬(동일 레인 선점)",
         flush=True,
     )
 
     t0 = time.monotonic()
     stopped = False
+    lane_coordinator = _CsvPlaybackLaneCoordinator()
     _csv_play_progress_stop.clear()
     ticker = threading.Thread(
         target=_csv_play_progress_ticker_loop,
@@ -2559,33 +2713,33 @@ def run_csv_timed_playback(
         name="lam-sim-csv-play-progress",
     )
     ticker.start()
+    workers: List[threading.Thread] = []
     try:
         for i, block in enumerate(ordered, 1):
             if csv_playback_stop_requested():
                 stopped = True
                 break
-            target_wall = t0 + float(block.time_sec) / sp
-            now = time.monotonic()
-            waited = max(0.0, target_wall - now)
-            if waited > 0.001 and not _sleep_csv_playback(waited):
-                stopped = True
-                break
+            t = threading.Thread(
+                target=_csv_playback_block_worker,
+                args=(block, i, registry, scheduler),
+                kwargs={
+                    "t0": t0,
+                    "speed_scale": sp,
+                    "lane_coordinator": lane_coordinator,
+                },
+                daemon=True,
+                name=f"lam-csv-play-blk{i:03d}",
+            )
+            workers.append(t)
+            t.start()
+
+        for t in workers:
             if csv_playback_stop_requested():
                 stopped = True
-                break
-            wall_elapsed = time.monotonic() - t0
-            sched = block.schedule
-            if sched is not None:
-                if block.steps:
-                    _run_lam_sim_steps_cancellable(
-                        registry, scheduler, block.steps, speed_scale=sp
-                    )
-                    _print_csv_compact_line(i, sched, wall_elapsed_sec=wall_elapsed, executed=True)
-                else:
-                    _print_csv_compact_line(i, sched, wall_elapsed_sec=wall_elapsed, executed=False)
-            if csv_playback_stop_requested():
-                stopped = True
-                break
+            try:
+                t.join()
+            except Exception:
+                pass
     finally:
         _csv_play_progress_stop.set()
         _csv_play_material_test_stop.set()
