@@ -34,11 +34,10 @@ Z_TBS_MOVE_UNIT_PER_MM: float = 1.0
 # → ``build_steps_for_event`` 자동 MOVE 의 ``prim`` 필드
 # =============================================================================
 ATM_Z_MOVE_PRIM_PATH: str = (
-    "/WORLD/atm/LAM_ATM_Robot_v01/ATM_Robot_Root/ATM_Body_CTL/ATM_Cylinder_CTL"
+    "/World/atm/LAM_ATM_Robot_v01/LAM_ATM_Robot_v01/ATM_Robot_Root/ATM_Body_CTL/ATM_Cylinder_CTL"
 )
 VTM_Z_MOVE_PRIM_PATH: str = (
-    "/WORLD/vtm/LAM_VTM_Robot_v01/VTM_Robot_Root/VTM_Cylinder_Rotation_CTL/"
-    "VTM_Cylinder_Position_CTL"
+    "/World/vtm/LAM_VTM_Robot_v01/LAM_VTM_Robot_v01/VTM_Robot_Root/VTM_Cylinder_Rotation_CTL/VTM_Cylinder_Postion_CTL"
 )
 
 # =============================================================================
