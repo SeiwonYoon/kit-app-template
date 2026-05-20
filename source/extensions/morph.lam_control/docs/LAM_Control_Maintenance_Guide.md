@@ -238,7 +238,7 @@ lam/lam_event_sequences/*.json
 | FOUP | `build_lot_id_to_foup_index` | `eqp_start_tm` 순 **lot_id 최초 등장** → foup1, foup2, … |
 | dwell | `rows_to_dwell_records` | 한 행 = 한 슬롯 **머무름**; `parse_module_nm_to_slot_key` |
 | 정렬 | `sort_dwells_for_playback` | **전역** `eqp_start_tm` 오름차순 |
-| 재생 | `run_csv_timed_playback` | 블록별 스레드: CSV ``t`` 까지 ``sleep`` → 로그/JSON · ATM·VTM 레인 병렬, 동일 레인 직렬(이전 JSON 완료 후) |
+| 재생 | `run_csv_timed_playback` | 일반: 블록별 스레드·CSV ``t`` 대기. **공정만보기**: CSV ``t`` 유지·레인 내 빈 구간만 생략·배속1x |
 | 블록 | `build_csv_timed_playback_blocks` | dwell(로그만) + pick/transfer/place(JSON) |
 
 **해석**
@@ -258,7 +258,7 @@ python morph/lam_control/simulation_play.py lam/csv/eap_tasjr91_sample_v1.csv
 ```
 
 **UI 타임라인:** CSV 시뮬 창 **재생 배속**(1x/5x 등) + **CSV 재생 타임라인** 미리보기.
-Play 시 `run_csv_timed_playback`: 각 블록이 **자체 스레드**에서 CSV ``eqp_start_tm``(÷배속)까지 대기 후 실행. **ATM** 과 **VTM** 은 동시 재생 가능(레인 락 분리); **같은 레인**(ATM끼리 / VTM끼리)은 이전 JSON 이 **끝난 뒤** 다음 JSON 이 시작(끊기·선점 없음).
+Play 시 `run_csv_timed_playback`: 각 블록이 **자체 스레드**에서 CSV ``eqp_start_tm``(÷배속)까지 대기 후 실행. **ATM** 과 **VTM** 은 CSV 시각에 맞춰 교차 시작(레인 락 분리); **같은 레인**은 이전 JSON 종료 후 ``max(종료 시각, 다음 CSV t)`` 에 시작. UI **공정만보기**만 dwell·**JSON 없는** 빈 대기(레인·전역, 예: ATM 마지막 후 VTM) 생략; **체크 해제** 시 위 일반 재생만 사용.
 dwell 은 해당 시각 **로그만**, pick/transfer/place 는 그 시각에 이벤트 JSON **안의 모든 스텝**
 (MOVE·Z·visibility·DELAY·TIMESAMPLES_REPLAY 있으면 포함)을 `LamSequenceRunner.run(speed_scale=…)` 로 실행.
 TIMESAMPLES 가 없어도 JSON 에 있는 MOVE/Z 등은 **그대로** 재생된다. 배속은 CSV 대기·스텝 재생 **모두** ÷배속.
@@ -267,7 +267,7 @@ TIMESAMPLES 가 없어도 JSON 에 있는 MOVE/Z 등은 **그대로** 재생된�
 
 **CSV 중지:** 시뮬 창 **CSV 중지** → ``request_stop_csv_playback()`` (대기 sleep 탈출 + ``LamSequenceRunner.stop()`` + ``scheduler.stop_all()``).
 
-**Viewport CSV 미니 패널 (선택):** ``lam_csv_viewport_hud.py`` 상단 ``LAM_CSV_VIEWPORT_CONTROLS_ENABLED = True`` — LAM Window 표시 시 Viewport 우측 상단에 폴더·파일·목록/타임라인/Play/중지·배속만 오버레이. 기존 **LAM CSV 시뮬 재생** ``ui.Window`` 는 변경 없음.
+**Viewport CSV 미니 패널 (선택):** ``lam_csv_viewport_hud.py`` — Viewport 우측 상단에 본창과 **동일** ``_process_only_model``·배속·**재생 타임라인**(녹색 강조)·진행 표시. 공정만보기 체크 시 Play 배속 1x 고정. ``register_hud_timeline_ui`` 로 본창과 타임라인 동기.
 
 ---
 

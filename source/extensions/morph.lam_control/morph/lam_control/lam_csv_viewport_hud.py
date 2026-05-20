@@ -4,7 +4,7 @@
 아래 플래그가 True 일 때만 default/LAM Viewport ``get_frame`` 슬롯에 컨트롤을 붙인다.
 
 - **합성 USD** — LAM Window 「② 기존 합성 USD 열기」와 동일 경로 모델 + Open Master
-- **CSV Play** — 폴더·파일·목록/타임라인/Play/중지·배속
+- **CSV Play** — 폴더·파일·목록/타임라인/Play/중지·배속·공정만보기(1x)·재생 타임라인
 
 **on/off:** ``LAM_CSV_VIEWPORT_CONTROLS_ENABLED`` (본 파일 상단).
 """
@@ -27,9 +27,10 @@ _PRINT_PREFIX = "[LAM/CSV-HUD]"
 LAM_CSV_VIEWPORT_CONTROLS_ENABLED = True
 
 _FRAME_SLOT = "morph.lam_control:csv_play_hud"
-_PANEL_W = 300
+_PANEL_W = 320
 _PANEL_PAD = 8
 _TOP_SPACER_H = 12
+_TIMELINE_H = 200
 
 
 def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]:
@@ -82,6 +83,7 @@ class LamCsvViewportControlsHud:
         self._sched_token: int = 0
 
     def destroy(self) -> None:
+        self._csv.register_hud_timeline_ui(None)
         self._destroy_layer()
         self._hud_combo = None
 
@@ -118,6 +120,7 @@ class LamCsvViewportControlsHud:
         _try_mount(max(0, int(delay_frames)))
 
     def _destroy_layer(self) -> None:
+        self._csv.register_hud_timeline_ui(None)
         self._root = None
         try:
             vw = _resolve_viewport_window(self._viewport)
@@ -246,46 +249,104 @@ class LamCsvViewportControlsHud:
                                         with ui.HStack(spacing=4, height=26):
                                             ui.Button(
                                                 "목록",
-                                                width=64,
+                                                width=56,
                                                 clicked_fn=self._on_hud_refresh_clicked,
                                                 tooltip="목록 새로고침",
                                             )
                                             ui.Button(
                                                 "타임라인",
-                                                width=64,
+                                                width=56,
                                                 clicked_fn=self._csv._on_schedule_refresh_clicked,
                                                 tooltip="타임라인·캐시 갱신",
                                             )
                                             ui.Button(
                                                 "Play",
-                                                width=64,
+                                                width=52,
                                                 clicked_fn=self._csv._on_play_clicked,
                                             )
                                             ui.Button(
                                                 "중지",
-                                                width=64,
+                                                width=52,
                                                 clicked_fn=self._csv._on_csv_stop_clicked,
                                             )
+                                        po_m = self._csv._process_only_model
+                                        if po_m is not None:
+                                            with ui.HStack(spacing=4, height=22):
+                                                ui.Label("공정만보기", width=72)
+                                                ui.CheckBox(
+                                                    model=po_m,
+                                                    width=20,
+                                                    tooltip=(
+                                                        "체크 후 Play: CSV 시각 유지, "
+                                                        "JSON 없는 빈 대기만 생략(배속 1x). "
+                                                        "체크 해제 시 기존 시간 재생."
+                                                    ),
+                                                )
+                                                ui.Spacer()
                                         with ui.HStack(spacing=4, height=26):
                                             ui.Label("배속", width=36)
                                             sp_m = self._csv._speed_model
                                             if sp_m is not None:
-                                                ui.FloatField(model=sp_m, width=56)
+                                                ui.FloatField(model=sp_m, width=52)
                                             ui.Button(
                                                 "1x",
-                                                width=32,
+                                                width=30,
                                                 clicked_fn=lambda: self._csv._set_speed_preset(
                                                     1.0
                                                 ),
                                             )
                                             ui.Button(
                                                 "5x",
-                                                width=32,
+                                                width=30,
                                                 clicked_fn=lambda: self._csv._set_speed_preset(
                                                     5.0
                                                 ),
+                                                tooltip="공정만보기 체크 시 Play 는 1x 고정",
                                             )
                                             ui.Spacer()
+                                        ui.Label(
+                                            "재생 타임라인 — JSON 재생 중 녹색",
+                                            height=16,
+                                            style={"font_size": 11, "color": 0xFFAAAAAA},
+                                        )
+                                        hud_prog_model = None
+                                        schedule_stack = None
+                                        try:
+                                            from omni.ui import (  # type: ignore
+                                                SimpleStringModel,
+                                            )
+
+                                            hud_prog_model = SimpleStringModel(
+                                                "(대기)"
+                                            )
+                                            with ui.ScrollingFrame(
+                                                height=_TIMELINE_H,
+                                                style={
+                                                    "background_color": 0xFF1A1E26,
+                                                    "border_width": 1,
+                                                    "border_color": 0xFF3A3A3A,
+                                                },
+                                            ):
+                                                with ui.VStack(
+                                                    spacing=2, height=0
+                                                ) as tl_stack:
+                                                    schedule_stack = tl_stack
+                                            ui.StringField(
+                                                model=hud_prog_model,
+                                                height=20,
+                                                read_only=True,
+                                            )
+                                        except Exception:
+                                            ui.Label(
+                                                "(타임라인 UI 없음)",
+                                                height=40,
+                                                word_wrap=True,
+                                            )
+                                        if schedule_stack is not None:
+                                            self._csv.register_hud_timeline_ui(
+                                                schedule_stack,
+                                                build_progress_model=hud_prog_model,
+                                            )
                         ui.Spacer()
         except Exception as exc:
             print(f"{_PRINT_PREFIX} mount failed: {exc}", flush=True)
@@ -293,7 +354,8 @@ class LamCsvViewportControlsHud:
             return
 
         print(
-            f"{_PRINT_PREFIX} Viewport 패널 표시 (합성 USD + CSV, 우측 상단).",
+            f"{_PRINT_PREFIX} Viewport 패널 표시 "
+            f"(합성 USD + CSV·공정만보기·타임라인, 우측 상단).",
             flush=True,
         )
 

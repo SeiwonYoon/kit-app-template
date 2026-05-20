@@ -33,6 +33,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+import weakref
 
 from .lam_slot_z_config import (
     ATM_Z_MOVE_PRIM_PATH,
@@ -1935,12 +1936,12 @@ def format_csv_playback_schedule(
 
 
 def _schedule_entry_match_key(e: CsvPlaybackScheduleEntry) -> Tuple[Any, ...]:
+    """타임라인 행·재생 블록 매칭 (메타/풀빌드 ``title_ko`` 차이 무시)."""
     return (
         round(float(e.time_sec), 6),
         int(e.sort_order),
         str(e.category),
         str(e.event_name),
-        str(e.title_ko),
     )
 
 
@@ -2313,9 +2314,25 @@ def build_csv_playback_schedule(dwells: List[DwellRecord]) -> List[CsvPlaybackSc
 # CSV Play 실시간 진행 (UI 1초 갱신 — 콘솔 1초 틱 로그 없음)
 _csv_play_progress_ui_cb: Optional[Callable[[float, float, float, float], None]] = None
 _csv_play_progress_stop = threading.Event()
+_csv_play_progress_snap_lock = threading.Lock()
+_csv_play_progress_snap: Dict[str, Any] = {
+    "process_only": False,
+    "json_done": 0,
+    "json_total": 0,
+    "csv_t_display": 0.0,
+    "csv_total": 0.0,
+    "t0": 0.0,
+    "speed_scale": 1.0,
+}
+
+# 공정만보기 전용 — 마지막 JSON 종료(전 레인) 시각·CSV t (레인 간 빈 텀 압축)
+_csv_play_global_end_lock = threading.Lock()
+_csv_play_global_wall_end: float = 0.0
+_csv_play_global_csv_end: float = 0.0
 
 # CSV Play 타임라인 — JSON 실행 중인 행만 UI 에서 녹색 강조 (항목 match key)
 _csv_play_timeline_highlight_cb: Optional[Callable[[frozenset], None]] = None
+_csv_play_timeline_window_ref: Optional[weakref.ReferenceType[Any]] = None
 _csv_play_timeline_active_keys_lock = threading.Lock()
 _csv_play_timeline_active_keys: set = set()
 
@@ -2332,12 +2349,33 @@ def set_csv_play_timeline_highlight_callback(
     _csv_play_timeline_highlight_cb = cb
 
 
-def _csv_play_timeline_highlight_notify(active_keys: frozenset) -> None:
-    cb = _csv_play_timeline_highlight_cb
-    if cb is None:
-        return
+def register_csv_play_timeline_window(window: Any) -> None:
+    """타임라인 녹색 강조 대상 UI (본창·HUD 공유 ``LamSimulationCsvPlayWindow``)."""
+    global _csv_play_timeline_window_ref
+    _csv_play_timeline_window_ref = weakref.ref(window)
 
+
+def unregister_csv_play_timeline_window() -> None:
+    global _csv_play_timeline_window_ref
+    _csv_play_timeline_window_ref = None
+
+
+def _csv_play_timeline_highlight_notify(active_keys: frozenset) -> None:
     def _ui() -> None:
+        ref = _csv_play_timeline_window_ref
+        win = ref() if ref is not None else None
+        if win is not None:
+            try:
+                win._apply_schedule_row_highlight(active_keys)
+                return
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} 타임라인 강조 UI 실패: {exc}",
+                    flush=True,
+                )
+        cb = _csv_play_timeline_highlight_cb
+        if cb is None:
+            return
         try:
             cb(active_keys)
         except Exception:
@@ -2375,6 +2413,185 @@ def set_csv_play_progress_ui_callback(
     """Play 중 UI 갱신: (csv_t, csv_total, wall_elapsed, wall_total_est)."""
     global _csv_play_progress_ui_cb
     _csv_play_progress_ui_cb = cb
+
+
+def get_csv_play_progress_snap() -> Dict[str, Any]:
+    """UI 진행 표시용 스냅샷 (공정만보기 시 json_done / csv_t_display 등)."""
+    with _csv_play_progress_snap_lock:
+        return dict(_csv_play_progress_snap)
+
+
+def _reset_csv_play_progress_snap(
+    *,
+    process_only: bool,
+    json_total: int = 0,
+    csv_total: float = 0.0,
+    t0: float = 0.0,
+    speed_scale: float = 1.0,
+) -> None:
+    with _csv_play_progress_snap_lock:
+        _csv_play_progress_snap.clear()
+        _csv_play_progress_snap.update(
+            {
+                "process_only": bool(process_only),
+                "json_done": 0,
+                "json_total": max(0, int(json_total)),
+                "csv_t_display": 0.0,
+                "csv_total": float(csv_total),
+                "t0": float(t0),
+                "speed_scale": float(max(0.01, speed_scale or 1.0)),
+            }
+        )
+
+
+def _csv_play_progress_mark_json_start(
+    block: CsvTimedPlaybackBlock, *, json_done: int
+) -> None:
+    with _csv_play_progress_snap_lock:
+        _csv_play_progress_snap["json_done"] = max(0, int(json_done))
+        _csv_play_progress_snap["csv_t_display"] = float(block.time_sec)
+
+
+def _csv_play_progress_mark_json_done(json_done: int) -> None:
+    with _csv_play_progress_snap_lock:
+        _csv_play_progress_snap["json_done"] = max(0, int(json_done))
+
+
+def _reset_csv_play_global_json_end(*, t0: float, csv_start: float = 0.0) -> None:
+    """공정만보기 시작 시 전역 종료 시각 초기화."""
+    global _csv_play_global_wall_end, _csv_play_global_csv_end
+    with _csv_play_global_end_lock:
+        _csv_play_global_wall_end = float(t0)
+        _csv_play_global_csv_end = float(csv_start)
+
+
+def _bump_csv_play_global_json_end(
+    block: CsvTimedPlaybackBlock, *, wall_end: float
+) -> None:
+    """공정만보기: 어느 레인이든 JSON 종료 후 전역 시각 갱신 (타 레인 대기 당김)."""
+    global _csv_play_global_wall_end, _csv_play_global_csv_end
+    we = float(wall_end)
+    ce = float(block.time_sec)
+    with _csv_play_global_end_lock:
+        if we > _csv_play_global_wall_end:
+            _csv_play_global_wall_end = we
+        if ce > _csv_play_global_csv_end:
+            _csv_play_global_csv_end = ce
+
+
+def _get_csv_play_global_json_end() -> Tuple[float, float]:
+    with _csv_play_global_end_lock:
+        return float(_csv_play_global_wall_end), float(_csv_play_global_csv_end)
+
+
+def _csv_playback_block_is_same(
+    a: CsvTimedPlaybackBlock, b: CsvTimedPlaybackBlock
+) -> bool:
+    """캐시·워커가 서로 다른 인스턴스여도 동일 재생 블록인지."""
+    if a is b:
+        return True
+    if float(a.time_sec) != float(b.time_sec) or int(a.sort_order) != int(b.sort_order):
+        return False
+    sa, sb = a.schedule, b.schedule
+    if sa is None and sb is None:
+        return True
+    if sa is None or sb is None:
+        return False
+    return _schedule_entry_match_key(sa) == _schedule_entry_match_key(sb)
+
+
+def _has_json_csv_between(
+    lo_csv: float,
+    hi_csv: float,
+    all_blocks: List[CsvTimedPlaybackBlock],
+    current: CsvTimedPlaybackBlock,
+    *,
+    lane: Optional[str] = None,
+) -> bool:
+    """``(lo_csv, hi_csv)`` 에 다른 JSON 이 있으면 ``True`` (현재 블록 제외, ``lane`` 필터 가능)."""
+    lo = float(lo_csv)
+    hi = float(hi_csv)
+    for b in all_blocks:
+        if _csv_playback_block_is_same(b, current) or not b.steps:
+            continue
+        if lane is not None and _playback_lane_from_block(b) != lane:
+            continue
+        t = float(b.time_sec)
+        if lo < t < hi:
+            return True
+    return False
+
+
+def _process_only_start_wall(
+    *,
+    lane_ready: float,
+    nominal_wall: float,
+    block: CsvTimedPlaybackBlock,
+    all_blocks: List[CsvTimedPlaybackBlock],
+    lane_last_csv: float,
+    lane: Optional[str],
+) -> float:
+    """공정만보기 전용 시작 시각 (일반 재생은 ``_csv_playback_block_worker`` 유지).
+
+    - 전역 ``g_csv`` 기준 사이에 다른 JSON 이 남아 있으면 ``nom`` 까지 대기.
+    - 사이가 비었거나(VTM→VTM) 모두 끝났으면 ``max(레인 준비, 전역 종료)`` 로 즉시 이어 붙임.
+    - JSON wall 시간 > CSV 간격(긴 애니) 이어도 대기하지 않음.
+    - VTM t=1·ATM t=3 처럼 시각 정렬 필요 시에만 ``nom`` 대기.
+    """
+    lr = float(lane_ready)
+    nom = float(nominal_wall)
+    g_wall, g_csv = _get_csv_play_global_json_end()
+    now = time.monotonic()
+    block_csv = float(block.time_sec)
+    lane_lo = float(lane_last_csv)
+
+    if _has_json_csv_between(g_csv, block_csv, all_blocks, block):
+        return max(lr, nom)
+
+    if lane and _has_json_csv_between(lane_lo, block_csv, all_blocks, block, lane=lane):
+        return max(lr, nom)
+
+    if now >= nom or lr >= nom or g_wall >= nom:
+        return max(lr, g_wall)
+
+    csv_span = block_csv - g_csv
+    wall_gap = nom - g_wall
+    if (
+        now < nom
+        and csv_span > 1e-9
+        and abs(csv_span - wall_gap) <= 1e-3
+        and lr <= g_wall + 1e-3
+    ):
+        return max(lr, nom)
+    return max(lr, g_wall)
+
+
+def _sleep_until_process_only_start(
+    *,
+    lane_ready: float,
+    nominal_wall: float,
+    block: CsvTimedPlaybackBlock,
+    all_blocks: List[CsvTimedPlaybackBlock],
+    lane_last_csv: float,
+    lane: Optional[str],
+) -> bool:
+    """공정만보기: 목표 시각까지 대기(전역·레인 완료 시각 재계산). ``False`` = 중지."""
+    while True:
+        if csv_playback_stop_requested():
+            return False
+        start = _process_only_start_wall(
+            lane_ready=lane_ready,
+            nominal_wall=nominal_wall,
+            block=block,
+            all_blocks=all_blocks,
+            lane_last_csv=lane_last_csv,
+            lane=lane,
+        )
+        wait = max(0.0, start - time.monotonic())
+        if wait <= 0.001:
+            return True
+        if not _sleep_csv_playback(min(wait, 0.05)):
+            return False
 
 
 class _SecondsIntervalProgress:
@@ -2613,6 +2830,71 @@ def _run_lam_sim_steps_cancellable(
         _execute()
 
 
+def _csv_playback_execute_json_block(
+    block: CsvTimedPlaybackBlock,
+    index: int,
+    registry: Any,
+    scheduler: Any,
+    *,
+    t0: float,
+    speed_scale: float,
+    lane_coordinator: _CsvPlaybackLaneCoordinator,
+    json_done_before: int = 0,
+) -> None:
+    """한 JSON 블록 실행 (로그·타임라인 강조·진행 스냅샷)."""
+    sp = float(max(0.01, speed_scale or 1.0))
+    sched = block.schedule
+    if sched is None or not block.steps:
+        return
+    _csv_play_progress_mark_json_start(block, json_done=json_done_before)
+    _notify_csv_play_progress_ui()
+    wall_elapsed = time.monotonic() - t0
+    lane = _playback_lane_from_block(block)
+    _csv_play_timeline_row_begin_entry(sched)
+    try:
+        _run_lam_sim_steps_cancellable(
+            registry,
+            scheduler,
+            block.steps,
+            speed_scale=sp,
+            lane=lane,
+            lane_coordinator=lane_coordinator,
+        )
+    finally:
+        _csv_play_timeline_row_end_entry(sched)
+    if not csv_playback_stop_requested():
+        _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=True)
+    _csv_play_progress_mark_json_done(json_done_before + 1)
+    _notify_csv_play_progress_ui()
+    if get_csv_play_progress_snap().get("process_only"):
+        _bump_csv_play_global_json_end(block, wall_end=time.monotonic())
+
+
+def _notify_csv_play_progress_ui() -> None:
+    ui_cb = _csv_play_progress_ui_cb
+    if ui_cb is None:
+        return
+    snap = get_csv_play_progress_snap()
+    t0 = float(snap.get("t0", 0.0) or 0.0)
+    csv_total = float(snap.get("csv_total", 0.0) or 0.0)
+    wall_elapsed = max(0.0, time.monotonic() - t0) if t0 > 0 else 0.0
+    if snap.get("process_only"):
+        csv_t = float(snap.get("csv_t_display", 0.0) or 0.0)
+        wall_total_est = float(max(1, snap.get("json_total", 1) or 1))
+    else:
+        sp = float(max(0.01, snap.get("speed_scale", 1.0) or 1.0))
+        csv_t = min(csv_total, wall_elapsed * sp) if csv_total > 0 else 0.0
+        wall_total_est = csv_total / sp if csv_total > 0 else 0.0
+
+    def _ui() -> None:
+        try:
+            ui_cb(csv_t, csv_total, wall_elapsed, wall_total_est)
+        except Exception:
+            pass
+
+    _post_kit_main_thread(_ui)
+
+
 def _csv_playback_block_worker(
     block: CsvTimedPlaybackBlock,
     index: int,
@@ -2641,21 +2923,16 @@ def _csv_playback_block_worker(
         _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=False)
         return
 
-    lane = _playback_lane_from_block(block)
-    _csv_play_timeline_row_begin_entry(sched)
-    try:
-        _run_lam_sim_steps_cancellable(
-            registry,
-            scheduler,
-            block.steps,
-            speed_scale=sp,
-            lane=lane,
-            lane_coordinator=lane_coordinator,
-        )
-    finally:
-        _csv_play_timeline_row_end_entry(sched)
-    if not csv_playback_stop_requested():
-        _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=True)
+    _csv_playback_execute_json_block(
+        block,
+        index,
+        registry,
+        scheduler,
+        t0=t0,
+        speed_scale=sp,
+        lane_coordinator=lane_coordinator,
+        json_done_before=0,
+    )
 
 
 def _log_csv_playback_block(
@@ -2710,6 +2987,210 @@ def _csv_play_progress_ticker_loop(
             ui_cb(csv_t, csv_total, wall_elapsed, wall_total_est)
         except Exception:
             pass
+
+
+def _csv_play_progress_ticker_snap_loop() -> None:
+    """공정만보기: 스냅샷 기준 진행률 (JSON 시각·건수로 점프)."""
+    while not _csv_play_progress_stop.wait(1.0):
+        if csv_playback_stop_requested():
+            break
+        _notify_csv_play_progress_ui()
+
+
+def _partition_json_blocks_by_lane(
+    blocks: List[CsvTimedPlaybackBlock],
+) -> Tuple[
+    List[Tuple[int, CsvTimedPlaybackBlock]],
+    List[Tuple[int, CsvTimedPlaybackBlock]],
+    List[Tuple[int, CsvTimedPlaybackBlock]],
+]:
+    """``(index, block)`` 리스트 — ATM / VTM / 기타(JSON 있음). dwell 제외."""
+    ordered = sorted(blocks, key=lambda b: (b.time_sec, b.sort_order))
+    atm: List[Tuple[int, CsvTimedPlaybackBlock]] = []
+    vtm: List[Tuple[int, CsvTimedPlaybackBlock]] = []
+    other: List[Tuple[int, CsvTimedPlaybackBlock]] = []
+    for i, b in enumerate(ordered, 1):
+        if not b.steps:
+            continue
+        lane = _playback_lane_from_block(b)
+        if lane == "atm":
+            atm.append((i, b))
+        elif lane == "vtm":
+            vtm.append((i, b))
+        else:
+            other.append((i, b))
+    return atm, vtm, other
+
+
+def _csv_play_process_only_lane_worker(
+    items: List[Tuple[int, CsvTimedPlaybackBlock]],
+    lane: Optional[str],
+    registry: Any,
+    scheduler: Any,
+    *,
+    t0: float,
+    lane_coordinator: _CsvPlaybackLaneCoordinator,
+    json_done_counter: List[int],
+    json_done_lock: threading.Lock,
+    all_json_blocks: List[CsvTimedPlaybackBlock],
+) -> None:
+    """공정만보기 전용: CSV ``t`` 유지 + 레인·전역 빈 구간만 압축 (일반 재생과 분리)."""
+    lane_ready_wall = float(t0)
+    lane_last_csv = 0.0
+    for index, block in items:
+        if csv_playback_stop_requested():
+            return
+        nominal_wall = float(t0) + float(block.time_sec)
+        if not _sleep_until_process_only_start(
+            lane_ready=lane_ready_wall,
+            nominal_wall=nominal_wall,
+            block=block,
+            all_blocks=all_json_blocks,
+            lane_last_csv=lane_last_csv,
+            lane=lane,
+        ):
+            return
+        if csv_playback_stop_requested():
+            return
+        with json_done_lock:
+            json_done_before = int(json_done_counter[0])
+        _csv_playback_execute_json_block(
+            block,
+            index,
+            registry,
+            scheduler,
+            t0=t0,
+            speed_scale=1.0,
+            lane_coordinator=lane_coordinator,
+            json_done_before=json_done_before,
+        )
+        with json_done_lock:
+            json_done_counter[0] = max(
+                int(json_done_counter[0]), json_done_before + 1
+            )
+        lane_ready_wall = time.monotonic()
+        lane_last_csv = max(lane_last_csv, float(block.time_sec))
+
+
+def _run_csv_timed_playback_process_only(
+    registry: Any,
+    scheduler: Any,
+    blocks: List[CsvTimedPlaybackBlock],
+) -> None:
+    """공정만보기: CSV ``t`` 스케줄 유지, dwell·JSON 없는 빈 대기만 생략. 배속 1x."""
+    ordered = sorted(blocks, key=lambda b: (b.time_sec, b.sort_order))
+    if not ordered:
+        print(f"{_PRINT_PREFIX} CSV 공정만보기: 블록 없음", flush=True)
+        return
+
+    apply_csv_play_initial_wafer_visibility()
+
+    all_json_blocks = [b for b in ordered if b.steps]
+    atm_items, vtm_items, other_items = _partition_json_blocks_by_lane(blocks)
+    n_json = len(atm_items) + len(vtm_items) + len(other_items)
+    csv_total = max(float(b.time_sec) for b in ordered)
+
+    print(
+        f"{_PRINT_PREFIX} ▶ 공정만보기 재생 | JSON {n_json}건 | "
+        f"CSV t 표시 0~{csv_total:.1f}s | ATM {len(atm_items)} · VTM {len(vtm_items)} | "
+        f"배속 1x · CSV 시각 유지 · 레인·전역 빈 구간만 생략",
+        flush=True,
+    )
+
+    t0 = time.monotonic()
+    stopped = False
+    clear_csv_play_timeline_highlight()
+    _reset_csv_play_global_json_end(t0=t0, csv_start=0.0)
+    lane_coordinator = _CsvPlaybackLaneCoordinator()
+    json_done_counter: List[int] = [0]
+    json_done_lock = threading.Lock()
+    _reset_csv_play_progress_snap(
+        process_only=True,
+        json_total=n_json,
+        csv_total=csv_total,
+        t0=t0,
+        speed_scale=1.0,
+    )
+    _notify_csv_play_progress_ui()
+    _csv_play_progress_stop.clear()
+    ticker = threading.Thread(
+        target=_csv_play_progress_ticker_snap_loop,
+        daemon=True,
+        name="lam-sim-csv-play-progress-snap",
+    )
+    ticker.start()
+    workers: List[threading.Thread] = []
+    try:
+        lane_kw = {
+            "t0": t0,
+            "lane_coordinator": lane_coordinator,
+            "json_done_counter": json_done_counter,
+            "json_done_lock": json_done_lock,
+            "all_json_blocks": all_json_blocks,
+        }
+        if atm_items:
+            workers.append(
+                threading.Thread(
+                    target=_csv_play_process_only_lane_worker,
+                    args=(atm_items, "atm", registry, scheduler),
+                    kwargs=lane_kw,
+                    daemon=True,
+                    name="lam-csv-play-atm-seq",
+                )
+            )
+        if vtm_items:
+            workers.append(
+                threading.Thread(
+                    target=_csv_play_process_only_lane_worker,
+                    args=(vtm_items, "vtm", registry, scheduler),
+                    kwargs=lane_kw,
+                    daemon=True,
+                    name="lam-csv-play-vtm-seq",
+                )
+            )
+        if other_items:
+            workers.append(
+                threading.Thread(
+                    target=_csv_play_process_only_lane_worker,
+                    args=(other_items, None, registry, scheduler),
+                    kwargs=lane_kw,
+                    daemon=True,
+                    name="lam-csv-play-other-seq",
+                )
+            )
+        for t in workers:
+            if csv_playback_stop_requested():
+                stopped = True
+            t.start()
+        for t in workers:
+            if csv_playback_stop_requested():
+                stopped = True
+            try:
+                t.join()
+            except Exception:
+                pass
+        _csv_play_progress_mark_json_done(n_json)
+        _notify_csv_play_progress_ui()
+    finally:
+        _csv_play_progress_stop.set()
+        _csv_play_material_test_stop.set()
+        clear_csv_play_timeline_highlight()
+        try:
+            ticker.join(timeout=2.0)
+        except Exception:
+            pass
+
+    total_wall = time.monotonic() - t0
+    if stopped:
+        print(
+            f"{_PRINT_PREFIX} 공정만보기 중지 | 실경과 {total_wall:.1f}s | JSON {n_json}건",
+            flush=True,
+        )
+    else:
+        print(
+            f"{_PRINT_PREFIX} 공정만보기 완료 | 실경과 {total_wall:.1f}s | JSON {n_json}건",
+            flush=True,
+        )
 
 
 # CSV Play 시작 시 1회만 보이게 할 FOUP 슬롯 (각 25).
@@ -2906,14 +3387,20 @@ def run_csv_timed_playback(
     blocks: List[CsvTimedPlaybackBlock],
     *,
     speed_scale: float = 1.0,
+    process_only: bool = False,
 ) -> None:
     """CSV ``eqp_start_tm`` 스케줄 재생 (``speed_scale`` 배속).
 
-    - 각 블록은 **자체 스레드**에서 CSV 시각까지 대기 후 실행 (이전 블록 완료를 기다리지 않음).
-    - **ATM** / **VTM** 레인은 서로 **병렬** 가능.
-    - **동일 레인** (ATM끼리 / VTM끼리) 은 이전 JSON 이 **끝난 뒤** 다음 JSON 실행(대기·직렬).
-    - dwell(``steps`` 없음) 은 해당 시각에 로그만.
+    - **일반**: 각 블록 스레드가 CSV 시각까지 대기 후 실행.
+    - **공정만보기** (``process_only``): CSV ``t`` 스케줄 유지, dwell·레인 내 **빈** 대기만 생략, 배속 1x.
+    - **ATM** / **VTM** 은 CSV 시각에 맞춰 교차 시작 가능(동시 0초 시작 아님).
+    - **동일 레인** 은 ``max(이전 JSON 종료, 다음 CSV t)`` 에 시작(직렬).
+    - dwell(``steps`` 없음) 은 일반 모드에서만 해당 시각에 로그.
     """
+    if process_only:
+        _run_csv_timed_playback_process_only(registry, scheduler, blocks)
+        return
+
     sp = float(max(0.01, speed_scale or 1.0))
     ordered = sorted(blocks, key=lambda b: (b.time_sec, b.sort_order))
     if not ordered:
@@ -2951,6 +3438,14 @@ def run_csv_timed_playback(
     stopped = False
     clear_csv_play_timeline_highlight()
     lane_coordinator = _CsvPlaybackLaneCoordinator()
+    n_json = sum(1 for b in ordered if b.steps)
+    _reset_csv_play_progress_snap(
+        process_only=False,
+        json_total=n_json,
+        csv_total=csv_total,
+        t0=t0,
+        speed_scale=sp,
+    )
     _csv_play_progress_stop.clear()
     ticker = threading.Thread(
         target=_csv_play_progress_ticker_loop,
@@ -3101,14 +3596,17 @@ def run_simulation_from_csv(
     csv_path: Optional[str] = None,
     speed_scale: float = 1.0,
     prepared: Optional[CachedCsvPlayback] = None,
+    process_only: bool = False,
 ) -> None:
     """CSV ``eqp_start_tm`` 동기 재생: 시각까지 대기 → 로그 → 이벤트 JSON (``speed_scale`` 배속).
 
     ``prepared`` 가 있으면 파싱·빌드를 생략한다 (캐시·UI 선행 빌드).
+    ``process_only=True`` 이면 공정만보기(배속 1x, CSV 시각·레인 내 빈 구간만 생략).
 
     Note:
         UI 스레드 안전을 위해 **백그라운드 스레드**에서 호출할 것.
     """
+    sp = 1.0 if process_only else float(max(0.01, speed_scale or 1.0))
     clear_csv_playback_stop()
     clear_csv_play_timeline_highlight()
     set_csv_playback_compact_log(True)
@@ -3139,12 +3637,23 @@ def run_simulation_from_csv(
             f"dwell {len(cached.dwells)} · 블록 {n_all} (JSON {n_act}) · {cached.build_ms:.0f}ms",
             flush=True,
         )
-        print(
-            f"{_PRINT_PREFIX} Play — 배속 {float(max(0.01, speed_scale)):.3g}x | "
-            f"CSV t=0 기준 재생 시작",
-            flush=True,
+        if process_only:
+            print(
+                f"{_PRINT_PREFIX} Play — 공정만보기 (배속 1x, CSV 시각·레인 빈 구간 생략)",
+                flush=True,
+            )
+        else:
+            print(
+                f"{_PRINT_PREFIX} Play — 배속 {sp:g}x | CSV t=0 기준 재생 시작",
+                flush=True,
+            )
+        run_csv_timed_playback(
+            registry,
+            scheduler,
+            blocks,
+            speed_scale=sp,
+            process_only=process_only,
         )
-        run_csv_timed_playback(registry, scheduler, blocks, speed_scale=speed_scale)
     finally:
         set_csv_playback_compact_log(False)
 
@@ -3208,6 +3717,10 @@ class LamSimulationCsvPlayWindow:
         self._schedule_highlight_keys: frozenset = frozenset()
         self._build_progress_model: Any = None
         self._speed_model: Any = None
+        self._process_only_model: Any = None
+        self._hud_schedule_rows_stack: Any = None
+        self._hud_schedule_row_labels: List[Any] = []
+        self._hud_build_progress_model: Any = None
         self._csv_play_thread: Optional[threading.Thread] = None
         self._csv_build_thread: Optional[threading.Thread] = None
         self._prepared_playback: Optional[CachedCsvPlayback] = None
@@ -3240,6 +3753,7 @@ class LamSimulationCsvPlayWindow:
                 pass
         set_csv_play_progress_ui_callback(None)
         set_csv_play_timeline_highlight_callback(None)
+        unregister_csv_play_timeline_window()
         clear_csv_play_timeline_highlight()
         try:
             if self._window is not None:
@@ -3260,6 +3774,10 @@ class LamSimulationCsvPlayWindow:
         self._schedule_highlight_keys = frozenset()
         self._build_progress_model = None
         self._speed_model = None
+        self._process_only_model = None
+        self._hud_schedule_rows_stack = None
+        self._hud_schedule_row_labels = []
+        self._hud_build_progress_model = None
         self._prepared_playback = None
 
     def _log(self, msg: str) -> None:
@@ -3272,16 +3790,64 @@ class LamSimulationCsvPlayWindow:
 
     def ensure_playback_models(self) -> None:
         """Viewport CSV HUD 가 전용 ``ui.Window`` 없이 Play API 를 쓸 때 모델·목록만 준비."""
-        if self._csv_dir_model is not None:
-            return
         try:
-            from omni.ui import SimpleFloatModel, SimpleStringModel  # type: ignore
+            from omni.ui import (  # type: ignore
+                SimpleBoolModel,
+                SimpleFloatModel,
+                SimpleStringModel,
+            )
         except Exception as exc:
             print(f"{_PRINT_PREFIX} ensure_playback_models: omni.ui — {exc}", flush=True)
             return
-        self._csv_dir_model = SimpleStringModel(str(get_lam_csv_dir()))
-        self._speed_model = SimpleFloatModel(1.0)
-        self._reload_csv_list(preserve_selection=False)
+        if self._csv_dir_model is None:
+            self._csv_dir_model = SimpleStringModel(str(get_lam_csv_dir()))
+            self._reload_csv_list(preserve_selection=False)
+        if self._speed_model is None:
+            self._speed_model = SimpleFloatModel(1.0)
+        if self._process_only_model is None:
+            self._process_only_model = SimpleBoolModel(False)
+        register_csv_play_timeline_window(self)
+
+    def register_hud_timeline_ui(
+        self,
+        rows_stack: Any,
+        *,
+        build_progress_model: Any = None,
+    ) -> None:
+        """Viewport 2D 패널 타임라인·진행 표시 (본창 스택은 건드리지 않음)."""
+        self._hud_schedule_rows_stack = rows_stack
+        self._hud_schedule_row_labels = []
+        self._hud_build_progress_model = build_progress_model
+        if rows_stack is None:
+            return
+        path = self._selected_csv_path()
+        if path is None:
+            self._rebuild_schedule_timeline_rows([], rebuild_main=False, rebuild_hud=True)
+            return
+        hit = get_cached_csv_playback(path)
+        if hit is not None:
+            self._prepared_playback = hit
+            self._rebuild_schedule_timeline_rows(
+                hit.schedule,
+                speed_scale=self._read_speed_scale(),
+                rebuild_main=False,
+                rebuild_hud=True,
+            )
+            self._set_build_progress_text(
+                f"준비 완료 (캐시) — dwell {len(hit.dwells)} · "
+                f"JSON {sum(1 for e in hit.schedule if e.category != 'dwell')}건"
+            )
+        else:
+            self._refresh_csv_schedule_preview(
+                path, fast_only=True, rebuild_main=False, rebuild_hud=True
+            )
+
+    def _has_timeline_ui(self) -> bool:
+        return (
+            self._schedule_rows_stack is not None
+            or self._hud_schedule_rows_stack is not None
+            or self._schedule_model is not None
+        )
 
     def set_csv_combo_index(self, index: int) -> None:
         """CSV 파일 드롭다운 인덱스 (HUD ↔ 본창 공유)."""
@@ -3321,6 +3887,7 @@ class LamSimulationCsvPlayWindow:
         except Exception:
             SimpleStringModel = None  # type: ignore
         self._window = ui.Window(self.WINDOW_TITLE, width=640, height=920)
+        register_csv_play_timeline_window(self)
         with self._window.frame:
             with ui.VStack(spacing=6):
                 ui.Label(
@@ -3365,13 +3932,32 @@ class LamSimulationCsvPlayWindow:
                         clicked_fn=self._on_csv_stop_clicked,
                         tooltip="진행 중 CSV Play·대기·애니메이션 중지",
                     )
+                    try:
+                        from omni.ui import SimpleBoolModel  # type: ignore
+
+                        if self._process_only_model is None:
+                            self._process_only_model = SimpleBoolModel(False)
+                        with ui.HStack(spacing=4, width=0):
+                            ui.Label("공정만보기", width=72)
+                            ui.CheckBox(
+                                model=self._process_only_model,
+                                width=22,
+                                tooltip=(
+                                    "체크 후 Play: CSV 시각(t) 유지, JSON 없는 빈 대기만 생략 "
+                                    "(배속 1x). ATM 종료 후 VTM 등 레인 간 빈 텀도 생략. "
+                                    "체크 해제 시 기존 시간 재생."
+                                ),
+                            )
+                    except Exception:
+                        self._process_only_model = None
                     ui.Spacer()
                 with ui.HStack(spacing=6, height=28):
                     ui.Label("재생 배속", width=70)
                     try:
                         from omni.ui import SimpleFloatModel  # type: ignore
 
-                        self._speed_model = SimpleFloatModel(1.0)
+                        if self._speed_model is None:
+                            self._speed_model = SimpleFloatModel(1.0)
                         ui.FloatField(model=self._speed_model, width=72)
                     except Exception:
                         self._speed_model = None
@@ -3547,11 +4133,15 @@ class LamSimulationCsvPlayWindow:
 
     def _on_csv_file_selection_changed(self) -> None:
         """드롭다운 CSV 변경 시 타임라인·준비 캐시를 선택 파일에 맞춘다."""
-        if self._schedule_rows_stack is None and self._schedule_model is None:
+        if not self._has_timeline_ui():
             return
         path = self._selected_csv_path()
         if path is None:
-            self._rebuild_schedule_timeline_rows([])
+            self._rebuild_schedule_timeline_rows(
+                [],
+                rebuild_main=self._schedule_rows_stack is not None,
+                rebuild_hud=self._hud_schedule_rows_stack is not None,
+            )
             return
         prev = self._prepared_playback
         if prev is not None and prev.path.resolve() != path.resolve():
@@ -3580,10 +4170,9 @@ class LamSimulationCsvPlayWindow:
             except Exception:
                 pass
 
-    def _clear_schedule_timeline_stack(self) -> None:
-        """VStack 자식 제거 — ``destroy()`` 만으로는 Kit UI 에서 안 사라지는 경우가 있음."""
-        self._schedule_row_labels = []
-        stack = self._schedule_rows_stack
+    def _clear_one_timeline_stack(self, stack: Any, labels_out: List[Any]) -> None:
+        """한 타임라인 VStack 만 비움 (본창·HUD 분리 — 서로 ``clear`` 하지 않음)."""
+        labels_out.clear()
         if stack is None:
             return
         try:
@@ -3591,28 +4180,65 @@ class LamSimulationCsvPlayWindow:
         except Exception:
             pass
 
+    def _clear_schedule_timeline_stack(
+        self,
+        *,
+        main: bool = True,
+        hud: bool = True,
+    ) -> None:
+        if main:
+            self._clear_one_timeline_stack(
+                self._schedule_rows_stack, self._schedule_row_labels
+            )
+        if hud:
+            self._clear_one_timeline_stack(
+                self._hud_schedule_rows_stack, self._hud_schedule_row_labels
+            )
+
     def _timeline_label_style(self, entry: CsvPlaybackScheduleEntry) -> Dict[str, Any]:
-        key = _schedule_entry_match_key(entry)
         if entry.category == "dwell":
-            return {"color": _TIMELINE_UI_COLOR_DWELL}
-        if key in self._schedule_highlight_keys:
+            return {"color": _TIMELINE_UI_COLOR_DWELL, "background_color": 0}
+        if self._entry_is_timeline_playing(entry, self._schedule_highlight_keys):
             return {
                 "color": _TIMELINE_UI_COLOR_PLAYING,
                 "background_color": 0x4422AA44,
             }
-        return {"color": _TIMELINE_UI_COLOR_DEFAULT}
+        return {"color": _TIMELINE_UI_COLOR_DEFAULT, "background_color": 0}
 
-    def _apply_schedule_row_highlight(self, active_keys: frozenset) -> None:
-        self._schedule_highlight_keys = frozenset(active_keys)
-        entries = self._schedule_row_entries
-        for i, ent in enumerate(entries):
-            lbl_idx = i + 1
-            if lbl_idx >= len(self._schedule_row_labels):
-                break
+    def _entry_is_timeline_playing(
+        self, entry: CsvPlaybackScheduleEntry, active_keys: frozenset
+    ) -> bool:
+        return _schedule_entry_match_key(entry) in active_keys
+
+    def _apply_timeline_label_style(self, label: Any, entry: CsvPlaybackScheduleEntry) -> None:
+        style = self._timeline_label_style(entry)
+        try:
+            label.style = style
+        except Exception:
             try:
-                self._schedule_row_labels[lbl_idx].style = self._timeline_label_style(ent)
+                for prop, val in style.items():
+                    label.style[prop] = val
             except Exception:
                 pass
+
+    def _live_timeline_highlight_keys(self) -> frozenset:
+        with _csv_play_timeline_active_keys_lock:
+            if _csv_play_timeline_active_keys:
+                return frozenset(_csv_play_timeline_active_keys)
+        return frozenset(self._schedule_highlight_keys)
+
+    def _apply_schedule_row_highlight(self, active_keys: frozenset) -> None:
+        merged = frozenset(active_keys) | self._live_timeline_highlight_keys()
+        self._schedule_highlight_keys = merged
+        entries = self._schedule_row_entries
+        for labels in (self._schedule_row_labels, self._hud_schedule_row_labels):
+            if len(labels) < 2:
+                continue
+            for i, ent in enumerate(entries):
+                lbl_idx = i + 1
+                if lbl_idx >= len(labels):
+                    break
+                self._apply_timeline_label_style(labels[lbl_idx], ent)
 
     def _post_apply_cached_timeline_ui(
         self, cached: CachedCsvPlayback, *, wait: bool = False
@@ -3639,39 +4265,75 @@ class LamSimulationCsvPlayWindow:
             return
         _post_kit_main_thread(lambda: self._apply_cached_timeline_ui(cached))
 
-    def _rebuild_schedule_timeline_rows(
+    def _fill_schedule_timeline_stack(
         self,
+        stack: Any,
+        labels_out: List[Any],
         entries: List[CsvPlaybackScheduleEntry],
         *,
-        speed_scale: float = 1.0,
+        speed_scale: float,
     ) -> None:
-        """스크롤 타임라인 행 재구성 (omni.ui — Kit update tick 또는 UI 콜백에서 호출)."""
-        self._schedule_row_entries = list(entries)
-        stack = self._schedule_rows_stack
-        if stack is None:
-            self._set_schedule_model_text(
-                format_csv_playback_schedule(entries, speed_scale=speed_scale)
-            )
-            return
-        self._clear_schedule_timeline_stack()
+        import omni.ui as ui  # type: ignore
+
         sp = max(0.1, float(speed_scale or 1.0))
         if not entries:
-            self._set_schedule_model_text("(CSV 선택 후 타임라인이 표시됩니다.)")
-            try:
-                import omni.ui as ui  # type: ignore
-
-                with stack:
-                    lbl = ui.Label(
+            with stack:
+                labels_out.append(
+                    ui.Label(
                         "(CSV 선택 후 타임라인이 표시됩니다.)",
                         height=18,
                         word_wrap=True,
                         style={"color": _TIMELINE_UI_COLOR_DEFAULT},
                     )
-                    self._schedule_row_labels.append(lbl)
-            except Exception:
-                pass
+                )
             return
         n_act = sum(1 for e in entries if e.category != "dwell")
+        with stack:
+            labels_out.append(
+                ui.Label(
+                    f"=== CSV 타임라인 · {len(entries)}건 · JSON {n_act}건 · 배속 {sp:g}x ===",
+                    height=20,
+                    word_wrap=True,
+                    style={"color": _TIMELINE_UI_COLOR_DEFAULT},
+                )
+            )
+            for i, ent in enumerate(entries, 1):
+                line = format_csv_playback_schedule_row(i, ent, speed_scale=sp)
+                labels_out.append(
+                    ui.Label(
+                        line,
+                        height=18,
+                        word_wrap=True,
+                        style=self._timeline_label_style(ent),
+                    )
+                )
+
+    def _rebuild_schedule_timeline_rows(
+        self,
+        entries: List[CsvPlaybackScheduleEntry],
+        *,
+        speed_scale: float = 1.0,
+        rebuild_main: bool = True,
+        rebuild_hud: bool = True,
+    ) -> None:
+        """스크롤 타임라인 행 재구성. HUD 등록 시 ``rebuild_main=False`` 로 본창 유지."""
+        self._schedule_row_entries = list(entries)
+        if (
+            not rebuild_main
+            and not rebuild_hud
+        ) or (
+            rebuild_main
+            and self._schedule_rows_stack is None
+            and rebuild_hud
+            and self._hud_schedule_rows_stack is None
+        ):
+            self._set_schedule_model_text(
+                format_csv_playback_schedule(entries, speed_scale=speed_scale)
+            )
+            return
+        sp = max(0.1, float(speed_scale or 1.0))
+        if not entries:
+            self._set_schedule_model_text("(CSV 선택 후 타임라인이 표시됩니다.)")
         try:
             import omni.ui as ui  # type: ignore
         except Exception:
@@ -3679,36 +4341,35 @@ class LamSimulationCsvPlayWindow:
                 format_csv_playback_schedule(entries, speed_scale=sp)
             )
             return
-        with stack:
-            hdr = ui.Label(
-                f"=== CSV 타임라인 · {len(entries)}건 · JSON {n_act}건 · 배속 {sp:g}x ===",
-                height=20,
-                word_wrap=True,
-                style={"color": _TIMELINE_UI_COLOR_DEFAULT},
+        _ = ui
+        self._clear_schedule_timeline_stack(main=rebuild_main, hud=rebuild_hud)
+        if rebuild_main and self._schedule_rows_stack is not None:
+            self._fill_schedule_timeline_stack(
+                self._schedule_rows_stack,
+                self._schedule_row_labels,
+                entries,
+                speed_scale=sp,
             )
-            self._schedule_row_labels.append(hdr)
-            for i, ent in enumerate(entries, 1):
-                line = format_csv_playback_schedule_row(i, ent, speed_scale=sp)
-                lbl = ui.Label(
-                    line,
-                    height=18,
-                    word_wrap=True,
-                    style=self._timeline_label_style(ent),
-                )
-                self._schedule_row_labels.append(lbl)
-        self._apply_schedule_row_highlight(self._schedule_highlight_keys)
+        if rebuild_hud and self._hud_schedule_rows_stack is not None:
+            self._fill_schedule_timeline_stack(
+                self._hud_schedule_rows_stack,
+                self._hud_schedule_row_labels,
+                entries,
+                speed_scale=sp,
+            )
+        self._apply_schedule_row_highlight(self._live_timeline_highlight_keys())
 
     def _set_build_progress_text(self, text: str) -> None:
-        m = self._build_progress_model
-        if m is None:
-            return
-        try:
-            m.set_value(text)
-        except Exception:
+        for m in (self._build_progress_model, self._hud_build_progress_model):
+            if m is None:
+                continue
             try:
-                m.set_value_as_string(text)  # type: ignore[attr-defined]
+                m.set_value(text)
             except Exception:
-                pass
+                try:
+                    m.set_value_as_string(text)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
 
     def _format_build_progress_line(self, done: int, total: int) -> str:
         total = max(1, int(total))
@@ -3719,13 +4380,40 @@ class LamSimulationCsvPlayWindow:
     def _format_play_progress_line(
         self, csv_t: float, csv_total: float, wall_elapsed: float, wall_total_est: float
     ) -> str:
+        snap = get_csv_play_progress_snap()
+        if snap.get("process_only"):
+            json_done = int(snap.get("json_done", 0) or 0)
+            json_total = max(1, int(snap.get("json_total", 1) or 1))
+            csv_t_disp = float(snap.get("csv_t_display", csv_t) or csv_t)
+            csv_tot = float(snap.get("csv_total", csv_total) or csv_total)
+            pct_json = 100.0 * json_done / json_total
+            pct_csv = (100.0 * csv_t_disp / csv_tot) if csv_tot > 1e-6 else 0.0
+            return (
+                f"▶ 공정만보기 {pct_json:.1f}% (JSON {json_done}/{json_total}) | "
+                f"CSV t {csv_t_disp:.1f}/{csv_tot:.1f}s ({pct_csv:.1f}%) | "
+                f"실경과 {wall_elapsed:.0f}s"
+            )
         pct = (100.0 * csv_t / csv_total) if csv_total > 1e-6 else 0.0
         return (
             f"▶ 재생 {pct:.1f}% | CSV t {csv_t:.1f}/{csv_total:.1f}s | "
             f"실경과 {wall_elapsed:.0f}s/{wall_total_est:.0f}s"
         )
 
+    def _read_process_only(self) -> bool:
+        m = self._process_only_model
+        if m is None:
+            return False
+        try:
+            return bool(m.get_value_as_bool())
+        except Exception:
+            try:
+                return bool(m.as_bool)
+            except Exception:
+                return False
+
     def _read_speed_scale(self) -> float:
+        if self._read_process_only():
+            return 1.0
         m = self._speed_model
         if m is None:
             return 1.0
@@ -3752,8 +4440,13 @@ class LamSimulationCsvPlayWindow:
 
     def _apply_cached_timeline_ui(self, cached: CachedCsvPlayback) -> None:
         sp = self._read_speed_scale()
-        self._rebuild_schedule_timeline_rows(cached.schedule, speed_scale=sp)
         self._prepared_playback = cached
+        self._rebuild_schedule_timeline_rows(
+            cached.schedule,
+            speed_scale=sp,
+            rebuild_main=self._schedule_rows_stack is not None,
+            rebuild_hud=self._hud_schedule_rows_stack is not None,
+        )
         self._set_build_progress_text(
             f"준비 완료 (캐시) — dwell {len(cached.dwells)} · "
             f"JSON {sum(1 for e in cached.schedule if e.category != 'dwell')}건"
@@ -3845,31 +4538,50 @@ class LamSimulationCsvPlayWindow:
         *,
         fast_only: bool = False,
         background_build: bool = False,
+        rebuild_main: bool = True,
+        rebuild_hud: bool = True,
     ) -> None:
         """타임라인 UI 갱신. fast_only=메타만 즉시, background_build=이후 캐시 빌드."""
-        if self._schedule_model is None:
+        if not self._has_timeline_ui():
             return
         p = path or self._selected_csv_path()
         if p is None:
-            self._rebuild_schedule_timeline_rows([])
+            self._rebuild_schedule_timeline_rows(
+                [], rebuild_main=rebuild_main, rebuild_hud=rebuild_hud
+            )
             self._set_build_progress_text("(CSV 없음)")
             return
         hit = get_cached_csv_playback(p)
         if hit is not None:
-            self._apply_cached_timeline_ui(hit)
+            self._prepared_playback = hit
+            self._rebuild_schedule_timeline_rows(
+                hit.schedule,
+                speed_scale=self._read_speed_scale(),
+                rebuild_main=rebuild_main and self._schedule_rows_stack is not None,
+                rebuild_hud=rebuild_hud and self._hud_schedule_rows_stack is not None,
+            )
+            self._set_build_progress_text(
+                f"준비 완료 (캐시) — dwell {len(hit.dwells)} · "
+                f"JSON {sum(1 for e in hit.schedule if e.category != 'dwell')}건"
+            )
             return
         try:
             dwells = load_csv_dwell_timeline(p)
             entries = build_csv_playback_schedule_meta(dwells)
             self._prepared_playback = None
             self._rebuild_schedule_timeline_rows(
-                entries, speed_scale=self._read_speed_scale()
+                entries,
+                speed_scale=self._read_speed_scale(),
+                rebuild_main=rebuild_main,
+                rebuild_hud=rebuild_hud,
             )
             self._set_build_progress_text(
                 "(미리보기 — [타임라인 갱신] 또는 Play 시 전체 빌드)"
             )
         except Exception as exc:
-            self._rebuild_schedule_timeline_rows([])
+            self._rebuild_schedule_timeline_rows(
+                [], rebuild_main=rebuild_main, rebuild_hud=rebuild_hud
+            )
             self._set_schedule_model_text(f"타임라인 생성 실패 ({p.name}):\n{exc}")
             self._set_build_progress_text(f"미리보기 실패: {exc}")
             print(f"{_PRINT_PREFIX} schedule preview error: {exc}", flush=True)
@@ -3913,6 +4625,9 @@ class LamSimulationCsvPlayWindow:
         if path is None:
             self._log("CSV 경로 없음")
             return
+        process_only = self._read_process_only()
+        if process_only:
+            self._set_speed_preset(1.0)
         sp = self._read_speed_scale()
         prepared = self._prepared_playback
         if prepared is None or prepared.path.resolve() != path.resolve():
@@ -3925,8 +4640,9 @@ class LamSimulationCsvPlayWindow:
             if prepared is not None
             else 0
         )
+        mode_ko = "공정만보기·배속1x" if process_only else f"배속 {sp:g}x"
         self._log(
-            f"Play: {path.name} — 배속 {sp:g}x, "
+            f"Play: {path.name} — {mode_ko}, "
             f"스케줄 {n_items}항목 (JSON {n_json})"
             + ("" if prepared is not None else " · 빌드 후 재생")
         )
@@ -4003,6 +4719,7 @@ class LamSimulationCsvPlayWindow:
                     csv_path=str(path),
                     speed_scale=sp,
                     prepared=prepared,
+                    process_only=process_only,
                 )
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} CSV Play 오류: {exc}", flush=True)
@@ -4182,6 +4899,8 @@ __all__ = [
     "is_csv_playback_compact_log",
     "set_csv_play_progress_ui_callback",
     "set_csv_play_timeline_highlight_callback",
+    "register_csv_play_timeline_window",
+    "unregister_csv_play_timeline_window",
     "clear_csv_play_timeline_highlight",
     "format_csv_playback_schedule_row",
     "is_csv_bulk_build_active",
