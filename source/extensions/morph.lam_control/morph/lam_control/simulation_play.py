@@ -30,7 +30,7 @@ import re
 import time
 from datetime import datetime
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -381,20 +381,21 @@ def is_csv_bulk_build_active() -> bool:
 
 
 def _post_kit_main_thread(fn: Callable[[], None]) -> None:
-    """백그라운드 스레드 → Kit UI 갱신 (다음 프레임). 실패 시 동기 호출."""
-    try:
-        import omni.kit.app as _kit_app  # type: ignore
+    """백그라운드·워커 스레드 → Kit update tick 에서 UI 갱신.
 
-        app = _kit_app.get_app()
-        if hasattr(app, "post_timer"):
-            app.post_timer(0.0, lambda *_a: fn())
-            return
-    except Exception:
-        pass
+    ``lam_sequence_engine._dispatch_main`` 과 동일 (``update_event_stream`` 구독).
+    omni.ui 를 워커 스레드에서 직접 호출하면 크래시하므로 ``post_timer`` 는 쓰지 않는다.
+    """
     try:
-        fn()
-    except Exception:
-        pass
+        from .lam_sequence_engine import _dispatch_main
+
+        _dispatch_main(fn)
+        return
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} UI dispatch 실패: {exc}",
+            flush=True,
+        )
 
 
 class _ThrottledBuildProgress:
@@ -491,7 +492,7 @@ def _estimate_csv_build_units(dwells: List["DwellRecord"]) -> int:
     for tour in tours.values():
         tour.sort(key=lambda x: x.start_sec)
         if tour[0].slot_key == LOGICAL_SLOT_ATM_ARM:
-            n += 1
+            n += 3  # FOUP pick + 합성 aligner place/pick
         n += max(0, len(tour) - 1)
         if tour[-1].slot_key == LOGICAL_SLOT_ATM_ARM:
             n += 1
@@ -1099,6 +1100,7 @@ class CsvPlaybackScheduleEntry:
     step_count: int = 0
     event_name: str = ""
     json_path: str = ""
+    schedule_row: int = -1
 
 
 @dataclass(frozen=True)
@@ -1116,16 +1118,25 @@ class CsvTimedPlaybackBlock:
     schedule: Optional[CsvPlaybackScheduleEntry] = None
 
 
+# FOUP pick 직후 CSV에 없는 Aligner 전처리 (현장 규칙, 합성 타임라인만).
+# 시각 = 투어 FOUP pick 의 CSV t(``first.start_sec``) + 아래 오프셋 [s].
+FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC: float = 2.5
+FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC: float = 7.5
+
 _SCHEDULE_CATEGORY_ORDER: Dict[str, int] = {
     "pick": 0,
-    "transfer": 1,
-    "place": 2,
-    "dwell": 3,
+    "aligner_place": 1,
+    "aligner_pick": 2,
+    "transfer": 3,
+    "place": 4,
+    "dwell": 5,
 }
 
 _SCHEDULE_CATEGORY_KO: Dict[str, str] = {
     "dwell": "체류",
     "pick": "FOUP 픽업",
+    "aligner_place": "Aligner 내려놓기",
+    "aligner_pick": "Aligner 픽업",
     "transfer": "이송",
     "place": "FOUP 반환",
 }
@@ -1461,6 +1472,164 @@ def build_foup_pick_place_steps(
     )
 
 
+def build_aligner_after_foup_pick_steps(pick_or_place: str) -> LamSimJsonSteps:
+    """FOUP pick 직후 합성 Aligner 공정 — ``atm_aligner_place`` / ``atm_aligner_pick``."""
+    from .lam_event_sequences import build_steps_for_event
+
+    po = (pick_or_place or "pick").strip().lower()
+    if po not in ("pick", "place"):
+        raise ValueError(f"pick_or_place must be 'pick' or 'place' (got {pick_or_place!r})")
+    event = f"atm_aligner_{po}"
+    return build_steps_for_event(
+        event,
+        slot_number=None,
+        vtm_ee_swap=VTM_END_EFFECTOR_SWAP_HANDS,
+    )
+
+
+def _aligner_exec_hint(pick_or_place: str) -> str:
+    event = f"atm_aligner_{(pick_or_place or 'pick').strip().lower()}"
+    po_ko = "픽업(pick)" if event.endswith("_pick") else "내려놓기(place)"
+    return f"build_steps_for_event({event!r})  →  lam_sim_actions.{event}()  [{po_ko}]"
+
+
+def _aligner_schedule_entry(
+    *,
+    time_sec: float,
+    pick_or_place: str,
+    foup_index: int,
+    cassette_slot: int,
+    lot_id: str,
+    anchor_time_sec: float,
+    steps: LamSimJsonSteps,
+) -> CsvPlaybackScheduleEntry:
+    po = (pick_or_place or "pick").strip().lower()
+    event = f"atm_aligner_{po}"
+    category = "aligner_place" if po == "place" else "aligner_pick"
+    _ev, json_path = _schedule_entry_json_fields(event)
+    place_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC
+    pick_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC
+    if po == "place":
+        delay_ko = f"FOUP pick(t={anchor_time_sec:.3f}s) 후 +{FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC:g}s"
+    else:
+        delay_ko = (
+            f"FOUP pick(t={anchor_time_sec:.3f}s) 후 "
+            f"+{FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC:g}s"
+        )
+    title_place = (
+        f"[재생] ATM 팔 → Aligner · lot={lot_id!r} · 웨이퍼#{cassette_slot} "
+        f"(FOUP{foup_index} 투어)"
+    )
+    title_pick = (
+        f"[재생] Aligner → ATM 팔 · lot={lot_id!r} · 웨이퍼#{cassette_slot} "
+        f"(FOUP{foup_index} 투어)"
+    )
+    return CsvPlaybackScheduleEntry(
+        time_sec=float(time_sec),
+        sort_order=_SCHEDULE_CATEGORY_ORDER[category],
+        category=category,
+        title_ko=title_place if po == "place" else title_pick,
+        csv_read_ko=(
+            "CSV 행 없음 — FOUP pick 직후 현장 규칙으로 타임라인에 자동 삽입. "
+            f"{delay_ko}."
+        ),
+        meaning_ko=(
+            "EAP CSV 에는 없지만, FOUP 에서 집은 웨이퍼를 Aligner 에 잠시 맡겼다가 "
+            "다시 ATM 팔로 집어 오는 전처리 공정."
+        ),
+        exec_ko=_aligner_exec_hint(po),
+        step_count=len(steps),
+        event_name=event,
+        json_path=json_path,
+    )
+
+
+def _aligner_schedule_entry_meta(
+    *,
+    time_sec: float,
+    pick_or_place: str,
+    foup_index: int,
+    cassette_slot: int,
+    lot_id: str,
+    anchor_time_sec: float,
+) -> CsvPlaybackScheduleEntry:
+    po = (pick_or_place or "pick").strip().lower()
+    event = f"atm_aligner_{po}"
+    category = "aligner_place" if po == "place" else "aligner_pick"
+    _ev, json_path = _schedule_entry_json_fields(event)
+    ent = _aligner_schedule_entry(
+        time_sec=time_sec,
+        pick_or_place=po,
+        foup_index=foup_index,
+        cassette_slot=cassette_slot,
+        lot_id=lot_id,
+        anchor_time_sec=anchor_time_sec,
+        steps=[],
+    )
+    return CsvPlaybackScheduleEntry(
+        time_sec=ent.time_sec,
+        sort_order=ent.sort_order,
+        category=ent.category,
+        title_ko=ent.title_ko,
+        csv_read_ko=ent.csv_read_ko,
+        meaning_ko=ent.meaning_ko,
+        exec_ko=ent.exec_ko,
+        step_count=_event_step_count_estimate(event),
+        event_name=event,
+        json_path=json_path,
+    )
+
+
+def _append_aligner_after_foup_pick(
+    *,
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+    anchor_time_sec: float,
+    foup_index: int,
+    cassette_slot: int,
+    lot_id: str,
+    progress: Optional[_ThrottledBuildProgress] = None,
+) -> None:
+    """FOUP pick 시각 기준 합성 aligner place → pick (CSV 파일은 변경하지 않음)."""
+    place_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC
+    pick_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC
+    for po, t_sec, label in (
+        ("place", place_t, "aligner_place"),
+        ("pick", pick_t, "aligner_pick"),
+    ):
+        try:
+            if blocks is not None:
+                steps = build_aligner_after_foup_pick_steps(po)
+                if not steps:
+                    continue
+                ent = _aligner_schedule_entry(
+                    time_sec=t_sec,
+                    pick_or_place=po,
+                    foup_index=foup_index,
+                    cassette_slot=cassette_slot,
+                    lot_id=lot_id,
+                    anchor_time_sec=anchor_time_sec,
+                    steps=steps,
+                )
+                schedule.append(ent)
+                blocks.append(_block_from_schedule(ent, steps, label=label))
+            else:
+                schedule.append(
+                    _aligner_schedule_entry_meta(
+                        time_sec=t_sec,
+                        pick_or_place=po,
+                        foup_index=foup_index,
+                        cassette_slot=cassette_slot,
+                        lot_id=lot_id,
+                        anchor_time_sec=anchor_time_sec,
+                    )
+                )
+        except Exception as exc:
+            _lam_sim_log_build("csv_tour", f"Aligner {po} skip: {exc}")
+        if progress is not None:
+            progress.tick(1)
+
+
 def _slot_key_label_ko(slot_key: str) -> str:
     if slot_key == LOGICAL_SLOT_ATM_ARM:
         return "ATM 팔(EndEffector)"
@@ -1729,6 +1898,22 @@ def _print_schedule_lines(lines: List[str]) -> None:
         print(f"{_PRINT_PREFIX} {line}", flush=True)
 
 
+def format_csv_playback_schedule_row(
+    index: int,
+    e: CsvPlaybackScheduleEntry,
+    *,
+    speed_scale: float = 1.0,
+) -> str:
+    """타임라인 UI 한 줄 (``format_csv_playback_schedule`` 과 동일 형식)."""
+    cat = _SCHEDULE_CATEGORY_KO.get(e.category, e.category)
+    action = _short_schedule_title(e.title_ko)
+    json_lbl = _json_exec_label(e, executed=False)
+    sp = max(0.1, float(speed_scale or 1.0))
+    return (
+        f"[{index:02d}] t={e.time_sec:7.2f}s | {cat} | {action} | {json_lbl} | 배속 {sp:g}x"
+    )
+
+
 def format_csv_playback_schedule(
     entries: List[CsvPlaybackScheduleEntry],
     *,
@@ -1741,17 +1926,43 @@ def format_csv_playback_schedule(
     sp = max(0.1, float(speed_scale or 1.0))
     lines = [
         f"=== CSV 타임라인 (t=0 기준 · {len(entries)}건 · JSON {n_act}건 · 배속 {sp:g}x) ===",
-        "형식: [번호] CSV t | 동작 | JSON |",
+        "형식: [번호] CSV t | 동작 | JSON | (재생 중 JSON 행 = 녹색)",
         "",
     ]
     for i, e in enumerate(entries, 1):
-        cat = _SCHEDULE_CATEGORY_KO.get(e.category, e.category)
-        action = _short_schedule_title(e.title_ko)
-        json_lbl = _json_exec_label(e, executed=False)
-        lines.append(
-            f"[{i:02d}] t={e.time_sec:7.2f}s | {cat} | {action} | {json_lbl}"
-        )
+        lines.append(format_csv_playback_schedule_row(i, e, speed_scale=sp))
     return "\n".join(lines)
+
+
+def _schedule_entry_match_key(e: CsvPlaybackScheduleEntry) -> Tuple[Any, ...]:
+    return (
+        round(float(e.time_sec), 6),
+        int(e.sort_order),
+        str(e.category),
+        str(e.event_name),
+        str(e.title_ko),
+    )
+
+
+def _stamp_schedule_row_ids(
+    schedule: List[CsvPlaybackScheduleEntry],
+) -> List[CsvPlaybackScheduleEntry]:
+    return [replace(e, schedule_row=i) for i, e in enumerate(schedule)]
+
+
+def _reattach_block_schedules(
+    blocks: List[CsvTimedPlaybackBlock],
+    schedule: List[CsvPlaybackScheduleEntry],
+) -> List[CsvTimedPlaybackBlock]:
+    keyed = {_schedule_entry_match_key(e): e for e in schedule}
+    out: List[CsvTimedPlaybackBlock] = []
+    for b in blocks:
+        if b.schedule is None:
+            out.append(b)
+            continue
+        ne = keyed.get(_schedule_entry_match_key(b.schedule))
+        out.append(replace(b, schedule=ne) if ne is not None else b)
+    return out
 
 
 def _block_from_schedule(
@@ -1882,6 +2093,14 @@ def build_csv_playback_schedule_meta(
                     lot_id=lot_id,
                 )
             )
+            _append_aligner_after_foup_pick(
+                schedule=schedule,
+                blocks=None,
+                anchor_time_sec=first.start_sec,
+                foup_index=foup_n,
+                cassette_slot=cassette_slot,
+                lot_id=lot_id,
+            )
         for i in range(len(tour) - 1):
             ent = _transfer_schedule_entry_meta(tour[i], tour[i + 1])
             if ent is not None:
@@ -1896,7 +2115,7 @@ def build_csv_playback_schedule_meta(
                 )
             )
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
-    return schedule
+    return _stamp_schedule_row_ids(schedule)
 
 
 def build_csv_playback_plan(
@@ -1959,6 +2178,15 @@ def build_csv_playback_plan(
                                 ent, pick_st, label=f"foup{foup_n}_pick({cassette_slot})"
                             )
                         )
+                        _append_aligner_after_foup_pick(
+                            schedule=schedule,
+                            blocks=blocks,
+                            anchor_time_sec=first.start_sec,
+                            foup_index=foup_n,
+                            cassette_slot=cassette_slot,
+                            lot_id=lot_id,
+                            progress=progress,
+                        )
                 except Exception as exc:
                     _lam_sim_log_build("csv_tour", f"FOUP pick skip: {exc}")
                 if progress is not None:
@@ -2006,6 +2234,8 @@ def build_csv_playback_plan(
 
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
     blocks.sort(key=lambda b: (b.time_sec, b.sort_order))
+    schedule = _stamp_schedule_row_ids(schedule)
+    blocks = _reattach_block_schedules(blocks, schedule)
     return schedule, blocks
 
 
@@ -2083,6 +2313,60 @@ def build_csv_playback_schedule(dwells: List[DwellRecord]) -> List[CsvPlaybackSc
 # CSV Play 실시간 진행 (UI 1초 갱신 — 콘솔 1초 틱 로그 없음)
 _csv_play_progress_ui_cb: Optional[Callable[[float, float, float, float], None]] = None
 _csv_play_progress_stop = threading.Event()
+
+# CSV Play 타임라인 — JSON 실행 중인 행만 UI 에서 녹색 강조 (항목 match key)
+_csv_play_timeline_highlight_cb: Optional[Callable[[frozenset], None]] = None
+_csv_play_timeline_active_keys_lock = threading.Lock()
+_csv_play_timeline_active_keys: set = set()
+
+_TIMELINE_UI_COLOR_DEFAULT = 0xFF9AA4B2
+_TIMELINE_UI_COLOR_DWELL = 0xFF6E7580
+_TIMELINE_UI_COLOR_PLAYING = 0xFF6CCB6C
+
+
+def set_csv_play_timeline_highlight_callback(
+    cb: Optional[Callable[[frozenset], None]],
+) -> None:
+    """Play 중 JSON 실행 행 강조: ``frozenset`` of ``_schedule_entry_match_key`` tuples."""
+    global _csv_play_timeline_highlight_cb
+    _csv_play_timeline_highlight_cb = cb
+
+
+def _csv_play_timeline_highlight_notify(active_keys: frozenset) -> None:
+    cb = _csv_play_timeline_highlight_cb
+    if cb is None:
+        return
+
+    def _ui() -> None:
+        try:
+            cb(active_keys)
+        except Exception:
+            pass
+
+    _post_kit_main_thread(_ui)
+
+
+def _csv_play_timeline_row_begin_entry(sched: CsvPlaybackScheduleEntry) -> None:
+    key = _schedule_entry_match_key(sched)
+    with _csv_play_timeline_active_keys_lock:
+        _csv_play_timeline_active_keys.add(key)
+        snap = frozenset(_csv_play_timeline_active_keys)
+    _csv_play_timeline_highlight_notify(snap)
+
+
+def _csv_play_timeline_row_end_entry(sched: CsvPlaybackScheduleEntry) -> None:
+    key = _schedule_entry_match_key(sched)
+    with _csv_play_timeline_active_keys_lock:
+        _csv_play_timeline_active_keys.discard(key)
+        snap = frozenset(_csv_play_timeline_active_keys)
+    _csv_play_timeline_highlight_notify(snap)
+
+
+def clear_csv_play_timeline_highlight() -> None:
+    """재생 종료·중지 시 타임라인 강조 해제."""
+    with _csv_play_timeline_active_keys_lock:
+        _csv_play_timeline_active_keys.clear()
+    _csv_play_timeline_highlight_notify(frozenset())
 
 
 def set_csv_play_progress_ui_callback(
@@ -2401,14 +2685,18 @@ def _csv_playback_block_worker(
         return
 
     lane = _playback_lane_from_block(block)
-    _run_lam_sim_steps_cancellable(
-        registry,
-        scheduler,
-        block.steps,
-        speed_scale=sp,
-        lane=lane,
-        lane_coordinator=lane_coordinator,
-    )
+    _csv_play_timeline_row_begin_entry(sched)
+    try:
+        _run_lam_sim_steps_cancellable(
+            registry,
+            scheduler,
+            block.steps,
+            speed_scale=sp,
+            lane=lane,
+            lane_coordinator=lane_coordinator,
+        )
+    finally:
+        _csv_play_timeline_row_end_entry(sched)
     if not csv_playback_stop_requested():
         _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=True)
 
@@ -2704,6 +2992,7 @@ def run_csv_timed_playback(
 
     t0 = time.monotonic()
     stopped = False
+    clear_csv_play_timeline_highlight()
     lane_coordinator = _CsvPlaybackLaneCoordinator()
     _csv_play_progress_stop.clear()
     ticker = threading.Thread(
@@ -2743,6 +3032,7 @@ def run_csv_timed_playback(
     finally:
         _csv_play_progress_stop.set()
         _csv_play_material_test_stop.set()
+        clear_csv_play_timeline_highlight()
         try:
             ticker.join(timeout=2.0)
         except Exception:
@@ -2863,6 +3153,7 @@ def run_simulation_from_csv(
         UI 스레드 안전을 위해 **백그라운드 스레드**에서 호출할 것.
     """
     clear_csv_playback_stop()
+    clear_csv_play_timeline_highlight()
     set_csv_playback_compact_log(True)
     try:
         path = resolve_csv_path(csv_path)
@@ -2954,6 +3245,10 @@ class LamSimulationCsvPlayWindow:
         self._script_model: Any = None
         self._func_combo: Any = None
         self._schedule_model: Any = None
+        self._schedule_rows_stack: Any = None
+        self._schedule_row_labels: List[Any] = []
+        self._schedule_row_entries: List[CsvPlaybackScheduleEntry] = []
+        self._schedule_highlight_keys: frozenset = frozenset()
         self._build_progress_model: Any = None
         self._speed_model: Any = None
         self._csv_play_thread: Optional[threading.Thread] = None
@@ -2987,6 +3282,8 @@ class LamSimulationCsvPlayWindow:
             except Exception:
                 pass
         set_csv_play_progress_ui_callback(None)
+        set_csv_play_timeline_highlight_callback(None)
+        clear_csv_play_timeline_highlight()
         try:
             if self._window is not None:
                 self._window.destroy()
@@ -3000,6 +3297,10 @@ class LamSimulationCsvPlayWindow:
         self._script_model = None
         self._func_combo = None
         self._schedule_model = None
+        self._schedule_rows_stack = None
+        self._schedule_row_labels = []
+        self._schedule_row_entries = []
+        self._schedule_highlight_keys = frozenset()
         self._build_progress_model = None
         self._speed_model = None
         self._prepared_playback = None
@@ -3033,6 +3334,7 @@ class LamSimulationCsvPlayWindow:
         self._csv_selected_index = max(0, min(int(index), len(self._csv_paths) - 1))
         if self._csv_file_stack is not None:
             self._rebuild_csv_combo_ui(selected_index=self._csv_selected_index)
+        self._on_csv_file_selection_changed()
 
     def get_csv_combo_index(self) -> int:
         if self._combo is not None:
@@ -3125,7 +3427,7 @@ class LamSimulationCsvPlayWindow:
                     )
                     ui.Spacer()
                 ui.Label(
-                    "CSV 재생 타임라인 (시간순 · 한글) — [타임라인 갱신] 또는 Play 시 준비",
+                    "CSV 재생 타임라인 — JSON 재생 중인 행만 녹색 · [타임라인 갱신] 또는 Play 시 준비",
                     height=18,
                 )
                 try:
@@ -3133,16 +3435,17 @@ class LamSimulationCsvPlayWindow:
                 except Exception:
                     SimpleStringModel = None  # type: ignore
                 if SimpleStringModel is not None:
-                    self._schedule_model = SimpleStringModel("(CSV 선택 후 타임라인이 표시됩니다.)")
-                    try:
-                        ui.StringField(
-                            model=self._schedule_model,
-                            height=240,
-                            multiline=True,
-                            read_only=True,
-                        )
-                    except TypeError:
-                        ui.StringField(model=self._schedule_model, height=240)
+                    self._schedule_model = SimpleStringModel("")
+                    with ui.ScrollingFrame(
+                        height=240,
+                        style={
+                            "background_color": 0xFF1A1E26,
+                            "border_width": 1,
+                            "border_color": 0xFF3A3A3A,
+                        },
+                    ):
+                        with ui.VStack(spacing=2, height=0) as schedule_stack:
+                            self._schedule_rows_stack = schedule_stack
                     self._build_progress_model = SimpleStringModel("(빌드·재생 진행 — 대기)")
                     ui.StringField(
                         model=self._build_progress_model,
@@ -3278,6 +3581,25 @@ class LamSimulationCsvPlayWindow:
                 ui.Label("CSV 파일", height=16)
                 idx = max(0, min(int(selected_index), len(names) - 1))
                 self._combo = ui.ComboBox(idx, *names, width=520, height=26)
+                try:
+                    self._combo.model.add_item_changed_fn(
+                        lambda *_a: self._on_csv_file_selection_changed()
+                    )
+                except Exception:
+                    pass
+
+    def _on_csv_file_selection_changed(self) -> None:
+        """드롭다운 CSV 변경 시 타임라인·준비 캐시를 선택 파일에 맞춘다."""
+        if self._schedule_rows_stack is None and self._schedule_model is None:
+            return
+        path = self._selected_csv_path()
+        if path is None:
+            self._rebuild_schedule_timeline_rows([])
+            return
+        prev = self._prepared_playback
+        if prev is not None and prev.path.resolve() != path.resolve():
+            self._prepared_playback = None
+        self._refresh_csv_schedule_preview(path, fast_only=True)
 
     def _selected_csv_path(self) -> Optional[Path]:
         if not self._csv_paths:
@@ -3300,6 +3622,124 @@ class LamSimulationCsvPlayWindow:
                 m.set_value_as_string(text)  # type: ignore[attr-defined]
             except Exception:
                 pass
+
+    def _clear_schedule_timeline_stack(self) -> None:
+        """VStack 자식 제거 — ``destroy()`` 만으로는 Kit UI 에서 안 사라지는 경우가 있음."""
+        self._schedule_row_labels = []
+        stack = self._schedule_rows_stack
+        if stack is None:
+            return
+        try:
+            stack.clear()
+        except Exception:
+            pass
+
+    def _timeline_label_style(self, entry: CsvPlaybackScheduleEntry) -> Dict[str, Any]:
+        key = _schedule_entry_match_key(entry)
+        if entry.category == "dwell":
+            return {"color": _TIMELINE_UI_COLOR_DWELL}
+        if key in self._schedule_highlight_keys:
+            return {
+                "color": _TIMELINE_UI_COLOR_PLAYING,
+                "background_color": 0x4422AA44,
+            }
+        return {"color": _TIMELINE_UI_COLOR_DEFAULT}
+
+    def _apply_schedule_row_highlight(self, active_keys: frozenset) -> None:
+        self._schedule_highlight_keys = frozenset(active_keys)
+        entries = self._schedule_row_entries
+        for i, ent in enumerate(entries):
+            lbl_idx = i + 1
+            if lbl_idx >= len(self._schedule_row_labels):
+                break
+            try:
+                self._schedule_row_labels[lbl_idx].style = self._timeline_label_style(ent)
+            except Exception:
+                pass
+
+    def _post_apply_cached_timeline_ui(
+        self, cached: CachedCsvPlayback, *, wait: bool = False
+    ) -> None:
+        """캐시 타임라인을 Kit update tick 에 반영. ``wait=True`` 면 1프레임 후까지 대기."""
+        if wait:
+            try:
+                from .lam_sequence_engine import _dispatch_main_wait
+
+                ok = _dispatch_main_wait(
+                    lambda: self._apply_cached_timeline_ui(cached),
+                    timeout=5.0,
+                )
+                if not ok:
+                    print(
+                        f"{_PRINT_PREFIX} 타임라인 UI 반영 타임아웃",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} 타임라인 UI 반영 실패: {exc}",
+                    flush=True,
+                )
+            return
+        _post_kit_main_thread(lambda: self._apply_cached_timeline_ui(cached))
+
+    def _rebuild_schedule_timeline_rows(
+        self,
+        entries: List[CsvPlaybackScheduleEntry],
+        *,
+        speed_scale: float = 1.0,
+    ) -> None:
+        """스크롤 타임라인 행 재구성 (omni.ui — Kit update tick 또는 UI 콜백에서 호출)."""
+        self._schedule_row_entries = list(entries)
+        stack = self._schedule_rows_stack
+        if stack is None:
+            self._set_schedule_model_text(
+                format_csv_playback_schedule(entries, speed_scale=speed_scale)
+            )
+            return
+        self._clear_schedule_timeline_stack()
+        sp = max(0.1, float(speed_scale or 1.0))
+        if not entries:
+            self._set_schedule_model_text("(CSV 선택 후 타임라인이 표시됩니다.)")
+            try:
+                import omni.ui as ui  # type: ignore
+
+                with stack:
+                    lbl = ui.Label(
+                        "(CSV 선택 후 타임라인이 표시됩니다.)",
+                        height=18,
+                        word_wrap=True,
+                        style={"color": _TIMELINE_UI_COLOR_DEFAULT},
+                    )
+                    self._schedule_row_labels.append(lbl)
+            except Exception:
+                pass
+            return
+        n_act = sum(1 for e in entries if e.category != "dwell")
+        try:
+            import omni.ui as ui  # type: ignore
+        except Exception:
+            self._set_schedule_model_text(
+                format_csv_playback_schedule(entries, speed_scale=sp)
+            )
+            return
+        with stack:
+            hdr = ui.Label(
+                f"=== CSV 타임라인 · {len(entries)}건 · JSON {n_act}건 · 배속 {sp:g}x ===",
+                height=20,
+                word_wrap=True,
+                style={"color": _TIMELINE_UI_COLOR_DEFAULT},
+            )
+            self._schedule_row_labels.append(hdr)
+            for i, ent in enumerate(entries, 1):
+                line = format_csv_playback_schedule_row(i, ent, speed_scale=sp)
+                lbl = ui.Label(
+                    line,
+                    height=18,
+                    word_wrap=True,
+                    style=self._timeline_label_style(ent),
+                )
+                self._schedule_row_labels.append(lbl)
+        self._apply_schedule_row_highlight(self._schedule_highlight_keys)
 
     def _set_build_progress_text(self, text: str) -> None:
         m = self._build_progress_model
@@ -3355,9 +3795,7 @@ class LamSimulationCsvPlayWindow:
 
     def _apply_cached_timeline_ui(self, cached: CachedCsvPlayback) -> None:
         sp = self._read_speed_scale()
-        self._set_schedule_model_text(
-            format_csv_playback_schedule(cached.schedule, speed_scale=sp)
-        )
+        self._rebuild_schedule_timeline_rows(cached.schedule, speed_scale=sp)
         self._prepared_playback = cached
         self._set_build_progress_text(
             f"준비 완료 (캐시) — dwell {len(cached.dwells)} · "
@@ -3456,7 +3894,7 @@ class LamSimulationCsvPlayWindow:
             return
         p = path or self._selected_csv_path()
         if p is None:
-            self._set_schedule_model_text("(CSV 파일이 없습니다. lam/csv 에 .csv 를 추가하세요.)")
+            self._rebuild_schedule_timeline_rows([])
             self._set_build_progress_text("(CSV 없음)")
             return
         hit = get_cached_csv_playback(p)
@@ -3464,14 +3902,17 @@ class LamSimulationCsvPlayWindow:
             self._apply_cached_timeline_ui(hit)
             return
         try:
-            text = preview_csv_playback_schedule(
-                str(p), speed_scale=self._read_speed_scale(), use_cache=False
+            dwells = load_csv_dwell_timeline(p)
+            entries = build_csv_playback_schedule_meta(dwells)
+            self._prepared_playback = None
+            self._rebuild_schedule_timeline_rows(
+                entries, speed_scale=self._read_speed_scale()
             )
-            self._set_schedule_model_text(text)
             self._set_build_progress_text(
                 "(미리보기 — [타임라인 갱신] 또는 Play 시 전체 빌드)"
             )
         except Exception as exc:
+            self._rebuild_schedule_timeline_rows([])
             self._set_schedule_model_text(f"타임라인 생성 실패 ({p.name}):\n{exc}")
             self._set_build_progress_text(f"미리보기 실패: {exc}")
             print(f"{_PRINT_PREFIX} schedule preview error: {exc}", flush=True)
@@ -3501,6 +3942,7 @@ class LamSimulationCsvPlayWindow:
             self._log("CSV Play 가 실행 중이 아닙니다.")
             return
         request_stop_csv_playback(self._registry, self._scheduler)
+        clear_csv_play_timeline_highlight()
         self._log("CSV Play 중지 요청 — 콘솔에서 'CSV Play 중지됨' 확인.")
 
     def _on_play_clicked(self) -> None:
@@ -3518,9 +3960,18 @@ class LamSimulationCsvPlayWindow:
         prepared = self._prepared_playback
         if prepared is None or prepared.path.resolve() != path.resolve():
             prepared = get_cached_csv_playback(path)
+        if prepared is not None:
+            self._apply_cached_timeline_ui(prepared)
         n_items = len(prepared.schedule) if prepared is not None else 0
+        n_json = (
+            sum(1 for e in prepared.schedule if e.category != "dwell")
+            if prepared is not None
+            else 0
+        )
         self._log(
-            f"Play (thread): {path.name} — 배속 {sp:g}x, 스케줄 {n_items}항목"
+            f"Play: {path.name} — 배속 {sp:g}x, "
+            f"스케줄 {n_items}항목 (JSON {n_json})"
+            + ("" if prepared is not None else " · 빌드 후 재생")
         )
 
         def _on_play_ui(csv_t: float, csv_total: float, wall_el: float, wall_tot: float) -> None:
@@ -3531,10 +3982,14 @@ class LamSimulationCsvPlayWindow:
 
             _post_kit_main_thread(_ui)
 
+        def _on_timeline_highlight(active_keys: frozenset) -> None:
+            self._apply_schedule_row_highlight(active_keys)
+
         def _worker() -> None:
             try:
                 nonlocal prepared
                 set_csv_play_progress_ui_callback(_on_play_ui)
+                set_csv_play_timeline_highlight_callback(_on_timeline_highlight)
                 if prepared is None:
                     ticker = self._build_ui_ticker
 
@@ -3579,10 +4034,7 @@ class LamSimulationCsvPlayWindow:
                             flush=True,
                         )
 
-                        def _ui_ready() -> None:
-                            self._apply_cached_timeline_ui(prepared)
-
-                        _post_kit_main_thread(_ui_ready)
+                        self._post_apply_cached_timeline_ui(prepared, wait=True)
                     finally:
                         if ticker is not None:
                             ticker.stop()
@@ -3599,6 +4051,13 @@ class LamSimulationCsvPlayWindow:
                 print(f"{_PRINT_PREFIX} CSV Play 오류: {exc}", flush=True)
             finally:
                 set_csv_play_progress_ui_callback(None)
+                set_csv_play_timeline_highlight_callback(None)
+                clear_csv_play_timeline_highlight()
+
+                def _ui_clear() -> None:
+                    self._apply_schedule_row_highlight(frozenset())
+
+                _post_kit_main_thread(_ui_clear)
                 self._csv_play_thread = None
 
         self._csv_play_thread = threading.Thread(
@@ -3765,6 +4224,9 @@ __all__ = [
     "set_csv_playback_compact_log",
     "is_csv_playback_compact_log",
     "set_csv_play_progress_ui_callback",
+    "set_csv_play_timeline_highlight_callback",
+    "clear_csv_play_timeline_highlight",
+    "format_csv_playback_schedule_row",
     "is_csv_bulk_build_active",
     "CachedCsvPlayback",
     "get_cached_csv_playback",
