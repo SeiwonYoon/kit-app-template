@@ -46,6 +46,8 @@ load_automatically = True
 
 # 절대 경로 예 (Windows):
 #   default_load_usd_path = r"C:\Users\ptK\Documents\kit-app-template_mine\lam\usd\master.usd"
+# Nucleus URL 예:
+#   default_load_usd_path = "omniverse://10.139.35.208/Users/....../Combine.usd"
 # 절대 경로 예 (Linux/macOS):
 #   default_load_usd_path = "/home/user/kit-app-template_mine/lam/usd/master.usd"
 # 프로젝트(레포) 루트 기준 상대 경로 예 — lam/ 가 repo 직하위일 때:
@@ -100,14 +102,19 @@ def _find_project_root() -> str:
 
 
 def resolve_default_load_usd_path(raw: str) -> str:
-    """`default_load_usd_path` 를 Open Master 에 쓸 절대 경로로 변환.
+    """`default_load_usd_path` 를 Open Master 에 쓸 경로로 변환.
 
-    - 절대 경로면 normpath 만 적용.
-    - 상대 경로면 프로젝트 루트(`_find_project_root()`) 기준으로 join.
+    - ``omniverse://...`` — 그대로 반환 (Nucleus URL).
+    - 절대 로컬 경로 — normpath.
+    - 상대 경로 — 프로젝트 루트(`_find_project_root()`) 기준 join.
     """
+    from .lam_usd_path import is_omniverse_usd_url
+
     s = (raw or "").strip()
     if not s:
         return ""
+    if is_omniverse_usd_url(s):
+        return s
     if os.path.isabs(s):
         return os.path.normpath(s)
     return os.path.normpath(os.path.join(_find_project_root(), s))
@@ -419,6 +426,7 @@ class LamWindow:
         if self._csv_viewport_hud is None:
             self._csv_viewport_hud = LamCsvViewportControlsHud(
                 self._csv_sim_window,
+                lam_window=self,
                 viewport=self._viewport,
             )
         self._csv_viewport_hud.sync_layers()
@@ -514,16 +522,23 @@ class LamWindow:
     def _on_open_master(self) -> None:
         if self._master_path_model is None:
             return
-        path = (self._master_path_model.get_value_as_string() or "").strip()
-        if path:
-            resolved = resolve_default_load_usd_path(path)
-            if resolved and resolved != path and os.path.isfile(resolved):
-                path = resolved
-                try:
-                    self._master_path_model.set_value(resolved)
-                except Exception:
-                    pass
-        self._open_master_at_path(path)
+        raw = (self._master_path_model.get_value_as_string() or "").strip()
+        resolved = resolve_default_load_usd_path(raw) if raw else ""
+        open_path = resolved or raw
+        from .lam_usd_path import master_usd_path_is_openable
+
+        if not master_usd_path_is_openable(open_path):
+            self._log(
+                "Master path 가 비어 있거나 파일/URL 을 열 수 없습니다. "
+                "(로컬 .usd 또는 omniverse://…)"
+            )
+            return
+        if open_path != raw:
+            try:
+                self._master_path_model.set_value(open_path)
+            except Exception:
+                pass
+        self._open_master_at_path(open_path)
 
     def _open_master_at_path(self, path: str, *, log_prefix: str = "") -> bool:
         """합성 USD 열기 — Discover + Extract 자동 (Open Master / 시작 자동 로드 공통)."""

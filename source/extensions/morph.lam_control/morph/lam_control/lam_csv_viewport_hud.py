@@ -1,7 +1,10 @@
-"""Viewport 우측 상단 CSV Play 미니 패널 (2D 오버레이).
+"""Viewport 우측 상단 LAM 미니 패널 (2D 오버레이).
 
 기존 ``LamSimulationCsvPlayWindow`` (``ui.Window``) 는 그대로 두고,
 아래 플래그가 True 일 때만 default/LAM Viewport ``get_frame`` 슬롯에 컨트롤을 붙인다.
+
+- **합성 USD** — LAM Window 「② 기존 합성 USD 열기」와 동일 경로 모델 + Open Master
+- **CSV Play** — 폴더·파일·목록/타임라인/Play/중지·배속
 
 **on/off:** ``LAM_CSV_VIEWPORT_CONTROLS_ENABLED`` (본 파일 상단).
 """
@@ -12,6 +15,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .lam_viewport import LamViewport
+    from .lam_window import LamWindow
     from .simulation_play import LamSimulationCsvPlayWindow
 
 _PRINT_PREFIX = "[LAM/CSV-HUD]"
@@ -23,7 +27,7 @@ _PRINT_PREFIX = "[LAM/CSV-HUD]"
 LAM_CSV_VIEWPORT_CONTROLS_ENABLED = True
 
 _FRAME_SLOT = "morph.lam_control:csv_play_hud"
-_PANEL_W = 292
+_PANEL_W = 300
 _PANEL_PAD = 8
 _TOP_SPACER_H = 12
 
@@ -61,15 +65,17 @@ def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]
 
 
 class LamCsvViewportControlsHud:
-    """CSV 폴더·파일·Play/중지·배속만 Viewport 에 오버레이."""
+    """Viewport 우측 상단 — 합성 USD Open Master + CSV Play."""
 
     def __init__(
         self,
         csv_window: "LamSimulationCsvPlayWindow",
         *,
+        lam_window: Optional["LamWindow"] = None,
         viewport: Optional["LamViewport"] = None,
     ) -> None:
         self._csv = csv_window
+        self._lam = lam_window
         self._viewport = viewport
         self._root: Any = None
         self._hud_combo: Any = None
@@ -136,6 +142,10 @@ class LamCsvViewportControlsHud:
 
         names = self._csv.csv_file_display_names()
         idx = self._csv.get_csv_combo_index()
+        lam = self._lam
+        master_model = (
+            getattr(lam, "_master_path_model", None) if lam is not None else None
+        )
 
         try:
             ra = getattr(ui, "Alignment", None)
@@ -158,12 +168,52 @@ class LamCsvViewportControlsHud:
                                 },
                             ):
                                 with ui.ZStack():
-                                    ui.Rectangle(style={"background_color": 0xE6181C22})
+                                    ui.Rectangle(
+                                        style={"background_color": 0xE6181C22}
+                                    )
                                     with ui.VStack(spacing=5):
+                                        ui.Label(
+                                            "LAM (Viewport)",
+                                            height=18,
+                                            style={
+                                                "font_size": 13,
+                                                "color": 0xFFFFFFFF,
+                                            },
+                                        )
+                                        if master_model is not None and lam is not None:
+                                            ui.Label("합성 USD", height=14)
+                                            ui.StringField(
+                                                model=master_model,
+                                                height=22,
+                                                tooltip=(
+                                                    "로컬 .usd 또는 "
+                                                    "omniverse://서버/경로/file.usd"
+                                                ),
+                                            )
+                                            with ui.HStack(spacing=4, height=26):
+                                                ui.Button(
+                                                    "Open Master",
+                                                    width=120,
+                                                    clicked_fn=lam._on_open_master,
+                                                    tooltip=(
+                                                        "LAM Window ② 와 동일 — "
+                                                        "Discover + Extract"
+                                                    ),
+                                                )
+                                                ui.Spacer()
+                                            ui.Rectangle(
+                                                height=1,
+                                                style={
+                                                    "background_color": 0xFF5A6A80
+                                                },
+                                            )
                                         ui.Label(
                                             "CSV Play",
                                             height=18,
-                                            style={"font_size": 13, "color": 0xFFFFFFFF},
+                                            style={
+                                                "font_size": 12,
+                                                "color": 0xFFCCCCCC,
+                                            },
                                         )
                                         ui.Label("폴더", height=14)
                                         dir_m = self._csv._csv_dir_model
@@ -224,12 +274,16 @@ class LamCsvViewportControlsHud:
                                             ui.Button(
                                                 "1x",
                                                 width=32,
-                                                clicked_fn=lambda: self._csv._set_speed_preset(1.0),
+                                                clicked_fn=lambda: self._csv._set_speed_preset(
+                                                    1.0
+                                                ),
                                             )
                                             ui.Button(
                                                 "5x",
                                                 width=32,
-                                                clicked_fn=lambda: self._csv._set_speed_preset(5.0),
+                                                clicked_fn=lambda: self._csv._set_speed_preset(
+                                                    5.0
+                                                ),
                                             )
                                             ui.Spacer()
                         ui.Spacer()
@@ -238,7 +292,10 @@ class LamCsvViewportControlsHud:
             self._root = None
             return
 
-        print(f"{_PRINT_PREFIX} Viewport CSV 패널 표시 (우측 상단).", flush=True)
+        print(
+            f"{_PRINT_PREFIX} Viewport 패널 표시 (합성 USD + CSV, 우측 상단).",
+            flush=True,
+        )
 
     def _on_hud_refresh_clicked(self) -> None:
         self._csv._on_refresh_clicked()

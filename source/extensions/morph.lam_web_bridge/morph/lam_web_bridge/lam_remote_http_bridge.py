@@ -130,6 +130,7 @@ def _snapshot(session: LamKitSession) -> Dict[str, Any]:
 
 
 def _cmd_open_master(session: LamKitSession, data: Dict[str, Any]) -> Dict[str, Any]:
+    from morph.lam_control.lam_usd_path import master_usd_path_is_openable
     from morph.lam_control.lam_window import default_load_usd_path, resolve_default_load_usd_path
 
     raw = str(data.get("path") or data.get("master_path") or "").strip()
@@ -139,9 +140,9 @@ def _cmd_open_master(session: LamKitSession, data: Dict[str, Any]) -> Dict[str, 
     if not resolved:
         _set_web_log("합성 USD 경로가 비어 있습니다.")
         return {"ok": False, "error": "empty path"}
-    if not os.path.isfile(resolved):
-        _set_web_log(f"파일 없음: {resolved}")
-        return {"ok": False, "error": "file not found", "path": resolved}
+    if not master_usd_path_is_openable(resolved):
+        _set_web_log(f"열 수 없음 (로컬 .usd 또는 omniverse://…): {resolved}")
+        return {"ok": False, "error": "path not openable", "path": resolved}
 
     ok = bool(session.open_master_at_path(resolved, log_prefix="Web"))
     with _web_state_lock:

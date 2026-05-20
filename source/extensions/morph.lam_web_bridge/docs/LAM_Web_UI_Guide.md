@@ -407,7 +407,7 @@ Kit `LamSimulationCsvPlayWindow` 하단의 **매크로/이벤트 함수 실행**
 
 | `cmd` | 추가 필드 | Kit 쪽 핵심 |
 |-------|-----------|-------------|
-| `open_master` | `path` 또는 `master_path` | `LamWindow._open_master_at_path` |
+| `open_master` | `path` 또는 `master_path` | `LamWindow._open_master_at_path` (로컬 `.usd` 또는 `omniverse://…`) |
 | `csv_refresh_list` | `csv_dir` (선택) | `list_csv_paths_in_directory` |
 | `csv_timeline_refresh` | `csv_dir`, `csv_path`, `speed_scale` | `build_csv_playback_plan` 등 |
 | `csv_play` | `csv_dir`, `csv_path`, `speed_scale` | `run_simulation_from_csv` |

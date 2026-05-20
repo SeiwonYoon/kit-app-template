@@ -125,9 +125,19 @@ class MasterStage:
         return True
 
     def open_master(self, path: str) -> bool:
-        """기존 master.usd 를 LAM 컨텍스트에 로드(REQ-005 로드 흐름)."""
-        if not path or not os.path.isfile(path):
-            print(f"{_PRINT_PREFIX} open_master: file not found: {path}", flush=True)
+        """기존 master.usd 를 LAM 컨텍스트에 로드(REQ-005 로드 흐름).
+
+        ``path`` 는 로컬 ``.usd`` 파일 또는 ``omniverse://`` Nucleus URL.
+        """
+        from .lam_usd_path import master_usd_path_is_openable
+
+        path = (path or "").strip()
+        if not master_usd_path_is_openable(path):
+            print(
+                f"{_PRINT_PREFIX} open_master: not openable "
+                f"(로컬 .usd 또는 omniverse://…): {path!r}",
+                flush=True,
+            )
             return False
 
         try:
