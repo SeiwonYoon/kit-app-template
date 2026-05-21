@@ -21,3 +21,6 @@
 3. `Save Master…` 가 본 폴더의 `usd/master.usd` 에 저장(또는 사용자 지정 경로). `Open Master…` 후 L2 Discovery 가 그 master 안의 인스턴스를 자동 복원.
 
 자세한 사양은 `source/extensions/morph.lam_control/docs/LAM_Spec.md` 와 `source/extensions/morph.tbs_control_1/docs/USD_Timeline_Spec.md` 의 REQ-002 ~ REQ-006 카드를 참조.
+
+**Jenkins / Linux 배포** (csv · USD · `lam_event_sequences` 가 서버에 안 올라가는 문제):
+`source/extensions/morph.lam_control/docs/LAM_Jenkins_Deployment_Guide.md`
