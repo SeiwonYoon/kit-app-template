@@ -1,485 +1,505 @@
-# LAM 데이터 배포 가이드 (Jenkins / Linux)
+# LAM Jenkins 배포 가이드 (본 레포 실측 기준)
 
-Kit 확장 `morph.lam_control` 이 사용하는 **레포 루트 `lam/`** 데이터(csv · USD · `lam_event_sequences` JSON)를
-**로컬 Windows**와 **Jenkins 빌드·배포 Linux** 환경에서 동일하게 쓰기 위한 **현상 정리 · 진단 · 해결 · 테스트** 문서입니다.
+**레포:** `kit-app-template_mine`
+**앱:** `source/apps/morph.editor.kit` → 확장 `morph.lam_control`
+**데이터 SoT:** 레포 루트 `lam/` (코드와 분리)
 
-**대상 독자:** 인프라(Jenkins) 담당, LAM 기능 검증 담당
-**관련 문서:** `LAM_Control_Maintenance_Guide.md`, `lam/README.md`, `LAM_Simulation_Play_Field_Test_Guide.md`
+이 문서는 **ChatGPT 등에서 흔히 나오는 “repo.toml / 루트 premake 수정” 같은 일반 조언이 아니라**,
+**지금 이 저장소에 실제로 있는 파일·경로만** 기준으로 Jenkins(Linux)까지 csv · JSON · USD 를 가져오는 방법을 **여러 루트(경로)** 로 나눠 적었습니다.
 
----
-
-## 0. 이 문서로 해결하려는 문제
-
-### 0.1 증상 (실무에서 확인된 것)
-
-| 구분 | 로컬 | Jenkins 배포 후 |
-|------|------|-----------------|
-| `lam/csv/*.csv` | 목록·재생 정상 | 목록 비거나 Play 실패 |
-| `lam/lam_event_sequences/*.json` | 시뮬·이벤트 재생 정상 | JSON 못 찾음 / 스텝 빈 실행 |
-| `lam/usd/...` (상대 경로 예: `lam/usd/LAM_v02/FBX/Combine_01.usd`) | Launch·Open Master 정상 | 파일 없음 / 자동 로드 실패 |
-| 배포 서버 디스크 | 레포 `lam/` 에 실제 파일 있음 | **`lam/` 트리·파일이 없거나 빈 폴더만 있음** |
-
-### 0.2 잘못된 원인 설명 (정리)
-
-- **`os.path` / `os` 모듈이 “로컬 전용”이라서 Linux에서 안 된다** → **아님.** Linux에서도 동일 API로 동작합니다.
-- **상대 경로 `lam/usd/...` 가 Jenkins에서 안 통한다** → **반만 맞음.** 상대 경로는 **“프로젝트 루트 + lam/…”** 로 풀리는데, **서버에 그 실제 파일이 없으면** 실패합니다. 로컬에서 상대 경로가 되는 것은 **경로 문법이 맞고 + 디스크에 `lam/` 이 있기 때문**입니다.
-
-### 0.3 실제 원인 (코드베이스 기준, 2가지가 겹침)
-
-```mermaid
-flowchart TD
-  A[Jenkins deploy] --> B{lam/ 폴더·파일이 서버에 있나?}
-  B -->|No| C[실패: csv / json / usd 전부]
-  B -->|Yes| D{_find_lam_data_root 가 진짜 lam 을 찾나?}
-  D -->|No - exts 아래 빈 lam| C
-  D -->|Yes| E[상대 경로 resolve 성공 가능]
-```
-
-1. **배포물에 `lam/` 데이터가 포함되지 않음** — `repo.sh build` / `premake5.lua` 는 **Python·docs만** `exts` 로 링크하고 **`lam/` 은 빌드 산출물에 넣지 않음.**
-2. **런타임이 잘못된 `lam/` 을 잡음** — 서버에서 레포 루트 `lam/` 을 못 찾으면 `exts` 근처 **빈 `lam/`** 을 만들고 그쪽을 루트로 사용 (`lam_window.py`, `simulation_play.py`, `lam_event_sequences.py` 공통).
+**관련:** `lam/README.md`, `LAM_Control_Maintenance_Guide.md`
 
 ---
 
-## 1. 프로젝트 구조 (LAM 관련)
+## 0. 먼저 읽을 것 — 이 레포에서 건드리는 파일
+
+| 파일 | LAM 데이터 배포와 관계 | 가이드에서 쓰는 루트 |
+|------|------------------------|----------------------|
+| `repo.toml` | Kit 빌드·패키징 **공통** 설정. **`lam/` 경로 설정 없음** | **루트 A·B:** 보통 **수정 안 함** |
+| `premake5.lua` (레포 루트) | `morph.editor.kit` 등 **앱 등록만** | **수정 안 함** |
+| `source/extensions/morph.lam_control/premake5.lua` | 확장 빌드 시 **어떤 폴더를 `exts`에 링크할지** | **루트 C·D** |
+| `source/extensions/morph.lam_control/config/extension.toml` | 확장 ID·버전 `0.1.0` | 참고만 |
+| `source/extensions/morph.lam_control/morph/lam_control/lam_window.py` | `default_load_usd_path`, `_find_lam_data_root()` | **루트 E** (코드) |
+| `source/extensions/morph.lam_control/morph/lam_control/simulation_play.py` | CSV 경로 | **루트 E** |
+| `source/extensions/morph.lam_control/morph/lam_control/lam_event_sequences.py` | JSON 경로 | **루트 E** |
+| `lam/` (레포 루트) | csv · `lam_event_sequences` · `usd` 실제 파일 | **모든 루트** |
+| `.github/workflows/.github-ci.yml` | `checkout` + `./repo.sh build` 만 (lam 미포함) | **루트 A** 시 Jenkins Job 보완 |
+
+**하지 말 것 (테스트 불가능해지는 일반 잘못된 조언):**
+
+- “`repo.toml`에 lam 경로 추가” → **이 레포 `repo.toml`에는 해당 항목 없음**
+- “루트 `premake5.lua`에 lam 복사” → **앱 정의만 있음, 확장 데이터와 무관**
+- `repo.toml`의 `[repo_package...]` `files_exclude`에 **`["data/**"]`** 가 있음 → `./repo.sh package` 로 zip 만들 때 **이름이 `data`인 경로가 통째로 빠질 수 있음** (루트 C 후 패키징 시 주의, §4.4)
+
+---
+
+## 1. 현재 프로젝트 구조 (실제 트리)
 
 ```text
-kit-app-template_mine/                 ← 프로젝트(레포) 루트 (_find_project_root)
+kit-app-template_mine/                          ← OMNI_REPO_ROOT (= 프로젝트 루트)
+├── repo.sh / repo.bat                          ← → tools/repoman/repoman.py
+├── repo.toml                                   ← repo_build, repo_package (lam 항목 없음)
+├── premake5.lua                                ← define_app("morph.editor.kit") 등
 ├── source/
-│   ├── apps/morph.editor.kit          ← morph.lam_control 로드
-│   └── extensions/morph.lam_control/
-│       ├── config/extension.toml
-│       ├── morph/lam_control/*.py     ← 실행 코드 (데이터 없음)
-│       └── premake5.lua               ← docs + morph 만 링크 (lam 미포함)
-├── lam/                               ← ★ 데이터 SoT (코드와 분리)
-│   ├── csv/                           ← dwell CSV
-│   ├── lam_event_sequences/           ← 이벤트 JSON (함수명.json)
-│   ├── usd/                           ← Master / reference USD
-│   ├── lam_external_results/          ← 외부 시뮬 결과 JSON
-│   └── README.md
-└── _build/{windows|linux}-.../release/
-    └── exts/morph.lam_control-0.1.0/
-        ├── morph/lam_control/         ← 배포 시 보통 이 코드만 갱신
-        └── (data/lam 없음 — 현재 premake 기준)
+│   ├── apps/
+│   │   └── morph.editor.kit                    ← "morph.lam_control" = {}
+│   └── extensions/
+│       └── morph.lam_control/
+│           ├── config/extension.toml           ← version 0.1.0, name morph.lam_control
+│           ├── premake5.lua                    ← ★ 현재 docs + morph 만 링크
+│           ├── docs/
+│           └── morph/lam_control/*.py          ← 런타임 코드 (data 폴더 없음)
+├── lam/                                        ← ★ 데이터 (확장 밖)
+│   ├── csv/
+│   ├── lam_event_sequences/
+│   ├── usd/
+│   └── lam_external_results/
+└── _build/
+    └── linux-x86_64/release/                   ← Jenkins CI 빌드 타깃 (ubuntu)
+        ├── apps/                               ← morph.editor.kit 실행 스크립트
+        └── exts/
+            └── morph.lam_control-0.1.0/        ← 버전은 extension.toml 과 동일
+                ├── config/                     ← (Kit가 소스에서 복사 — premake에 없어도 존재할 수 있음)
+                ├── docs/
+                └── morph/lam_control/
+                └── (data/lam 없음 — 현재 premake 기준)
 ```
 
-**설계 의도:** `lam/README.md` — 데이터는 확장 안 `data/` 가 아니라 **레포 루트 `lam/`**.
+### 1.1 빌드 명령 (이 레포)
 
----
+| 환경 | 명령 | 비고 |
+|------|------|------|
+| Linux / Jenkins | `./repo.sh build` | `.github-ci.yml` 과 동일 |
+| Windows | `repo.bat build` | CI에도 있음 |
+| `repo.toml` | `[repo_build.build] enabled = true` | |
+| | `"platform:windows-x86_64".enabled = false` | **네이티브 Windows MSBuild 빌드는 꺼짐** — 로컬은 `repo.bat`·Kit 동작 방식은 팀 환경 확인 |
 
-## 2. 코드가 경로를 찾는 방식 (현재 구현)
+### 1.2 빌드 후 확장이 놓이는 **정확한 경로**
 
-### 2.1 공통: `lam` 데이터 루트
-
-다음 파일에 **동일한** `_find_lam_data_root()` 가 있습니다.
-
-| 파일 | 용도 |
-|------|------|
-| `morph/lam_control/lam_window.py` | UI 기본 경로, USD 파일피커 시작 위치, autoload |
-| `morph/lam_control/simulation_play.py` | `get_lam_csv_dir()` → `{lam}/csv` |
-| `morph/lam_control/lam_event_sequences.py` | `get_event_sequences_dir()` → `{lam}/lam_event_sequences` |
-
-**알고리즘 요약:**
-
-1. `__file__` 의 디렉터리에서 시작해 부모를 최대 **12단계** 올라감.
-2. 각 단계에서 `{현재}/lam` 이 **디렉터리이면** 그 경로를 반환.
-3. 없으면 `__file__` 기준 **6단계 위** `{...}/lam` 을 fallback 으로 반환하고,
-   `lam_event_sequences`, `lam_external_results`, `usd` 하위 폴더 **생성 시도** (비어 있을 수 있음).
-
-**로컬에서 성공하는 이유:** 올라가다 **레포 루트의 `kit-app-template_mine/lam`** 을 만남.
-**Jenkins에서 실패하는 이유:** 조상 경로에 **실제 데이터가 있는 `lam/` 이 없음** → 3번으로 **빈 `lam/`**.
-
-### 2.2 CSV
-
-| 항목 | 내용 |
-|------|------|
-| 디렉터리 | `get_lam_csv_dir()` = `Path(_find_lam_data_root()) / "csv"` |
-| 목록 | `list_lam_csv_paths()` — `lam/csv/*.csv` |
-| 기본 파일 | `DEFAULT_CSV_PATH` — 모듈 import 시 `LAM_SIM_CSV` env 또는 `_default_csv_path()` **한 번** 평가 |
-| env | `LAM_SIM_CSV=/절대/경로/file.csv` → **해당 CSV 파일 하나**만 우회 가능 (목록·JSON·USD 는 대체 안 됨) |
-
-### 2.3 애니메이션 JSON (`lam_event_sequences`)
-
-| 항목 | 내용 |
-|------|------|
-| 디렉터리 | `get_event_sequences_dir()` = `{lam}/lam_event_sequences` |
-| 파일 규칙 | `event_json_path("atm_foup1_pick")` → `{lam}/lam_event_sequences/atm_foup1_pick.json` |
-| 호출 | `build_steps_for_event()`, CSV dwell 이송, `lam_sim_actions` 매크로 |
-
-JSON 이 없으면 콘솔에 이벤트 빌드 실패·`NOT_FOUND` 류 로그가 날 수 있음 (`LAM_Control_Maintenance_Guide.md` 참고).
-
-### 2.4 USD
-
-| 항목 | 내용 |
-|------|------|
-| UI Master 경로 | `lam_window` — `_master_path_model` 기본값 `{lam}/usd/master.usd` |
-| 자동 로드 | `load_automatically`, `default_load_usd_path` → `resolve_default_load_usd_path()` |
-| 상대 경로 규칙 | `lam/usd/...` → `os.path.join(_find_project_root(), raw)`
-  `_find_project_root()` = `dirname(_find_lam_data_root())` |
-| Nucleus | `omniverse://...` 는 그대로 사용 (`lam_usd_path.is_omniverse_usd_url`) |
-
-**실무 설정 예 (로컬에서 동작 확인됨):**
-
-```python
-default_load_usd_path = "lam/usd/LAM_v02/FBX/Combine_01.usd"
+```text
+${OMNI_REPO_ROOT}/_build/linux-x86_64/release/exts/morph.lam_control-0.1.0/
 ```
 
-→ 풀린 경로: `{프로젝트루트}/lam/usd/LAM_v02/FBX/Combine_01.usd`
-→ **서버에 이 파일이 없으면** 상대 경로여도 실패.
+로컬 Windows에서 빌드했다면 플랫폼 폴더가 `windows-x86_64` 일 수 있음. **아래 명령에서 플랫폼만 바꿔서** 확인.
 
-### 2.5 빌드가 `lam/` 을 포함하지 않음 (근거)
-
-`source/extensions/morph.lam_control/premake5.lua`:
+### 1.3 `morph.lam_control/premake5.lua` **현재 내용 (실측)**
 
 ```lua
+-- source/extensions/morph.lam_control/premake5.lua
+local ext = get_current_extension_info()
+project_ext (ext)
 repo_build.prebuild_link {
     { "docs", ext.target_dir.."/docs" },
     { "morph", ext.target_dir.."/morph" },
 }
 ```
 
-`morph.measure_control_1` 은 `{ "data", ext.target_dir.."/data" }` 를 링크하지만, **`lam_control` 은 `data` / `lam` 링크 없음.**
+→ **`lam/` 은 링크되지 않음.** 그래서 Jenkins가 `exts` 만 배포하면 csv/json/usd 가 없음.
 
-`.github/workflows/.github-ci.yml` 은 `checkout` + `./repo.sh build` 만 수행 — **`lam/` 배포 단계 없음** (팀 Jenkins 파이프라인도 동일 패턴이면 동일 증상).
+**비교 (같은 레포의 다른 확장):** `source/extensions/morph.measure_control_1/premake5.lua` 는 `{ "data", ext.target_dir.."/data" }` 가 **있음** — LAM 은 아직 없음.
 
 ---
 
-## 3. 권장 배포 레이아웃 (코드 수정 없이)
+## 2. 런타임이 경로를 찾는 방식 (코드 — 수정 전)
 
-Kit 실행·exts 위치에 맞게 `DEPLOY_ROOT` 를 정한 뒤, **아래 구조를 만족**시키면 현재 코드의 상위 탐색이 로컬과 같아집니다.
+다음 **3개 파일**에 같은 `_find_lam_data_root()` 가 있습니다.
 
-```text
-DEPLOY_ROOT/
-├── _build/
-│   └── linux-x86_64/
-│       └── release/              ← Kit 바이너리·exts (Jenkins가 갱신하는 부분)
-│           └── exts/
-│               └── morph.lam_control-0.1.0/
-└── lam/                          ← ★ 반드시 추가 (Git 또는 rsync)
-    ├── csv/
-    ├── lam_event_sequences/
-    └── usd/
-        └── LAM_v02/FBX/Combine_01.usd   (예)
+- `morph/lam_control/lam_window.py`
+- `morph/lam_control/simulation_play.py`
+- `morph/lam_control/lam_event_sequences.py`
+
+**동작 요약**
+
+1. `__file__` 기준으로 부모를 최대 12단계 올리며 `{부모}/lam` 디렉터리 검색
+2. 찾으면 → 예: `{OMNI_REPO_ROOT}/lam`
+3. 못 찾으면 → `exts/.../morph/lam_control` 위로 6단계 fallback + **빈 `lam/` 생성 시도**
+
+| 데이터 | 코드 | 상대 경로 |
+|--------|------|-----------|
+| CSV | `get_lam_csv_dir()` | `lam/csv/` |
+| JSON | `get_event_sequences_dir()` | `lam/lam_event_sequences/` |
+| USD (UI·autoload) | `resolve_default_load_usd_path()` | `lam/usd/...` (프로젝트 루트 기준 join) |
+
+**현재 `lam_window.py` (실측):**
+
+```python
+default_load_usd_path = "lam/usd/LAM_v02/FBX/Combine_01.usd"
+load_automatically = True
 ```
 
-**왜 `_build` 와 형제인가:**
-exts → release → arch → `_build` → **`DEPLOY_ROOT`** 에서 `DEPLOY_ROOT/lam` 을 찾기 위함 (12단계 탐색 이내).
+→ 로컬에서 되는 조건: `{OMNI_REPO_ROOT}/lam/usd/LAM_v02/FBX/Combine_01.usd` **파일이 디스크에 있음**.
 
-**잘못된 예:**
+**환경변수 (이 레포에 이미 있음):**
 
-- `release/exts/.../lam/` 만 두고 상위에 `lam` 없음 → 탐색 실패 가능.
-- exts 만 배포하고 **`lam/` 전체 미포함** → 현재 증상 그대로.
+- `LAM_SIM_CSV` — **CSV 파일 1개** 경로만 override (`simulation_play.py`). JSON·USD 는 대체 안 함.
 
 ---
 
-## 4. 해결 방안 전체 목록
+## 3. 증상 ↔ 원인 (실무 정리)
 
-| ID | 방안 | 코드 변경 | Jenkins/운영 | csv | json | usd | 로컬 영향 |
-|----|------|-----------|--------------|-----|------|-----|-----------|
-| **A** | `DEPLOY_ROOT/lam/` 동봉 (§3 구조) | 없음 | deploy 스크립트에 `lam/` rsync | ○ | ○ | ○ | 없음 |
-| **B** | Git에 데이터 커밋 (대용량은 LFS) | 없음 | checkout 시 `lam/` 존재 | ○* | ○* | ○* | 없음 |
-| **C** | `LAM_SIM_CSV` env (단일 CSV) | 없음 | env 설정 | △ | ✗ | ✗ | 없음 |
-| **D** | USD만 Nucleus URL | 설정만 | `default_load_usd_path = omniverse://...` | — | — | ○ | 없음 |
-| **E** | premake `data/lam` ← repo `lam` 링크 | premake | build 후 exts 안에 data | ○ | ○ | ○ | rebuild 필요 |
-| **F** | `lam_data_paths.py` + ExtensionManager | Python | E와 병행 권장 | ○ | ○ | ○ | fallback 유지 시 없음 |
-
-**내일 1차 검증 권장 순서:** **B 확인 → A 적용 → §5 진단 → §6 테스트**
-**중장기:** E + F (exts만 배포해도 `data/lam` 포함).
+| 증상 | 이 레포에서의 원인 |
+|------|-------------------|
+| Jenkins에서 csv/json/usd 전부 실패 | 배포물에 **`lam/` 없음** 또는 Git에 파일 없음 |
+| 로컬만 됨 | 로컬 디스크에 `lam/` 있음 + 상위 탐색 성공 |
+| UI CSV 경로가 `.../exts/.../../../../../../../lam/csv` | **빈 fallback `lam`** — 진짜 데이터 루트 아님 |
+| 상대 USD 설정은 맞는데 서버만 실패 | **파일 미배포** (경로 문법 문제 아님) |
+| `os.path` 때문 | **아님** — Linux에서도 동작. 문제는 **경로에 파일이 없음** |
 
 ---
 
-## 5. 진단 절차 (배포 서버 / Linux)
+## 4. 배포 루트 선택 (하나만 골라 순서대로 진행)
 
-각 단계 **통과/실패** 를 기록해 두면 원인이 A(파일 없음) vs D(잘못된 lam 루트) 인지 바로 갈립니다.
+```text
+                    ┌─────────────────────────────────────┐
+                    │  목표: Jenkins에서 csv/json/usd OK   │
+                    └─────────────────────────────────────┘
+                                      │
+        ┌─────────────────────────────┼─────────────────────────────┐
+        ▼                             ▼                             ▼
+   [루트 A]                      [루트 C]                      [루트 D]
+ Jenkins만                      premake +                    lam 을 확장 안으로
+ lam/ 동봉                      data/lam 링크                 이전 + premake
+ (코드 0)                       (빌드 1파일)                  (구조 변경)
+        │                             │                             │
+        └──────────────┬──────────────┴──────────────┬──────────────┘
+                       ▼                             ▼
+                  [루트 B]                      [루트 E]
+                  Git LFS/커밋                  + Python 경로 SSOT
+                  (A/C/D 공통)                  (별도 PR)
+```
 
-### 5.0 사전: Git·아티팩트에 파일이 있는지 (Jenkins 빌드 **전**, 개발 PC)
+| 루트 | 난이도 | 수정하는 것 | 로컬 | Jenkins | 추천 |
+|------|--------|-------------|------|---------|------|
+| **A** | 낮음 | Jenkins deploy 스크립트만 | 유지 | `lam/` 수동 동봉 | **내일 1순위** |
+| **B** | 낮음 | Git (+ LFS) | 유지 | checkout 시 파일 존재 | A와 함께 |
+| **C** | 중간 | `morph.lam_control/premake5.lua` 만 | rebuild | exts 안 `data/lam` | exts만 배포 팀 |
+| **D** | 중간~높음 | `lam/` → 확장 `data/lam` 이전 | 경로 습관 변경 | C와 동일 | 장기 구조 정리 |
+| **E** | 높음 | `lam_data_paths.py` + premake | fallback 유지 | C/D + 코드 | 안정화 |
+
+---
+
+# 루트 A — 코드·premake 변경 없음 (Jenkins에 `lam/` 동봉)
+
+**적합:** 지금 로컬이 정상이고, Jenkins Job 만 손댈 수 있을 때.
+
+### A-1. 전제: Git에 배포할 파일이 있는지 (개발 PC)
+
+레포 루트에서:
 
 ```bash
-# 레포 루트에서
-git ls-files lam/csv/
-git ls-files lam/lam_event_sequences/ | head
-git ls-files lam/usd/
+cd kit-app-template_mine   # OMNI_REPO_ROOT
 
-# 배포에 쓸 USD가 tracked 인지 (예)
+git ls-files lam/csv/
+git ls-files lam/lam_event_sequences/ | head -5
 git ls-files "lam/usd/LAM_v02/FBX/Combine_01.usd"
 ```
 
-- **출력 없음** → Jenkins `git checkout` 만으로는 **서버에 절대 안 생김**. → 방안 **B** (커밋 또는 별도 아티팯트) 필요.
-- **untracked 로컬만 존재** → 로컬만 되고 Jenkins는 안 되는 전형적 패턴.
+- **출력 없음** → Jenkins `git checkout` 만으로는 **절대 안 올라감**. → **루트 B** 먼저.
+- 로컬에만 있고 untracked → `git status lam/` 로 확인 후 커밋.
 
-### 5.1 배포 서버: 파일 물리 존재
+### A-2. Jenkins 서버 디렉터리 (이 레포 기준 권장 형태)
 
-`DEPLOY_ROOT` 를 팀 실제 경로로 바꿉니다.
-
-```bash
-DEPLOY_ROOT=/opt/kit-lam-app   # 예시
-
-test -d "$DEPLOY_ROOT/lam" && echo "OK: lam dir" || echo "FAIL: no lam"
-test -d "$DEPLOY_ROOT/lam/csv" && echo "OK: csv" || echo "FAIL: no csv"
-test -d "$DEPLOY_ROOT/lam/lam_event_sequences" && echo "OK: seq" || echo "FAIL: no seq"
-test -d "$DEPLOY_ROOT/lam/usd" && echo "OK: usd" || echo "FAIL: no usd"
-
-ls -la "$DEPLOY_ROOT/lam/csv/" | head
-ls -la "$DEPLOY_ROOT/lam/lam_event_sequences/" | head
-ls -la "$DEPLOY_ROOT/lam/usd/LAM_v02/FBX/" 2>/dev/null || echo "CHECK usd subpath"
-
-# 사용 중인 Combine USD 예
-test -f "$DEPLOY_ROOT/lam/usd/LAM_v02/FBX/Combine_01.usd" && echo "OK: Combine_01.usd" || echo "FAIL: missing USD"
-```
-
-**5.1 FAIL** → 방안 **A + B** 부터. 코드·상대경로와 무관.
-
-### 5.2 Kit / LAM UI: 런타임이 가리키는 루트
-
-1. Morph Editor(또는 팀 Kit 앱) Launch.
-2. **LAM Window** 열기.
-3. **Simulation CSV Play** 창에서 **CSV 디렉터리** 라벨/경로 확인.
-
-| UI에 보이는 경로 패턴 | 의미 |
-|----------------------|------|
-| `.../kit-app-template_mine/lam/csv` 또는 `.../DEPLOY_ROOT/lam/csv` | **정상** (진짜 데이터 루트) |
-| `.../exts/morph.lam_control-.../../../../../../../lam/csv` | **위험** — fallback 빈 `lam` 가능 |
-| 목록 0개 | 루트는 잡혔으나 **csv 파일 미배포** 또는 빈 디렉터리 |
-
-4. 콘솔에서 다음 prefix 검색:
-
-| prefix | 파일 |
-|--------|------|
-| `[LAM/WIN]` | `lam_window.py` — autoload, file not found |
-| `[LAM/SIMPLAY]` | `simulation_play.py` |
-| `[LAM/EVSEQ]` | `lam_event_sequences.py` |
-
-**자동 로드 실패 예:**
+Kit 이 `_build/linux-x86_64/release` 에서 뜬다고 가정:
 
 ```text
-[LAM/WIN] autoload: file not found: /wrong/path/lam/usd/...
+DEPLOY_ROOT/                          ← 팀이 정한 설치 루트 (예: /opt/kit-app-template_mine)
+├── _build/linux-x86_64/release/      ← ./repo.sh build 결과 (exts 포함)
+└── lam/                              ← 레포의 lam/ 을 그대로 복사
+    ├── csv/
+    ├── lam_event_sequences/
+    └── usd/LAM_v02/FBX/Combine_01.usd
 ```
 
-### 5.3 상대 USD 경로가 풀리는 최종 경로 (개념)
+**`lam/` 은 `_build` 와 형제**로 `DEPLOY_ROOT` 직하에 둡니다.
+(코드가 exts → … → `_build` → `DEPLOY_ROOT` 올라가며 `DEPLOY_ROOT/lam` 을 찾음)
 
-- 설정: `default_load_usd_path = "lam/usd/LAM_v02/FBX/Combine_01.usd"`
-- 코드: `resolve_default_load_usd_path()` → `{_find_project_root()}/lam/usd/LAM_v02/FBX/Combine_01.usd`
-- **5.1** 에서 그 절대 경로에 파일이 있어야 Open Master / autoload 성공.
+### A-3. Jenkins Pipeline 예시 (이 레포 경로 그대로)
 
----
-
-## 6. 테스트 시나리오 (내일 따라하기)
-
-각 테스트 **전제:** §5.1 통과 (서버에 `lam/` 파일 있음).
-**기록란**에 날짜·서버·DEPLOY_ROOT·통과 여부를 적습니다.
-
-### Test 0 — 베이스라인 (로컬, 선택)
-
-| # | 절차 | 기대 |
-|---|------|------|
-| 0.1 | Windows 로컬 Launch | LAM CSV 디렉터리 = `...\kit-app-template_mine\lam\csv` |
-| 0.2 | CSV 목록에 `eap_tasjr91_sample_v1.csv` 등 표시 | 1개 이상 |
-| 0.3 | `lam/lam_event_sequences/vtm_chamber5_right_place.json` 존재 | `ls` 또는 탐색기 |
-| 0.4 | 상대 USD autoload 또는 Open `lam/usd/.../Combine_01.usd` | Stage 로드 |
-
-→ 0.x 전부 OK 이면 **코드·상대경로 설정은 정상**, Jenkins는 **배포만** 의심.
-
----
-
-### Test 1 — Jenkins 서버 `lam/` 배포 (방안 A)
-
-| # | 절차 | 기대 |
-|---|------|------|
-| 1.1 | Jenkins job에 **Package lam** 단계 추가 (§7.1 스크립트) | 아티팩트에 `lam/` 포함 |
-| 1.2 | Deploy 후 §5.1 명령 재실행 | 전부 OK |
-| 1.3 | `lam/csv` 파일 개수가 로컬과 동일한지 `diff -qr` 또는 `wc` | 대략 일치 |
-
-**실패 시:** deploy 스크립트가 `exts` 만 복사하는지 확인. `lam/` rsync 경로·권한 확인.
-
----
-
-### Test 2 — CSV 로드
-
-| # | 절차 | 기대 |
-|---|------|------|
-| 2.1 | Launch → LAM → Simulation CSV Play | CSV 디렉터리가 §5.2 정상 패턴 |
-| 2.2 | 드롭다운/목록에서 CSV 선택 | 파일명 표시 |
-| 2.3 | Play (짧은 구간) | `[LAM/SIMPLAY]` 에러 없이 진행 |
-| 2.4 | (선택) `export LAM_SIM_CSV=...` 후 재시작 | 지정 파일로 재생 (방안 C 검증) |
-
-**실패 분기:**
-
-- 목록 비음 → `lam/csv` 미배포 또는 빈 루트.
-- Play 시 JSON 에러 → Test 3 으로.
-
----
-
-### Test 3 — `lam_event_sequences` JSON
-
-| # | 절차 | 기대 |
-|---|------|------|
-| 3.1 | 서버: `ls lam/lam_event_sequences/vtm_chamber5_right_place.json` | 파일 있음 |
-| 3.2 | CSV Play 또는 매크로로 chamber5 이벤트 유도 | 이동·애니 스텝 실행 |
-| 3.3 | (선택) LAM JSON Test Window — 이벤트 JSON Add/Run | 스텝 진행 |
-
-**실패 분기:**
-
-- `event json not found` 류 → `get_event_sequences_dir()` 가 가리키는 경로에 파일 없음 (§5.2 UI 경로와 `ls` 경로 비교).
-
----
-
-### Test 4 — USD 로드
-
-| # | 절차 | 기대 |
-|---|------|------|
-| 4.1 | `default_load_usd_path` 가 `lam/usd/LAM_v02/FBX/Combine_01.usd` 인 빌드 사용 | 배포 브랜치·설정 확인 |
-| 4.2 | §5.1 에서 해당 파일 EXISTS | OK |
-| 4.3 | Launch (`load_automatically=True`) | Master 로드 또는 로그에 resolved 경로 |
-| 4.4 | 실패 시 LAM Window → Open Master → `lam/usd/...` 수동 | 수동은 되고 autoload 만 안 되면 타이밍/설정 이슈 |
-
-**실패 분기:**
-
-- `file not found` + 경로가 `C:/Users/...` → **Windows 절대경로가 박힌 빌드** — 상대경로 빌드로 교체.
-- 경로는 `.../lam/usd/...` 인데 없음 → §5.1 USD 미배포.
-
----
-
-### Test 5 — (선택) 방안 E 검증 — exts 안 `data/lam`
-
-코드/premake 수정 **이후** 별도 스프린트:
-
-| # | 절차 | 기대 |
-|---|------|------|
-| 5.1 | `./repo.sh build` | `_build/.../exts/morph.lam_control-.../data/lam/csv` 존재 |
-| 5.2 | `DEPLOY_ROOT` 에 `lam/` 없이 exts 만 배포 | Test 2~4 통과 |
-
----
-
-## 7. Jenkins / 배포 스크립트 예시
-
-팀 Job 이름·경로는 환경에 맞게 치환합니다.
-
-### 7.1 Package 단계 (빌드 후 `lam/` 포함)
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-REPO_ROOT="${WORKSPACE:-$(pwd)}"
-STAGING="${REPO_ROOT}/deploy_staging"
-rm -rf "${STAGING}"
-mkdir -p "${STAGING}"
-
-# Kit 빌드 (기존)
-./repo.sh build
-
-# 빌드 산출물 (플랫폼 경로는 환경에 맞게)
-LINUX_RELEASE="${REPO_ROOT}/_build/linux-x86_64/release"
-if [ ! -d "${LINUX_RELEASE}" ]; then
-  echo "ERROR: release dir not found: ${LINUX_RELEASE}"
-  exit 1
-fi
-
-cp -a "${LINUX_RELEASE}" "${STAGING}/release"
-
-# ★ LAM 데이터 — 반드시 포함
-if [ ! -d "${REPO_ROOT}/lam" ]; then
-  echo "ERROR: ${REPO_ROOT}/lam missing"
-  exit 1
-fi
-cp -a "${REPO_ROOT}/lam" "${STAGING}/lam"
-
-# 배포 아티팩트 (tar 예)
-tar -czf "${REPO_ROOT}/kit-lam-deploy.tar.gz" -C "${STAGING}" release lam
-ls -la "${REPO_ROOT}/kit-lam-deploy.tar.gz"
+```groovy
+// 예: Jenkinsfile — 팀 Job 에 맞게 stage 이름만 조정
+pipeline {
+  agent any
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+    stage('Build Kit') {
+      steps {
+        sh './repo.sh build'
+      }
+    }
+    stage('Stage Deploy') {
+      steps {
+        sh '''
+          set -e
+          DEPLOY_ROOT="${DEPLOY_ROOT:-/opt/kit-app-template_mine}"
+          rm -rf "${DEPLOY_ROOT}"
+          mkdir -p "${DEPLOY_ROOT}"
+          cp -a _build/linux-x86_64/release "${DEPLOY_ROOT}/_build/linux-x86_64/release"
+          cp -a lam "${DEPLOY_ROOT}/lam"
+          ls -la "${DEPLOY_ROOT}/lam/csv" | head
+          test -f "${DEPLOY_ROOT}/lam/usd/LAM_v02/FBX/Combine_01.usd"
+        '''
+      }
+    }
+  }
+}
 ```
 
-### 7.2 Deploy 단계 (서버)
+**팀이 `exts` 만 rsync 하는 경우:** 위 `cp -a lam` 단계가 **없으면 루트 A 실패** — Job 에 반드시 추가.
+
+### A-4. 검증 (Linux 서버)
 
 ```bash
-#!/bin/bash
-set -euo pipefail
+DEPLOY_ROOT=/opt/kit-app-template_mine
 
-DEPLOY_ROOT=/opt/kit-lam-app
-ARTIFACT=kit-lam-deploy.tar.gz
-
-sudo mkdir -p "${DEPLOY_ROOT}"
-sudo tar -xzf "${ARTIFACT}" -C "${DEPLOY_ROOT}"
-
-# 구조 확인: release 와 lam 이 형제여야 함
-# DEPLOY_ROOT/release/...  DEPLOY_ROOT/lam/...
-ls -la "${DEPLOY_ROOT}/lam/csv" | head
+test -d "$DEPLOY_ROOT/lam/csv" && echo OK_csv || echo FAIL_csv
+test -d "$DEPLOY_ROOT/lam/lam_event_sequences" && echo OK_json || echo FAIL_json
+test -f "$DEPLOY_ROOT/lam/usd/LAM_v02/FBX/Combine_01.usd" && echo OK_usd || echo FAIL_usd
 ```
 
-**주의:** 팀이 `release` 내용만 `DEPLOY_ROOT/_build/...` 로 풀는 경우, **`lam` 은 `DEPLOY_ROOT/lam`** (§3) 에 두도록 스크립트를 맞춥니다.
-
-### 7.3 Git LFS (USD 대용량, 방안 B 보조)
+### A-5. Kit 실행 · LAM 테스트
 
 ```bash
-# 최초 1회 (레포)
+cd "$DEPLOY_ROOT/_build/linux-x86_64/release"
+# 팀 실행 방식: 예) ./morph.editor.sh 또는 kit.sh + morph.editor.kit
+ls apps/morph.editor*
+```
+
+| # | 확인 |
+|---|------|
+| 1 | LAM Window → CSV 디렉터리가 `$DEPLOY_ROOT/lam/csv` 를 가리키는지 |
+| 2 | CSV 목록 1개 이상 |
+| 3 | Play 후 `[LAM/SIMPLAY]` 치명적 파일 없음 |
+| 4 | `vtm_chamber5_right_place.json` 등 이벤트 동작 |
+| 5 | autoload 또는 Open `lam/usd/LAM_v02/FBX/Combine_01.usd` |
+
+**실패 시:** UI CSV 경로가 `.../exts/morph.lam_control-0.1.0/.../../../../../../../lam` 이면 **A-2 트리** 미준수.
+
+---
+
+# 루트 B — Git에 데이터 올리기 (A/C/D 공통 전제)
+
+**수정 파일:** 없음 (Git 작업만)
+
+```bash
+# 예: USD 가 큰 경우
+git lfs install
 git lfs track "lam/usd/**/*.usd"
-git add .gitattributes
-git add lam/usd/LAM_v02/FBX/Combine_01.usd
-git commit -m "Track LAM USD via Git LFS"
+git add .gitattributes lam/usd/LAM_v02/FBX/Combine_01.usd
+git add lam/csv lam/lam_event_sequences
+git commit -m "Add LAM deploy data for Jenkins"
+git push
 ```
 
-Jenkins agent 에 `git-lfs` 설치·`git lfs pull` 필요.
+Jenkins agent 에 `git-lfs` + checkout 후 `git lfs pull` 필요.
 
-### 7.4 Kit 실행 시 env (선택)
+---
+
+# 루트 C — `morph.lam_control/premake5.lua` 만 수정 (exts에 `data/lam` 포함)
+
+**적합:** Jenkins가 **`_build/.../exts/morph.lam_control-*` 만** 갱신하는 팀.
+**수정 파일 1개:** `source/extensions/morph.lam_control/premake5.lua`
+**수정 안 함:** `repo.toml`, 루트 `premake5.lua`
+
+### C-1. premake 수정 (복사해서 적용)
+
+`source/extensions/morph.lam_control/premake5.lua` 를 아래처럼 변경:
+
+```lua
+local ext = get_current_extension_info()
+project_ext (ext)
+
+-- 레포 루트 lam/ → 빌드 산출물 data/lam (소스 lam/ 은 그대로 SoT)
+repo_build.prebuild_link {
+    { "config", ext.target_dir .. "/config" },
+    { "docs", ext.target_dir .. "/docs" },
+    { "morph", ext.target_dir .. "/morph" },
+    { "../../../lam", ext.target_dir .. "/data/lam" },
+}
+```
+
+**상대경로 근거:**
+`premake5.lua` 위치 = `source/extensions/morph.lam_control/`
+→ `../../../lam` = `kit-app-template_mine/lam`
+
+(`morph.lam_web_bridge/premake5.lua` 가 `config` 를 링크하는 것과 동일 패턴)
+
+### C-2. 로컬에서 빌드·확인
 
 ```bash
-export LAM_SIM_CSV="${DEPLOY_ROOT}/lam/csv/eap_tasjr91_sample_v1.csv"
-# 향후 코드 추가 시:
-# export LAM_DATA_ROOT="${DEPLOY_ROOT}/lam"
-cd "${DEPLOY_ROOT}/_build/linux-x86_64/release"   # 팀 실행 방식에 맞게
-./kit.sh morph.editor.kit   # 실제 실행 파일명은 팀 표준 따름
+./repo.sh build
+# Windows: repo.bat build
+
+EXT="_build/linux-x86_64/release/exts/morph.lam_control-0.1.0"
+ls -la "$EXT/data/lam/csv" | head
+ls -la "$EXT/data/lam/lam_event_sequences" | head
+test -f "$EXT/data/lam/usd/LAM_v02/FBX/Combine_01.usd" && echo OK
 ```
 
----
+**주의:** 현재 코드는 **`data/lam` 을 보지 않고** 레포 루트 `lam/` 만 탐색합니다.
+→ premake 만 고치면 **디스크에는 exts 안에 복사되지만**, **런타임은 아직 루트 A 트리 또는 루트 E 코드**가 필요합니다.
 
-## 8. 트러블슈팅 FAQ
+| 단계 | 효과 |
+|------|------|
+| C만 | Jenkins 아티팩트에 **파일은 들어감**, **앱이 아직 안 읽을 수 있음** |
+| C + A | exts 배포 + DEPLOY_ROOT/lam → **즉시 동작** |
+| C + E | exts 만으로 **동작** (목표) |
 
-| 질문 | 답 |
-|------|-----|
-| 로컬은 되는데 Jenkins만 안 됨 | 서버에 **`lam/` 미배포** 또는 **Git 미추적 파일** 가능성 최대. §5.0·5.1 |
-| 상대경로 `lam/usd/...` 썼는데 서버에서만 실패 | 상대경로는 맞음. **풀린 절대경로에 파일 없음** → §5.1 `test -f` |
-| CSV만 되고 JSON은 안 됨 | 같은 `_find_lam_data_root()` — 드묾. `lam_event_sequences` 만 누락 배포·오타 확인 |
-| UI CSV 경로가 exts 아래 `../../../../lam` | **빈 fallback lam** — §3 구조로 `DEPLOY_ROOT/lam` 배치 |
-| exts만 최신인데 예전 lam | **lam 은 Jenkins 별도 복사** 필요. build 가 lam 을 갱신하지 않음 |
-| `LAM_SIM_CSV` 넣었는데 JSON 실패 | 정상. C는 CSV 1파일만. **A 또는 E** 필요 |
-| Open Master 는 되는데 autoload 만 실패 | `load_automatically`, post_update 타이밍, 로그 `[LAM/WIN] autoload` 확인 |
+### C-3. Jenkins
 
----
+```bash
+./repo.sh build
+# 배포: _build/linux-x86_64/release/exts/... 만 올려도
+# ext/data/lam/... 파일 존재 여부는 C-2 ls 로 확인
+```
 
-## 9. 향후 코드·빌드 개선 (Test 5 / 방안 E·F)
+### C-4. `repo.toml` 패키징 주의 (이 레포 실측)
 
-로컬 흐름을 깨지 않으면서 **exts만 배포**에 가깝게 가려면:
+`repo.toml` 의 `[repo_package.packages.fat_package]` / `thin_package`:
 
-1. **`premake5.lua`** — repo `lam/` → `ext.target_dir/../data/lam` (상대경로는 premake 위치 기준 조정).
-2. **`lam_data_paths.py`** (신규) — 조회 순서: `LAM_DATA_ROOT` → `get_extension_path` + `data/lam` → **현재 `_find_lam_data_root` 상위 탐색** → `${root}/lam`.
-3. **`lam_window.py` / `simulation_play.py` / `lam_event_sequences.py`** — 위 모듈만 사용하도록 통일.
-4. **`DEFAULT_CSV_PATH`** — import 시 고정하지 말고 Play 시점 조회.
+```toml
+files_exclude = [
+    ...
+    ["data/**"],
+]
+```
 
-이 작업은 **별도 PR** 로 진행하고, 본 문서 §6 Test 5 로 검증.
+`./repo.sh package` 로 zip 만들 때 **`data/` 이름 하위가 제외**될 수 있습니다.
+→ 루트 C 후 **zip 배포**를 쓰면 패키지 안에 `exts/.../data/lam` 이 빠졌는지 **반드시 unzip 후 확인**.
+→ **exts 폴더 직접 rsync** 배포면 문제 없을 수 있음.
 
----
-
-## 10. 관련 소스·함수 인덱스
-
-| 데이터 | 디렉터리 | 주요 코드 |
-|--------|----------|-----------|
-| CSV | `lam/csv/` | `simulation_play.get_lam_csv_dir`, `list_lam_csv_paths`, `DEFAULT_CSV_PATH`, `LAM_SIM_CSV` |
-| JSON | `lam/lam_event_sequences/` | `lam_event_sequences.get_event_sequences_dir`, `event_json_path`, `build_steps_for_event` |
-| USD | `lam/usd/` | `lam_window._find_lam_data_root`, `resolve_default_load_usd_path`, `_open_master_at_path` |
-| 빌드 | — | `premake5.lua`, `repo.sh`, `.github/workflows/.github-ci.yml` |
+**`repo.toml` 을 LAM 때문에 고치려면** — 팀 인프라 담당과 **`files_exclude`에서 확장 data 만 예외** 할지 논의 (본 가이드에서는 필수 아님).
 
 ---
 
-## 11. 내일 작업 체크리스트 (한 장 요약)
+# 루트 D — `lam/` 을 확장 소스 트리 안으로 이전
 
-- [ ] **5.0** Git tracked 여부 확인 (`lam/csv`, `lam_event_sequences`, 사용 USD)
-- [ ] **7.1** Jenkins package 에 `lam/` 포함 여부 확인·추가
-- [ ] **7.2** Deploy 후 **5.1** 서버 파일 존재 테스트
-- [ ] **Test 2** CSV 목록·Play
-- [ ] **Test 3** JSON 이벤트 1건 (예: `vtm_chamber5_right_place`)
-- [ ] **Test 4** USD autoload 또는 Open (`lam/usd/LAM_v02/FBX/Combine_01.usd`)
-- [ ] UI CSV 경로·`[LAM/WIN]` autoload 로그 스크린샷/복사 보관
-- [ ] 실패 시 §8 FAQ · 방안 A/B/E 표에서 다음 조치 선택
+**적합:** 데이터를 확장 레포 안에서만 관리하고 싶을 때.
+
+### D-1. 폴더 이동 (개념)
+
+```text
+source/extensions/morph.lam_control/data/lam/
+├── csv/
+├── lam_event_sequences/
+└── usd/
+```
+
+레포 루트 `lam/` 내용을 **복사 또는 이동** (팀 정책).
+이후 SoT 는 `source/extensions/morph.lam_control/data/lam/`.
+
+### D-2. premake5.lua
+
+```lua
+repo_build.prebuild_link {
+    { "config", ext.target_dir .. "/config" },
+    { "data", ext.target_dir .. "/data" },
+    { "docs", ext.target_dir .. "/docs" },
+    { "morph", ext.target_dir .. "/morph" },
+}
+```
+
+(`measure_control_1` 과 동일 — `data` 폴더 통째 링크)
+
+### D-3. 문서·습관
+
+- `lam/README.md` → 확장 `data/lam/README.md` 로 안내 수정
+- **루트 E** 없이는 런타임이 여전히 **레포 루트 `lam/`** 만 찾음 → 이전 후에도 **루트 E 또는 A** 필요
 
 ---
 
-*문서 버전: 2026-05-19 — 현재 `morph.lam_control` 코드·premake 기준.*
+# 루트 E — Python 경로 SSOT (별도 PR, C/D 와 함께)
+
+**신규 파일 (권장):** `morph/lam_control/lam_data_paths.py`
+
+**조회 순서 (제안):**
+
+1. `LAM_DATA_ROOT` 환경변수
+2. `omni.kit.app` → `morph.lam_control-0.1.0` → `{ext}/data/lam`
+3. 기존 `_find_lam_data_root()` 상위 탐색 → `{OMNI_REPO_ROOT}/lam`
+4. (선택) `carb` `${root}/lam`
+
+`lam_window.py`, `simulation_play.py`, `lam_event_sequences.py` 의 `_find_lam_data_root` 제거 후 import.
+
+**이 레포에서 Extension ID:** `config/extension.toml` → `morph.lam_control`, 빌드 폴더명 `morph.lam_control-0.1.0`.
+
+---
+
+## 5. 루트별 “내일 할 일” 체크리스트
+
+### 5.1 공통 (모든 루트)
+
+- [ ] `lam_window.py` 의 `default_load_usd_path` 가 배포 브랜치에서
+      `lam/usd/LAM_v02/FBX/Combine_01.usd` 인지 확인
+- [ ] §B `git ls-files` 로 csv/json/usd tracked 확인
+- [ ] 실패 시 LAM UI **CSV 디렉터리 한 줄** + `[LAM/WIN] autoload` 로그 저장
+
+### 5.2 루트 A만
+
+- [ ] Jenkins에 `cp -a lam "${DEPLOY_ROOT}/lam"` 추가
+- [ ] §A-4 서버 `test -f` 3종
+- [ ] §A-5 Kit 테스트 5항목
+
+### 5.3 루트 C 추가
+
+- [ ] `source/extensions/morph.lam_control/premake5.lua` §C-1 적용
+- [ ] `./repo.sh build` 후 `exts/.../data/lam/...` ls
+- [ ] (코드 E 전) 루트 A 트리도 유지하거나 루트 E 진행
+
+### 5.4 루트 D 추가
+
+- [ ] `data/lam` 이전 + premake §D-2
+- [ ] `lam/README.md` 팀 공유
+
+---
+
+## 6. 데이터 종류별 — 이 레포 파일·함수 인덱스
+
+| 종류 | 로컬 SoT (현재) | 읽는 코드 |
+|------|-----------------|-----------|
+| CSV | `lam/csv/*.csv` | `simulation_play.get_lam_csv_dir`, `list_lam_csv_paths`, env `LAM_SIM_CSV` |
+| JSON | `lam/lam_event_sequences/<이벤트>.json` | `lam_event_sequences.event_json_path`, `build_steps_for_event` |
+| USD | `lam/usd/...` | `lam_window.resolve_default_load_usd_path`, Open Master |
+| 외부 결과 | `lam/lam_external_results/` | `lam_external_event_runner` |
+
+---
+
+## 7. 트러블슈팅 (이 레포 한정)
+
+| 현상 | 확인 | 조치 |
+|------|------|------|
+| 로컬 OK / Jenkins NG | 서버 `ls DEPLOY_ROOT/lam` | 루트 A |
+| exts만 배포 | `exts/.../data/lam` 유무 | 없으면 루트 C, 있어도 코드 E 전엔 A 필요 |
+| package zip 에 data 없음 | unzip 후 `data/lam` | §C-4 `repo.toml` exclude |
+| CSV만 env로 됨 | `LAM_SIM_CSV` | JSON/USD 는 A 또는 E |
+| Windows 빌드 이상 | `repo.toml` windows build false | `repo.bat`·`_build/windows-*` 팀 확인 |
+
+---
+
+## 8. 권장 진행 순서 (실무)
+
+1. **루트 B** — Git에 배포 파일 있는지 (10분)
+2. **루트 A** — Jenkins `lam/` 동봉 + §A-4 검증 (당일 효과最大)
+3. **§A-5** — csv · json · usd Launch 테스트
+4. 팀이 **exts만 배포** → **루트 C** premake + **루트 E** 코드 (주 단위)
+5. 구조 단순화 원하면 **루트 D** 검토
+
+---
+
+## 9. 문서·설정 파일 빠른 링크 (이 레포)
+
+| 경로 |
+|------|
+| `lam/README.md` |
+| `source/extensions/morph.lam_control/premake5.lua` |
+| `source/extensions/morph.lam_control/config/extension.toml` |
+| `source/apps/morph.editor.kit` |
+| `repo.toml` (`[repo_build]`, `[repo_package]`) |
+| `premake5.lua` (루트, 앱만) |
+| `.github/workflows/.github-ci.yml` |
+| `source/extensions/morph.lam_control/docs/LAM_Control_Maintenance_Guide.md` |
+
+---
+
+*문서 버전: 2026-05-19 — `kit-app-template_mine` 트리·`morph.lam_control` premake·`lam_window.py` default USD 경로 실측 반영.*
