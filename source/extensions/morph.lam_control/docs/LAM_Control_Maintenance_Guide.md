@@ -3,6 +3,7 @@
 Kit 확장 `morph.lam_control` — **무엇을 어디서 수정하면 무엇이 바뀌는지**, **실행 코드 위치**를 정리한 문서입니다.
 
 관련 문서:
+- **Jenkins / Linux `lam/` 데이터 배포·진단·테스트:** `LAM_Jenkins_Deployment_Guide.md`
 - 시뮬 CSV·가상 설정 상세: `LAM_Simulation_Play_User_Config.md`
 - 장비·wafer 모델: `LAM_Equipment_Model.md`
 - 타임샘플 재생: `LAM_TimeSamples_Replay.md`

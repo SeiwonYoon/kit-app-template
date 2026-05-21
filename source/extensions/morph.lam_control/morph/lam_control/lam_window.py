@@ -54,8 +54,8 @@ load_automatically = True
 #   default_load_usd_path = "lam/usd/master.usd"
 #   default_load_usd_path = r"lam\usd\master.usd"
 # default_load_usd_path = "lam/usd/master.usd"
-default_load_usd_path = "C:/Users/ptK/Documents/kit-app-template_mine/lam/usd/combine_1.usd"
-# default_load_usd_path = "lam/usd/LAM_v02/FBX/Combine_01.usd"
+# default_load_usd_path = "C:/Users/ptK/Documents/kit-app-template_mine/lam/usd/combine_1.usd"
+default_load_usd_path = "lam/usd/LAM_v02/FBX/Combine_01.usd"
 
 
 _PRINT_PREFIX = "[LAM/WIN]"
@@ -615,13 +615,13 @@ class LamWindow:
                 self._master_path_model.set_value(resolved)
             except Exception:
                 pass
-        if not os.path.isfile(resolved):
-            self._log(f"자동 로드 실패 — 파일 없음:\n  {resolved}")
-            print(
-                f"{_PRINT_PREFIX} autoload: file not found: {resolved}",
-                flush=True,
-            )
-            return
+        # if not os.path.isfile(resolved):
+        #     self._log(f"자동 로드 실패 — 파일 없음:\n  {resolved}")
+        #     print(
+        #         f"{_PRINT_PREFIX} autoload: file not found: {resolved}",
+        #         flush=True,
+        #     )
+        #     return
         self._log(f"자동 로드 시작: {resolved}")
         self._open_master_at_path(resolved, log_prefix="자동 로드")
 
