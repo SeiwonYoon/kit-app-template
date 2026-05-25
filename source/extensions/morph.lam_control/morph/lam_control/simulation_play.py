@@ -2314,6 +2314,12 @@ _csv_play_global_end_lock = threading.Lock()
 _csv_play_global_wall_end: float = 0.0
 _csv_play_global_csv_end: float = 0.0
 
+# 공정만보기 — CSV 진행 시계 (JSON 실행 중 1x 진행, 전 레인 idle 시 다음 이벤트 t 로 점프)
+_process_only_playhead_lock = threading.Lock()
+_process_only_playhead_csv: float = 0.0
+_process_only_playhead_wall: float = 0.0
+_process_only_started_keys: set = set()
+
 # CSV Play 타임라인 — JSON 실행 중인 행만 UI 에서 녹색 강조 (항목 match key)
 _csv_play_timeline_highlight_cb: Optional[Callable[[frozenset], None]] = None
 _csv_play_timeline_window_ref: Optional[weakref.ReferenceType[Any]] = None
@@ -2484,6 +2490,92 @@ def _csv_playback_block_is_same(
     return _schedule_entry_match_key(sa) == _schedule_entry_match_key(sb)
 
 
+def _reset_process_only_playhead(*, t0: float, csv_start: float = 0.0) -> None:
+    """공정만보기 Play 시작 시 진행 시계·시작 기록 초기화."""
+    global _process_only_playhead_csv, _process_only_playhead_wall, _process_only_started_keys
+    with _process_only_playhead_lock:
+        _process_only_playhead_csv = float(csv_start)
+        _process_only_playhead_wall = float(t0)
+        _process_only_started_keys = set()
+
+
+def _process_only_json_active() -> bool:
+    with _csv_play_timeline_active_keys_lock:
+        return bool(_csv_play_timeline_active_keys)
+
+
+def _process_only_playhead_csv_now() -> float:
+    """JSON 이 하나라도 실행 중이면 wall 1x 로 CSV t 진행, idle 이면 마지막 시계값 유지."""
+    now = time.monotonic()
+    with _process_only_playhead_lock:
+        base = float(_process_only_playhead_csv)
+        anchor = float(_process_only_playhead_wall)
+    if not _process_only_json_active():
+        return base
+    return base + max(0.0, now - anchor)
+
+
+def _process_only_advance_playhead_after_block(block: CsvTimedPlaybackBlock) -> None:
+    """JSON 종료 후 시계를 해당 블록 CSV t 이상으로 맞춤."""
+    t = float(block.time_sec)
+    now = time.monotonic()
+    with _process_only_playhead_lock:
+        global _process_only_playhead_csv, _process_only_playhead_wall
+        if t > _process_only_playhead_csv:
+            _process_only_playhead_csv = t
+        _process_only_playhead_wall = now
+
+
+def _process_only_next_unstarted_block(
+    all_blocks: List[CsvTimedPlaybackBlock],
+) -> Optional[CsvTimedPlaybackBlock]:
+    ordered = sorted(all_blocks, key=lambda b: (b.time_sec, b.sort_order))
+    with _process_only_playhead_lock:
+        started = set(_process_only_started_keys)
+    for b in ordered:
+        if not b.steps or b.schedule is None:
+            continue
+        if _schedule_entry_match_key(b.schedule) in started:
+            continue
+        return b
+    return None
+
+
+def _process_only_block_is_next_unstarted(
+    block: CsvTimedPlaybackBlock,
+    all_blocks: List[CsvTimedPlaybackBlock],
+) -> bool:
+    nxt = _process_only_next_unstarted_block(all_blocks)
+    if nxt is None:
+        return False
+    return _csv_playback_block_is_same(nxt, block)
+
+
+def _process_only_try_idle_compress_to_next(all_blocks: List[CsvTimedPlaybackBlock]) -> None:
+    """전 레인 JSON 미실행(idle)일 때만 다음 예정 이벤트 CSV t 로 점프."""
+    if _process_only_json_active():
+        return
+    nxt = _process_only_next_unstarted_block(all_blocks)
+    if nxt is None:
+        return
+    target = float(nxt.time_sec)
+    now = time.monotonic()
+    with _process_only_playhead_lock:
+        global _process_only_playhead_csv, _process_only_playhead_wall
+        if target > _process_only_playhead_csv:
+            _process_only_playhead_csv = target
+        _process_only_playhead_wall = now
+
+
+def _process_only_mark_block_started(block: CsvTimedPlaybackBlock) -> None:
+    sched = block.schedule
+    if sched is None:
+        return
+    key = _schedule_entry_match_key(sched)
+    with _process_only_playhead_lock:
+        _process_only_started_keys.add(key)
+
+
 def _has_json_csv_between(
     lo_csv: float,
     hi_csv: float,
@@ -2506,50 +2598,6 @@ def _has_json_csv_between(
     return False
 
 
-def _process_only_start_wall(
-    *,
-    lane_ready: float,
-    nominal_wall: float,
-    block: CsvTimedPlaybackBlock,
-    all_blocks: List[CsvTimedPlaybackBlock],
-    lane_last_csv: float,
-    lane: Optional[str],
-) -> float:
-    """공정만보기 전용 시작 시각 (일반 재생은 ``_csv_playback_block_worker`` 유지).
-
-    - 전역 ``g_csv`` 기준 사이에 다른 JSON 이 남아 있으면 ``nom`` 까지 대기.
-    - 사이가 비었거나(VTM→VTM) 모두 끝났으면 ``max(레인 준비, 전역 종료)`` 로 즉시 이어 붙임.
-    - JSON wall 시간 > CSV 간격(긴 애니) 이어도 대기하지 않음.
-    - VTM t=1·ATM t=3 처럼 시각 정렬 필요 시에만 ``nom`` 대기.
-    """
-    lr = float(lane_ready)
-    nom = float(nominal_wall)
-    g_wall, g_csv = _get_csv_play_global_json_end()
-    now = time.monotonic()
-    block_csv = float(block.time_sec)
-    lane_lo = float(lane_last_csv)
-
-    if _has_json_csv_between(g_csv, block_csv, all_blocks, block):
-        return max(lr, nom)
-
-    if lane and _has_json_csv_between(lane_lo, block_csv, all_blocks, block, lane=lane):
-        return max(lr, nom)
-
-    if now >= nom or lr >= nom or g_wall >= nom:
-        return max(lr, g_wall)
-
-    csv_span = block_csv - g_csv
-    wall_gap = nom - g_wall
-    if (
-        now < nom
-        and csv_span > 1e-9
-        and abs(csv_span - wall_gap) <= 1e-3
-        and lr <= g_wall + 1e-3
-    ):
-        return max(lr, nom)
-    return max(lr, g_wall)
-
-
 def _sleep_until_process_only_start(
     *,
     lane_ready: float,
@@ -2559,22 +2607,36 @@ def _sleep_until_process_only_start(
     lane_last_csv: float,
     lane: Optional[str],
 ) -> bool:
-    """공정만보기: 목표 시각까지 대기(전역·레인 완료 시각 재계산). ``False`` = 중지."""
+    """공정만보기: CSV 진행 시계가 ``block.time_sec`` 에 도달할 때까지 대기.
+
+    - JSON 실행 중: wall 1x 로 시계 진행 → VTM t=6 시작 후 2s 뒤 ATM t=8 시작 가능.
+    - 전 레인 idle: 다음 예정 이벤트 CSV t 로만 점프(빈 대기 제거). 동시에 전부 시작하지 않음.
+    - 같은 레인: ``lane_ready``(이전 JSON 종료) 후에만 시작.
+    """
+    _ = (nominal_wall, lane_last_csv, lane)
+    target_csv = float(block.time_sec)
+    lr = float(lane_ready)
     while True:
         if csv_playback_stop_requested():
             return False
-        start = _process_only_start_wall(
-            lane_ready=lane_ready,
-            nominal_wall=nominal_wall,
-            block=block,
-            all_blocks=all_blocks,
-            lane_last_csv=lane_last_csv,
-            lane=lane,
-        )
-        wait = max(0.0, start - time.monotonic())
-        if wait <= 0.001:
+        now = time.monotonic()
+        if now + 1e-6 < lr:
+            if not _sleep_csv_playback(min(0.05, lr - now)):
+                return False
+            continue
+        if not _process_only_json_active():
+            if _process_only_block_is_next_unstarted(block, all_blocks):
+                _process_only_try_idle_compress_to_next(all_blocks)
+        csv_now = _process_only_playhead_csv_now()
+        if csv_now + 1e-6 >= target_csv:
+            _process_only_mark_block_started(block)
+            with _process_only_playhead_lock:
+                global _process_only_playhead_csv, _process_only_playhead_wall
+                if target_csv > _process_only_playhead_csv:
+                    _process_only_playhead_csv = target_csv
+                _process_only_playhead_wall = time.monotonic()
             return True
-        if not _sleep_csv_playback(min(wait, 0.05)):
+        if not _sleep_csv_playback(0.05):
             return False
 
 
@@ -2851,6 +2913,7 @@ def _csv_playback_execute_json_block(
     _csv_play_progress_mark_json_done(json_done_before + 1)
     _notify_csv_play_progress_ui()
     if get_csv_play_progress_snap().get("process_only"):
+        _process_only_advance_playhead_after_block(block)
         _bump_csv_play_global_json_end(block, wall_end=time.monotonic())
 
 
@@ -2863,7 +2926,9 @@ def _notify_csv_play_progress_ui() -> None:
     csv_total = float(snap.get("csv_total", 0.0) or 0.0)
     wall_elapsed = max(0.0, time.monotonic() - t0) if t0 > 0 else 0.0
     if snap.get("process_only"):
-        csv_t = float(snap.get("csv_t_display", 0.0) or 0.0)
+        csv_t = _process_only_playhead_csv_now()
+        with _csv_play_progress_snap_lock:
+            _csv_play_progress_snap["csv_t_display"] = float(csv_t)
         wall_total_est = float(max(1, snap.get("json_total", 1) or 1))
     else:
         sp = float(max(0.01, snap.get("speed_scale", 1.0) or 1.0))
@@ -3077,7 +3142,7 @@ def _run_csv_timed_playback_process_only(
     print(
         f"{_PRINT_PREFIX} ▶ 공정만보기 재생 | JSON {n_json}건 | "
         f"CSV t 표시 0~{csv_total:.1f}s | ATM {len(atm_items)} · VTM {len(vtm_items)} | "
-        f"배속 1x · CSV 시각 유지 · 레인·전역 빈 구간만 생략",
+        f"배속 1x · idle 구간만 점프 · CSV t 간격으로 레인 시작(겹침 시 병렬)",
         flush=True,
     )
 
@@ -3085,6 +3150,7 @@ def _run_csv_timed_playback_process_only(
     stopped = False
     clear_csv_play_timeline_highlight()
     _reset_csv_play_global_json_end(t0=t0, csv_start=0.0)
+    _reset_process_only_playhead(t0=t0, csv_start=0.0)
     lane_coordinator = _CsvPlaybackLaneCoordinator()
     json_done_counter: List[int] = [0]
     json_done_lock = threading.Lock()
@@ -3376,7 +3442,7 @@ def run_csv_timed_playback(
     """CSV ``eqp_start_tm`` 스케줄 재생 (``speed_scale`` 배속).
 
     - **일반**: 각 블록 스레드가 CSV 시각까지 대기 후 실행.
-    - **공정만보기** (``process_only``): CSV ``t`` 스케줄 유지, dwell·레인 내 **빈** 대기만 생략, 배속 1x.
+    - **공정만보기** (``process_only``): dwell 생략·배속 1x·빈 구간 압축·레인 간 JSON 실행 중 병렬(일반 재생 경로 무관).
     - **ATM** / **VTM** 은 CSV 시각에 맞춰 교차 시작 가능(동시 0초 시작 아님).
     - **동일 레인** 은 ``max(이전 JSON 종료, 다음 CSV t)`` 에 시작(직렬).
     - dwell(``steps`` 없음) 은 일반 모드에서만 해당 시각에 로그.
