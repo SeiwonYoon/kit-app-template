@@ -183,33 +183,33 @@ class LamCsvViewportControlsHud:
                                                 "color": 0xFFFFFFFF,
                                             },
                                         )
-                                        if master_model is not None and lam is not None:
-                                            ui.Label("합성 USD", height=14)
-                                            ui.StringField(
-                                                model=master_model,
-                                                height=22,
-                                                tooltip=(
-                                                    "로컬 .usd 또는 "
-                                                    "omniverse://서버/경로/file.usd"
-                                                ),
-                                            )
-                                            with ui.HStack(spacing=4, height=26):
-                                                ui.Button(
-                                                    "Open Master",
-                                                    width=120,
-                                                    clicked_fn=lam._on_open_master,
-                                                    tooltip=(
-                                                        "LAM Window ② 와 동일 — "
-                                                        "Discover + Extract"
-                                                    ),
-                                                )
-                                                ui.Spacer()
-                                            ui.Rectangle(
-                                                height=1,
-                                                style={
-                                                    "background_color": 0xFF5A6A80
-                                                },
-                                            )
+                                        # if master_model is not None and lam is not None:
+                                        #     ui.Label("합성 USD", height=14)
+                                        #     ui.StringField(
+                                        #         model=master_model,
+                                        #         height=22,
+                                        #         tooltip=(
+                                        #             "로컬 .usd 또는 "
+                                        #             "omniverse://서버/경로/file.usd"
+                                        #         ),
+                                        #     )
+                                        #     with ui.HStack(spacing=4, height=26):
+                                        #         ui.Button(
+                                        #             "Open Master",
+                                        #             width=120,
+                                        #             clicked_fn=lam._on_open_master,
+                                        #             tooltip=(
+                                        #                 "LAM Window ② 와 동일 — "
+                                        #                 "Discover + Extract"
+                                        #             ),
+                                        #         )
+                                        #         ui.Spacer()
+                                        #     ui.Rectangle(
+                                        #         height=1,
+                                        #         style={
+                                        #             "background_color": 0xFF5A6A80
+                                        #         },
+                                        #     )
                                         ui.Label(
                                             "CSV Play",
                                             height=18,
@@ -260,7 +260,7 @@ class LamCsvViewportControlsHud:
                                                 tooltip="타임라인·캐시 갱신",
                                             )
                                             ui.Button(
-                                                "Play",
+                                                "재생",
                                                 width=52,
                                                 clicked_fn=self._csv._on_play_clicked,
                                             )
@@ -311,6 +311,7 @@ class LamCsvViewportControlsHud:
                                         )
                                         hud_prog_model = None
                                         schedule_stack = None
+                                        schedule_scroll = None
                                         try:
                                             from omni.ui import (  # type: ignore
                                                 SimpleStringModel,
@@ -326,7 +327,7 @@ class LamCsvViewportControlsHud:
                                                     "border_width": 1,
                                                     "border_color": 0xFF3A3A3A,
                                                 },
-                                            ):
+                                            ) as schedule_scroll:
                                                 with ui.VStack(
                                                     spacing=2, height=0
                                                 ) as tl_stack:
@@ -346,6 +347,7 @@ class LamCsvViewportControlsHud:
                                             self._csv.register_hud_timeline_ui(
                                                 schedule_stack,
                                                 build_progress_model=hud_prog_model,
+                                                scroll_frame=schedule_scroll,
                                             )
                         ui.Spacer()
         except Exception as exc:

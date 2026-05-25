@@ -3696,6 +3696,7 @@ class LamSimulationCsvPlayWindow:
         self._func_combo: Any = None
         self._schedule_model: Any = None
         self._schedule_rows_stack: Any = None
+        self._schedule_scroll_frame: Any = None
         self._schedule_row_labels: List[Any] = []
         self._schedule_row_entries: List[CsvPlaybackScheduleEntry] = []
         self._schedule_highlight_keys: frozenset = frozenset()
@@ -3703,6 +3704,7 @@ class LamSimulationCsvPlayWindow:
         self._speed_model: Any = None
         self._process_only_model: Any = None
         self._hud_schedule_rows_stack: Any = None
+        self._hud_schedule_scroll_frame: Any = None
         self._hud_schedule_row_labels: List[Any] = []
         self._hud_build_progress_model: Any = None
         self._csv_play_thread: Optional[threading.Thread] = None
@@ -3756,6 +3758,8 @@ class LamSimulationCsvPlayWindow:
         self._schedule_row_labels = []
         self._schedule_row_entries = []
         self._schedule_highlight_keys = frozenset()
+        self._schedule_scroll_frame = None
+        self._hud_schedule_scroll_frame = None
         self._build_progress_model = None
         self._speed_model = None
         self._process_only_model = None
@@ -3797,12 +3801,15 @@ class LamSimulationCsvPlayWindow:
         rows_stack: Any,
         *,
         build_progress_model: Any = None,
+        scroll_frame: Any = None,
     ) -> None:
         """Viewport 2D 패널 타임라인·진행 표시 (본창 스택은 건드리지 않음)."""
         self._hud_schedule_rows_stack = rows_stack
+        self._hud_schedule_scroll_frame = scroll_frame
         self._hud_schedule_row_labels = []
         self._hud_build_progress_model = build_progress_model
         if rows_stack is None:
+            self._hud_schedule_scroll_frame = None
             return
         path = self._selected_csv_path()
         if path is None:
@@ -3970,9 +3977,10 @@ class LamSimulationCsvPlayWindow:
                             "border_width": 1,
                             "border_color": 0xFF3A3A3A,
                         },
-                    ):
+                    ) as schedule_scroll:
                         with ui.VStack(spacing=2, height=0) as schedule_stack:
                             self._schedule_rows_stack = schedule_stack
+                        self._schedule_scroll_frame = schedule_scroll
                     self._build_progress_model = SimpleStringModel("(빌드·재생 진행 — 대기)")
                     ui.StringField(
                         model=self._build_progress_model,
@@ -4205,6 +4213,56 @@ class LamSimulationCsvPlayWindow:
             except Exception:
                 pass
 
+    def _first_highlighted_row_index(
+        self, active_keys: frozenset
+    ) -> Optional[int]:
+        """타임라인 순서상 첫 번째 녹색(재생 중) 행 인덱스."""
+        if not active_keys:
+            return None
+        for i, ent in enumerate(self._schedule_row_entries):
+            if _schedule_entry_match_key(ent) in active_keys:
+                return i
+        return None
+
+    def _scroll_timeline_label_into_view(
+        self, label: Any, scroll_frame: Any = None
+    ) -> None:
+        """재생 중 행이 ScrollingFrame 안에 보이도록 스크롤."""
+        if label is None:
+            return
+        try:
+            label.scroll_here_y()
+            return
+        except Exception:
+            pass
+        if scroll_frame is None:
+            return
+        try:
+            y = float(getattr(label, "screen_position_y", 0.0) or 0.0)
+            h = float(getattr(label, "computed_height", 18.0) or 18.0)
+            frame_h = float(getattr(scroll_frame, "computed_height", 0.0) or 0.0)
+            if frame_h <= 0:
+                return
+            cur = float(getattr(scroll_frame, "scroll_y", 0.0) or 0.0)
+            scroll_frame.scroll_y = max(0.0, y - frame_h * 0.25)
+        except Exception:
+            pass
+
+    def _scroll_timeline_to_highlighted_rows(self, active_keys: frozenset) -> None:
+        """본창·HUD 타임라인 — 녹색 행으로 자동 스크롤."""
+        row_i = self._first_highlighted_row_index(active_keys)
+        if row_i is None:
+            return
+        lbl_idx = row_i + 1
+        pairs = (
+            (self._schedule_row_labels, self._schedule_scroll_frame),
+            (self._hud_schedule_row_labels, self._hud_schedule_scroll_frame),
+        )
+        for labels, scroll_frame in pairs:
+            if lbl_idx >= len(labels):
+                continue
+            self._scroll_timeline_label_into_view(labels[lbl_idx], scroll_frame)
+
     def _live_timeline_highlight_keys(self) -> frozenset:
         with _csv_play_timeline_active_keys_lock:
             if _csv_play_timeline_active_keys:
@@ -4223,6 +4281,7 @@ class LamSimulationCsvPlayWindow:
                 if lbl_idx >= len(labels):
                     break
                 self._apply_timeline_label_style(labels[lbl_idx], ent)
+        self._scroll_timeline_to_highlighted_rows(merged)
 
     def _post_apply_cached_timeline_ui(
         self, cached: CachedCsvPlayback, *, wait: bool = False
