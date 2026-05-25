@@ -49,31 +49,15 @@ from .lam_wafer_prim_paths import load_wafer_prim_by_slot_key
 # ---------------------------------------------------------------------------
 
 
-def _find_lam_data_root() -> str:
-    """저장소에서 ``lam`` 폴더(이벤트·USD·csv 공용 데이터 루트)를 찾는다.
-
-    ``lam_window`` 와 동일: 이 파일 위치에서 상위 디렉터리를 최대 12단계까지 올라가며
-    ``.../lam`` 이 존재하는 경로를 반환. 없으면 상대 경로로 ``lam`` 을 가리키는 fallback.
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    cur = here
-    for _ in range(12):
-        cand = os.path.normpath(os.path.join(cur, "lam"))
-        if os.path.isdir(cand):
-            return cand
-        nxt = os.path.dirname(cur)
-        if nxt == cur:
-            break
-        cur = nxt
-    return os.path.normpath(os.path.join(here, "..", "..", "..", "..", "..", "..", "lam"))
+from .lam_data_paths import resolve_local_data_path_or_default
 
 
 def get_lam_csv_dir() -> Path:
-    """시뮬 dwell CSV 디렉터리 ``lam/csv`` 경로를 반환한다.
+    """시뮬 dwell CSV 디렉터리 ``data/csv`` 경로를 반환한다.
 
     폴더가 없으면 생성을 시도한다(실패해도 Path 는 반환).
     """
-    d = Path(_find_lam_data_root()) / "csv"
+    d = resolve_local_data_path_or_default("csv")
     try:
         d.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -4874,7 +4858,6 @@ __all__ = [
     "ensure_event_json_scaffolds",
     "ParsedCsvRow",
     "DwellRecord",
-    "_find_lam_data_root",
     "get_lam_csv_dir",
     "list_lam_csv_paths",
     "list_csv_paths_in_directory",

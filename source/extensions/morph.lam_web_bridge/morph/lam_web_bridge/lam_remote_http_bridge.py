@@ -109,12 +109,13 @@ def _resolve_csv_path(csv_path: str, csv_dir: str) -> Optional[Path]:
 
 
 def _snapshot(session: LamKitSession) -> Dict[str, Any]:
-    from morph.lam_control.lam_window import default_load_usd_path, resolve_default_load_usd_path
+    from morph.lam_control.lam_data_paths import resolve_local_data_path
+    from morph.lam_control.lam_window import default_load_usd_path
 
     with _web_state_lock:
         mp = str(_web_state.get("master_path") or "")
         if not mp:
-            mp = resolve_default_load_usd_path(default_load_usd_path)
+            mp = resolve_local_data_path(default_load_usd_path) or ""
         return {
             "log": str(_web_state.get("log") or ""),
             "master_path": mp,
@@ -131,12 +132,13 @@ def _snapshot(session: LamKitSession) -> Dict[str, Any]:
 
 def _cmd_open_master(session: LamKitSession, data: Dict[str, Any]) -> Dict[str, Any]:
     from morph.lam_control.lam_usd_path import master_usd_path_is_openable
-    from morph.lam_control.lam_window import default_load_usd_path, resolve_default_load_usd_path
+    from morph.lam_control.lam_data_paths import resolve_local_data_path
+    from morph.lam_control.lam_window import default_load_usd_path
 
     raw = str(data.get("path") or data.get("master_path") or "").strip()
     if not raw:
         raw = default_load_usd_path
-    resolved = resolve_default_load_usd_path(raw)
+    resolved = resolve_local_data_path(raw)
     if not resolved:
         _set_web_log("합성 USD 경로가 비어 있습니다.")
         return {"ok": False, "error": "empty path"}
@@ -496,13 +498,14 @@ def start_lam_remote_http_bridge() -> None:
     if session is None:
         raise RuntimeError("morph.lam_control session is not registered")
 
-    from morph.lam_control.lam_window import default_load_usd_path, resolve_default_load_usd_path
+    from morph.lam_control.lam_data_paths import resolve_local_data_path
+    from morph.lam_control.lam_window import default_load_usd_path
     from morph.lam_control.simulation_play import get_lam_csv_dir
 
     _session_ref = session
     csv_dir = str(get_lam_csv_dir())
     with _web_state_lock:
-        _web_state["master_path"] = resolve_default_load_usd_path(default_load_usd_path)
+        _web_state["master_path"] = resolve_local_data_path(default_load_usd_path) or ""
         _web_state["csv_dir"] = csv_dir
         if not _web_state.get("csv_selected"):
             _web_state["csv_selected"] = ""

@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+from .lam_data_paths import resolve_local_data_path
 from .lam_composition_discovery import CompositionDiscovery
 from .lam_external_event_runner import LamExternalEventRunner
 from .lam_instance_registry import AnimationInstanceRegistry
@@ -50,74 +51,15 @@ load_automatically = True
 #   default_load_usd_path = "omniverse://10.139.35.208/Users/....../Combine.usd"
 # 절대 경로 예 (Linux/macOS):
 #   default_load_usd_path = "/home/user/kit-app-template_mine/lam/usd/master.usd"
-# 프로젝트(레포) 루트 기준 상대 경로 예 — lam/ 가 repo 직하위일 때:
-#   default_load_usd_path = "lam/usd/master.usd"
-#   default_load_usd_path = r"lam\usd\master.usd"
-# default_load_usd_path = "lam/usd/master.usd"
-# default_load_usd_path = "C:/Users/ptK/Documents/kit-app-template_mine/lam/usd/combine_1.usd"
-default_load_usd_path = "lam/usd/LAM_v02/FBX/Combine_01.usd"
+# 확장 data/ 기준 상대 경로 예:
+#   default_load_usd_path = "usd/master.usd"
+#   default_load_usd_path = "usd/LAM_v02/FBX/Combine_01.usd"
+default_load_usd_path = "usd/tractorGeo.usd"
 
 
 _PRINT_PREFIX = "[LAM/WIN]"
 
 WINDOW_TITLE = "LAM Multi-USD Load"
-
-
-def _find_lam_data_root() -> str:
-    """repo 루트의 `lam/` 폴더 절대 경로를 반환한다.
-
-    `__file__` 위치가 source/extensions/... 이든 _build/.../exts/... 이든 모두 통하도록,
-    부모 폴더를 거슬러 올라가며 `lam` 폴더가 존재하는 첫 위치를 반환한다.
-    못 찾으면 폴더 자체를 만들어서 반환(첫 실행 자동 생성).
-    """
-    here = os.path.dirname(os.path.abspath(__file__))
-    cur = here
-    for _ in range(12):
-        cand = os.path.normpath(os.path.join(cur, "lam"))
-        if os.path.isdir(cand):
-            return cand
-        nxt = os.path.dirname(cur)
-        if nxt == cur:
-            break
-        cur = nxt
-    # 폴더가 어디에도 없으면 here 위로 6단계(= 일반적인 _build 깊이) 위에 생성 시도.
-    fallback = os.path.normpath(os.path.join(here, "..", "..", "..", "..", "..", "..", "lam"))
-    try:
-        os.makedirs(os.path.join(fallback, "lam_event_sequences"), exist_ok=True)
-        os.makedirs(os.path.join(fallback, "lam_external_results"), exist_ok=True)
-        os.makedirs(os.path.join(fallback, "usd"), exist_ok=True)
-    except Exception:
-        pass
-    return fallback
-
-
-def _ext_data_dir() -> str:
-    """레거시 호환 — 새 lam/ 폴더 위치를 반환."""
-    return _find_lam_data_root()
-
-
-def _find_project_root() -> str:
-    """프로젝트(레포) 루트 — `lam/` 폴더의 부모 디렉터리."""
-    return os.path.dirname(_find_lam_data_root())
-
-
-def resolve_default_load_usd_path(raw: str) -> str:
-    """`default_load_usd_path` 를 Open Master 에 쓸 경로로 변환.
-
-    - ``omniverse://...`` — 그대로 반환 (Nucleus URL).
-    - 절대 로컬 경로 — normpath.
-    - 상대 경로 — 프로젝트 루트(`_find_project_root()`) 기준 join.
-    """
-    from .lam_usd_path import is_omniverse_usd_url
-
-    s = (raw or "").strip()
-    if not s:
-        return ""
-    if is_omniverse_usd_url(s):
-        return s
-    if os.path.isabs(s):
-        return os.path.normpath(s)
-    return os.path.normpath(os.path.join(_find_project_root(), s))
 
 
 class LamWindow:
@@ -204,13 +146,15 @@ class LamWindow:
 
         self._asset_path_model = ui.SimpleStringModel("")
         self._instance_id_model = ui.SimpleStringModel("")
-        # 모든 기본 경로는 repo 루트의 lam/ 폴더를 가리킨다(외부 _build/.../exts/... 가 아님).
-        lam_root = _find_lam_data_root()
+        usd_dir = resolve_local_data_path("usd") or ""
         self._master_path_model = ui.SimpleStringModel(
-            os.path.join(lam_root, "usd", "master.usd")
+            os.path.join(usd_dir, "master.usd") if usd_dir else "master.usd"
+        )
+        results_default = resolve_local_data_path(
+            "lam_external_results/sample_external_result.json"
         )
         self._results_path_model = ui.SimpleStringModel(
-            os.path.join(lam_root, "lam_external_results", "sample_external_result.json")
+            results_default or "lam_external_results/sample_external_result.json"
         )
 
         self._window = ui.Window(WINDOW_TITLE, width=860, height=720)
@@ -523,7 +467,7 @@ class LamWindow:
         if self._master_path_model is None:
             return
         raw = (self._master_path_model.get_value_as_string() or "").strip()
-        resolved = resolve_default_load_usd_path(raw) if raw else ""
+        resolved = resolve_local_data_path(raw) if raw else ""
         open_path = resolved or raw
         from .lam_usd_path import master_usd_path_is_openable
 
@@ -605,7 +549,7 @@ class LamWindow:
         """`load_automatically` 가 True 일 때 첫 show() 에서 합성 USD 를 연다."""
         if not load_automatically:
             return
-        resolved = resolve_default_load_usd_path(default_load_usd_path)
+        resolved = resolve_local_data_path(default_load_usd_path)
         if not resolved:
             self._log("자동 로드: default_load_usd_path 가 비어 있습니다.")
             print(f"{_PRINT_PREFIX} autoload: empty default_load_usd_path", flush=True)
@@ -739,7 +683,7 @@ class LamWindow:
 
     def _open_editor(self) -> None:
         if self._sequence_editor is None:
-            seq_dir = os.path.join(_find_lam_data_root(), "lam_event_sequences")
+            seq_dir = resolve_local_data_path("lam_event_sequences") or ""
             self._sequence_editor = LamSequenceEditor(
                 self._registry,
                 self._scheduler,
@@ -751,7 +695,7 @@ class LamWindow:
     def _open_json_test(self) -> None:
         """REQ-009 — JSON 테스트 창(시퀀스 편집기와 별개) 을 연다."""
         if self._json_test_window is None:
-            seq_dir = os.path.join(_find_lam_data_root(), "lam_event_sequences")
+            seq_dir = resolve_local_data_path("lam_event_sequences") or ""
             self._json_test_window = LamJsonTestWindow(
                 registry=self._registry,
                 scheduler=self._scheduler,
@@ -777,7 +721,7 @@ class LamWindow:
             self._log("Results path 가 비어 있습니다.")
             return
         if self._external_runner is None:
-            seq_dir = os.path.join(_find_lam_data_root(), "lam_event_sequences")
+            seq_dir = resolve_local_data_path("lam_event_sequences") or ""
             self._external_runner = LamExternalEventRunner(self._registry, self._scheduler, seq_dir)
         ok = self._external_runner.start(path, on_log=self._log)
         self._log(f"External {'STARTED' if ok else 'NOT_STARTED'}: {path}")
@@ -859,7 +803,7 @@ class LamWindow:
         if d is None:
             return
         try:
-            start = os.path.join(_find_lam_data_root(), "usd")
+            start = resolve_local_data_path("usd") or ""
             d.show(start)
         except Exception as exc:
             self._log(f"FilePicker show 실패: {exc}")
@@ -888,7 +832,7 @@ class LamWindow:
         if d is None:
             return
         try:
-            start = os.path.join(_find_lam_data_root(), "usd")
+            start = resolve_local_data_path("usd") or ""
             d.show(start)
         except Exception as exc:
             self._log(f"FilePicker show 실패: {exc}")
@@ -919,7 +863,7 @@ class LamWindow:
         if d is None:
             return
         try:
-            start = os.path.join(_find_lam_data_root(), "usd")
+            start = resolve_local_data_path("usd") or ""
             d.show(start)
         except Exception as exc:
             self._log(f"FilePicker show 실패: {exc}")
@@ -953,7 +897,7 @@ class LamWindow:
         if d is None:
             return
         try:
-            start = os.path.join(_find_lam_data_root(), "lam_external_results")
+            start = resolve_local_data_path("lam_external_results") or ""
             d.show(start)
         except Exception as exc:
             self._log(f"FilePicker show 실패: {exc}")
@@ -1995,5 +1939,5 @@ __all__ = [
     "LamWindow",
     "load_automatically",
     "default_load_usd_path",
-    "resolve_default_load_usd_path",
+    "resolve_local_data_path",
 ]

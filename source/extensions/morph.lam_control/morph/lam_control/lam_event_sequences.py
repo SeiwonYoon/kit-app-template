@@ -26,6 +26,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .lam_data_paths import resolve_local_data_path_or_default
 from .lam_slot_z_config import (
     ATM_Z_MOVE_PRIM_PATH,
     VTM_Z_MOVE_PRIM_PATH,
@@ -250,22 +251,8 @@ def log_event_steps_built(event_name: str, steps: List[Dict[str, Any]], *, slot_
                 print(f"{_PRINT_PREFIX}        prim={prim_vis}", flush=True)
 
 
-def _find_lam_data_root() -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
-    cur = here
-    for _ in range(12):
-        cand = os.path.normpath(os.path.join(cur, "lam"))
-        if os.path.isdir(cand):
-            return cand
-        nxt = os.path.dirname(cur)
-        if nxt == cur:
-            break
-        cur = nxt
-    return os.path.normpath(os.path.join(here, "..", "..", "..", "..", "..", "..", "lam"))
-
-
 def get_event_sequences_dir() -> Path:
-    d = Path(_find_lam_data_root()) / "lam_event_sequences"
+    d = resolve_local_data_path_or_default("lam_event_sequences")
     try:
         d.mkdir(parents=True, exist_ok=True)
     except Exception:
