@@ -1,12 +1,26 @@
 [
   {
+    "type": "MOVE",
+    "prim": "/World/aaa",
+    "duration": 5.0,
+    "dx": 0.0,
+    "dy": 400.0,
+    "dz": 0.0,
+    "move_from_initial": false,
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": ""
+  },
+  {
     "type": "PRIM_VISIBILITY",
     "mode": "show",
     "prim": "{SLOT_WAFER}",
     "duration": 0.02,
     "run_with_previous": false,
     "step_delay_ms": 0,
-    "description": "atm_foup1_place — SLOT wafer (편집)"
+    "description": "atm_aligner_pick — SLOT wafer (편집)"
   },
   {
     "type": "PRIM_VISIBILITY",
@@ -15,13 +29,13 @@
     "duration": 0.02,
     "run_with_previous": true,
     "step_delay_ms": 0,
-    "description": "atm_foup1_place — ARM wafer (편집)"
+    "description": "atm_aligner_pick — ARM wafer (편집)"
   },
   {
     "type": "DELAY",
     "duration": 0.5,
     "run_with_previous": false,
     "step_delay_ms": 0,
-    "description": "atm_foup1_place — TIMESAMPLES_REPLAY 등을 여기에 추가"
+    "description": "atm_aligner_pick — TIMESAMPLES_REPLAY 등을 여기에 추가"
   }
 ]

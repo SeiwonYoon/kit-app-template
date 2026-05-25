@@ -1,1 +1,67 @@
-[]
+[
+  {
+    "type": "TIMESAMPLES_REPLAY",
+    "ref": {
+      "prim_path": "/World/aaa",
+      "guid": "5fe40846-a122-4c30-9dae-be0a98568d00",
+      "instance_id": "aaa",
+      "source_asset": "C:\\Users\\ptK\\Documents\\kit-app-template_mine\\lam\\usd\\test1.usd"
+    },
+    "mode": "MANUAL",
+    "start_frame": 0,
+    "end_frame": 30,
+    "speed_scale": 1.0,
+    "loop": false,
+    "offset_correction_enabled": false,
+    "offset_correct_prims": "",
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": ""
+  },
+  {
+    "type": "ROTATE",
+    "prim": "/World/aaa/N_07_Laser_Cutting",
+    "duration": 1.0,
+    "rx": 0.0,
+    "ry": 0.0,
+    "rz": 90.0,
+    "auto_pivot_world_center": false,
+    "user_axis_rotate": false,
+    "pivot_wx": 0.0,
+    "pivot_wy": 0.0,
+    "pivot_wz": 0.0,
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": ""
+  },
+  {
+    "type": "MOVE",
+    "prim": "/World/aaa/N_07_Laser_Cutting",
+    "duration": 1.0,
+    "dx": 100.0,
+    "dy": 0.0,
+    "dz": 0.0,
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": ""
+  },
+  {
+    "type": "MOVE",
+    "prim": "/World/aaa/N_07_Laser_Cutting",
+    "duration": 1.0,
+    "dx": 0.0,
+    "dy": 300.0,
+    "dz": 0.0,
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": ""
+  }
+]

@@ -2,7 +2,7 @@
   {
     "type": "MOVE",
     "prim": "/World/aaa",
-    "duration": 1.0,
+    "duration": 3.0,
     "dx": 100.0,
     "dy": 0.0,
     "dz": 0.0,

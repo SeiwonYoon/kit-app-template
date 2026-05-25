@@ -1,5 +1,19 @@
 [
   {
+    "type": "MOVE",
+    "prim": "/World/aaa",
+    "duration": 5.0,
+    "dx": 0.0,
+    "dy": 400.0,
+    "dz": 0.0,
+    "move_from_initial": false,
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "description": ""
+  },
+  {
     "type": "PRIM_VISIBILITY",
     "mode": "show",
     "prim": "{SLOT_WAFER}",

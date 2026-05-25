@@ -43,4 +43,5 @@ deps/**/user.toml
 source/extensions/morph.lam_web_bridge/web/streaming_ui/dist/
 source/extensions/morph.lam_control/data/
 source/extensions/morph.lam_web_bridge/web/streaming_ui/node_modules/
-lam/
+/lam/
+lam/lam_event_sequences/
