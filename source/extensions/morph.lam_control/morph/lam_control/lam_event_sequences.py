@@ -618,6 +618,23 @@ def build_steps_for_event(
         steps[0] = dict(steps[0])
         steps[0]["run_with_previous"] = True
 
+    try:
+        from .lam_wafer_viewport_labels import (
+            annotate_steps_with_wafer_label_context,
+            make_wafer_label_step_context,
+        )
+
+        label_ctx = make_wafer_label_step_context(
+            event_name=name,
+            slot_key=sk,
+            arm_slot_key=arm_sk,
+            slot_wafer_path=slot_wafer,
+            arm_wafer_path=arm_wafer,
+        )
+        steps = annotate_steps_with_wafer_label_context(steps, label_ctx)
+    except Exception:
+        pass
+
     out.extend(steps)
     log_event_steps_built(name, out, slot_number=slot_number)
     return out

@@ -3306,6 +3306,16 @@ def apply_csv_play_initial_wafer_visibility() -> None:
             f"FOUP 보임 {len(show_paths)} · 숨김 {len(hide_paths)}",
             flush=True,
         )
+        try:
+            from .lam_wafer_prim_paths import IS_LABEL_SHOW
+            from .lam_wafer_viewport_labels import get_wafer_label_tracker
+
+            if IS_LABEL_SHOW:
+                get_wafer_label_tracker().reset_foup_baseline(wafer_map)
+            else:
+                get_wafer_label_tracker().clear()
+        except Exception:
+            pass
 
 
 # CSV Play material binding 테스트 스케줄 (setTimeout 유사, Play 중지 시 탈출)

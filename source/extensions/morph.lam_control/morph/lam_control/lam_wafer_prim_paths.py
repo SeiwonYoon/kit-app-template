@@ -10,6 +10,10 @@
     - ``False`` — 실무 ``WAFER_PRIM_BY_SLOT_KEY`` 경로.
     - ``True`` — FOUP 슬롯만 ``/wafer_01/_01``, ``/wafer_01/_02`` … 형식 (테스트 stage).
 
+``IS_LABEL_SHOW`` (모듈 상단):
+    - ``True`` — 뷰포트 3D 슬롯 번호(01~25) 표시 + pick/place 시 번호 이식.
+    - ``False`` — 모든 슬롯 웨이퍼 경로에서 번호 미표시(오버레이·트래커 비활성).
+
 ``WAFER_PRIM_PATH_PREFIX``:
 - 비우면 dict 에 적은 경로 문자열을 **그대로** 쓴다.
 - ``"/World/"`` 처럼 넣으면, **슬래시로 시작하지 않는** 모든 경로 앞에 한 번에 붙인다.
@@ -23,6 +27,9 @@ from typing import Dict, Optional
 
 # False — 아래 ``WAFER_PRIM_BY_SLOT_KEY`` (실무 USD). True — 테스트 stage ``/wafer_XX`` 트리.
 IS_TEST: bool = False
+
+# False — 뷰포트 웨이퍼 번호 라벨 전부 끔. True — FOUP·이송 경로 3D 번호 표시.
+IS_LABEL_SHOW: bool = False
 
 # 슬롯 142: /LAM_WaferPosition_v01/LAM_WaferPosition_v01/... (World 없음)
 # 팔 끝 3 (LOGICAL:*): /World/atm|vtm/.../LAM_*_Robot_v01/LAM_*_Robot_v01/...
@@ -260,6 +267,7 @@ def load_wafer_prim_by_slot_key() -> Dict[str, str]:
 
 __all__ = [
     "IS_TEST",
+    "IS_LABEL_SHOW",
     "WAFER_PRIM_PATH_PREFIX",
     "LOGICAL_SLOT_ATM_ARM",
     "LOGICAL_SLOT_VTM_EE_L",

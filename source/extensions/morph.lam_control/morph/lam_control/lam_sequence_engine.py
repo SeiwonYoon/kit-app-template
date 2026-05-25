@@ -1355,6 +1355,20 @@ class LamSequenceRunner:
                     )
 
         _dispatch_main_wait(_do_in_main, timeout=5.0)
+        label_ctx = step.get("_lam_wafer_label_ctx")
+        if label_ctx:
+            try:
+                from .lam_wafer_viewport_labels import (
+                    get_wafer_label_tracker,
+                    wafer_viewport_labels_enabled,
+                )
+
+                if wafer_viewport_labels_enabled():
+                    tracker = get_wafer_label_tracker()
+                    for p in paths:
+                        tracker.on_visibility(p, visible, label_ctx)
+            except Exception:
+                pass
         _seq_log(
             f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY paths={paths} visible={visible} tail={tail:.3f}s",
             flush=True,
