@@ -216,7 +216,7 @@ class LamSimPlayVirtualConfig:
     |------|------|------|
     | ``atm_height_prim_path`` | ATM Z MOVE 대상 prim | ``lam_slot_z_config.ATM_Z_MOVE_PRIM_PATH`` |
     | ``vtm_position_prim_path`` | VTM Z MOVE 대상 prim | ``lam_slot_z_config.VTM_Z_MOVE_PRIM_PATH`` |
-    | ``lam_sim_z_slot_move_duration_sec`` | 자동 Z MOVE 시간 [s] (기본 **0.5**) | **본 필드** |
+    | ``lam_sim_z_slot_move_duration_sec`` | 자동 Z MOVE 시간 [s] (기본 **0.3**) | **본 필드** |
     | ``atm_z_usd_world_offset_m`` | 전 슬롯 Z 보정 (TBS/mm) | **본 필드** |
     | ``z_slot_delta_m`` | [m] 테이블 (레거시) | ``load_atm_z_tables()`` |
 
@@ -226,7 +226,7 @@ class LamSimPlayVirtualConfig:
     timeline_log_enabled: bool = True
     atm_height_prim_path: str = "/World/LAM/ATM/HeightStage"
     vtm_position_prim_path: str = "/World/LAM/_VIRTUAL/VTM/ZStage"
-    lam_sim_z_slot_move_duration_sec: float = 0.5  # Z 동시 이동 duration — build_steps_for_event 가 사용
+    lam_sim_z_slot_move_duration_sec: float = 0.3  # Z 동시 이동 duration — build_steps_for_event 가 사용
     vtm_z_table_authored_baseline_m: float = 0.101
     vtm_z_baseline_applied_m: float = 0.101
     vtm_z_usd_world_offset_m: float = 0.0
@@ -285,7 +285,7 @@ def default_lam_sim_virtual_config() -> LamSimPlayVirtualConfig:
         timeline_log_enabled=True,
         atm_height_prim_path=ATM_Z_MOVE_PRIM_PATH,
         vtm_position_prim_path=VTM_Z_MOVE_PRIM_PATH,
-        lam_sim_z_slot_move_duration_sec=0.5,
+        lam_sim_z_slot_move_duration_sec=0.3,
         vtm_z_table_authored_baseline_m=vtm_z0_m,
         vtm_z_baseline_applied_m=vtm_z0_m,
         vtm_z_usd_world_offset_m=0.0,
@@ -1106,7 +1106,7 @@ class CsvTimedPlaybackBlock:
 # FOUP pick 직후 CSV에 없는 Aligner 전처리 (현장 규칙, 합성 타임라인만).
 # 시각 = 투어 FOUP pick 의 CSV t(``first.start_sec``) + 아래 오프셋 [s].
 FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC: float = 2.5
-FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC: float = 7.5
+FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC: float = 6
 
 _SCHEDULE_CATEGORY_ORDER: Dict[str, int] = {
     "pick": 0,
