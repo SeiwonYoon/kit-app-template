@@ -6,6 +6,10 @@
 - 팔 끝은 dict 의 ``"LOGICAL:ATM_ARM"`` / ``"LOGICAL:VTM_EE_L"`` / ``"LOGICAL:VTM_EE_R"`` 줄만 수정.
 - 이벤트 JSON 의 ``{SLOT_WAFER}`` / ``{ARM_WAFER}`` → ``build_steps_for_event`` 가 본 dict 로 치환.
 
+``IS_TEST`` (모듈 상단):
+    - ``False`` — 실무 ``WAFER_PRIM_BY_SLOT_KEY`` 경로.
+    - ``True`` — FOUP 슬롯만 ``/wafer_01/_01``, ``/wafer_01/_02`` … 형식 (테스트 stage).
+
 ``WAFER_PRIM_PATH_PREFIX``:
 - 비우면 dict 에 적은 경로 문자열을 **그대로** 쓴다.
 - ``"/World/"`` 처럼 넣으면, **슬래시로 시작하지 않는** 모든 경로 앞에 한 번에 붙인다.
@@ -14,7 +18,11 @@
 
 from __future__ import annotations
 
-from typing import Dict
+import re
+from typing import Dict, Optional
+
+# False — 아래 ``WAFER_PRIM_BY_SLOT_KEY`` (실무 USD). True — 테스트 stage ``/wafer_XX`` 트리.
+IS_TEST: bool = False
 
 # 슬롯 142: /LAM_WaferPosition_v01/LAM_WaferPosition_v01/... (World 없음)
 # 팔 끝 3 (LOGICAL:*): /World/atm|vtm/.../LAM_*_Robot_v01/LAM_*_Robot_v01/...
@@ -227,15 +235,31 @@ WAFER_PRIM_BY_SLOT_KEY: Dict[str, str] = {
 #     return p
 
 
+def _test_wafer_path_for_slot_key(slot_key: str) -> Optional[str]:
+    """테스트 USD — ``foup{N}_k`` → ``/wafer_NN/_kk`` (예: ``foup1_1`` → ``/wafer_01/_01``)."""
+    m = re.match(r"^foup(\d+)_(\d+)$", (slot_key or "").strip())
+    if not m:
+        return None
+    foup_n = int(m.group(1))
+    slot_i = int(m.group(2))
+    return f"/wafer_{foup_n:02d}/_{slot_i:02d}"
+
+
 def load_wafer_prim_by_slot_key() -> Dict[str, str]:
     """slot_key → prim path 맵 복사본 (``WAFER_PRIM_PATH_PREFIX`` 가 있으면 일괄 접두)."""
     out = dict(WAFER_PRIM_BY_SLOT_KEY)
+    if IS_TEST:
+        for k in list(out.keys()):
+            test_p = _test_wafer_path_for_slot_key(k)
+            if test_p is not None:
+                out[k] = test_p
     if WAFER_PRIM_PATH_PREFIX:
         return {k: _apply_prefix(v) for k, v in out.items()}
     return out
 
 
 __all__ = [
+    "IS_TEST",
     "WAFER_PRIM_PATH_PREFIX",
     "LOGICAL_SLOT_ATM_ARM",
     "LOGICAL_SLOT_VTM_EE_L",

@@ -391,10 +391,16 @@ def vtm_event_name_for_slot(slot_key: str, hand: str, pick_or_place: str) -> Tup
 
 def _default_scaffold_steps(event_name: str) -> List[Dict[str, Any]]:
     """시퀀스 에디터에서 편집할 최소 스캐폴드."""
+    if event_name.endswith("_pick"):
+        slot_mode, arm_mode = "hide", "show"
+    elif event_name.endswith("_place"):
+        slot_mode, arm_mode = "show", "hide"
+    else:
+        slot_mode, arm_mode = "show", "hide"
     return [
         {
             "type": "PRIM_VISIBILITY",
-            "mode": "show",
+            "mode": slot_mode,
             "prim": TOKEN_SLOT_WAFER,
             "duration": 0.02,
             "run_with_previous": False,
@@ -403,7 +409,7 @@ def _default_scaffold_steps(event_name: str) -> List[Dict[str, Any]]:
         },
         {
             "type": "PRIM_VISIBILITY",
-            "mode": "hide",
+            "mode": arm_mode,
             "prim": TOKEN_ARM_WAFER,
             "duration": 0.02,
             "run_with_previous": True,
