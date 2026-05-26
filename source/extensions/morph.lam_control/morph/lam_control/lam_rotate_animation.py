@@ -154,6 +154,7 @@ def run_prim_rotate_animation(
     segments: List[Dict[str, Any]],
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
+    speed_ref: float = 1.0,
 ) -> None:
     """simple 모드 — TBS_OFFSET RotateXYZ 에 (rx,ry,rz) 누적 보간."""
     global _rot_animations
@@ -195,6 +196,7 @@ def run_prim_rotate_animation(
         "elapsed_in_segment": 0.0,
         "loop": loop,
         "on_completed": on_completed,
+        "speed_ref": float(max(0.01, speed_ref or 1.0)),
     }
     _ensure_update_sub()
 
@@ -254,6 +256,10 @@ def _on_update(e) -> None:
     dt = float(payload.get("dt", 0.0) or 0.0)
     if dt <= 0:
         dt = 1.0 / 60.0
+    try:
+        from .simulation_play import get_csv_play_anim_dt_scale
+    except Exception:
+        get_csv_play_anim_dt_scale = None  # type: ignore
     if not _rot_animations:
         return
     stage = _stage()
@@ -268,9 +274,14 @@ def _on_update(e) -> None:
                 to_remove.append(prim_path)
                 continue
 
+            frame_dt = dt
+            if get_csv_play_anim_dt_scale is not None:
+                frame_dt = dt * float(
+                    get_csv_play_anim_dt_scale(float(state.get("speed_ref", 1.0) or 1.0))
+                )
             segments = state["segments"]
             idx = state["segment_index"]
-            elapsed = state["elapsed_in_segment"] + dt
+            elapsed = state["elapsed_in_segment"] + frame_dt
             base_rot = state["start_rot"]
             for i in range(idx):
                 d = segments[i]["delta"]

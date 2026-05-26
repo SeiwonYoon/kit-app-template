@@ -113,7 +113,28 @@ def zero_tbs_offset_translate_at_path(prim_path: str) -> None:
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
         return
+    stop_prim_translate_animation(prim_path)
     _set_prim_translate(prim, Gf.Vec3f(0.0, 0.0, 0.0))
+
+
+def snap_tbs_offset_translate_to_absolute(
+    prim_path: str,
+    x: float,
+    y: float,
+    z: float,
+) -> None:
+    """``move_from_initial=True`` 목표 좌표로 TBS_OFFSET translate 즉시 스냅."""
+    stage = _stage()
+    if not stage:
+        return
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return
+    stop_prim_translate_animation(prim_path)
+    _set_prim_translate(
+        prim,
+        Gf.Vec3f(float(x), float(y), float(z)),
+    )
 
 
 def run_prim_translate_animation(
@@ -121,6 +142,7 @@ def run_prim_translate_animation(
     segments: List[Dict[str, Any]],
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
+    speed_ref: float = 1.0,
 ) -> None:
     global _animations, _update_sub
     if not segments:
@@ -161,6 +183,7 @@ def run_prim_translate_animation(
         "elapsed_in_segment": 0.0,
         "loop": loop,
         "on_completed": on_completed,
+        "speed_ref": float(max(0.01, speed_ref or 1.0)),
     }
     _ensure_update_sub()
 
@@ -215,6 +238,10 @@ def _on_update(e) -> None:
     dt = float(payload.get("dt", 0.0) or 0.0)
     if dt <= 0:
         dt = 1.0 / 60.0
+    try:
+        from .simulation_play import get_csv_play_anim_dt_scale
+    except Exception:
+        get_csv_play_anim_dt_scale = None  # type: ignore
     if not _animations:
         return
     stage = _stage()
@@ -228,9 +255,14 @@ def _on_update(e) -> None:
             if not prim or not prim.IsValid():
                 to_remove.append(prim_path)
                 continue
+            frame_dt = dt
+            if get_csv_play_anim_dt_scale is not None:
+                frame_dt = dt * float(
+                    get_csv_play_anim_dt_scale(float(state.get("speed_ref", 1.0) or 1.0))
+                )
             segments = state["segments"]
             idx = state["segment_index"]
-            elapsed = state["elapsed_in_segment"] + dt
+            elapsed = state["elapsed_in_segment"] + frame_dt
             base_pos = state["start_pos"]
             for i in range(idx):
                 d = segments[i]["delta"]
@@ -294,4 +326,5 @@ __all__ = [
     "stop_prim_translate_animation",
     "stop_all_translate_animations",
     "zero_tbs_offset_translate_at_path",
+    "snap_tbs_offset_translate_to_absolute",
 ]

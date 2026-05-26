@@ -416,6 +416,38 @@ def _reset_tbs_offset_ops_for_paths(paths: List[str]) -> None:
 
 # --------------------------------------------------------------------- runner
 
+def _playback_speed_scale(fallback: float) -> float:
+    """CSV Play 중이면 UI 라이브 배속, 아니면 ``fallback``."""
+    try:
+        from .simulation_play import (
+            csv_play_session_active,
+            get_csv_play_live_speed_scale,
+            sync_csv_play_live_speed_from_ui,
+        )
+
+        if csv_play_session_active():
+            sync_csv_play_live_speed_from_ui()
+            return get_csv_play_live_speed_scale()
+    except Exception:
+        pass
+    return float(max(0.01, fallback or 1.0))
+
+
+def _csv_play_nominal_sleep(runner: "LamSequenceRunner", wall_sec: float, *, allow_stop: bool) -> None:
+    """CSV Play: wall 대기를 JSON 시간 기준으로 환산해 배속 변경에 따라 가변 대기."""
+    if wall_sec <= 1e-9:
+        return
+    sp0 = _playback_speed_scale(1.0)
+    nominal_remaining = float(wall_sec) * sp0
+    while nominal_remaining > 1e-6:
+        if allow_stop and runner._stop_flag.is_set():
+            return
+        sp = _playback_speed_scale(sp0)
+        wall_chunk = min(0.05, nominal_remaining / sp)
+        time.sleep(wall_chunk)
+        nominal_remaining -= wall_chunk * sp
+
+
 class LamSequenceRunner:
     """1 시퀀스의 step 배열을 순차 실행하는 러너.
 
@@ -517,6 +549,7 @@ class LamSequenceRunner:
                     _seq_log(f"{_PRINT_PREFIX} _apply_start_snapshot failed: {exc}", flush=True)
 
             d0_ms = int(first.get("step_delay_ms", 0) or 0)
+            sp = _playback_speed_scale(sp)
             d0 = max(0.0, (d0_ms / 1000.0) / sp)
             if d0 > 0:
                 self._sleep(d0)
@@ -526,10 +559,12 @@ class LamSequenceRunner:
                 if self._stop_flag.is_set():
                     _seq_log(f"{_PRINT_PREFIX} stop requested at step[{a}]", flush=True)
                     break
+                sp = _playback_speed_scale(sp)
                 b = _group_end_index(steps, a)
                 self._execute_group(steps, a, b, sp, reset_each_start)
                 next_idx = b + 1
                 if next_idx < len(steps):
+                    sp = _playback_speed_scale(sp)
                     delay_ms_next = int((steps[next_idx] or {}).get("step_delay_ms", 0) or 0)
                     delay_next = max(0.0, (delay_ms_next / 1000.0) / sp)
                     if delay_next > 0:
@@ -566,16 +601,17 @@ class LamSequenceRunner:
         """
         if self._stop_flag.is_set():
             return
+        sp = _playback_speed_scale(speed_scale)
         leader_idx = a
         anchor_idx = b
         t_group_start = time.monotonic()
         motion_tx, motion_rot, motion_replay = self._collect_motion_targets_from_steps(steps, a, b)
         motion_extra_timeout = self._estimate_group_motion_extra_timeout(
-            steps, a, b, speed_scale
+            steps, a, b, sp
         )
 
         # leader 즉시 시작.
-        leader_dur = self._start_step(leader_idx, steps[leader_idx], speed_scale, reset_each_start)
+        leader_dur = self._start_step(leader_idx, steps[leader_idx], sp, reset_each_start)
         follower_threads: List[threading.Thread] = []
         if leader_idx == anchor_idx:
             self._wait_for(t_group_start + leader_dur)
@@ -584,19 +620,20 @@ class LamSequenceRunner:
 
             for i in range(a + 1, b + 1):
                 step_i = steps[i] or {}
-                delay_sec = max(
-                    0.0, (int(step_i.get("step_delay_ms", 0) or 0) / 1000.0) / speed_scale
-                )
 
-                def _runner_for(
-                    idx: int = i, step: dict = step_i, delay: float = delay_sec
-                ) -> None:
+                def _runner_for(idx: int = i, step: dict = step_i) -> None:
+                    sp_follow = _playback_speed_scale(sp)
+                    delay = max(
+                        0.0,
+                        (int(step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_follow,
+                    )
                     if delay > 0:
                         self._sleep(delay, allow_stop=True)
                     if self._stop_flag.is_set():
                         return
                     start_at = time.monotonic()
-                    dur = self._start_step(idx, step, speed_scale, reset_each_start)
+                    sp_step = _playback_speed_scale(sp)
+                    dur = self._start_step(idx, step, sp_step, reset_each_start)
                     if idx == anchor_idx:
                         anchor_finish_at_holder["t"] = start_at + dur
 
@@ -607,8 +644,9 @@ class LamSequenceRunner:
                 follower_threads.append(t)
 
             anchor_step = steps[anchor_idx] or {}
+            sp_anchor = _playback_speed_scale(sp)
             anchor_delay_sec = max(
-                0.0, (int(anchor_step.get("step_delay_ms", 0) or 0) / 1000.0) / speed_scale
+                0.0, (int(anchor_step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_anchor
             )
             self._sleep(anchor_delay_sec + 0.05, allow_stop=True)
             self._wait_for(anchor_finish_at_holder["t"])
@@ -733,6 +771,12 @@ class LamSequenceRunner:
             return False
 
         while not self._stop_flag.is_set():
+            try:
+                from .simulation_play import sync_csv_play_live_speed_from_ui
+
+                sync_csv_play_live_speed_from_ui()
+            except Exception:
+                pass
             if not _any_busy():
                 return
             if time.monotonic() >= deadline:
@@ -1182,6 +1226,7 @@ class LamSequenceRunner:
                         p,
                         [{"duration": duration, "delta": seg_delta}],
                         loop=False,
+                        speed_ref=sp,
                     )
                     if from_initial:
                         _seq_log(
@@ -1289,6 +1334,7 @@ class LamSequenceRunner:
                         p,
                         [{"duration": duration, "delta": (drx, dry, drz)}],
                         loop=False,
+                        speed_ref=sp,
                     )
                 if from_initial:
                     _seq_log(
@@ -1391,12 +1437,32 @@ class LamSequenceRunner:
             now = time.monotonic()
             if now >= target_monotonic:
                 return
+            try:
+                from .simulation_play import csv_play_session_active
+
+                if csv_play_session_active():
+                    _csv_play_nominal_sleep(
+                        self,
+                        target_monotonic - now,
+                        allow_stop=True,
+                    )
+                    return
+            except Exception:
+                pass
             chunk = min(0.1, target_monotonic - now)
             time.sleep(max(0.0, chunk))
 
     def _sleep(self, sec: float, *, allow_stop: bool = True) -> None:
         if sec <= 0:
             return
+        try:
+            from .simulation_play import csv_play_session_active
+
+            if csv_play_session_active():
+                _csv_play_nominal_sleep(self, sec, allow_stop=allow_stop)
+                return
+        except Exception:
+            pass
         end = time.monotonic() + sec
         while True:
             if allow_stop and self._stop_flag.is_set():

@@ -210,22 +210,22 @@ class LamCsvViewportControlsHud:
                                         #             "background_color": 0xFF5A6A80
                                         #         },
                                         #     )
-                                        ui.Label(
-                                            "CSV Play",
-                                            height=18,
-                                            style={
-                                                "font_size": 12,
-                                                "color": 0xFFCCCCCC,
-                                            },
-                                        )
-                                        ui.Label("폴더", height=14)
-                                        dir_m = self._csv._csv_dir_model
-                                        if dir_m is not None:
-                                            ui.StringField(
-                                                model=dir_m,
-                                                height=22,
-                                                tooltip="CSV 폴더 — [목록]으로 갱신",
-                                            )
+                                        # ui.Label(
+                                        #     "CSV Play",
+                                        #     height=18,
+                                        #     style={
+                                        #         "font_size": 12,
+                                        #         "color": 0xFFCCCCCC,
+                                        #     },
+                                        # )
+                                        # ui.Label("폴더", height=14)
+                                        # dir_m = self._csv._csv_dir_model
+                                        # if dir_m is not None:
+                                        #     ui.StringField(
+                                        #         model=dir_m,
+                                        #         height=22,
+                                        #         tooltip="CSV 폴더 — [목록]으로 갱신",
+                                        #     )
                                         ui.Label("파일", height=14)
                                         if names:
                                             self._hud_combo = ui.ComboBox(
@@ -247,12 +247,12 @@ class LamCsvViewportControlsHud:
                                                 word_wrap=True,
                                             )
                                         with ui.HStack(spacing=4, height=26):
-                                            ui.Button(
-                                                "목록",
-                                                width=56,
-                                                clicked_fn=self._on_hud_refresh_clicked,
-                                                tooltip="목록 새로고침",
-                                            )
+                                            # ui.Button(
+                                            #     "목록",
+                                            #     width=56,
+                                            #     clicked_fn=self._on_hud_refresh_clicked,
+                                            #     tooltip="목록 새로고침",
+                                            # )
                                             ui.Button(
                                                 "타임라인",
                                                 width=56,
@@ -263,11 +263,22 @@ class LamCsvViewportControlsHud:
                                                 "재생",
                                                 width=52,
                                                 clicked_fn=self._csv._on_play_clicked,
+                                                tooltip="일시정지 후면 저장된 CSV 시각부터 이어서",
                                             )
                                             ui.Button(
-                                                "중지",
-                                                width=52,
-                                                clicked_fn=self._csv._on_csv_stop_clicked,
+                                                "일시정지",
+                                                width=56,
+                                                clicked_fn=self._csv._on_csv_pause_clicked,
+                                                tooltip="진행 위치 저장 후 멈춤",
+                                            )
+                                            ui.Button(
+                                                "정지",
+                                                width=44,
+                                                clicked_fn=self._csv._on_csv_stop_reset_clicked,
+                                                tooltip=(
+                                                    "초기화: TBS→0, FOUP 75 show, "
+                                                    "기타 wafer hide, 재생 위치 리셋"
+                                                ),
                                             )
                                         po_m = self._csv._process_only_model
                                         if po_m is not None:
