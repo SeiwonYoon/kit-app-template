@@ -36,8 +36,10 @@ from .lam_csv_viewport_hud import (
     LAM_CSV_VIEWPORT_CONTROLS_ENABLED,
     LamCsvViewportControlsHud,
 )
-from .lam_wafer_prim_paths import IS_LABEL_SHOW
-from .lam_wafer_viewport_labels import LamWaferFoupViewportLabels
+from .lam_wafer_viewport_labels import (
+    LamWaferFoupViewportLabels,
+    wafer_viewport_labels_enabled,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ load_automatically = True
 #   default_load_usd_path = "usd/master.usd"
 #   default_load_usd_path = "usd/LAM_v02/FBX/Combine_01.usd"
 default_load_usd_path = "usd/master_1.usd"
-
+# default_load_usd_path = "usd/combine_05.usd"
 
 _PRINT_PREFIX = "[LAM/WIN]"
 
@@ -72,10 +74,13 @@ class LamWindow:
         registry: AnimationInstanceRegistry,
         scheduler: PlaybackScheduler,
         evaluator: RuntimeEvaluator,
+        *,
+        ext_id: str = "",
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
         self._evaluator = evaluator
+        self._ext_id = (ext_id or "").strip()
         self._master = MasterStage()
         self._loader = MultiUsdLoader(self._master, self._registry)
         self._discovery = CompositionDiscovery(self._master, self._registry)
@@ -133,7 +138,7 @@ class LamWindow:
                 # 시퀀스 편집기도 같이 살린다(REQ-008).
                 self._open_editor()
                 self._sync_csv_viewport_hud()
-                self._sync_wafer_foup_viewport_labels()
+                self._sync_wafer_foup_viewport_labels_only()
                 return
             except Exception:
                 self._window = None
@@ -354,28 +359,32 @@ class LamWindow:
 
         self._schedule_autoload_master_on_startup()
         self._sync_csv_viewport_hud()
-        self._sync_wafer_foup_viewport_labels()
+        self._sync_wafer_foup_viewport_labels_only()
 
-    def _sync_wafer_foup_viewport_labels(self, *, delay_frames: int = 12) -> None:
-        """``lam_wafer_prim_paths.IS_LABEL_SHOW`` 일 때 3D 슬롯 번호 라벨."""
-        if not IS_LABEL_SHOW:
+    def _sync_wafer_foup_viewport_labels_only(self, *, delay_frames: int = 12) -> None:
+        """Viewport 3D 라벨 SceneView 마운트/해제 (체크 상태는 ``apply_wafer_label_visibility_from_ui``)."""
+        if not wafer_viewport_labels_enabled():
             try:
-                from .lam_wafer_viewport_labels import get_wafer_label_tracker
+                from .lam_wafer_viewport_labels import (
+                    get_wafer_label_tracker,
+                    teardown_wafer_viewport_labels,
+                )
 
                 get_wafer_label_tracker().clear()
+                teardown_wafer_viewport_labels()
             except Exception:
-                pass
-            if self._wafer_foup_labels is not None:
-                try:
-                    self._wafer_foup_labels.destroy()
-                except Exception:
-                    pass
-                self._wafer_foup_labels = None
+                if self._wafer_foup_labels is not None:
+                    try:
+                        self._wafer_foup_labels.destroy()
+                    except Exception:
+                        pass
+            self._wafer_foup_labels = None
             return
         if self._wafer_foup_labels is None:
             self._wafer_foup_labels = LamWaferFoupViewportLabels(
                 viewport=self._viewport,
                 master=self._master,
+                ext_id=self._ext_id,
             )
         self._wafer_foup_labels.sync_layers(delay_frames=delay_frames)
 
@@ -394,6 +403,7 @@ class LamWindow:
                 registry=self._registry,
                 scheduler=self._scheduler,
             )
+            self._csv_sim_window.set_lam_window(self)
         self._csv_sim_window.ensure_playback_models()
         if self._csv_viewport_hud is None:
             self._csv_viewport_hud = LamCsvViewportControlsHud(
@@ -537,8 +547,26 @@ class LamWindow:
             self._log(f"{prefix}Discover added={len(added)}")
             extract_prefix = log_prefix or "Open Master"
             self._auto_extract_after_master_open(log_prefix=extract_prefix)
-            self._sync_wafer_foup_viewport_labels(delay_frames=24)
+            self._refresh_wafer_labels_after_master_open(delay_frames=24)
         return ok
+
+    def _refresh_wafer_labels_after_master_open(self, *, delay_frames: int = 24) -> None:
+        """Open Master 후 체크 ON 이면 트래커·SceneView 를 stage 경로에 맞게 다시 맞춘다."""
+        try:
+            from .lam_wafer_viewport_labels import wafer_viewport_labels_enabled
+        except Exception:
+            wafer_viewport_labels_enabled = lambda: False  # type: ignore
+
+        if not wafer_viewport_labels_enabled():
+            self._sync_wafer_foup_viewport_labels_only(delay_frames=delay_frames)
+            return
+        if self._csv_sim_window is not None:
+            try:
+                self._csv_sim_window.apply_wafer_label_visibility_from_ui(lam_window=self)
+                return
+            except Exception:
+                pass
+        self._sync_wafer_foup_viewport_labels_only(delay_frames=delay_frames)
 
     def _schedule_autoload_master_on_startup(self) -> None:
         """`load_automatically` 시 합성 로드를 몇 프레임 뒤에 실행.
@@ -746,6 +774,7 @@ class LamWindow:
                 registry=self._registry,
                 scheduler=self._scheduler,
             )
+            self._csv_sim_window.set_lam_window(self)
         self._csv_sim_window.show()
 
     def _on_run_external(self) -> None:

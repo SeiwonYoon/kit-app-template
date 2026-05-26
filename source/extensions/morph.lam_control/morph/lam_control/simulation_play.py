@@ -3307,11 +3307,13 @@ def apply_csv_play_initial_wafer_visibility() -> None:
             flush=True,
         )
         try:
-            from .lam_wafer_prim_paths import IS_LABEL_SHOW
-            from .lam_wafer_viewport_labels import get_wafer_label_tracker
+            from .lam_wafer_viewport_labels import (
+                get_wafer_label_tracker,
+                wafer_viewport_labels_enabled,
+            )
 
-            if IS_LABEL_SHOW:
-                get_wafer_label_tracker().reset_foup_baseline(wafer_map)
+            if wafer_viewport_labels_enabled():
+                get_wafer_label_tracker().reset_foup_baseline(wafer_map, stage=st)
             else:
                 get_wafer_label_tracker().clear()
         except Exception:
@@ -3779,6 +3781,8 @@ class LamSimulationCsvPlayWindow:
         self._build_progress_model: Any = None
         self._speed_model: Any = None
         self._process_only_model: Any = None
+        self._wafer_label_show_model: Any = None
+        self._lam_window_ref: Any = None
         self._hud_schedule_rows_stack: Any = None
         self._hud_schedule_scroll_frame: Any = None
         self._hud_schedule_row_labels: List[Any] = []
@@ -3839,6 +3843,8 @@ class LamSimulationCsvPlayWindow:
         self._build_progress_model = None
         self._speed_model = None
         self._process_only_model = None
+        self._wafer_label_show_model = None
+        self._lam_window_ref = None
         self._hud_schedule_rows_stack = None
         self._hud_schedule_row_labels = []
         self._hud_build_progress_model = None
@@ -3870,7 +3876,122 @@ class LamSimulationCsvPlayWindow:
             self._speed_model = SimpleFloatModel(1.0)
         if self._process_only_model is None:
             self._process_only_model = SimpleBoolModel(False)
+        if self._wafer_label_show_model is None:
+            self._wafer_label_show_model = SimpleBoolModel(False)
         register_csv_play_timeline_window(self)
+
+    def set_lam_window(self, lam_window: Any) -> None:
+        """Viewport 라벨 동기용 ``LamWindow`` 참조 (본창·HUD 체크박스)."""
+        self._lam_window_ref = lam_window
+
+    def _resolve_lam_window(self, lam_window: Any = None) -> Any:
+        return lam_window if lam_window is not None else self._lam_window_ref
+
+    def mount_wafer_label_show_checkbox_ui(self, ui: Any, *, lam_window: Any = None) -> None:
+        """「웨이퍼번호보기」 체크박스 한 줄 (Viewport HUD · CSV 본창 공통)."""
+        self.ensure_playback_models()
+        wl_m = self._wafer_label_show_model
+        if wl_m is None:
+            return
+        try:
+            from .lam_wafer_prim_paths import IS_LABEL_SHOW
+        except Exception:
+            IS_LABEL_SHOW = True  # type: ignore
+        tip = (
+            "3D 뷰포트 웨이퍼 슬롯 번호(01~25). pick/place hide·show 와 함께 이동."
+        )
+        if not IS_LABEL_SHOW:
+            tip += " (코드 IS_LABEL_SHOW=False 이면 번호는 표시되지 않음.)"
+        lam = self._resolve_lam_window(lam_window)
+
+        def _on_changed(*_a: Any) -> None:
+            self.apply_wafer_label_visibility_from_ui(lam_window=lam)
+
+        with ui.HStack(spacing=4, height=22):
+            ui.Label("웨이퍼번호보기", width=88)
+            wl_cb = ui.CheckBox(model=wl_m, width=20, tooltip=tip)
+            for hook in ("add_value_changed_fn", "add_item_changed_fn"):
+                try:
+                    fn = getattr(wl_m, hook, None)
+                    if callable(fn):
+                        fn(_on_changed)
+                except Exception:
+                    pass
+            ui.Spacer()
+
+    def read_wafer_label_show_enabled(self) -> bool:
+        """「웨이퍼번호보기」 체크박스 (SimpleBoolModel 호환)."""
+        m = self._wafer_label_show_model
+        if m is None:
+            return False
+        try:
+            return bool(m.get_value_as_bool())
+        except Exception:
+            pass
+        try:
+            return bool(m.as_bool)
+        except Exception:
+            pass
+        try:
+            return bool(m.get_value())
+        except Exception:
+            return False
+
+    def apply_wafer_label_visibility_from_ui(self, lam_window: Any = None) -> None:
+        """HUD/본창 「웨이퍼번호보기」 체크 → 트래커·Viewport 3D 라벨 동기."""
+        try:
+            from .lam_wafer_prim_paths import IS_LABEL_SHOW
+            from .lam_wafer_viewport_labels import (
+                get_wafer_label_tracker,
+                set_wafer_labels_ui_enabled,
+                wafer_viewport_labels_enabled,
+            )
+
+            ui_on = self.read_wafer_label_show_enabled()
+            set_wafer_labels_ui_enabled(bool(IS_LABEL_SHOW) and ui_on)
+            if wafer_viewport_labels_enabled():
+                try:
+                    apply_csv_play_initial_wafer_visibility()
+                except Exception as exc:
+                    self._log(f"wafer label FOUP visibility skip: {exc}")
+                stage = None
+                lam = self._resolve_lam_window(lam_window)
+                if lam is not None:
+                    try:
+                        stage = lam._master.get_stage()
+                    except Exception:
+                        stage = None
+                if stage is None:
+                    try:
+                        import omni.usd as ou  # type: ignore
+
+                        ctx = ou.get_context("")
+                        if ctx is not None:
+                            stage = ctx.get_stage()
+                    except Exception:
+                        stage = None
+                n = get_wafer_label_tracker().reset_foup_baseline(
+                    load_wafer_prim_by_slot_key(),
+                    stage=stage,
+                )
+                self._log(f"wafer label tracker: {n} FOUP slot path(s) mapped")
+            else:
+                get_wafer_label_tracker().clear()
+                try:
+                    from .lam_wafer_viewport_labels import teardown_wafer_viewport_labels
+
+                    teardown_wafer_viewport_labels()
+                except Exception:
+                    pass
+        except Exception as exc:
+            self._log(f"wafer label UI sync failed: {exc}")
+            return
+        lam = self._resolve_lam_window(lam_window)
+        if lam is not None:
+            try:
+                lam._sync_wafer_foup_viewport_labels_only()
+            except Exception as exc:
+                self._log(f"wafer label viewport sync failed: {exc}")
 
     def register_hud_timeline_ui(
         self,
@@ -4018,6 +4139,10 @@ class LamSimulationCsvPlayWindow:
                     except Exception:
                         self._process_only_model = None
                     ui.Spacer()
+                try:
+                    self.mount_wafer_label_show_checkbox_ui(ui)
+                except Exception as exc:
+                    self._log(f"wafer label checkbox UI: {exc}")
                 with ui.HStack(spacing=6, height=28):
                     ui.Label("재생 배속", width=70)
                     try:

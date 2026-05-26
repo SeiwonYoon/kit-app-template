@@ -11,8 +11,9 @@
     - ``True`` — FOUP 슬롯만 ``/wafer_01/_01``, ``/wafer_01/_02`` … 형식 (테스트 stage).
 
 ``IS_LABEL_SHOW`` (모듈 상단):
-    - ``True`` — 뷰포트 3D 슬롯 번호(01~25) 표시 + pick/place 시 번호 이식.
-    - ``False`` — 모든 슬롯 웨이퍼 경로에서 번호 미표시(오버레이·트래커 비활성).
+    - ``True`` — 웨이퍼 번호 기능 사용 가능. Viewport 「공정만보기」 패널의
+      「웨이퍼번호보기」 체크로 런타임 on/off.
+    - ``False`` — 번호 기능 전체 비활성(체크박스도 없음).
 
 ``WAFER_PRIM_PATH_PREFIX``:
 - 비우면 dict 에 적은 경로 문자열을 **그대로** 쓴다.
@@ -23,13 +24,13 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 # False — 아래 ``WAFER_PRIM_BY_SLOT_KEY`` (실무 USD). True — 테스트 stage ``/wafer_XX`` 트리.
-IS_TEST: bool = False
+IS_TEST: bool = True
 
-# False — 뷰포트 웨이퍼 번호 라벨 전부 끔. True — FOUP·이송 경로 3D 번호 표시.
-IS_LABEL_SHOW: bool = False
+# False — 3D 번호·트래커 비활성(체크박스는 보이나 동작 안 함). True — HUD 체크로 on/off.
+IS_LABEL_SHOW: bool = True
 
 # 슬롯 142: /LAM_WaferPosition_v01/LAM_WaferPosition_v01/... (World 없음)
 # 팔 끝 3 (LOGICAL:*): /World/atm|vtm/.../LAM_*_Robot_v01/LAM_*_Robot_v01/...
@@ -252,6 +253,41 @@ def _test_wafer_path_for_slot_key(slot_key: str) -> Optional[str]:
     return f"/wafer_{foup_n:02d}/_{slot_i:02d}"
 
 
+def _production_path_for_slot_key(slot_key: str) -> str:
+    """``IS_TEST`` 무시 — dict 원본 + 접두만 적용."""
+    raw = (WAFER_PRIM_BY_SLOT_KEY.get((slot_key or "").strip()) or "").strip()
+    if not raw:
+        return ""
+    return _apply_prefix(raw)
+
+
+def resolve_wafer_prim_path_on_stage(stage: Any, slot_key: str, path: str) -> str:
+    """현재 stage 에 실제로 있는 prim 경로를 고른다 (테스트/실무 경로 자동 폴백)."""
+    p = (path or "").strip()
+    if stage is None:
+        return p
+
+    def _valid(path_str: str) -> bool:
+        if not path_str:
+            return False
+        try:
+            prim = stage.GetPrimAtPath(path_str)
+            return bool(prim and prim.IsValid())
+        except Exception:
+            return False
+
+    if _valid(p):
+        return p
+    alt = _production_path_for_slot_key(slot_key)
+    if alt and _valid(alt):
+        return alt
+    if IS_TEST:
+        test_p = _test_wafer_path_for_slot_key(slot_key)
+        if test_p and _valid(test_p):
+            return test_p
+    return p
+
+
 def load_wafer_prim_by_slot_key() -> Dict[str, str]:
     """slot_key → prim path 맵 복사본 (``WAFER_PRIM_PATH_PREFIX`` 가 있으면 일괄 접두)."""
     out = dict(WAFER_PRIM_BY_SLOT_KEY)
@@ -274,4 +310,5 @@ __all__ = [
     "LOGICAL_SLOT_VTM_EE_R",
     "WAFER_PRIM_BY_SLOT_KEY",
     "load_wafer_prim_by_slot_key",
+    "resolve_wafer_prim_path_on_stage",
 ]

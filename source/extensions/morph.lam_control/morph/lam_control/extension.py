@@ -50,6 +50,7 @@ class LamControlExtension(omni.ext.IExt):
             registry=self._registry,
             scheduler=self._scheduler,
             evaluator=self._evaluator,
+            ext_id=ext_id,
         )
         self._window.show()
         self._evaluator.start()

@@ -283,6 +283,15 @@ class LamCsvViewportControlsHud:
                                                     ),
                                                 )
                                                 ui.Spacer()
+                                        try:
+                                            self._csv.mount_wafer_label_show_checkbox_ui(
+                                                ui, lam_window=self._lam
+                                            )
+                                        except Exception as exc:
+                                            print(
+                                                f"{_PRINT_PREFIX} wafer label checkbox: {exc}",
+                                                flush=True,
+                                            )
                                         with ui.HStack(spacing=4, height=26):
                                             ui.Label("배속", width=36)
                                             sp_m = self._csv._speed_model
@@ -360,6 +369,10 @@ class LamCsvViewportControlsHud:
             f"(합성 USD + CSV·공정만보기·타임라인, 우측 상단).",
             flush=True,
         )
+        try:
+            self._csv.apply_wafer_label_visibility_from_ui(lam_window=self._lam)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} wafer label sync after mount: {exc}", flush=True)
 
     def _on_hud_refresh_clicked(self) -> None:
         self._csv._on_refresh_clicked()
