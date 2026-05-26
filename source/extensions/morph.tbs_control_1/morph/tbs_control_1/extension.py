@@ -306,6 +306,12 @@ class Extension(omni.ext.IExt):
             self._overlay = None
         usd_animation_control.stop_usd_animation()
         try:
+            from .equipment_autoload import teardown_equipment_autoload
+
+            teardown_equipment_autoload(self)
+        except Exception:
+            pass
+        try:
             teardown_sim_multi_viewports(self)
         except Exception:
             pass

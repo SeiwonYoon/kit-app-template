@@ -1,1 +1,56 @@
-[]
+[
+  {
+    "type": "USD_TIMELINE",
+    "description": "",
+    "mode": "MANUAL",
+    "start_frame": 0,
+    "end_frame": 300,
+    "offset_correction_enabled": false,
+    "offset_correct_prims": "",
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "_start_from_current": false,
+    "_start_from_current_paths": "",
+    "speed_scale": 6.0
+  },
+  {
+    "type": "MOVE",
+    "description": "",
+    "prim": "/Root/Root/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_2000_A00__________________________92/UV______________________A6061T6_120/_______________________________________7__121/Mesh_56",
+    "duration": 5.0,
+    "dx": 500.0,
+    "dy": 0.0,
+    "dz": 0.0,
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "_start_from_current": false,
+    "_start_from_current_paths": "",
+    "_runtime_duration": 5.0,
+    "_runtime_dx": 500.0,
+    "_runtime_dy": 0.0,
+    "_runtime_dz": 0.0
+  },
+  {
+    "type": "MOVE",
+    "prim": "/RootRoot/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/link0",
+    "duration": 6.0,
+    "dx": 0.0,
+    "dy": 0.0,
+    "dz": 1000.0,
+    "hide_enabled": false,
+    "hide_prims": "",
+    "run_with_previous": false,
+    "step_delay_ms": 0,
+    "_start_from_current": false,
+    "_start_from_current_paths": "",
+    "_runtime_duration": 6.0,
+    "_runtime_dx": 0.0,
+    "_runtime_dy": 0.0,
+    "_runtime_dz": 1000.0,
+    "description": ""
+  }
+]

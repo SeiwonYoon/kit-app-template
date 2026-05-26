@@ -7541,6 +7541,12 @@ def on_sim_ep_count_changed(ext: Any) -> None:
     if not is_ep3 and getattr(ext, "_sim_fault_ep3_model", None) is not None:
         ext._sim_fault_ep3_model.set_value(False)
     _sync_ep3_port_cell_visibility(ext)
+    try:
+        from .equipment_autoload import on_sim_ep_count_combo_changed
+
+        on_sim_ep_count_combo_changed(ext)
+    except Exception:
+        pass
 
 
 def receive_signal_data(ext: Any, data: str, format: str = "json") -> bool:
