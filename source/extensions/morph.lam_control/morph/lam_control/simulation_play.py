@@ -4781,6 +4781,12 @@ class LamSimulationCsvPlayWindow:
                         clicked_fn=self._on_schedule_refresh_clicked,
                         tooltip="콤보에서 고른 CSV 를 다시 파싱해 아래 목록 갱신",
                     )
+                    ui.Button(
+                        "정렬 저장",
+                        width=90,
+                        clicked_fn=self._on_save_sorted_csv_clicked,
+                        tooltip="선택한 CSV를 eqp_start_tm 오름차순으로 정렬해 같은 폴더에 새 파일로 저장",
+                    )
                     ui.Button("CSV Play", width=90, clicked_fn=self._on_play_clicked)
                     ui.Button(
                         "일시정지",
@@ -5593,6 +5599,59 @@ class LamSimulationCsvPlayWindow:
             return
         self._refresh_csv_schedule_preview(path, background_build=True)
         self._log(f"타임라인·캐시 빌드 시작: {path.name}")
+
+    def _on_save_sorted_csv_clicked(self) -> None:
+        """선택 CSV를 eqp_start_tm 오름차순으로 정렬해 새 파일로 저장."""
+        src = self._selected_csv_path()
+        if src is None:
+            self._log("CSV 없음 — 저장할 파일이 없습니다.")
+            return
+        try:
+            out = self._write_sorted_csv_by_eqp_start_tm(src)
+            self._log(f"정렬 CSV 저장 완료: {out.name}")
+            # 같은 폴더에 파일이 생겼으므로 목록 갱신 (선택은 유지)
+            self._reload_csv_list(preserve_selection=True)
+        except Exception as exc:
+            msg = f"정렬 CSV 저장 실패: {exc}"
+            print(f"{_PRINT_PREFIX} {msg}", flush=True)
+            self._log(msg)
+
+    def _write_sorted_csv_by_eqp_start_tm(self, src: Path) -> Path:
+        """원본 CSV 행을 보존한 채 eqp_start_tm 기준 정렬하여 같은 폴더에 저장."""
+        import csv as _csv
+
+        p = Path(src).resolve()
+        if not p.is_file():
+            raise FileNotFoundError(str(p))
+
+        with p.open("r", encoding="utf-8", newline="") as f:
+            reader = _csv.DictReader(f)
+            fieldnames = list(reader.fieldnames or ())
+            if not fieldnames:
+                raise ValueError("CSV header 가 비었습니다.")
+            rows = list(reader)
+
+        # 키 계산: eqp_start_iso 우선(있으면), 없으면 eqp_start_tm
+        def _key(raw: dict) -> float:
+            return _parse_csv_time_field(raw, "eqp_start_tm", "eqp_start_iso")
+
+        rows.sort(key=lambda r: (_key(r), str(r.get("lot_id") or ""), str(r.get("cassette_slot") or ""), str(r.get("module_nm") or "")))
+
+        out_base = p.with_name(f"{p.stem}_sorted_by_eqp_start_tm{p.suffix}")
+        out = out_base
+        for i in range(1, 1000):
+            if not out.exists():
+                break
+            out = p.with_name(f"{p.stem}_sorted_by_eqp_start_tm_{i}{p.suffix}")
+        if out.exists():
+            raise FileExistsError(f"output already exists: {out}")
+
+        with out.open("w", encoding="utf-8", newline="") as f:
+            writer = _csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for r in rows:
+                writer.writerow(r)
+        return out
 
     def _csv_play_thread_alive(self) -> bool:
         t = self._csv_play_thread
