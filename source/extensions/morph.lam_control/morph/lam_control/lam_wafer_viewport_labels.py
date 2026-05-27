@@ -102,6 +102,53 @@ def _paths_equal(a: str, b: str) -> bool:
     return bool(pa and pb and pa == pb)
 
 
+def _normalize_path_key(path: str) -> str:
+    return (path or "").strip().rstrip("/")
+
+
+def _path_alias_set(
+    prim_path: str,
+    slot_key: str,
+    ctx_path: str,
+    *,
+    stage: Optional[Usd.Stage] = None,
+) -> set[str]:
+    """동일 prim 을 가리킬 수 있는 경로 문자열 후보 (stage·맵·컨텍스트)."""
+    aliases: set[str] = set()
+    for raw in (prim_path, ctx_path):
+        key = _normalize_path_key(raw)
+        if key:
+            aliases.add(key)
+    sk = (slot_key or "").strip()
+    if stage is not None and sk:
+        for raw in (ctx_path, (load_wafer_prim_by_slot_key().get(sk) or "")):
+            resolved = resolve_wafer_prim_path_on_stage(stage, sk, raw)
+            key = _normalize_path_key(resolved)
+            if key:
+                aliases.add(key)
+    return aliases
+
+
+def _path_matches_role(
+    prim_path: str,
+    *,
+    role: str,
+    ctx: Dict[str, str],
+    stage: Optional[Usd.Stage] = None,
+) -> bool:
+    """``prim_path`` 가 컨텍스트 slot/arm 웨이퍼 prim 과 같은 대상인지."""
+    p = _normalize_path_key(prim_path)
+    if not p:
+        return False
+    if role == "slot":
+        slot_key = (ctx.get("slot_key") or "").strip()
+        ctx_path = (ctx.get("slot_wafer_path") or "").strip()
+    else:
+        slot_key = (ctx.get("arm_slot_key") or "").strip()
+        ctx_path = (ctx.get("arm_wafer_path") or "").strip()
+    return p in _path_alias_set(p, slot_key, ctx_path, stage=stage)
+
+
 def cassette_style_label_for_slot_key(slot_key: str) -> Optional[str]:
     """FOUP/buffer/cooling 만 카세트 번호(01~25 등). airlock/chamber/aligner 는 None."""
     sk = (slot_key or "").strip()
@@ -121,15 +168,24 @@ def make_wafer_label_step_context(
     arm_slot_key: str,
     slot_wafer_path: str,
     arm_wafer_path: str,
+    wafer_label: str = "",
 ) -> Dict[str, str]:
+    """이벤트 JSON ``PRIM_VISIBILITY`` 스텝에 붙일 라벨 컨텍스트.
+
+    ``wafer_label`` — CSV ``cassette_slot`` 등에서 온 표시 번호(``17`` → ``17``).
+    FOUP/버퍼 슬롯 pick 시 hide/show 가 slot_key 경로와 어긋나도 번호를 유지한다.
+    """
     po = "pick" if (event_name or "").strip().endswith("_pick") else "place"
+    sk = (slot_key or "").strip()
+    label = (wafer_label or "").strip() or (cassette_style_label_for_slot_key(sk) or "")
     return {
         "event_name": (event_name or "").strip(),
-        "slot_key": (slot_key or "").strip(),
+        "slot_key": sk,
         "arm_slot_key": (arm_slot_key or "").strip(),
         "slot_wafer_path": (slot_wafer_path or "").strip(),
         "arm_wafer_path": (arm_wafer_path or "").strip(),
         "pick_or_place": po,
+        "wafer_label": label,
     }
 
 
@@ -215,11 +271,44 @@ class WaferNumberLabelTracker:
         self._lock = threading.Lock()
         self._prim_to_label: Dict[str, str] = {}
         self._arm_carried: Dict[str, str] = {}
+        self._revision: int = 0
+
+    @property
+    def revision(self) -> int:
+        with self._lock:
+            return int(self._revision)
+
+    def _bump_revision(self) -> None:
+        self._revision += 1
+
+    def _explicit_label_from_ctx(self, ctx: Dict[str, str]) -> Optional[str]:
+        raw = (ctx.get("wafer_label") or "").strip()
+        if not raw:
+            return None
+        try:
+            return f"{int(raw):02d}"
+        except Exception:
+            return raw
+
+    def _pop_label_for_aliases(
+        self,
+        prim_path: str,
+        slot_key: str,
+        ctx_path: str,
+        *,
+        stage: Optional[Usd.Stage] = None,
+    ) -> Optional[str]:
+        for alias in _path_alias_set(prim_path, slot_key, ctx_path, stage=stage):
+            label = self._prim_to_label.pop(alias, None)
+            if label:
+                return label
+        return None
 
     def clear(self) -> None:
         with self._lock:
             self._prim_to_label.clear()
             self._arm_carried.clear()
+            self._bump_revision()
 
     def reset_foup_baseline(
         self,
@@ -238,17 +327,21 @@ class WaferNumberLabelTracker:
                 if stage is not None and path:
                     path = resolve_wafer_prim_path_on_stage(stage, sk, path)
                 if label and path:
-                    self._prim_to_label[path] = label
+                    self._prim_to_label[_normalize_path_key(path)] = label
+            self._bump_revision()
             return len(self._prim_to_label)
 
     def _label_on_arm_for_place(self, arm_p: str, arm_sk: str) -> Optional[str]:
         """place 시 SLOT show 가 ARM hide 보다 먼저 올 때 — 팔 prim 에 아직 붙어 있는 번호."""
-        if arm_p:
-            lbl = self._prim_to_label.get(arm_p)
+        if arm_sk:
+            lbl = self._arm_carried.get(arm_sk)
             if lbl:
                 return lbl
-        if arm_sk:
-            return self._arm_carried.get(arm_sk)
+        key = _normalize_path_key(arm_p)
+        if key:
+            lbl = self._prim_to_label.get(key)
+            if lbl:
+                return lbl
         return None
 
     def on_visibility(self, prim_path: str, visible: bool, ctx: Dict[str, str]) -> None:
@@ -259,28 +352,43 @@ class WaferNumberLabelTracker:
         """
         if not wafer_viewport_labels_enabled() or not ctx:
             return
-        p = (prim_path or "").strip()
+        p = _normalize_path_key(prim_path)
         if not p:
             return
+
+        stage: Optional[Usd.Stage] = None
+        try:
+            import omni.usd as ou  # type: ignore
+
+            ctx_usd = ou.get_context("")
+            if ctx_usd is not None:
+                stage = ctx_usd.get_stage()
+        except Exception:
+            stage = None
 
         slot_p = (ctx.get("slot_wafer_path") or "").strip()
         arm_p = (ctx.get("arm_wafer_path") or "").strip()
         arm_sk = (ctx.get("arm_slot_key") or "").strip()
         po = (ctx.get("pick_or_place") or "").strip().lower()
         slot_key = (ctx.get("slot_key") or "").strip()
-        cassette = cassette_style_label_for_slot_key(slot_key)
+        explicit = self._explicit_label_from_ctx(ctx)
+        cassette = explicit or cassette_style_label_for_slot_key(slot_key)
 
-        is_slot = bool(slot_p and _paths_equal(p, slot_p))
-        is_arm = bool(arm_p and _paths_equal(p, arm_p))
+        is_slot = _path_matches_role(p, role="slot", ctx=ctx, stage=stage)
+        is_arm = _path_matches_role(p, role="arm", ctx=ctx, stage=stage)
         if not is_slot and not is_arm:
             return
 
+        changed = False
         with self._lock:
             if po == "pick":
                 if is_slot and not visible:
-                    label = self._prim_to_label.pop(p, None) or cassette
+                    label = self._pop_label_for_aliases(
+                        p, slot_key, slot_p, stage=stage
+                    ) or cassette
                     if label and arm_sk:
                         self._arm_carried[arm_sk] = label
+                        changed = True
                 elif is_arm and visible:
                     label = self._arm_carried.get(arm_sk) if arm_sk else None
                     if not label:
@@ -289,6 +397,7 @@ class WaferNumberLabelTracker:
                         self._prim_to_label[p] = label
                         if arm_sk:
                             self._arm_carried[arm_sk] = label
+                        changed = True
             elif po == "place":
                 if is_slot and visible:
                     label = self._label_on_arm_for_place(arm_p, arm_sk)
@@ -298,10 +407,18 @@ class WaferNumberLabelTracker:
                         self._prim_to_label[p] = label
                         if arm_sk:
                             self._arm_carried[arm_sk] = label
+                        changed = True
                 elif is_arm and not visible:
-                    label = self._prim_to_label.pop(p, None)
+                    label = self._pop_label_for_aliases(
+                        p, arm_sk, arm_p, stage=stage
+                    )
                     if label and arm_sk:
                         self._arm_carried[arm_sk] = label
+                        changed = True
+            if changed:
+                self._bump_revision()
+        if changed:
+            notify_wafer_label_tracker_changed()
 
     def iter_drawable_labels(self, stage: Usd.Stage) -> List[Tuple[str, str]]:
         """stage 에 존재하는 mapped prim — visibility 는 그리기 단계에서만 참고."""
@@ -359,6 +476,18 @@ def get_wafer_label_tracker() -> WaferNumberLabelTracker:
     return _tracker
 
 
+def notify_wafer_label_tracker_changed() -> None:
+    """트래커 갱신 직후 Viewport 3D 라벨 SceneView 를 다음 post_update 에 다시 그린다."""
+    inst = _active_label_overlay
+    if inst is None:
+        return
+    try:
+        inst._last_tracker_revision = -1
+        inst._schedule_rebuild_labels()
+    except Exception:
+        pass
+
+
 class LamWaferFoupViewportLabels:
     """Viewport SceneView — 트래커가 가리키는 visible prim 에 3D 번호."""
 
@@ -379,6 +508,8 @@ class LamWaferFoupViewportLabels:
         self._sched_token = 0
         self._post_update_sub: Any = None
         self._last_drawn_count = -1
+        self._last_drawn_fingerprint: Tuple[Tuple[str, str], ...] = ()
+        self._last_tracker_revision = -1
         self._teardown = False
 
     def _frame_id(self) -> str:
@@ -420,6 +551,8 @@ class LamWaferFoupViewportLabels:
         self._viewport_window = None
         self._built = False
         self._last_drawn_count = -1
+        self._last_drawn_fingerprint = ()
+        self._last_tracker_revision = -1
         if permanent:
             print(f"{_PRINT_PREFIX} SceneView removed (labels off)", flush=True)
 
@@ -543,6 +676,8 @@ class LamWaferFoupViewportLabels:
         tracker = get_wafer_label_tracker()
         entries = tracker.iter_visible_labels(stage)
         mapped = tracker.mapped_prim_count()
+        rev = tracker.revision
+        fingerprint = tuple(sorted((a, b) for a, b in entries))
         if mapped > 0 and len(entries) == 0 and self._last_drawn_count != -2:
             print(
                 f"{_PRINT_PREFIX} mapped {mapped} path(s) but none on stage — "
@@ -550,13 +685,19 @@ class LamWaferFoupViewportLabels:
                 flush=True,
             )
             self._last_drawn_count = -2
-        elif len(entries) != self._last_drawn_count:
+        elif (
+            len(entries) != self._last_drawn_count
+            or fingerprint != self._last_drawn_fingerprint
+            or rev != self._last_tracker_revision
+        ):
             print(
                 f"{_PRINT_PREFIX} drawing {len(entries)} label(s) "
-                f"(mapped={mapped})",
+                f"(mapped={mapped}, rev={rev})",
                 flush=True,
             )
             self._last_drawn_count = len(entries)
+            self._last_drawn_fingerprint = fingerprint
+            self._last_tracker_revision = rev
 
         self._labels_root.clear()
 
@@ -594,6 +735,7 @@ __all__ = [
     "annotate_steps_with_wafer_label_context",
     "cassette_style_label_for_slot_key",
     "get_wafer_label_tracker",
+    "notify_wafer_label_tracker_changed",
     "make_wafer_label_step_context",
     "get_wafer_labels_ui_enabled",
     "set_wafer_labels_ui_enabled",

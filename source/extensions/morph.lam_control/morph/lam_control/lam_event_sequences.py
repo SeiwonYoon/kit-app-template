@@ -454,11 +454,39 @@ def _substitute_templates(obj: Any, mapping: Dict[str, str]) -> Any:
     return obj
 
 
+def _wafer_label_from_event_slot(event_name: str, slot_number: Optional[int]) -> str:
+    """CSV ``cassette_slot`` → 표시 번호. 에어록 물리 슬롯 인덱스(1·2)는 제외."""
+    if slot_number is None:
+        return ""
+    name = (event_name or "").strip()
+    if re.fullmatch(r"atm_airlock\d+_(?:pick|place)", name):
+        return ""
+    if re.fullmatch(r"vtm_airlock\d+_(?:left|right)_(?:pick|place)", name):
+        return ""
+    try:
+        return f"{int(slot_number):02d}"
+    except Exception:
+        return str(slot_number).strip()
+
+
 def _resolve_wafer_path(slot_key: str, wafer_map: Dict[str, str]) -> str:
-    p = (wafer_map.get(slot_key) or "").strip()
+    from .lam_wafer_prim_paths import resolve_wafer_prim_path_on_stage
+
+    sk = (slot_key or "").strip()
+    p = (wafer_map.get(sk) or "").strip()
+    stage = None
+    try:
+        import omni.usd as ou  # type: ignore
+
+        ctx = ou.get_context("")
+        stage = ctx.get_stage() if ctx else None
+    except Exception:
+        pass
+    if stage is not None and p:
+        return resolve_wafer_prim_path_on_stage(stage, sk, p)
     if not p and _event_verbose_log_enabled():
         print(
-            f"{_PRINT_PREFIX} wafer prim 없음 slot_key={slot_key!r} — "
+            f"{_PRINT_PREFIX} wafer prim 없음 slot_key={sk!r} — "
             f"lam_wafer_prim_paths.py 확인",
             flush=True,
         )
@@ -549,6 +577,7 @@ def build_steps_for_event(
 
     slot_wafer = _resolve_wafer_path(sk, wafer_map)
     arm_wafer = _resolve_wafer_path(arm_sk, wafer_map)
+    wafer_label = _wafer_label_from_event_slot(name, slot_number)
     mapping = {
         TOKEN_SLOT_WAFER: slot_wafer,
         TOKEN_ARM_WAFER: arm_wafer,
@@ -630,6 +659,7 @@ def build_steps_for_event(
             arm_slot_key=arm_sk,
             slot_wafer_path=slot_wafer,
             arm_wafer_path=arm_wafer,
+            wafer_label=wafer_label,
         )
         steps = annotate_steps_with_wafer_label_context(steps, label_ctx)
     except Exception:
