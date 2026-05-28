@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import omni.ui as ui
@@ -50,6 +51,11 @@ _PRINT_PREFIX = "[LAM/WaferLabels]"
 _FRAME_SLOT = "morph.lam_control:wafer_foup_labels"
 _LABEL_FONT_SIZE = 16
 _LABEL_COLOR = (1.0, 1.0, 1.0, 1.0)
+
+# ON 직후 “보일 때까지 오래 걸림”의 주원인:
+# 매 post_update(프레임)마다 75개 라벨의 prim 중심(BBox) 계산 + Scene 재생성이 발생한다.
+# 기능은 유지하면서 비용을 줄이기 위해 라벨 리빌드 빈도를 제한한다.
+_LABEL_REBUILD_MIN_INTERVAL_SEC = 0.20  # 5Hz
 
 FOUP_LABEL_SLOT_KEYS: Tuple[str, ...] = tuple(
     f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
@@ -513,6 +519,7 @@ class LamWaferFoupViewportLabels:
         self._last_drawn_fingerprint: Tuple[Tuple[str, str], ...] = ()
         self._last_tracker_revision = -1
         self._teardown = False
+        self._last_rebuild_wall: float = 0.0
 
     def _frame_id(self) -> str:
         return self._ext_id
@@ -577,6 +584,11 @@ class LamWaferFoupViewportLabels:
             def _on_post_update(_event) -> None:
                 if not self._can_operate() or not self._built or not self._labels_root:
                     return
+                # 매 프레임 리빌드는 너무 비싸므로(prim 75×BBox) 최소 간격으로 제한
+                now = float(time.time())
+                if now - float(self._last_rebuild_wall) < float(_LABEL_REBUILD_MIN_INTERVAL_SEC):
+                    return
+                self._last_rebuild_wall = now
                 self._schedule_rebuild_labels()
 
             self._post_update_sub = stream.create_subscription_to_pop(
@@ -703,12 +715,30 @@ class LamWaferFoupViewportLabels:
 
         self._labels_root.clear()
 
+        # BBoxCache는 1회만 생성해서 재사용(라벨 수가 많아도 비용 크게 절감)
+        bbox_cache: Optional[UsdGeom.BBoxCache] = None
+        try:
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
+            )
+        except Exception:
+            bbox_cache = None
+
         with self._labels_root:
             for path_str, text in entries:
                 prim = stage.GetPrimAtPath(path_str)
                 if not prim or not prim.IsValid():
                     continue
-                pos = _prim_world_center(prim)
+                pos = None
+                if bbox_cache is not None:
+                    try:
+                        bbox = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
+                        c = bbox.GetMidpoint()
+                        pos = (float(c[0]), float(c[1]), float(c[2]))
+                    except Exception:
+                        pos = None
+                if pos is None:
+                    pos = _prim_world_center(prim)
                 if pos is None:
                     continue
                 self._build_one_label(pos, text)

@@ -2435,6 +2435,15 @@ def clear_csv_play_timeline_highlight() -> None:
     _csv_play_timeline_highlight_notify(frozenset())
 
 
+def get_csv_play_timeline_active_keys_snap() -> frozenset:
+    """현재 타임라인(녹색) 강조 키 스냅샷.
+
+    재생 로직을 건드리지 않고 UI/상태 표시용으로 조회한다.
+    """
+    with _csv_play_timeline_active_keys_lock:
+        return frozenset(_csv_play_timeline_active_keys)
+
+
 def set_csv_play_progress_ui_callback(
     cb: Optional[Callable[[float, float, float, float], None]],
 ) -> None:
@@ -4463,6 +4472,13 @@ class LamSimulationCsvPlayWindow:
         self._speed_model: Any = None
         self._process_only_model: Any = None
         self._wafer_label_show_model: Any = None
+        self._foup_status_show_model: Any = None
+        self._device_labels_show_model: Any = None
+        self._pick_whitelist_model: Any = None
+        self._overlay_checkbox_syncing: bool = False
+        self._overlay_checkbox_initialized: bool = False
+        self._overlay_apply_pending: bool = False
+        # (removed) overlay toggle polling fields
         self._lam_window_ref: Any = None
         self._hud_schedule_rows_stack: Any = None
         self._hud_schedule_scroll_frame: Any = None
@@ -4557,11 +4573,71 @@ class LamSimulationCsvPlayWindow:
         if self._speed_model is None:
             self._speed_model = SimpleFloatModel(1.0)
         self._wire_speed_model_live_update()
+        try:
+            from .lam_viewport_overlay_config import (  # type: ignore
+                STARTUP_CHECK_PROCESS_ONLY,
+                STARTUP_CHECK_WAFER_LABELS,
+            )
+        except Exception:
+            STARTUP_CHECK_PROCESS_ONLY = False  # type: ignore
+            STARTUP_CHECK_WAFER_LABELS = False  # type: ignore
         if self._process_only_model is None:
-            self._process_only_model = SimpleBoolModel(False)
+            self._process_only_model = SimpleBoolModel(bool(STARTUP_CHECK_PROCESS_ONLY))
         if self._wafer_label_show_model is None:
-            self._wafer_label_show_model = SimpleBoolModel(False)
+            self._wafer_label_show_model = SimpleBoolModel(bool(STARTUP_CHECK_WAFER_LABELS))
+            try:
+                from .lam_wafer_prim_paths import IS_LABEL_SHOW  # type: ignore
+                from .lam_wafer_viewport_labels import set_wafer_labels_ui_enabled  # type: ignore
+
+                set_wafer_labels_ui_enabled(
+                    bool(IS_LABEL_SHOW) and bool(STARTUP_CHECK_WAFER_LABELS)
+                )
+            except Exception:
+                pass
+        # overlay 토글은 전역 단일 모델을 공유해야 HUD/본창이 서로 싸우지 않는다.
+        if self._foup_status_show_model is None:
+            try:
+                from .lam_viewport_overlay_state import get_ui_model_foup_status
+
+                self._foup_status_show_model = get_ui_model_foup_status()
+            except Exception:
+                try:
+                    from .lam_viewport_overlay_config import STARTUP_CHECK_FOUP_STATUS  # type: ignore
+
+                    _foup_def = bool(STARTUP_CHECK_FOUP_STATUS)
+                except Exception:
+                    _foup_def = True
+                self._foup_status_show_model = SimpleBoolModel(_foup_def)
+        if self._device_labels_show_model is None:
+            try:
+                from .lam_viewport_overlay_state import get_ui_model_device_labels
+
+                self._device_labels_show_model = get_ui_model_device_labels()
+            except Exception:
+                try:
+                    from .lam_viewport_overlay_config import STARTUP_CHECK_DEVICE_LABELS  # type: ignore
+
+                    _dev_def = bool(STARTUP_CHECK_DEVICE_LABELS)
+                except Exception:
+                    _dev_def = True
+                self._device_labels_show_model = SimpleBoolModel(_dev_def)
+        if self._pick_whitelist_model is None:
+            try:
+                from .lam_viewport_overlay_state import get_ui_model_pick_whitelist
+
+                self._pick_whitelist_model = get_ui_model_pick_whitelist()
+            except Exception:
+                try:
+                    from .lam_viewport_overlay_config import STARTUP_CHECK_PICK_WHITELIST  # type: ignore
+
+                    _pick_def = bool(STARTUP_CHECK_PICK_WHITELIST)
+                except Exception:
+                    _pick_def = False
+                self._pick_whitelist_model = SimpleBoolModel(_pick_def)
         register_csv_play_timeline_window(self)
+
+    # NOTE: overlay 토글은 changed_fn/모델 이벤트로만 동기화한다.
+    # 폴링 기반 동기화는 상태가 왕복하면서 3D 패널이 깜박이거나 겹침을 유발할 수 있어 제거.
 
     def set_lam_window(self, lam_window: Any) -> None:
         """Viewport 라벨 동기용 ``LamWindow`` 참조 (본창·HUD 체크박스)."""
@@ -4602,6 +4678,54 @@ class LamSimulationCsvPlayWindow:
                     pass
             ui.Spacer()
 
+    def mount_overlay_feature_checkboxes_ui(self, ui: Any) -> None:
+        """추가 상태표시 기능 체크박스 (시뮬 재생창·HUD 공통)."""
+        self.ensure_playback_models()
+        try:
+            from .lam_viewport_overlay_state import (
+                set_toggle_device_labels,
+                set_toggle_foup_status,
+                set_toggle_pick_whitelist,
+                ui_models_are_syncing,
+            )
+        except Exception:
+            return
+
+        f_m = self._foup_status_show_model
+        d_m = self._device_labels_show_model
+        p_m = self._pick_whitelist_model
+        if f_m is None or d_m is None or p_m is None:
+            return
+
+        # 전역 모델을 공유하므로 여기서 상태→모델 set_value를 반복 수행하지 않는다.
+        # (필요 시 overlay_state가 set_toggle_*에서 모델을 동기화한다.)
+        self._overlay_checkbox_initialized = True
+
+        def _read_bool(m: Any) -> bool:
+            try:
+                return bool(m.get_value_as_bool())
+            except Exception:
+                pass
+            try:
+                return bool(m.as_bool)
+            except Exception:
+                pass
+            try:
+                return bool(m.get_value())
+            except Exception:
+                return False
+
+        with ui.HStack(spacing=8, height=22):
+            ui.Label("FOUP상태보기", width=88)
+            # changed_fn/인자/호출 타이밍이 환경별로 불안정하여 사용하지 않는다.
+            # 토글 SSOT는 `lam_viewport_overlay_state`의 전역 모델 훅(add_value_changed_fn)이다.
+            ui.CheckBox(model=f_m, width=20)
+            ui.Label("기기정보보기", width=88)
+            ui.CheckBox(model=d_m, width=20)
+            ui.Label("선택제한", width=66)
+            ui.CheckBox(model=p_m, width=20, tooltip="Viewport 클릭 선택을 whitelist 루트로 제한")
+            ui.Spacer()
+
     def read_wafer_label_show_enabled(self) -> bool:
         """「웨이퍼번호보기」 체크박스 (SimpleBoolModel 호환)."""
         m = self._wafer_label_show_model
@@ -4634,7 +4758,9 @@ class LamSimulationCsvPlayWindow:
             set_wafer_labels_ui_enabled(bool(IS_LABEL_SHOW) and ui_on)
             if wafer_viewport_labels_enabled():
                 try:
-                    apply_csv_play_initial_wafer_visibility()
+                    # 라벨 토글 ON 시 wait=True(메인 스레드 15s 대기)는 UI 체감이 매우 느려질 수 있음.
+                    # 동일한 최종 결과(visibility 적용)는 유지하되, 비동기로 실행해서 즉시 라벨을 먼저 띄운다.
+                    apply_csv_play_initial_wafer_visibility(wait=False)
                 except Exception as exc:
                     self._log(f"wafer label FOUP visibility skip: {exc}")
                 stage = None
@@ -4822,7 +4948,15 @@ class LamSimulationCsvPlayWindow:
                         from omni.ui import SimpleBoolModel  # type: ignore
 
                         if self._process_only_model is None:
-                            self._process_only_model = SimpleBoolModel(False)
+                            try:
+                                from .lam_viewport_overlay_config import (  # type: ignore
+                                    STARTUP_CHECK_PROCESS_ONLY,
+                                )
+
+                                _po_def = bool(STARTUP_CHECK_PROCESS_ONLY)
+                            except Exception:
+                                _po_def = False
+                            self._process_only_model = SimpleBoolModel(_po_def)
                         with ui.HStack(spacing=4, width=0):
                             ui.Label("공정만보기", width=72)
                             ui.CheckBox(
@@ -4841,6 +4975,10 @@ class LamSimulationCsvPlayWindow:
                     self.mount_wafer_label_show_checkbox_ui(ui)
                 except Exception as exc:
                     self._log(f"wafer label checkbox UI: {exc}")
+                try:
+                    self.mount_overlay_feature_checkboxes_ui(ui)
+                except Exception as exc:
+                    self._log(f"overlay feature checkboxes UI: {exc}")
                 with ui.HStack(spacing=6, height=28):
                     ui.Label("재생 배속", width=70)
                     try:

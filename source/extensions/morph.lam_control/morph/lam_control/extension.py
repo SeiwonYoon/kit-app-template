@@ -41,6 +41,17 @@ class LamControlExtension(omni.ext.IExt):
 
     def on_startup(self, ext_id: str) -> None:  # noqa: D401
         print(f"{_PRINT_PREFIX} on_startup ext_id={ext_id}", flush=True)
+        try:
+            import carb  # type: ignore
+            import importlib
+
+            sp = importlib.import_module("morph.lam_control.simulation_play")
+            st = importlib.import_module("morph.lam_control.lam_viewport_overlay_state")
+            carb.log_warn(f"[LAM] morph.lam_control loaded from: {__file__}")
+            carb.log_warn(f"[LAM] simulation_play from: {getattr(sp, '__file__', '?')}")
+            carb.log_warn(f"[LAM] overlay_state from: {getattr(st, '__file__', '?')}")
+        except Exception:
+            pass
 
         self._registry = AnimationInstanceRegistry()
         self._evaluator = RuntimeEvaluator(registry=self._registry)

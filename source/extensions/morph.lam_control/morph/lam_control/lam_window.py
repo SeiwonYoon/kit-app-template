@@ -36,6 +36,15 @@ from .lam_csv_viewport_hud import (
     LAM_CSV_VIEWPORT_CONTROLS_ENABLED,
     LamCsvViewportControlsHud,
 )
+from .lam_viewport_status_panel import LamViewportStatusPanel
+from .lam_viewport_foup_status_3d import LamFoupStatus3dPanel
+from .lam_viewport_device_labels_3d import LamViewportDeviceLabels3d
+from .lam_viewport_overlay_state import (
+    apply_startup_checkbox_side_effects,
+    get_toggle_device_labels,
+    get_toggle_foup_status,
+    register_toggle_listener,
+)
 from .lam_wafer_viewport_labels import (
     LamWaferFoupViewportLabels,
     wafer_viewport_labels_enabled,
@@ -99,6 +108,10 @@ class LamWindow:
         self._csv_sim_window: Optional[LamSimulationCsvPlayWindow] = None
         self._csv_viewport_hud: Optional[LamCsvViewportControlsHud] = None
         self._wafer_foup_labels: Optional[LamWaferFoupViewportLabels] = None
+        self._status_panel: Optional[LamViewportStatusPanel] = None
+        self._foup_status_3d: Optional[LamFoupStatus3dPanel] = None
+        self._device_labels_3d: Optional[LamViewportDeviceLabels3d] = None
+        self._overlay_toggle_listener_registered: bool = False
         self._external_runner: Optional[LamExternalEventRunner] = None
         self._window = None
         self._instances_inner = None
@@ -405,6 +418,7 @@ class LamWindow:
             )
             self._csv_sim_window.set_lam_window(self)
         self._csv_sim_window.ensure_playback_models()
+        apply_startup_checkbox_side_effects()
         if self._csv_viewport_hud is None:
             self._csv_viewport_hud = LamCsvViewportControlsHud(
                 self._csv_sim_window,
@@ -412,6 +426,77 @@ class LamWindow:
                 viewport=self._viewport,
             )
         self._csv_viewport_hud.sync_layers()
+        # 상태 패널은 앱 시작 시 항상 표시(내용이 비어도 표시)
+        if self._status_panel is None:
+            self._status_panel = LamViewportStatusPanel(
+                self._csv_sim_window,
+                viewport=self._viewport,
+            )
+        self._status_panel.sync_layers()
+
+        # FOUP 3D 상태 패널 (토글 ON일 때만 표시; 패널 스스로 토글을 확인)
+        if self._foup_status_3d is None:
+            self._foup_status_3d = LamFoupStatus3dPanel(
+                self._csv_sim_window,
+                viewport=self._viewport,
+            )
+        self._foup_status_3d.sync_layers()
+
+        # 기기정보보기 3D 라벨 (토글 ON일 때만 표시; 라벨 스스로 토글 확인)
+        if self._device_labels_3d is None:
+            self._device_labels_3d = LamViewportDeviceLabels3d(viewport=self._viewport)
+        self._device_labels_3d.sync_layers()
+
+        # 토글 체크박스 OFF/ON 시 즉시 show/hide 되도록 리스너 1회 등록
+        if not self._overlay_toggle_listener_registered:
+            self._overlay_toggle_listener_registered = True
+
+            def _on_overlay_toggle_changed() -> None:
+                # OFF면 즉시 destroy() (남아있는 SceneView 제거가 핵심)
+                try:
+                    if self._foup_status_3d is not None:
+                        if get_toggle_foup_status():
+                            self._foup_status_3d.sync_layers(delay_frames=0)
+                        else:
+                            self._foup_status_3d.destroy()
+                except Exception:
+                    pass
+                try:
+                    if self._device_labels_3d is not None:
+                        if get_toggle_device_labels():
+                            self._device_labels_3d.sync_layers(delay_frames=0)
+                        else:
+                            self._device_labels_3d.destroy()
+                except Exception:
+                    pass
+
+            register_toggle_listener(_on_overlay_toggle_changed)
+
+    def _apply_overlay_toggles(self) -> None:
+        """체크박스 변경 시 post_update에서 3D overlay show/hide를 강제 적용."""
+        try:
+            from .lam_viewport_overlay_state import (
+                get_toggle_device_labels,
+                get_toggle_foup_status,
+            )
+        except Exception:
+            return
+        try:
+            if self._foup_status_3d is not None:
+                if get_toggle_foup_status():
+                    self._foup_status_3d.sync_layers(delay_frames=0)
+                else:
+                    self._foup_status_3d.destroy()
+        except Exception:
+            pass
+        try:
+            if self._device_labels_3d is not None:
+                if get_toggle_device_labels():
+                    self._device_labels_3d.sync_layers(delay_frames=0)
+                else:
+                    self._device_labels_3d.destroy()
+        except Exception:
+            pass
 
     def destroy(self) -> None:
         try:
@@ -438,6 +523,24 @@ class LamWindow:
         except Exception:
             pass
         self._csv_viewport_hud = None
+        try:
+            if self._status_panel is not None:
+                self._status_panel.destroy()
+        except Exception:
+            pass
+        self._status_panel = None
+        try:
+            if self._foup_status_3d is not None:
+                self._foup_status_3d.destroy()
+        except Exception:
+            pass
+        self._foup_status_3d = None
+        try:
+            if self._device_labels_3d is not None:
+                self._device_labels_3d.destroy()
+        except Exception:
+            pass
+        self._device_labels_3d = None
         try:
             if self._wafer_foup_labels is not None:
                 self._wafer_foup_labels.destroy()

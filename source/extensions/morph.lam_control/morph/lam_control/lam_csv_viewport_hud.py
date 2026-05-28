@@ -294,6 +294,7 @@ class LamCsvViewportControlsHud:
                                                     ),
                                                 )
                                                 ui.Spacer()
+                                        #웨이퍼 번호보기 체크박스스
                                         try:
                                             self._csv.mount_wafer_label_show_checkbox_ui(
                                                 ui, lam_window=self._lam
@@ -301,6 +302,14 @@ class LamCsvViewportControlsHud:
                                         except Exception as exc:
                                             print(
                                                 f"{_PRINT_PREFIX} wafer label checkbox: {exc}",
+                                                flush=True,
+                                            )
+                                        #추가 상태표시 기능 체크박스 simulation_play.py 참조
+                                        try:
+                                            self._csv.mount_overlay_feature_checkboxes_ui(ui)
+                                        except Exception as exc:
+                                            print(
+                                                f"{_PRINT_PREFIX} overlay feature checkboxes: {exc}",
                                                 flush=True,
                                             )
                                         with ui.HStack(spacing=4, height=26):
@@ -324,51 +333,55 @@ class LamCsvViewportControlsHud:
                                                 tooltip="공정만보기 체크 시 Play 는 1x 고정",
                                             )
                                             ui.Spacer()
-                                        ui.Label(
-                                            "재생 타임라인 — JSON 재생 중 녹색",
-                                            height=16,
-                                            style={"font_size": 11, "color": 0xFFAAAAAA},
-                                        )
-                                        hud_prog_model = None
-                                        schedule_stack = None
-                                        schedule_scroll = None
-                                        try:
-                                            from omni.ui import (  # type: ignore
-                                                SimpleStringModel,
-                                            )
 
-                                            hud_prog_model = SimpleStringModel(
-                                                "(대기)"
-                                            )
-                                            with ui.ScrollingFrame(
-                                                height=_TIMELINE_H,
-                                                style={
-                                                    "background_color": 0xFF1A1E26,
-                                                    "border_width": 1,
-                                                    "border_color": 0xFF3A3A3A,
-                                                },
-                                            ) as schedule_scroll:
-                                                with ui.VStack(
-                                                    spacing=2, height=0
-                                                ) as tl_stack:
-                                                    schedule_stack = tl_stack
-                                            ui.StringField(
-                                                model=hud_prog_model,
-                                                height=20,
-                                                read_only=True,
-                                            )
-                                        except Exception:
-                                            ui.Label(
-                                                "(타임라인 UI 없음)",
-                                                height=40,
-                                                word_wrap=True,
-                                            )
-                                        if schedule_stack is not None:
-                                            self._csv.register_hud_timeline_ui(
-                                                schedule_stack,
-                                                build_progress_model=hud_prog_model,
-                                                scroll_frame=schedule_scroll,
-                                            )
+                                        # 타임라인 창
+
+
+                                        # ui.Label(
+                                        #     "재생 타임라인 — JSON 재생 중 녹색",
+                                        #     height=16,
+                                        #     style={"font_size": 11, "color": 0xFFAAAAAA},
+                                        # )
+                                        # hud_prog_model = None
+                                        # schedule_stack = None
+                                        # schedule_scroll = None
+                                        # try:
+                                        #     from omni.ui import (  # type: ignore
+                                        #         SimpleStringModel,
+                                        #     )
+
+                                        #     hud_prog_model = SimpleStringModel(
+                                        #         "(대기)"
+                                        #     )
+                                        #     with ui.ScrollingFrame(
+                                        #         height=_TIMELINE_H,
+                                        #         style={
+                                        #             "background_color": 0xFF1A1E26,
+                                        #             "border_width": 1,
+                                        #             "border_color": 0xFF3A3A3A,
+                                        #         },
+                                        #     ) as schedule_scroll:
+                                        #         with ui.VStack(
+                                        #             spacing=2, height=0
+                                        #         ) as tl_stack:
+                                        #             schedule_stack = tl_stack
+                                        #     ui.StringField(
+                                        #         model=hud_prog_model,
+                                        #         height=20,
+                                        #         read_only=True,
+                                        #     )
+                                        # except Exception:
+                                        #     ui.Label(
+                                        #         "(타임라인 UI 없음)",
+                                        #         height=40,
+                                        #         word_wrap=True,
+                                        #     )
+                                        # if schedule_stack is not None:
+                                        #     self._csv.register_hud_timeline_ui(
+                                        #         schedule_stack,
+                                        #         build_progress_model=hud_prog_model,
+                                        #         scroll_frame=schedule_scroll,
+                                        #     )
                         ui.Spacer()
         except Exception as exc:
             print(f"{_PRINT_PREFIX} mount failed: {exc}", flush=True)
