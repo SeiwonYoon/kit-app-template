@@ -193,7 +193,9 @@ def annotate_steps_with_wafer_label_context(
     steps: List[Dict[str, Any]], ctx: Dict[str, str]
 ) -> List[Dict[str, Any]]:
     """``PRIM_VISIBILITY`` 스텝에 이벤트 컨텍스트를 붙인다 (엔진에서 라벨 이식용)."""
-    if not wafer_viewport_labels_enabled() or not ctx:
+    # UI 체크박스가 꺼진 상태에서 plan 을 빌드해도,
+    # 나중에 켰을 때 pick/place 라벨 이식이 동작해야 하므로 컨텍스트는 항상 부착한다.
+    if not ctx:
         return steps
     out: List[Dict[str, Any]] = []
     ctx_copy = dict(ctx)

@@ -1453,6 +1453,21 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
             f"이송 스텝 0개: {prev.slot_key!r}->{curr.slot_key!r} — "
             f"lam/lam_event_sequences/*.json 및 prim/Z 설정 확인.",
         )
+    # -------------------------------------------------------------------
+    # 웨이퍼 번호(FOUP 카세트 슬롯 번호) 컨텍스트 보강
+    # -------------------------------------------------------------------
+    # 테스트/실무 모두에서, event_name 의 slot_number(예: airlock slot=1/2)와
+    # 실제 웨이퍼 번호(cassette_slot)가 다르다. 라벨 UI는 이 컨텍스트로 번호를
+    # 팔/슬롯으로 이식하므로, dwell 기반 이송에서는 항상 cassette_slot을 우선한다.
+    try:
+        # dwell 이송에서는 slot_number(에어록 1/2 등)이 아니라 **항상** cassette_slot을 라벨로 쓴다.
+        label = f"{int(curr.cassette_slot):02d}"
+        for st in steps:
+            ctx = st.get("_lam_wafer_label_ctx") if isinstance(st, dict) else None
+            if isinstance(ctx, dict):
+                ctx["wafer_label"] = label
+    except Exception:
+        pass
     return steps
 
 
