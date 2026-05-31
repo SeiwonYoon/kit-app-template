@@ -43,6 +43,7 @@ _FRAME_SLOT = "morph.lam_control:foup_status_3d"
 _ACTIVE_SCENEVIEW_BY_VW: Dict[int, Any] = {}
 _ACTIVE_VW_BY_ID: Dict[int, Any] = {}
 _ACTIVE_PANEL_NODES_BY_VW: Dict[int, Any] = {}
+_ACTIVE_FOUP_PANEL: Optional["LamFoupStatus3dPanel"] = None
 
 _PANEL_W = int(FOUP_PANEL_WIDTH_PX)
 _PANEL_H = int(FOUP_PANEL_HEIGHT_PX)
@@ -84,6 +85,22 @@ def force_remove_all_foup_sceneviews() -> None:
         _ACTIVE_PANEL_NODES_BY_VW.clear()
     except Exception:
         pass
+
+
+def reset_foup_play_session() -> None:
+    """CSV 정지(초기화) — FOUP 집계·pick/place 중복 추적·3D 패널 표시 리셋."""
+    try:
+        from .lam_viewport_overlay_state import reset_all_foup_counts
+
+        reset_all_foup_counts()
+    except Exception:
+        pass
+    inst = _ACTIVE_FOUP_PANEL
+    if inst is not None:
+        try:
+            inst.reset_play_session()
+        except Exception:
+            pass
 
 
 def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]:
@@ -171,8 +188,18 @@ class LamFoupStatus3dPanel:
         self._panel_nodes: Dict[int, Dict[str, Any]] = {}
 
     def destroy(self) -> None:
+        global _ACTIVE_FOUP_PANEL
+        if _ACTIVE_FOUP_PANEL is self:
+            _ACTIVE_FOUP_PANEL = None
         self._stop_poll()
         self._destroy_layer()
+
+    def reset_play_session(self) -> None:
+        """정지(초기화) 후 pick/place 누적·중복 키 초기화."""
+        self._seen_pick_keys.clear()
+        self._seen_place_keys.clear()
+        if self._built and self._root:
+            self._update_ui()
 
     def sync_layers(self, *, delay_frames: int = 12) -> None:
         if not get_toggle_foup_status():
@@ -207,6 +234,9 @@ class LamFoupStatus3dPanel:
         _try(max(0, int(delay_frames)))
 
     def _destroy_layer(self) -> None:
+        global _ACTIVE_FOUP_PANEL
+        if _ACTIVE_FOUP_PANEL is self:
+            _ACTIVE_FOUP_PANEL = None
         # viewport_api에 add_scene_view 한 경우 반드시 제거해야 중복/겹침이 안 생김
         try:
             if self._scene_view is not None and self._viewport_window is not None:
@@ -274,6 +304,8 @@ class LamFoupStatus3dPanel:
             print(f"{_PRINT_PREFIX} mount failed: {exc}", flush=True)
             return
         self._built = True
+        global _ACTIVE_FOUP_PANEL
+        _ACTIVE_FOUP_PANEL = self
         self._start_poll()
         self._ensure_ui_built()
         try:
@@ -469,5 +501,5 @@ class LamFoupStatus3dPanel:
                         )
 
 
-__all__ = ["LamFoupStatus3dPanel", "force_remove_all_foup_sceneviews"]
+__all__ = ["LamFoupStatus3dPanel", "force_remove_all_foup_sceneviews", "reset_foup_play_session"]
 

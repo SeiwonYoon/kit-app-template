@@ -419,6 +419,18 @@ def get_foup_counts(foup_index: int) -> FoupCounts:
         return _foup_counts.get(fi, FoupCounts())
 
 
+def reset_all_foup_counts(*, total: int = 25) -> None:
+    """FOUP1~3 pick/place 집계 초기화 — CSV 정지(초기화) 시 호출."""
+    with _lock:
+        global _foup_counts
+        t = max(1, int(total))
+        _foup_counts = {
+            1: FoupCounts(total=t),
+            2: FoupCounts(total=t),
+            3: FoupCounts(total=t),
+        }
+
+
 def get_snapshot() -> Dict[str, Any]:
     with _lock:
         return {
@@ -457,5 +469,6 @@ __all__ = [
     "get_active_schedule_keys",
     "set_foup_counts",
     "get_foup_counts",
+    "reset_all_foup_counts",
     "get_snapshot",
 ]
