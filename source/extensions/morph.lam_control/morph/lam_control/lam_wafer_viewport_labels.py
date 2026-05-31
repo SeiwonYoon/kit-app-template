@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import re
 import threading
-import time
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import omni.ui as ui
@@ -52,10 +51,7 @@ _FRAME_SLOT = "morph.lam_control:wafer_foup_labels"
 _LABEL_FONT_SIZE = 16
 _LABEL_COLOR = (1.0, 1.0, 1.0, 1.0)
 
-# ON 직후 “보일 때까지 오래 걸림”의 주원인:
-# 매 post_update(프레임)마다 75개 라벨의 prim 중심(BBox) 계산 + Scene 재생성이 발생한다.
-# 기능은 유지하면서 비용을 줄이기 위해 라벨 리빌드 빈도를 제한한다.
-_LABEL_REBUILD_MIN_INTERVAL_SEC = 0.20  # 5Hz
+# 위치 추적: 매 post_update 프레임마다 Transform 만 갱신 (구조 변경 시에만 Scene 재생성)
 
 FOUP_LABEL_SLOT_KEYS: Tuple[str, ...] = tuple(
     f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
@@ -213,6 +209,24 @@ def annotate_steps_with_wafer_label_context(
     return out
 
 
+def stamp_wafer_cassette_label_on_steps(
+    steps: List[Dict[str, Any]], cassette_slot: int
+) -> None:
+    """ATM/VTM pick·place PRIM_VISIBILITY ctx — CSV ``cassette_slot`` 번호로 통일."""
+    try:
+        label = f"{int(cassette_slot):02d}"
+    except Exception:
+        label = str(cassette_slot or "").strip()
+    if not label:
+        return
+    for st in steps:
+        if not isinstance(st, dict):
+            continue
+        ctx = st.get(_WAFER_LABEL_CTX_KEY)
+        if isinstance(ctx, dict):
+            ctx["wafer_label"] = label
+
+
 def _post_update_once(callback) -> None:
     """다음 post_update 에서 callback 1회 (Scene UI 갱신용)."""
     sub_ref: List[Any] = [None]
@@ -352,6 +366,50 @@ class WaferNumberLabelTracker:
                 return lbl
         return None
 
+    def _resolve_pick_label(
+        self,
+        ctx: Dict[str, str],
+        *,
+        popped: Optional[str] = None,
+    ) -> Optional[str]:
+        """pick 시 표시 번호 — ctx cassette_slot(explicit) > 슬롯 pop > carried > 물리 슬롯 fallback."""
+        explicit = self._explicit_label_from_ctx(ctx)
+        if explicit:
+            return explicit
+        if popped:
+            return popped
+        arm_sk = (ctx.get("arm_slot_key") or "").strip()
+        if arm_sk:
+            carried = self._arm_carried.get(arm_sk)
+            if carried:
+                return carried
+        slot_key = (ctx.get("slot_key") or "").strip()
+        return cassette_style_label_for_slot_key(slot_key)
+
+    def _assign_label_to_arm_paths(
+        self,
+        label: str,
+        *,
+        arm_sk: str,
+        arm_p: str,
+        event_prim: str = "",
+        stage: Optional[Usd.Stage] = None,
+    ) -> None:
+        """팔 carry + prim map — pick 순서(ARM show 먼저)와 관계없이 동일 번호 유지."""
+        if not label:
+            return
+        if arm_sk:
+            self._arm_carried[arm_sk] = label
+        keys: set[str] = set()
+        for alias in _path_alias_set(arm_p, arm_sk, arm_p, stage=stage):
+            if alias:
+                keys.add(alias)
+        ep = _normalize_path_key(event_prim)
+        if ep:
+            keys.add(ep)
+        for key in keys:
+            self._prim_to_label[key] = label
+
     def on_visibility(self, prim_path: str, visible: bool, ctx: Dict[str, str]) -> None:
         """``lam_sequence_engine`` PRIM_VISIBILITY 직후 호출.
 
@@ -391,26 +449,34 @@ class WaferNumberLabelTracker:
         with self._lock:
             if po == "pick":
                 if is_slot and not visible:
-                    label = self._pop_label_for_aliases(
+                    popped = self._pop_label_for_aliases(
                         p, slot_key, slot_p, stage=stage
-                    ) or cassette
-                    if label and arm_sk:
-                        self._arm_carried[arm_sk] = label
+                    )
+                    label = self._resolve_pick_label(ctx, popped=popped) or cassette
+                    if label:
+                        self._assign_label_to_arm_paths(
+                            label,
+                            arm_sk=arm_sk,
+                            arm_p=arm_p,
+                            stage=stage,
+                        )
                         changed = True
                 elif is_arm and visible:
-                    label = self._arm_carried.get(arm_sk) if arm_sk else None
-                    if not label:
-                        label = cassette
+                    label = self._resolve_pick_label(ctx) or cassette
                     if label:
-                        self._prim_to_label[p] = label
-                        if arm_sk:
-                            self._arm_carried[arm_sk] = label
+                        self._assign_label_to_arm_paths(
+                            label,
+                            arm_sk=arm_sk,
+                            arm_p=arm_p,
+                            event_prim=p,
+                            stage=stage,
+                        )
                         changed = True
             elif po == "place":
                 if is_slot and visible:
                     label = self._label_on_arm_for_place(arm_p, arm_sk)
                     if not label:
-                        label = cassette
+                        label = explicit or cassette
                     if label:
                         self._prim_to_label[p] = label
                         if arm_sk:
@@ -519,7 +585,7 @@ class LamWaferFoupViewportLabels:
         self._last_drawn_fingerprint: Tuple[Tuple[str, str], ...] = ()
         self._last_tracker_revision = -1
         self._teardown = False
-        self._last_rebuild_wall: float = 0.0
+        self._label_transforms: Dict[str, Any] = {}
 
     def _frame_id(self) -> str:
         return self._ext_id
@@ -562,6 +628,7 @@ class LamWaferFoupViewportLabels:
         self._last_drawn_count = -1
         self._last_drawn_fingerprint = ()
         self._last_tracker_revision = -1
+        self._label_transforms.clear()
         if permanent:
             print(f"{_PRINT_PREFIX} SceneView removed (labels off)", flush=True)
 
@@ -584,12 +651,7 @@ class LamWaferFoupViewportLabels:
             def _on_post_update(_event) -> None:
                 if not self._can_operate() or not self._built or not self._labels_root:
                     return
-                # 매 프레임 리빌드는 너무 비싸므로(prim 75×BBox) 최소 간격으로 제한
-                now = float(time.time())
-                if now - float(self._last_rebuild_wall) < float(_LABEL_REBUILD_MIN_INTERVAL_SEC):
-                    return
-                self._last_rebuild_wall = now
-                self._schedule_rebuild_labels()
+                self._rebuild_labels()
 
             self._post_update_sub = stream.create_subscription_to_pop(
                 _on_post_update,
@@ -679,12 +741,27 @@ class LamWaferFoupViewportLabels:
         _active_label_overlay = self
         self._rebuild_labels()
 
+    def _prim_world_pos(
+        self,
+        prim: Usd.Prim,
+        bbox_cache: Optional[UsdGeom.BBoxCache],
+    ) -> Optional[Tuple[float, float, float]]:
+        if bbox_cache is not None:
+            try:
+                bbox = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
+                c = bbox.GetMidpoint()
+                return (float(c[0]), float(c[1]), float(c[2]))
+            except Exception:
+                pass
+        return _prim_world_center(prim)
+
     def _rebuild_labels(self) -> None:
         if not self._can_operate() or not self._built or not self._labels_root:
             return
         stage = self._get_stage()
         if not stage:
             self._labels_root.clear()
+            self._label_transforms.clear()
             return
 
         tracker = get_wafer_label_tracker()
@@ -692,6 +769,7 @@ class LamWaferFoupViewportLabels:
         mapped = tracker.mapped_prim_count()
         rev = tracker.revision
         fingerprint = tuple(sorted((a, b) for a, b in entries))
+
         if mapped > 0 and len(entries) == 0 and self._last_drawn_count != -2:
             print(
                 f"{_PRINT_PREFIX} mapped {mapped} path(s) but none on stage — "
@@ -699,23 +777,39 @@ class LamWaferFoupViewportLabels:
                 flush=True,
             )
             self._last_drawn_count = -2
-        elif (
+
+        structural = (
             len(entries) != self._last_drawn_count
             or fingerprint != self._last_drawn_fingerprint
             or rev != self._last_tracker_revision
-        ):
-            print(
-                f"{_PRINT_PREFIX} drawing {len(entries)} label(s) "
-                f"(mapped={mapped}, rev={rev})",
-                flush=True,
-            )
+            or set(self._label_transforms.keys()) != {p for p, _ in entries}
+        )
+
+        if structural:
+            if (
+                len(entries) != self._last_drawn_count
+                or fingerprint != self._last_drawn_fingerprint
+                or rev != self._last_tracker_revision
+            ):
+                print(
+                    f"{_PRINT_PREFIX} drawing {len(entries)} label(s) "
+                    f"(mapped={mapped}, rev={rev})",
+                    flush=True,
+                )
             self._last_drawn_count = len(entries)
             self._last_drawn_fingerprint = fingerprint
             self._last_tracker_revision = rev
+            self._sync_label_structure(stage, entries)
+            return
 
+        self._update_label_positions(stage, entries)
+
+    def _sync_label_structure(
+        self, stage: Usd.Stage, entries: List[Tuple[str, str]]
+    ) -> None:
         self._labels_root.clear()
+        self._label_transforms.clear()
 
-        # BBoxCache는 1회만 생성해서 재사용(라벨 수가 많아도 비용 크게 절감)
         bbox_cache: Optional[UsdGeom.BBoxCache] = None
         try:
             bbox_cache = UsdGeom.BBoxCache(
@@ -729,23 +823,50 @@ class LamWaferFoupViewportLabels:
                 prim = stage.GetPrimAtPath(path_str)
                 if not prim or not prim.IsValid():
                     continue
-                pos = None
-                if bbox_cache is not None:
-                    try:
-                        bbox = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
-                        c = bbox.GetMidpoint()
-                        pos = (float(c[0]), float(c[1]), float(c[2]))
-                    except Exception:
-                        pos = None
-                if pos is None:
-                    pos = _prim_world_center(prim)
+                pos = self._prim_world_pos(prim, bbox_cache)
                 if pos is None:
                     continue
-                self._build_one_label(pos, text)
+                root = self._build_one_label(pos, text)
+                if root is not None:
+                    self._label_transforms[path_str] = root
+
+    def _update_label_positions(
+        self, stage: Usd.Stage, entries: List[Tuple[str, str]]
+    ) -> None:
+        if not entries:
+            if self._label_transforms:
+                self._labels_root.clear()
+                self._label_transforms.clear()
+            return
+
+        bbox_cache: Optional[UsdGeom.BBoxCache] = None
+        try:
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
+            )
+        except Exception:
+            bbox_cache = None
+
+        for path_str, text in entries:
+            prim = stage.GetPrimAtPath(path_str)
+            if not prim or not prim.IsValid():
+                continue
+            pos = self._prim_world_pos(prim, bbox_cache)
+            if pos is None:
+                continue
+            node = self._label_transforms.get(path_str)
+            if node is None:
+                self._sync_label_structure(stage, entries)
+                return
+            try:
+                node.transform = sc.Matrix44.get_translation_matrix(*pos)
+            except Exception:
+                self._sync_label_structure(stage, entries)
+                return
 
     def _build_one_label(
         self, world_pos: Tuple[float, float, float], text: str
-    ) -> None:
+    ) -> Any:
         root = sc.Transform(
             look_at=sc.Transform.LookAt.CAMERA,
             transform=sc.Matrix44.get_translation_matrix(*world_pos),
@@ -758,6 +879,7 @@ class LamWaferFoupViewportLabels:
                     color=_LABEL_COLOR,
                     alignment=ui.Alignment.CENTER,
                 )
+        return root
 
 
 __all__ = [
@@ -771,6 +893,7 @@ __all__ = [
     "make_wafer_label_step_context",
     "get_wafer_labels_ui_enabled",
     "set_wafer_labels_ui_enabled",
+    "stamp_wafer_cassette_label_on_steps",
     "teardown_wafer_viewport_labels",
     "wafer_viewport_labels_enabled",
 ]

@@ -1453,19 +1453,10 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
             f"이송 스텝 0개: {prev.slot_key!r}->{curr.slot_key!r} — "
             f"lam/lam_event_sequences/*.json 및 prim/Z 설정 확인.",
         )
-    # -------------------------------------------------------------------
-    # 웨이퍼 번호(FOUP 카세트 슬롯 번호) 컨텍스트 보강
-    # -------------------------------------------------------------------
-    # 테스트/실무 모두에서, event_name 의 slot_number(예: airlock slot=1/2)와
-    # 실제 웨이퍼 번호(cassette_slot)가 다르다. 라벨 UI는 이 컨텍스트로 번호를
-    # 팔/슬롯으로 이식하므로, dwell 기반 이송에서는 항상 cassette_slot을 우선한다.
     try:
-        # dwell 이송에서는 slot_number(에어록 1/2 등)이 아니라 **항상** cassette_slot을 라벨로 쓴다.
-        label = f"{int(curr.cassette_slot):02d}"
-        for st in steps:
-            ctx = st.get("_lam_wafer_label_ctx") if isinstance(st, dict) else None
-            if isinstance(ctx, dict):
-                ctx["wafer_label"] = label
+        from .lam_wafer_viewport_labels import stamp_wafer_cassette_label_on_steps
+
+        stamp_wafer_cassette_label_on_steps(steps, curr.cassette_slot)
     except Exception:
         pass
     return steps
@@ -1486,14 +1477,23 @@ def build_foup_pick_place_steps(
 
     sk = _foup_slot_key(foup_index, cassette_slot)
     event, num = atm_event_name_for_slot(sk, pick_or_place)
-    return build_steps_for_event(
+    steps = build_steps_for_event(
         event,
         slot_number=num,
         vtm_ee_swap=VTM_END_EFFECTOR_SWAP_HANDS,
     )
+    try:
+        from .lam_wafer_viewport_labels import stamp_wafer_cassette_label_on_steps
+
+        stamp_wafer_cassette_label_on_steps(steps, cassette_slot)
+    except Exception:
+        pass
+    return steps
 
 
-def build_aligner_after_foup_pick_steps(pick_or_place: str) -> LamSimJsonSteps:
+def build_aligner_after_foup_pick_steps(
+    pick_or_place: str, *, cassette_slot: int
+) -> LamSimJsonSteps:
     """FOUP pick 직후 합성 Aligner 공정 — ``atm_aligner_place`` / ``atm_aligner_pick``."""
     from .lam_event_sequences import build_steps_for_event
 
@@ -1501,11 +1501,18 @@ def build_aligner_after_foup_pick_steps(pick_or_place: str) -> LamSimJsonSteps:
     if po not in ("pick", "place"):
         raise ValueError(f"pick_or_place must be 'pick' or 'place' (got {pick_or_place!r})")
     event = f"atm_aligner_{po}"
-    return build_steps_for_event(
+    steps = build_steps_for_event(
         event,
         slot_number=None,
         vtm_ee_swap=VTM_END_EFFECTOR_SWAP_HANDS,
     )
+    try:
+        from .lam_wafer_viewport_labels import stamp_wafer_cassette_label_on_steps
+
+        stamp_wafer_cassette_label_on_steps(steps, cassette_slot)
+    except Exception:
+        pass
+    return steps
 
 
 def _aligner_exec_hint(pick_or_place: str) -> str:
@@ -1620,7 +1627,7 @@ def _append_aligner_after_foup_pick(
     ):
         try:
             if blocks is not None:
-                steps = build_aligner_after_foup_pick_steps(po)
+                steps = build_aligner_after_foup_pick_steps(po, cassette_slot=cassette_slot)
                 if not steps:
                     continue
                 ent = _aligner_schedule_entry(
