@@ -4653,8 +4653,19 @@ class LamSimulationCsvPlayWindow:
     def _resolve_lam_window(self, lam_window: Any = None) -> Any:
         return lam_window if lam_window is not None else self._lam_window_ref
 
-    def mount_wafer_label_show_checkbox_ui(self, ui: Any, *, lam_window: Any = None) -> None:
-        """「웨이퍼번호보기」 체크박스 한 줄 (Viewport HUD · CSV 본창 공통)."""
+    def mount_wafer_label_show_checkbox_ui(
+        self,
+        ui: Any,
+        *,
+        lam_window: Any = None,
+        label_width: int = 88,
+        row_height: int = 22,
+        wrap_row: bool = True,
+    ) -> None:
+        """「웨이퍼번호보기」 체크박스 (Viewport HUD · CSV 본창 공통).
+
+        ``wrap_row=False`` 이면 Label+CheckBox 만 그린다 (호출측 HStack 에 나란히 배치).
+        """
         self.ensure_playback_models()
         wl_m = self._wafer_label_show_model
         if wl_m is None:
@@ -4673,9 +4684,9 @@ class LamSimulationCsvPlayWindow:
         def _on_changed(*_a: Any) -> None:
             self.apply_wafer_label_visibility_from_ui(lam_window=lam)
 
-        with ui.HStack(spacing=4, height=22):
-            ui.Label("웨이퍼번호보기", width=88)
-            wl_cb = ui.CheckBox(model=wl_m, width=20, tooltip=tip)
+        def _build() -> None:
+            ui.Label("웨이퍼번호보기", width=int(label_width), height=int(row_height))
+            ui.CheckBox(model=wl_m, width=20, height=int(row_height), tooltip=tip)
             for hook in ("add_value_changed_fn", "add_item_changed_fn"):
                 try:
                     fn = getattr(wl_m, hook, None)
@@ -4683,9 +4694,22 @@ class LamSimulationCsvPlayWindow:
                         fn(_on_changed)
                 except Exception:
                     pass
-            ui.Spacer()
 
-    def mount_overlay_feature_checkboxes_ui(self, ui: Any) -> None:
+        if wrap_row:
+            with ui.HStack(spacing=4, height=int(row_height)):
+                _build()
+                ui.Spacer()
+        else:
+            _build()
+
+    def mount_overlay_feature_checkboxes_ui(
+        self,
+        ui: Any,
+        *,
+        label_width: int = 88,
+        row_height: int = 22,
+        spacing: int = 8,
+    ) -> None:
         """추가 상태표시 기능 체크박스 (시뮬 재생창·HUD 공통)."""
         self.ensure_playback_models()
         try:
@@ -4722,15 +4746,20 @@ class LamSimulationCsvPlayWindow:
             except Exception:
                 return False
 
-        with ui.HStack(spacing=8, height=22):
-            ui.Label("FOUP상태보기", width=88)
+        with ui.HStack(spacing=int(spacing), height=int(row_height)):
+            ui.Label("FOUP상태보기", width=int(label_width), height=int(row_height))
             # changed_fn/인자/호출 타이밍이 환경별로 불안정하여 사용하지 않는다.
             # 토글 SSOT는 `lam_viewport_overlay_state`의 전역 모델 훅(add_value_changed_fn)이다.
-            ui.CheckBox(model=f_m, width=20)
-            ui.Label("기기정보보기", width=88)
-            ui.CheckBox(model=d_m, width=20)
-            ui.Label("선택제한", width=66)
-            ui.CheckBox(model=p_m, width=20, tooltip="Viewport 클릭 선택을 whitelist 루트로 제한")
+            ui.CheckBox(model=f_m, width=20, height=int(row_height))
+            ui.Label("기기정보보기", width=int(label_width), height=int(row_height))
+            ui.CheckBox(model=d_m, width=20, height=int(row_height))
+            ui.Label("선택제한", width=int(label_width), height=int(row_height))
+            ui.CheckBox(
+                model=p_m,
+                width=20,
+                height=int(row_height),
+                tooltip="Viewport 클릭 선택을 whitelist 루트로 제한",
+            )
             ui.Spacer()
 
     def read_wafer_label_show_enabled(self) -> bool:

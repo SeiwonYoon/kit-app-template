@@ -31,6 +31,8 @@ _PANEL_W = 320
 _PANEL_PAD = 8
 _TOP_SPACER_H = 12
 _TIMELINE_H = 200
+_CHECKBOX_LABEL_WIDTH = 52
+_CHECKBOX_ROW_HEIGHT = 22
 
 
 def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]:
@@ -281,32 +283,46 @@ class LamCsvViewportControlsHud:
                                                 ),
                                             )
                                         po_m = self._csv._process_only_model
-                                        if po_m is not None:
-                                            with ui.HStack(spacing=4, height=22):
-                                                ui.Label("공정만보기", width=72)
-                                                ui.CheckBox(
-                                                    model=po_m,
-                                                    width=20,
-                                                    tooltip=(
-                                                        "체크 후 Play: CSV 시각 유지, "
-                                                        "JSON 없는 빈 대기만 생략(배속 1x). "
-                                                        "체크 해제 시 기존 시간 재생."
-                                                    ),
+                                        try:
+                                            with ui.HStack(
+                                                spacing=4, height=_CHECKBOX_ROW_HEIGHT
+                                            ):
+                                                if po_m is not None:
+                                                    ui.Label(
+                                                        "공정만보기",
+                                                        width=_CHECKBOX_LABEL_WIDTH,
+                                                        height=_CHECKBOX_ROW_HEIGHT,
+                                                    )
+                                                    ui.CheckBox(
+                                                        model=po_m,
+                                                        width=20,
+                                                        height=_CHECKBOX_ROW_HEIGHT,
+                                                        tooltip=(
+                                                            "체크 후 Play: CSV 시각 유지, "
+                                                            "JSON 없는 빈 대기만 생략(배속 1x). "
+                                                            "체크 해제 시 기존 시간 재생."
+                                                        ),
+                                                    )
+                                                self._csv.mount_wafer_label_show_checkbox_ui(
+                                                    ui,
+                                                    lam_window=self._lam,
+                                                    wrap_row=False,
+                                                    label_width=_CHECKBOX_LABEL_WIDTH,
+                                                    row_height=_CHECKBOX_ROW_HEIGHT,
                                                 )
                                                 ui.Spacer()
-                                        #웨이퍼 번호보기 체크박스스
-                                        try:
-                                            self._csv.mount_wafer_label_show_checkbox_ui(
-                                                ui, lam_window=self._lam
-                                            )
                                         except Exception as exc:
                                             print(
-                                                f"{_PRINT_PREFIX} wafer label checkbox: {exc}",
+                                                f"{_PRINT_PREFIX} process/wafer checkboxes: {exc}",
                                                 flush=True,
                                             )
-                                        #추가 상태표시 기능 체크박스 simulation_play.py 참조
                                         try:
-                                            self._csv.mount_overlay_feature_checkboxes_ui(ui)
+                                            self._csv.mount_overlay_feature_checkboxes_ui(
+                                                ui,
+                                                label_width=_CHECKBOX_LABEL_WIDTH,
+                                                row_height=_CHECKBOX_ROW_HEIGHT,
+                                                spacing=4,
+                                            )
                                         except Exception as exc:
                                             print(
                                                 f"{_PRINT_PREFIX} overlay feature checkboxes: {exc}",
