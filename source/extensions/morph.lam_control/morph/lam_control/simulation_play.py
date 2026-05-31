@@ -5845,6 +5845,12 @@ class LamSimulationCsvPlayWindow:
         """정지(초기화) — 재생 위치 삭제 + prim TBS 0 + FOUP show / 기타 hide."""
         clear_csv_play_pause_checkpoint()
         self._reset_timeline_playback_highlight_ui()
+        try:
+            from .lam_viewport_foup_status_3d import reset_foup_play_session
+
+            reset_foup_play_session()
+        except Exception:
+            pass
         if self._csv_play_thread_alive():
             request_stop_csv_playback(self._registry, self._scheduler)
         self._log(

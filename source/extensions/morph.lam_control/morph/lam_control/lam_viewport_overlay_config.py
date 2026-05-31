@@ -37,17 +37,17 @@ CSV_COL_MODULE_NM: str = "module_nm"
 STATUS_PANEL_TITLE: str = "STATUS"
 
 # 패널 레이아웃/스타일(사용자가 여기서 조정)
-STATUS_PANEL_WIDTH_PX: int = 300
+STATUS_PANEL_WIDTH_PX: int = 350
 STATUS_PANEL_LABEL_COL_WIDTH_PX: int = 120
 STATUS_PANEL_PADDING_PX: int = 10
 STATUS_PANEL_TITLE_FONT_SIZE: int = 14
-STATUS_PANEL_ROW_FONT_SIZE: int = 13
+STATUS_PANEL_ROW_FONT_SIZE: int = 16  # 행별 label/value 미지정 시 공통 기본값
 STATUS_PANEL_ROW_HEIGHT_PX: int = 26
 STATUS_PANEL_STATE_ROW_HEIGHT_PX: int = 72
 
 STATUS_PANEL_BG_COLOR_HEX: int = 0xE6181C22
 STATUS_PANEL_BORDER_COLOR_HEX: int = 0xFF5A6A80
-STATUS_PANEL_ROW_BG_HEX: int = 0x1AFFFFFF  # 연한 행 배경(투명도 포함)
+STATUS_PANEL_ROW_BG_HEX: int = 0xE6181C22  # 연한 행 배경(투명도 포함)
 STATUS_PANEL_TEXT_COLOR_HEX: int = 0xffffffff
 # STATUS_PANEL_TEXT_COLOR_HEX: int = 0xff000000
 STATUS_PANEL_LABEL_COLOR_HEX: int = 0xFFB8C0CC
@@ -74,12 +74,18 @@ class StatusRowSpec:
       - "{time}": ``재생 0.9% | t 15.1/1773.7s | 실경과 16s/1774s`` (스냅샷·배속 기준)
       - "{state}": ``웨이퍼#N · lot_id · event_json`` (JSON은 이름만, dwell 시 JSON 생략) — 일시정지/dwell 시 마지막 값 유지
       - "{eq_model}": `STATUS_PANEL_EQ_MODEL_VALUE` (기본 수동값; 필요 시 사용)
+
+    레이아웃:
+    - ``height_px``: 행 높이 [px]
+    - ``label_font_size`` / ``value_font_size``: 좌측(이름)·우측(값) 폰트 [px] (기본 ``STATUS_PANEL_ROW_FONT_SIZE``)
     """
 
     key: str
     name: str
     value: str
     height_px: int = 26
+    label_font_size: int = STATUS_PANEL_ROW_FONT_SIZE  # 좌측(이름) 컬럼 [px]
+    value_font_size: int = STATUS_PANEL_ROW_FONT_SIZE  # 우측(값) 컬럼 [px]
 
 
 # 사용자가 여기 리스트만 수정하면 행 추가/삭제/순서 변경 가능
@@ -90,6 +96,8 @@ STATUS_PANEL_ROWS: List[StatusRowSpec] = [
         name="EQ MODEL",
         value="KIYO_FXE",
         height_px=STATUS_PANEL_ROW_HEIGHT_PX,
+        label_font_size=14,   # 좌측만 작게
+        value_font_size=14,
     ),
     # CSV 컬럼 매핑 예시
     StatusRowSpec(
@@ -132,7 +140,7 @@ FOUP_ANCHOR_PRIM_BY_INDEX: Dict[int, str] = {
 }
 
 # FOUP 패널 위치 오프셋(객체 중심 기준) — 초기값은 임시. 실제로 보며 조정.
-FOUP_PANEL_OFFSET_XYZ_M: Tuple[float, float, float] = (300, 0.0, 0.10)
+FOUP_PANEL_OFFSET_XYZ_M: Tuple[float, float, float] = (-20, -50, 0.10)
 
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
 FOUP_PANEL_WIDTH_PX: int = 220

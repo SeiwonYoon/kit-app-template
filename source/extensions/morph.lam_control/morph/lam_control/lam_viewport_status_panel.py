@@ -286,6 +286,22 @@ class LamViewportStatusPanel:
 
                                             def _row(spec, *, draw_sep: bool) -> None:
                                                 h = int(getattr(spec, "height_px", 26) or 26)
+                                                label_fs = int(
+                                                    getattr(
+                                                        spec,
+                                                        "label_font_size",
+                                                        STATUS_PANEL_ROW_FONT_SIZE,
+                                                    )
+                                                    or STATUS_PANEL_ROW_FONT_SIZE
+                                                )
+                                                value_fs = int(
+                                                    getattr(
+                                                        spec,
+                                                        "value_font_size",
+                                                        STATUS_PANEL_ROW_FONT_SIZE,
+                                                    )
+                                                    or STATUS_PANEL_ROW_FONT_SIZE
+                                                )
                                                 with ui.ZStack(height=h, width=panel_w - pad * 2):
                                                     ui.Rectangle(
                                                         style={"background_color": int(STATUS_PANEL_ROW_BG_HEX)}
@@ -295,7 +311,7 @@ class LamViewportStatusPanel:
                                                             str(getattr(spec, "name", "")),
                                                             width=label_w,
                                                             style={
-                                                                "font_size": int(STATUS_PANEL_ROW_FONT_SIZE),
+                                                                "font_size": label_fs,
                                                                 "color": int(STATUS_PANEL_LABEL_COLOR_HEX),
                                                             },
                                                         )
@@ -305,7 +321,7 @@ class LamViewportStatusPanel:
                                                             height=h,
                                                             word_wrap=True,
                                                             style={
-                                                                "font_size": int(STATUS_PANEL_ROW_FONT_SIZE),
+                                                                "font_size": value_fs,
                                                                 "color": int(STATUS_PANEL_TEXT_COLOR_HEX),
                                                             },
                                                         )
