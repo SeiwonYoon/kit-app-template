@@ -147,14 +147,34 @@ FOUP_PANEL_BORDER_RGBA: Tuple[float, float, float, float] = (0.45, 0.55, 0.70, 0
 # 기능 #3: 기기정보보기 라벨 정의
 # ---------------------------------------------------------------------------
 
+# 항목별로 override 가능. 기본 배경/테두리는 FOUP 3D 패널과 동일.
+DEVICE_LABEL_DEFAULT_BG_RGBA: Tuple[float, float, float, float] = FOUP_PANEL_BG_RGBA
+DEVICE_LABEL_DEFAULT_BORDER_RGBA: Tuple[float, float, float, float] = FOUP_PANEL_BORDER_RGBA
+# padding (가로, 세로) [px] — 패널 크기 = 글자 추정 + padding
+DEVICE_LABEL_DEFAULT_PADDING_PX: Tuple[int, int] = (10, 6)
+# 글자 폭 추정 후 전체에 곱하는 여유 배율 + 추가 px (sc.Label 실측보다 넉넉히)
+DEVICE_LABEL_CHAR_WIDTH_FACTOR: float = 1.05
+DEVICE_LABEL_WIDTH_SLACK_PX: int = 12
+
 
 @dataclass(frozen=True)
 class DeviceLabelSpec:
+    """기기 3D 라벨 한 항목.
+
+    - ``bg_rgba`` / ``border_rgba``: FOUP 패널과 동일 형식 (0~1 float RGBA).
+    - ``padding_px``: (가로, 세로) [px]. 패널 크기는 글자 길이 + padding 으로 자동.
+    - ``show_border``: FOUP 와 같이 wireframe 테두리 표시.
+    """
+
     name: str
     prim_path: str
     offset_xyz_m: Tuple[float, float, float] = (0.0, 0.0, 0.10)
     color_rgba: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     font_size: int = 16
+    bg_rgba: Tuple[float, float, float, float] = DEVICE_LABEL_DEFAULT_BG_RGBA
+    border_rgba: Tuple[float, float, float, float] = DEVICE_LABEL_DEFAULT_BORDER_RGBA
+    padding_px: Tuple[int, int] = DEVICE_LABEL_DEFAULT_PADDING_PX
+    show_border: bool = True
 
 
 # v1: CoolStation 1개만 채우고 나머지는 사용자가 추가
@@ -166,6 +186,9 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
         offset_xyz_m=(-0.20, 0.0, 0.15),
         color_rgba=(1.0, 1.0, 1.0, 1.0),
         font_size=16,
+        bg_rgba=(0.10, 0.12, 0.15, 0.75),   # 생략 시 FOUP와 동일
+        padding_px=(12, 8),               # 항목별 padding
+        show_border=True,
     ),
     DeviceLabelSpec(
         name="Chamber1",
@@ -223,6 +246,11 @@ __all__ = [
     "FOUP_PANEL_FONT_SIZE",
     "FOUP_PANEL_BG_RGBA",
     "FOUP_PANEL_BORDER_RGBA",
+    "DEVICE_LABEL_DEFAULT_BG_RGBA",
+    "DEVICE_LABEL_DEFAULT_BORDER_RGBA",
+    "DEVICE_LABEL_DEFAULT_PADDING_PX",
+    "DEVICE_LABEL_CHAR_WIDTH_FACTOR",
+    "DEVICE_LABEL_WIDTH_SLACK_PX",
     "DeviceLabelSpec",
     "DEVICE_LABEL_SPECS",
     "VIEWPORT_PICK_WHITELIST_ROOTS",

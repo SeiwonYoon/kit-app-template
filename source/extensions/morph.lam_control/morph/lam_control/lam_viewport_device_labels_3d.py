@@ -12,7 +12,12 @@ import omni.ui as ui
 from omni.ui import scene as sc
 from pxr import Usd, UsdGeom
 
-from .lam_viewport_overlay_config import DEVICE_LABEL_SPECS
+from .lam_viewport_overlay_config import (
+    DEVICE_LABEL_CHAR_WIDTH_FACTOR,
+    DEVICE_LABEL_SPECS,
+    DEVICE_LABEL_WIDTH_SLACK_PX,
+    DeviceLabelSpec,
+)
 from .lam_viewport_overlay_state import get_toggle_device_labels
 
 if TYPE_CHECKING:
@@ -124,6 +129,39 @@ def _prim_world_center(prim: Usd.Prim) -> Optional[Tuple[float, float, float]]:
 
 def _normalize_path(p: str) -> str:
     return (p or "").strip().rstrip("/")
+
+
+def _estimate_text_content_width(text: str, font_size: int) -> int:
+    """``sc.Label`` SCREEN 공간 — 글자별 폭 추정 (omni.ui.scene 는 size=font 높이, 폭은 더 넓음)."""
+    fs = max(8, int(font_size))
+    total = 0.0
+    for ch in str(text or ""):
+        if ch == " ":
+            total += fs * 0.40
+        elif ch.isupper():
+            total += fs * 1.12
+        elif ch.isdigit():
+            total += fs * 0.72
+        elif ch in "1il|":
+            total += fs * 0.48
+        else:
+            total += fs * 0.90
+    scaled = total * float(DEVICE_LABEL_CHAR_WIDTH_FACTOR)
+    return int(scaled) + int(DEVICE_LABEL_WIDTH_SLACK_PX)
+
+
+def _estimate_label_panel_size(
+    text: str,
+    font_size: int,
+    padding_px: Tuple[int, int],
+) -> Tuple[int, int]:
+    """글자 길이 + padding 기준 SCREEN 공간 패널 (w, h) [px]."""
+    pad_h, pad_v = int(padding_px[0]), int(padding_px[1])
+    fs = max(8, int(font_size))
+    content_w = _estimate_text_content_width(text, fs)
+    w = max(content_w + pad_h * 2, fs * 2 + pad_h * 2)
+    h = max(int(fs * 1.40) + pad_v * 2, fs + pad_v * 2)
+    return w, h
 
 
 class LamViewportDeviceLabels3d:
@@ -305,20 +343,36 @@ class LamViewportDeviceLabels3d:
                     continue
                 ox, oy, oz = spec.offset_xyz_m
                 pos = (center[0] + ox, center[1] + oy, center[2] + oz)
-                self._build_label(pos, spec.name, spec.font_size, spec.color_rgba)
+                self._build_label(pos, spec)
 
-    def _build_label(self, world_pos: Tuple[float, float, float], text: str, size: int, rgba) -> None:
+    def _build_label(self, world_pos: Tuple[float, float, float], spec: DeviceLabelSpec) -> None:
+        text = str(spec.name or "")
+        fs = int(spec.font_size)
+        pad_h, pad_v = int(spec.padding_px[0]), int(spec.padding_px[1])
+        panel_w, panel_h = _estimate_label_panel_size(text, fs, (pad_h, pad_v))
+        bg = tuple(spec.bg_rgba)
+        border = tuple(spec.border_rgba)
+        text_color = tuple(spec.color_rgba)
+
         root = sc.Transform(
             look_at=sc.Transform.LookAt.CAMERA,
             transform=sc.Matrix44.get_translation_matrix(*world_pos),
         )
         with root:
             with sc.Transform(scale_to=sc.Space.SCREEN):
+                sc.Rectangle(width=panel_w, height=panel_h, color=bg, wireframe=False)
+                if spec.show_border:
+                    sc.Rectangle(
+                        width=panel_w,
+                        height=panel_h,
+                        color=border,
+                        wireframe=True,
+                    )
                 sc.Label(
                     text,
-                    size=int(size),
-                    color=tuple(rgba),
-                    alignment=ui.Alignment.LEFT_TOP,
+                    size=fs,
+                    color=text_color,
+                    alignment=ui.Alignment.CENTER,
                 )
 
 
