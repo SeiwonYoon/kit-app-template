@@ -23,6 +23,15 @@ STARTUP_CHECK_PICK_WHITELIST: bool = False  # 선택제한 (Viewport 클릭 whit
 
 
 # ---------------------------------------------------------------------------
+# 웨이퍼 3D 번호 (Viewport 「웨이퍼번호보기」 체크 ON 일 때)
+# ---------------------------------------------------------------------------
+# FOUP1~3 × 25슬롯(총 75) prim 위 번호 라벨 표시 여부.
+# False(기본): FOUP 슬롯 번호는 숨기고, 팔·aligner·chamber 등 나머지 슬롯만 표시.
+# True: FOUP 75슬롯에도 카세트 번호(01~25) 표시.
+WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS: bool = False
+
+
+# ---------------------------------------------------------------------------
 # CSV 컬럼명 매핑 (향후 컬럼 변경 대비)
 # ---------------------------------------------------------------------------
 CSV_COL_EQP_ID: str = "eqp_id"
@@ -226,6 +235,7 @@ __all__ = [
     "STARTUP_CHECK_FOUP_STATUS",
     "STARTUP_CHECK_DEVICE_LABELS",
     "STARTUP_CHECK_PICK_WHITELIST",
+    "WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS",
     "CSV_COL_EQP_ID",
     "CSV_COL_LOT_ID",
     "CSV_COL_CASSETTE_SLOT",

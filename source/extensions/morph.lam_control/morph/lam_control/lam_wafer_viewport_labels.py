@@ -1,6 +1,7 @@
-"""웨이퍼 슬롯 번호(01~25) 3D 뷰포트 라벨 — FOUP 시작, pick/place 시 팔·장비 슬롯으로 이식.
+"""웨이퍼 슬롯 번호(01~25) 3D 뷰포트 라벨 — pick/place 시 팔·장비 슬롯으로 이식.
 
-- CSV Play 시작: FOUP1~3 각 25슬롯 prim 에만 번호 표시.
+- FOUP 75슬롯 번호 표시 여부: ``lam_viewport_overlay_config.WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS``.
+- CSV Play 시작 baseline: 위 설정이 True 일 때만 FOUP1~3×25 에 번호 등록.
 - ``PRIM_VISIBILITY`` (pick hide SLOT / show ARM, place 반대) 실행 시
   ``WaferNumberLabelTracker`` 가 **동일 카세트 번호**를 팔·airlock·chamber 등으로 옮긴다.
 - airlock/chamber/aligner 슬롯 인덱스(1·2)가 아니라 **FOUP 에서 올린 웨이퍼 번호**가 유지된다.
@@ -17,6 +18,7 @@ import omni.ui as ui
 from omni.ui import scene as sc
 from pxr import Usd, UsdGeom
 
+from .lam_viewport_overlay_config import WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS
 from .lam_wafer_prim_paths import (
     IS_LABEL_SHOW,
     load_wafer_prim_by_slot_key,
@@ -61,6 +63,58 @@ _LABEL_COLOR = (1.0, 1.0, 1.0, 1.0)
 FOUP_LABEL_SLOT_KEYS: Tuple[str, ...] = tuple(
     f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
 )
+
+_foup_exclude_paths_cache: Tuple[Optional[int], frozenset[str]] = (None, frozenset())
+
+
+def wafer_label_show_foup_slot_numbers() -> bool:
+    """FOUP1~3×25 Viewport 번호 표시 — ``WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS``."""
+    return bool(WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS)
+
+
+def _foup_slot_paths_for_label_filter(
+    stage: Optional[Usd.Stage],
+) -> frozenset[str]:
+    """그리기 제외용 FOUP 75 prim 경로 집합 (설정 False 일 때만 채움)."""
+    global _foup_exclude_paths_cache
+    if wafer_label_show_foup_slot_numbers():
+        return frozenset()
+    stage_id = id(stage) if stage is not None else None
+    if _foup_exclude_paths_cache[0] == stage_id:
+        return _foup_exclude_paths_cache[1]
+    paths: set[str] = set()
+    wm = load_wafer_prim_by_slot_key()
+    for sk in FOUP_LABEL_SLOT_KEYS:
+        raw = (wm.get(sk) or "").strip()
+        if not raw:
+            continue
+        resolved = raw
+        if stage is not None:
+            resolved = resolve_wafer_prim_path_on_stage(stage, sk, raw) or raw
+        key = _normalize_path_key(resolved)
+        if key:
+            paths.add(key)
+    frozen = frozenset(paths)
+    _foup_exclude_paths_cache = (stage_id, frozen)
+    return frozen
+
+
+def _filter_labels_for_draw(
+    entries: List[Tuple[str, str]],
+    stage: Usd.Stage,
+) -> List[Tuple[str, str]]:
+    if wafer_label_show_foup_slot_numbers():
+        return entries
+    excluded = _foup_slot_paths_for_label_filter(stage)
+    if not excluded:
+        return entries
+    out: List[Tuple[str, str]] = []
+    for path, text in entries:
+        if _normalize_path_key(path) in excluded:
+            continue
+        out.append((path, text))
+    return out
+
 
 _FOUP_BUFFER_SLOT_RE = re.compile(r"^(?:foup|buffer)\d+_(\d+)$")
 _COOLING_SLOT_RE = re.compile(r"^cooling_(\d+)$")
@@ -348,13 +402,14 @@ class WaferNumberLabelTracker:
             self._prim_to_label.clear()
             self._arm_carried.clear()
             wm = wafer_map or load_wafer_prim_by_slot_key()
-            for sk in FOUP_LABEL_SLOT_KEYS:
-                label = cassette_style_label_for_slot_key(sk)
-                path = (wm.get(sk) or "").strip()
-                if stage is not None and path:
-                    path = resolve_wafer_prim_path_on_stage(stage, sk, path)
-                if label and path:
-                    self._prim_to_label[_normalize_path_key(path)] = label
+            if wafer_label_show_foup_slot_numbers():
+                for sk in FOUP_LABEL_SLOT_KEYS:
+                    label = cassette_style_label_for_slot_key(sk)
+                    path = (wm.get(sk) or "").strip()
+                    if stage is not None and path:
+                        path = resolve_wafer_prim_path_on_stage(stage, sk, path)
+                    if label and path:
+                        self._prim_to_label[_normalize_path_key(path)] = label
             self._bump_revision()
             return len(self._prim_to_label)
 
@@ -528,7 +583,8 @@ class WaferNumberLabelTracker:
             any_on_stage.append((path, text))
             if _prim_is_visible(prim):
                 visible.append((path, text))
-        return visible if visible else any_on_stage
+        chosen = visible if visible else any_on_stage
+        return _filter_labels_for_draw(chosen, stage)
 
     def mapped_prim_count(self) -> int:
         with self._lock:
@@ -900,6 +956,7 @@ __all__ = [
     "set_wafer_labels_ui_enabled",
     "stamp_wafer_cassette_label_on_steps",
     "teardown_wafer_viewport_labels",
+    "wafer_label_show_foup_slot_numbers",
     "wafer_label_tracking_enabled",
     "wafer_viewport_labels_enabled",
 ]
