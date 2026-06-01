@@ -4781,50 +4781,20 @@ class LamSimulationCsvPlayWindow:
             return False
 
     def apply_wafer_label_visibility_from_ui(self, lam_window: Any = None) -> None:
-        """HUD/본창 「웨이퍼번호보기」 체크 → 트래커·Viewport 3D 라벨 동기."""
+        """HUD/본창 「웨이퍼번호보기」 — 3D 라벨 표시만 on/off (웨이퍼 visibility·트래커 맵 유지)."""
         try:
             from .lam_wafer_prim_paths import IS_LABEL_SHOW
             from .lam_wafer_viewport_labels import (
-                get_wafer_label_tracker,
+                notify_wafer_label_tracker_changed,
                 set_wafer_labels_ui_enabled,
+                teardown_wafer_viewport_labels,
                 wafer_viewport_labels_enabled,
             )
 
             ui_on = self.read_wafer_label_show_enabled()
             set_wafer_labels_ui_enabled(bool(IS_LABEL_SHOW) and ui_on)
-            if wafer_viewport_labels_enabled():
+            if not wafer_viewport_labels_enabled():
                 try:
-                    # 라벨 토글 ON 시 wait=True(메인 스레드 15s 대기)는 UI 체감이 매우 느려질 수 있음.
-                    # 동일한 최종 결과(visibility 적용)는 유지하되, 비동기로 실행해서 즉시 라벨을 먼저 띄운다.
-                    apply_csv_play_initial_wafer_visibility(wait=False)
-                except Exception as exc:
-                    self._log(f"wafer label FOUP visibility skip: {exc}")
-                stage = None
-                lam = self._resolve_lam_window(lam_window)
-                if lam is not None:
-                    try:
-                        stage = lam._master.get_stage()
-                    except Exception:
-                        stage = None
-                if stage is None:
-                    try:
-                        import omni.usd as ou  # type: ignore
-
-                        ctx = ou.get_context("")
-                        if ctx is not None:
-                            stage = ctx.get_stage()
-                    except Exception:
-                        stage = None
-                n = get_wafer_label_tracker().reset_foup_baseline(
-                    load_wafer_prim_by_slot_key(),
-                    stage=stage,
-                )
-                self._log(f"wafer label tracker: {n} FOUP slot path(s) mapped")
-            else:
-                get_wafer_label_tracker().clear()
-                try:
-                    from .lam_wafer_viewport_labels import teardown_wafer_viewport_labels
-
                     teardown_wafer_viewport_labels()
                 except Exception:
                     pass
@@ -4837,6 +4807,12 @@ class LamSimulationCsvPlayWindow:
                 lam._sync_wafer_foup_viewport_labels_only()
             except Exception as exc:
                 self._log(f"wafer label viewport sync failed: {exc}")
+                return
+        if wafer_viewport_labels_enabled():
+            try:
+                notify_wafer_label_tracker_changed()
+            except Exception:
+                pass
 
     def register_hud_timeline_ui(
         self,

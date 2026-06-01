@@ -37,9 +37,14 @@ def get_wafer_labels_ui_enabled() -> bool:
     return bool(_runtime_wafer_labels_ui_enabled)
 
 
+def wafer_label_tracking_enabled() -> bool:
+    """pick/place 번호 맵 갱신 — UI 체크와 무관 (``IS_LABEL_SHOW`` 만)."""
+    return bool(IS_LABEL_SHOW)
+
+
 def wafer_viewport_labels_enabled() -> bool:
-    """코드 ``IS_LABEL_SHOW`` × UI 체크박스."""
-    return bool(IS_LABEL_SHOW) and get_wafer_labels_ui_enabled()
+    """Viewport 3D 라벨 그리기 — ``IS_LABEL_SHOW`` × UI 체크박스."""
+    return wafer_label_tracking_enabled() and get_wafer_labels_ui_enabled()
 
 if TYPE_CHECKING:
     from .lam_master_stage import LamMasterStage
@@ -416,7 +421,7 @@ class WaferNumberLabelTracker:
         pick: hide SLOT → 번호 보관, show ARM → 동일 번호 부여.
         place: show SLOT → 팔(또는 carried) 번호 부여, hide ARM → 맵에서만 제거.
         """
-        if not wafer_viewport_labels_enabled() or not ctx:
+        if not wafer_label_tracking_enabled() or not ctx:
             return
         p = _normalize_path_key(prim_path)
         if not p:
@@ -491,7 +496,7 @@ class WaferNumberLabelTracker:
                         changed = True
             if changed:
                 self._bump_revision()
-        if changed:
+        if changed and wafer_viewport_labels_enabled():
             notify_wafer_label_tracker_changed()
 
     def iter_drawable_labels(self, stage: Usd.Stage) -> List[Tuple[str, str]]:
@@ -895,5 +900,6 @@ __all__ = [
     "set_wafer_labels_ui_enabled",
     "stamp_wafer_cassette_label_on_steps",
     "teardown_wafer_viewport_labels",
+    "wafer_label_tracking_enabled",
     "wafer_viewport_labels_enabled",
 ]

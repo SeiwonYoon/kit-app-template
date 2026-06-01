@@ -378,12 +378,8 @@ class LamWindow:
         """Viewport 3D 라벨 SceneView 마운트/해제 (체크 상태는 ``apply_wafer_label_visibility_from_ui``)."""
         if not wafer_viewport_labels_enabled():
             try:
-                from .lam_wafer_viewport_labels import (
-                    get_wafer_label_tracker,
-                    teardown_wafer_viewport_labels,
-                )
+                from .lam_wafer_viewport_labels import teardown_wafer_viewport_labels
 
-                get_wafer_label_tracker().clear()
                 teardown_wafer_viewport_labels()
             except Exception:
                 if self._wafer_foup_labels is not None:

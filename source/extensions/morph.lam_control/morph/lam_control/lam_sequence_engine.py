@@ -1406,20 +1406,13 @@ class LamSequenceRunner:
             try:
                 from .lam_wafer_viewport_labels import (
                     get_wafer_label_tracker,
-                    wafer_viewport_labels_enabled,
+                    wafer_label_tracking_enabled,
                 )
 
-                if wafer_viewport_labels_enabled():
+                if wafer_label_tracking_enabled():
                     tracker = get_wafer_label_tracker()
                     for p in paths:
                         tracker.on_visibility(p, visible, label_ctx)
-                    # on_visibility 내부에서 notify 호출 — 구버전 호환 이중 갱신
-                    try:
-                        from .lam_wafer_viewport_labels import notify_wafer_label_tracker_changed
-
-                        notify_wafer_label_tracker_changed()
-                    except Exception:
-                        pass
             except Exception:
                 pass
         _seq_log(
