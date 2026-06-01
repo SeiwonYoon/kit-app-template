@@ -152,3 +152,11 @@ v1 기본:
 - **선택 허용 루트 추가**:  
   `VIEWPORT_PICK_WHITELIST_ROOTS.append("/Your/Root")`
 
+---
+
+## 6) (설계만) 웨이퍼·슬롯 시간별 스냅샷 / 추후 프리런
+
+**구현 전** 요구사항·데이터 모델은 아래 문서에 정리되어 있다. CSV Play 동작은 변경하지 않고 관측 레이어만 추가하는 방향이다.
+
+- `docs/LAM_Wafer_Fab_TimeSeries_Snapshot_Design.md`
+
