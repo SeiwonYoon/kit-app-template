@@ -1,9 +1,8 @@
 """FOUP 진행상황 3D 패널 (기능 #2) — v1.
 
-재생 로직을 수정하지 않고:
-- `LamSimulationCsvPlayWindow`가 보유한 schedule 엔트리 목록을 읽고
-- `simulation_play.get_csv_play_timeline_active_keys_snap()`(녹색 강조 키)로 "현재 실행 중 엔트리"를 추정,
-  FOUP pick/place 누적 카운트를 갱신해 표시한다.
+- pick/place 집계: ``lam_viewport_overlay_state.record_foup_event_from_schedule_entry``
+  (JSON 블록 실행 시작 시 ``atm_foup{n}_pick|place`` — FOUP 1~3 구분).
+- 이 패널은 ``get_foup_counts`` 를 읽어 3D 텍스트만 갱신한다.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ from .lam_viewport_overlay_state import (
     FoupCounts,
     get_foup_counts,
     get_toggle_foup_status,
-    set_foup_counts,
 )
 
 if TYPE_CHECKING:
@@ -83,6 +81,34 @@ def force_remove_all_foup_sceneviews() -> None:
         _ACTIVE_SCENEVIEW_BY_VW.clear()
         _ACTIVE_VW_BY_ID.clear()
         _ACTIVE_PANEL_NODES_BY_VW.clear()
+    except Exception:
+        pass
+
+
+def refresh_foup_status_panel_ui() -> None:
+    """FOUP 집계 변경 직후 3D 패널 숫자 갱신 (메인 스레드 post_update)."""
+    inst = _ACTIVE_FOUP_PANEL
+    if inst is None or not getattr(inst, "_built", False):
+        return
+
+    def _ui() -> None:
+        try:
+            if _ACTIVE_FOUP_PANEL is inst and inst._built:
+                inst._update_ui()
+        except Exception:
+            pass
+
+    try:
+        import omni.kit.app as kapp  # type: ignore
+
+        app = kapp.get_app()
+        if app is not None:
+            app.post_update(_ui)
+            return
+    except Exception:
+        pass
+    try:
+        _ui()
     except Exception:
         pass
 
@@ -181,8 +207,6 @@ class LamFoupStatus3dPanel:
         self._built = False
         self._post_update_sub: Any = None
         self._last_tick = 0.0
-        self._seen_pick_keys: set = set()
-        self._seen_place_keys: set = set()
         self._sync_token: float = 0.0
         # 한번 만든 UI를 재사용(겹침/누적 방지)
         self._panel_nodes: Dict[int, Dict[str, Any]] = {}
@@ -195,9 +219,7 @@ class LamFoupStatus3dPanel:
         self._destroy_layer()
 
     def reset_play_session(self) -> None:
-        """정지(초기화) 후 pick/place 누적·중복 키 초기화."""
-        self._seen_pick_keys.clear()
-        self._seen_place_keys.clear()
+        """정지(초기화) 후 3D 패널 표시만 리셋 (집계는 overlay_state)."""
         if self._built and self._root:
             self._update_ui()
 
@@ -347,35 +369,7 @@ class LamFoupStatus3dPanel:
             self._post_update_sub = None
 
     def _tick(self) -> None:
-        try:
-            from .simulation_play import get_csv_play_timeline_active_keys_snap, _schedule_entry_match_key  # type: ignore
-
-            active = get_csv_play_timeline_active_keys_snap()
-            # 현재 active key 중 schedule에서 첫 번째 매칭을 선택(단일 선택 가정)
-            ent = None
-            for e in getattr(self._csv, "_schedule_row_entries", []) or []:
-                if _schedule_entry_match_key(e) in active:
-                    ent = e
-                    break
-            if ent is not None:
-                key = _schedule_entry_match_key(ent)
-                ev = str(getattr(ent, "event_name", "") or "")
-                # event_name이 없으면 skip
-                if ev.startswith("atm_foup") and ev.endswith("_pick"):
-                    # atm_foup{n}_pick
-                    n = int(ev[len("atm_foup") :].split("_", 1)[0])
-                    if key not in self._seen_pick_keys:
-                        self._seen_pick_keys.add(key)
-                        c = get_foup_counts(n)
-                        set_foup_counts(n, c.picked_count + 1, c.placed_back_count, total=c.total)
-                elif ev.startswith("atm_foup") and ev.endswith("_place"):
-                    n = int(ev[len("atm_foup") :].split("_", 1)[0])
-                    if key not in self._seen_place_keys:
-                        self._seen_place_keys.add(key)
-                        c = get_foup_counts(n)
-                        set_foup_counts(n, c.picked_count, c.placed_back_count + 1, total=c.total)
-        except Exception:
-            pass
+        """앵커 위치·집계 텍스트 주기 갱신 (집계는 JSON 시작 시 overlay_state 에 기록)."""
         self._update_ui()
 
     def _ensure_ui_built(self) -> None:
@@ -501,5 +495,10 @@ class LamFoupStatus3dPanel:
                         )
 
 
-__all__ = ["LamFoupStatus3dPanel", "force_remove_all_foup_sceneviews", "reset_foup_play_session"]
+__all__ = [
+    "LamFoupStatus3dPanel",
+    "force_remove_all_foup_sceneviews",
+    "refresh_foup_status_panel_ui",
+    "reset_foup_play_session",
+]
 

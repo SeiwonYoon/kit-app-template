@@ -2421,6 +2421,12 @@ def _csv_play_timeline_highlight_notify(active_keys: frozenset) -> None:
 
 def _csv_play_timeline_row_begin_entry(sched: CsvPlaybackScheduleEntry) -> None:
     key = _schedule_entry_match_key(sched)
+    try:
+        from .lam_viewport_overlay_state import record_foup_event_from_schedule_entry
+
+        record_foup_event_from_schedule_entry(sched)
+    except Exception:
+        pass
     with _csv_play_timeline_active_keys_lock:
         _csv_play_timeline_active_keys.add(key)
         snap = frozenset(_csv_play_timeline_active_keys)

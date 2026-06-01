@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+
+_FOUP_ATM_EVENT_RE = re.compile(r"^atm_foup([1-3])_(pick|place)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,8 @@ _active_schedule_keys: Tuple[Tuple[Any, ...], ...] = ()
 
 # FOUP별 집계(pick/place 누적) — foup_index -> FoupCounts
 _foup_counts: Dict[int, FoupCounts] = {1: FoupCounts(), 2: FoupCounts(), 3: FoupCounts()}
+# 스케줄 행당 1회 pick/place 카운트 (타임라인 match key)
+_foup_counted_schedule_keys: set[Tuple[Any, ...]] = set()
 
 _toggle_listeners: list = []
 
@@ -422,13 +427,70 @@ def get_foup_counts(foup_index: int) -> FoupCounts:
 def reset_all_foup_counts(*, total: int = 25) -> None:
     """FOUP1~3 pick/place 집계 초기화 — CSV 정지(초기화) 시 호출."""
     with _lock:
-        global _foup_counts
+        global _foup_counts, _foup_counted_schedule_keys
         t = max(1, int(total))
         _foup_counts = {
             1: FoupCounts(total=t),
             2: FoupCounts(total=t),
             3: FoupCounts(total=t),
         }
+        _foup_counted_schedule_keys = set()
+
+
+def schedule_entry_foup_match_key(sched: Any) -> Tuple[Any, ...]:
+    """``simulation_play._schedule_entry_match_key`` 와 동일 규칙 (순환 import 방지)."""
+    return (
+        round(float(getattr(sched, "time_sec", 0.0) or 0.0), 6),
+        int(getattr(sched, "sort_order", 0) or 0),
+        str(getattr(sched, "category", "") or ""),
+        str(getattr(sched, "event_name", "") or ""),
+    )
+
+
+def record_foup_event_from_schedule_entry(sched: Any) -> bool:
+    """``atm_foup{n}_pick|place`` JSON 실행 시작 시 FOUP별 집계 (+1, 행당 1회).
+
+    Returns:
+        True if a pick or place was recorded for FOUP 1~3.
+    """
+    ev = str(getattr(sched, "event_name", "") or "").strip()
+    m = _FOUP_ATM_EVENT_RE.match(ev)
+    if not m:
+        return False
+    foup_n = int(m.group(1))
+    po = str(m.group(2) or "").strip().lower()
+    row_key = schedule_entry_foup_match_key(sched)
+    with _lock:
+        if row_key in _foup_counted_schedule_keys:
+            return False
+        _foup_counted_schedule_keys.add(row_key)
+        c = _foup_counts.get(foup_n, FoupCounts())
+        if po == "pick":
+            _foup_counts[foup_n] = FoupCounts(
+                total=c.total,
+                picked_count=c.picked_count + 1,
+                placed_back_count=c.placed_back_count,
+            )
+        elif po == "place":
+            _foup_counts[foup_n] = FoupCounts(
+                total=c.total,
+                picked_count=c.picked_count,
+                placed_back_count=c.placed_back_count + 1,
+            )
+        else:
+            return False
+    notify_foup_counts_ui_refresh()
+    return True
+
+
+def notify_foup_counts_ui_refresh() -> None:
+    """FOUP 3D 패널 텍스트 즉시 갱신 (재생 스레드 → post_update)."""
+    try:
+        from .lam_viewport_foup_status_3d import refresh_foup_status_panel_ui
+
+        refresh_foup_status_panel_ui()
+    except Exception:
+        pass
 
 
 def get_snapshot() -> Dict[str, Any]:
@@ -470,5 +532,8 @@ __all__ = [
     "set_foup_counts",
     "get_foup_counts",
     "reset_all_foup_counts",
+    "schedule_entry_foup_match_key",
+    "record_foup_event_from_schedule_entry",
+    "notify_foup_counts_ui_refresh",
     "get_snapshot",
 ]
