@@ -2967,6 +2967,11 @@ def get_csv_play_pause_checkpoint() -> Optional[CsvPlayPauseCheckpoint]:
     return _csv_play_pause_checkpoint
 
 
+def csv_play_pause_armed() -> bool:
+    """일시정지 직후 — 이어서 Play 가능 상태(재생 스레드 정리 대기 중 포함)."""
+    return bool(_csv_play_pause_armed)
+
+
 def _compute_pause_wall_elapsed_from_snap(snap: Dict[str, Any]) -> float:
     if csv_play_session_active():
         return max(0.0, get_csv_play_wall_elapsed())
@@ -5828,6 +5833,45 @@ class LamSimulationCsvPlayWindow:
         t = self._csv_play_thread
         return t is not None and t.is_alive()
 
+    def _reap_csv_play_thread(self, *, timeout: float = 30.0) -> bool:
+        """중지 요청된 재생 스레드가 끝날 때까지 대기 후 참조 해제. True = 새 Play 가능."""
+        t = self._csv_play_thread
+        if t is None:
+            return True
+        if not t.is_alive():
+            self._csv_play_thread = None
+            return True
+        try:
+            t.join(timeout=max(0.05, float(timeout)))
+        except Exception:
+            pass
+        if not t.is_alive():
+            self._csv_play_thread = None
+            return True
+        return False
+
+    def _schedule_reap_csv_play_thread_after_stop(
+        self,
+        *,
+        timeout: float = 45.0,
+        done_log: str = "",
+    ) -> None:
+        """일시정지·정지 후 백그라운드에서 재생 스레드 join — UI는 즉시 반환."""
+
+        def _worker() -> None:
+            ok = self._reap_csv_play_thread(timeout=timeout)
+            if done_log and ok:
+                try:
+                    _post_kit_main_thread(lambda: self._log(done_log))
+                except Exception:
+                    pass
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="lam-csv-play-reap",
+        ).start()
+
     def _on_csv_pause_clicked(self) -> None:
         """일시정지 — 진행 위치 저장, 웨이퍼 visibility 는 유지."""
         if not self._csv_play_thread_alive():
@@ -5851,6 +5895,10 @@ class LamSimulationCsvPlayWindow:
             f"일시정지 — CSV t≈{ck.resume_csv_sec:.1f}s · "
             f"실경과 {ck.wall_elapsed_sec:.0f}s{json_note}"
         )
+        self._schedule_reap_csv_play_thread_after_stop(
+            timeout=45.0,
+            done_log="일시정지 완료 — [재생] 으로 이어서 Play 하세요.",
+        )
 
     def _on_csv_stop_reset_clicked(self) -> None:
         """정지(초기화) — 재생 위치 삭제 + prim TBS 0 + FOUP show / 기타 hide."""
@@ -5864,6 +5912,7 @@ class LamSimulationCsvPlayWindow:
             pass
         if self._csv_play_thread_alive():
             request_stop_csv_playback(self._registry, self._scheduler)
+            self._schedule_reap_csv_play_thread_after_stop(timeout=45.0)
         self._log(
             "정지(초기화) 시작 — Z/팔 TBS→0, FOUP 75 show, "
             "나머지 슬롯·팔 wafer hide (백그라운드)"
@@ -5898,8 +5947,18 @@ class LamSimulationCsvPlayWindow:
             self._log("CSV 없음 — lam/csv 에 파일을 추가하세요.")
             return
         if self._csv_play_thread_alive():
-            self._log("이미 재생 중 — [일시정지] 후 Play(이어서) 또는 [정지(초기화)] 하세요.")
-            return
+            if csv_playback_stop_requested() or csv_play_pause_armed():
+                if not self._reap_csv_play_thread(timeout=30.0):
+                    self._log(
+                        "일시정지·정지 처리 중입니다 — "
+                        "잠시 후 [재생]을 다시 눌러 주세요."
+                    )
+                    return
+            else:
+                self._log(
+                    "이미 재생 중 — [일시정지] 후 Play(이어서) 또는 [정지(초기화)] 하세요."
+                )
+                return
         path = self._selected_csv_path()
         if path is None:
             self._log("CSV 경로 없음")
@@ -6215,6 +6274,7 @@ __all__ = [
     "request_pause_csv_playback",
     "clear_csv_play_pause_checkpoint",
     "get_csv_play_pause_checkpoint",
+    "csv_play_pause_armed",
     "save_csv_play_pause_checkpoint",
     "match_csv_play_pause_checkpoint",
     "clear_csv_playback_stop",
