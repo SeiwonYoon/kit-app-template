@@ -21,6 +21,33 @@ STARTUP_CHECK_FOUP_STATUS: bool = True  # FOUP상태보기
 STARTUP_CHECK_DEVICE_LABELS: bool = True  # 기기정보보기
 STARTUP_CHECK_PICK_WHITELIST: bool = False  # 선택제한 (Viewport 클릭 whitelist)
 STARTUP_CHECK_PLAY_PRIM_HIDE: bool = False  # prim숨김 (Viewport HUD · CSV 본창)
+STARTUP_CHECK_PLAY_CAMERA_FLY: bool = True  # Play 시 preset 뷰로 fly (일시정지 이어서 제외)
+
+
+# ---------------------------------------------------------------------------
+# CSV Play 시작 시 카메라 fly-to (구현: lam_play_camera_fly.py)
+# 「뷰 저장」버튼으로 콘솔에 출력된 블록을 eye_xyz / target_xyz 에 붙여넣기.
+# ---------------------------------------------------------------------------
+PLAY_CAMERA_PRESET_ENABLED: bool = True
+PLAY_CAMERA_FLY_DURATION_SEC: float = 3
+PLAY_CAMERA_FLY_POSITION_EPS_M: float = 0.05
+PLAY_CAMERA_FLY_DIRECTION_EPS_DEG: float = 1.0
+
+
+@dataclass(frozen=True)
+class PlayCameraPresetSpec:
+    """Play 시작 시 이동할 뷰 (월드 좌표, 미터)."""
+
+    eye_xyz: Tuple[float, float, float]
+    target_xyz: Tuple[float, float, float]
+    up_xyz: Tuple[float, float, float] = (0.0, 0.0, 1.0)
+
+
+# 캡처 후 붙여넣기 — PRESET_ENABLED = True 로 바꿀 것
+PLAY_CAMERA_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
+    eye_xyz=(5237.438457, 7949.290852, 7035.098296),
+    target_xyz=(-1503.170796, 1208.681599, 294.489204),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +308,13 @@ __all__ = [
     "STARTUP_CHECK_DEVICE_LABELS",
     "STARTUP_CHECK_PICK_WHITELIST",
     "STARTUP_CHECK_PLAY_PRIM_HIDE",
+    "STARTUP_CHECK_PLAY_CAMERA_FLY",
+    "PLAY_CAMERA_PRESET_ENABLED",
+    "PLAY_CAMERA_FLY_DURATION_SEC",
+    "PLAY_CAMERA_FLY_POSITION_EPS_M",
+    "PLAY_CAMERA_FLY_DIRECTION_EPS_DEG",
+    "PlayCameraPresetSpec",
+    "PLAY_CAMERA_PRESET",
     "PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET",
     "PLAY_HIDE_FADE_ENABLED",
     "PLAY_HIDE_FADE_DURATION_SEC",

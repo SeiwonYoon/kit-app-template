@@ -65,11 +65,17 @@ try:
 except Exception:
     _ph0 = False
 
+try:
+    from .lam_viewport_overlay_config import STARTUP_CHECK_PLAY_CAMERA_FLY as _cf0
+except Exception:
+    _cf0 = False
+
 # 토글(체크박스) 상태 — 시뮬창/HUD 동기화용
 _toggle_foup_status: bool = _f0
 _toggle_device_labels: bool = _d0
 _toggle_pick_whitelist: bool = _p0
 _toggle_play_prim_hide: bool = bool(_ph0)
+_toggle_play_camera_fly: bool = bool(_cf0)
 
 # 토글이 UI/모델 이벤트로 왕복하는 것을 막기 위한 디바운스(초단기 반전 무시)
 _last_toggle_change_ts: Dict[str, float] = {"foup": 0.0, "device": 0.0, "pick": 0.0}
@@ -105,9 +111,11 @@ _ui_model_foup: Any = None
 _ui_model_device: Any = None
 _ui_model_pick: Any = None
 _ui_model_play_prim_hide: Any = None
+_ui_model_play_camera_fly: Any = None
 _ui_model_syncing: bool = False
 _ui_model_hooks_installed: bool = False
 _ui_model_play_prim_hook_installed: bool = False
+_ui_model_play_camera_fly_hook_installed: bool = False
 
 
 def ui_models_are_syncing() -> bool:
@@ -479,6 +487,82 @@ def set_toggle_play_prim_hide(enabled: bool, *, from_ui_model: bool = False) -> 
 def get_toggle_play_prim_hide() -> bool:
     with _lock:
         return bool(_toggle_play_prim_hide)
+
+
+def _ensure_play_camera_fly_ui_model() -> None:
+    global _ui_model_play_camera_fly
+    if _ui_model_play_camera_fly is not None:
+        _install_play_camera_fly_ui_hook()
+        return
+    try:
+        import omni.ui as ui  # type: ignore
+        from omni.ui import SimpleBoolModel  # type: ignore
+    except Exception:
+        return
+    with _ui_models_lock:
+        if _ui_model_play_camera_fly is None:
+            _ui_model_play_camera_fly = SimpleBoolModel(
+                bool(get_toggle_play_camera_fly())
+            )
+    _install_play_camera_fly_ui_hook()
+
+
+def _install_play_camera_fly_ui_hook() -> None:
+    global _ui_model_play_camera_fly_hook_installed
+    if _ui_model_play_camera_fly_hook_installed or _ui_model_play_camera_fly is None:
+        return
+
+    def _on_changed(*_a: Any) -> None:
+        if ui_models_are_syncing():
+            return
+        try:
+            v = _read_model_bool(_ui_model_play_camera_fly)
+            set_toggle_play_camera_fly(v, from_ui_model=True)
+        except Exception:
+            pass
+
+    for hook in ("add_value_changed_fn", "add_item_changed_fn"):
+        try:
+            fn = getattr(_ui_model_play_camera_fly, hook, None)
+            if callable(fn):
+                fn(_on_changed)
+        except Exception:
+            pass
+    _ui_model_play_camera_fly_hook_installed = True
+
+
+def get_ui_model_play_camera_fly() -> Any:
+    _ensure_play_camera_fly_ui_model()
+    return _ui_model_play_camera_fly
+
+
+def _sync_ui_model_play_camera_fly() -> None:
+    global _ui_model_syncing
+    _ensure_play_camera_fly_ui_model()
+    if _ui_model_play_camera_fly is None:
+        return
+    if _ui_model_syncing:
+        return
+    _ui_model_syncing = True
+    try:
+        _ui_model_play_camera_fly.set_value(bool(get_toggle_play_camera_fly()))
+    except Exception:
+        pass
+    finally:
+        _ui_model_syncing = False
+
+
+def set_toggle_play_camera_fly(enabled: bool, *, from_ui_model: bool = False) -> None:
+    with _lock:
+        global _toggle_play_camera_fly
+        _toggle_play_camera_fly = bool(enabled)
+    if not from_ui_model:
+        _sync_ui_model_play_camera_fly()
+
+
+def get_toggle_play_camera_fly() -> bool:
+    with _lock:
+        return bool(_toggle_play_camera_fly)
 
 
 def update_progress_snap(snap: Dict[str, Any]) -> None:

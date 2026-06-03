@@ -329,6 +329,23 @@ class LamCsvViewportControlsHud:
                                                 flush=True,
                                             )
                                         try:
+                                            self._csv.mount_play_camera_fly_checkbox_ui(
+                                                ui,
+                                                label_width=_CHECKBOX_LABEL_WIDTH,
+                                                row_height=_CHECKBOX_ROW_HEIGHT,
+                                                spacing=4,
+                                            )
+                                            self._csv.mount_play_camera_capture_button_ui(
+                                                ui,
+                                                width=52,
+                                                height=_CHECKBOX_ROW_HEIGHT,
+                                            )
+                                        except Exception as exc:
+                                            print(
+                                                f"{_PRINT_PREFIX} play camera fly UI: {exc}",
+                                                flush=True,
+                                            )
+                                        try:
                                             self._csv.mount_play_prim_hide_checkbox_ui(
                                                 ui,
                                                 label_width=_CHECKBOX_LABEL_WIDTH,

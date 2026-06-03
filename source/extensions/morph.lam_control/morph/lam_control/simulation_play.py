@@ -4348,6 +4348,7 @@ def run_simulation_from_csv(
     initial_json_done: int = 0,
     reset_wafer_visibility: bool = True,
     wall_elapsed_offset: float = 0.0,
+    skip_play_prim_hide: bool = False,
 ) -> None:
     """CSV ``eqp_start_tm`` 동기 재생: 시각까지 대기 → 로그 → 이벤트 JSON (``speed_scale`` 배속).
 
@@ -4355,6 +4356,7 @@ def run_simulation_from_csv(
     ``process_only=True`` 이면 공정만보기(배속 1x, CSV 시각·레인 내 빈 구간만 생략).
     ``resume_from_csv_sec`` > 0 이면 해당 CSV 시각부터 이어서 재생.
     ``wall_elapsed_offset`` — 일시정지 이어서 재생 시 실경과 누적 [s].
+    ``skip_play_prim_hide=True`` — play_start prim 숨김을 호출측에서 이미 수행한 경우.
 
     Note:
         UI 스레드 안전을 위해 **백그라운드 스레드**에서 호출할 것.
@@ -4382,12 +4384,13 @@ def run_simulation_from_csv(
             )
             return
 
-        try:
-            from .lam_play_prim_hide import apply_play_prim_hide_phase
+        if not skip_play_prim_hide:
+            try:
+                from .lam_play_prim_hide import apply_play_prim_hide_phase
 
-            apply_play_prim_hide_phase("play_start")
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} play prim hide (play_start): {exc}", flush=True)
+                apply_play_prim_hide_phase("play_start")
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} play prim hide (play_start): {exc}", flush=True)
 
         n_act = len(action_blocks)
         n_all = len(blocks)
@@ -4501,6 +4504,7 @@ class LamSimulationCsvPlayWindow:
         self._device_labels_show_model: Any = None
         self._pick_whitelist_model: Any = None
         self._play_prim_hide_model: Any = None
+        self._play_camera_fly_model: Any = None
         self._overlay_checkbox_syncing: bool = False
         self._overlay_checkbox_initialized: bool = False
         self._overlay_apply_pending: bool = False
@@ -4676,6 +4680,21 @@ class LamSimulationCsvPlayWindow:
                 except Exception:
                     _ph_def = False
                 self._play_prim_hide_model = SimpleBoolModel(_ph_def)
+        if self._play_camera_fly_model is None:
+            try:
+                from .lam_viewport_overlay_state import get_ui_model_play_camera_fly
+
+                self._play_camera_fly_model = get_ui_model_play_camera_fly()
+            except Exception:
+                try:
+                    from .lam_viewport_overlay_config import (  # type: ignore
+                        STARTUP_CHECK_PLAY_CAMERA_FLY,
+                    )
+
+                    _cf_def = bool(STARTUP_CHECK_PLAY_CAMERA_FLY)
+                except Exception:
+                    _cf_def = False
+                self._play_camera_fly_model = SimpleBoolModel(_cf_def)
         register_csv_play_timeline_window(self)
 
     # NOTE: overlay 토글은 changed_fn/모델 이벤트로만 동기화한다.
@@ -4796,6 +4815,58 @@ class LamSimulationCsvPlayWindow:
                 tooltip="Viewport 클릭 선택을 whitelist 루트로 제한",
             )
             ui.Spacer()
+
+    def mount_play_camera_fly_checkbox_ui(
+        self,
+        ui: Any,
+        *,
+        label_width: int = 52,
+        row_height: int = 22,
+        spacing: int = 4,
+    ) -> None:
+        """「Play시점이동」 — preset 뷰로 fly 후 재생 (일시정지 이어서 제외)."""
+        self.ensure_playback_models()
+        m = self._play_camera_fly_model
+        if m is None:
+            return
+        with ui.HStack(spacing=int(spacing), height=int(row_height)):
+            ui.Label("Play시점", width=int(label_width), height=int(row_height))
+            ui.CheckBox(
+                model=m,
+                width=20,
+                height=int(row_height),
+                tooltip=(
+                    "체크 후 Play: 설정 뷰로 부드럽게 이동한 뒤 prim숨김·재생. "
+                    "preset: lam_viewport_overlay_config PLAY_CAMERA_PRESET"
+                ),
+            )
+            ui.Spacer()
+
+    def mount_play_camera_capture_button_ui(
+        self,
+        ui: Any,
+        *,
+        width: int = 52,
+        height: int = 22,
+    ) -> None:
+        """현재 뷰포트 시점 캡처 → 콘솔에 config 붙여넣기 블록 출력."""
+        self.ensure_playback_models()
+
+        def _on_click() -> None:
+            try:
+                from .lam_play_camera_fly import log_play_camera_preset_capture
+
+                log_play_camera_preset_capture()
+            except Exception as exc:
+                self._log(f"뷰 저장 실패: {exc}")
+
+        ui.Button(
+            "뷰저장",
+            width=int(width),
+            height=int(height),
+            clicked_fn=_on_click,
+            tooltip="현재 뷰 eye/target → 콘솔 로그 (config에 붙여넣기)",
+        )
 
     def mount_play_prim_hide_checkbox_ui(
         self,
@@ -5050,6 +5121,8 @@ class LamSimulationCsvPlayWindow:
                 except Exception as exc:
                     self._log(f"overlay feature checkboxes UI: {exc}")
                 try:
+                    self.mount_play_camera_fly_checkbox_ui(ui, label_width=88)
+                    self.mount_play_camera_capture_button_ui(ui, width=52)
                     self.mount_play_prim_hide_checkbox_ui(ui, label_width=88)
                 except Exception as exc:
                     self._log(f"play prim hide checkbox UI: {exc}")
@@ -6143,6 +6216,27 @@ class LamSimulationCsvPlayWindow:
                             ticker.stop()
                         set_csv_playback_compact_log(False)
 
+                if not resume_from_pause:
+                    try:
+                        from .lam_play_camera_fly import run_play_camera_fly_before_start
+
+                        run_play_camera_fly_before_start()
+                    except Exception as exc:
+                        print(
+                            f"{_PRINT_PREFIX} play camera fly: {exc}",
+                            flush=True,
+                        )
+
+                try:
+                    from .lam_play_prim_hide import apply_play_prim_hide_phase
+
+                    apply_play_prim_hide_phase("play_start")
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} play prim hide (play_start): {exc}",
+                        flush=True,
+                    )
+
                 run_simulation_from_csv(
                     self._registry,
                     self._scheduler,
@@ -6154,6 +6248,7 @@ class LamSimulationCsvPlayWindow:
                     initial_json_done=initial_json_done,
                     reset_wafer_visibility=reset_wafer,
                     wall_elapsed_offset=wall_elapsed_offset,
+                    skip_play_prim_hide=True,
                 )
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} CSV Play 오류: {exc}", flush=True)
