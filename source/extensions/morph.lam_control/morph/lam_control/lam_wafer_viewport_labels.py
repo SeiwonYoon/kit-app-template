@@ -58,7 +58,7 @@ _FRAME_SLOT = "morph.lam_control:wafer_foup_labels"
 _LABEL_FONT_SIZE = 16
 _LABEL_COLOR = (1.0, 1.0, 1.0, 1.0)
 
-# 위치 추적: 매 post_update 프레임마다 Transform 만 갱신 (구조 변경 시에만 Scene 재생성)
+# 위치 추적: FOUP baseline(정적) / 팔·장비(동적) 분리 — 동적만 update 스트림에서 Transform 갱신
 
 FOUP_LABEL_SLOT_KEYS: Tuple[str, ...] = tuple(
     f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
@@ -352,6 +352,7 @@ class WaferNumberLabelTracker:
         self._lock = threading.Lock()
         self._prim_to_label: Dict[str, str] = {}
         self._arm_carried: Dict[str, str] = {}
+        self._foup_baseline_paths: set[str] = set()
         self._revision: int = 0
 
     @property
@@ -389,6 +390,7 @@ class WaferNumberLabelTracker:
         with self._lock:
             self._prim_to_label.clear()
             self._arm_carried.clear()
+            self._foup_baseline_paths.clear()
             self._bump_revision()
 
     def reset_foup_baseline(
@@ -401,6 +403,7 @@ class WaferNumberLabelTracker:
         with self._lock:
             self._prim_to_label.clear()
             self._arm_carried.clear()
+            self._foup_baseline_paths.clear()
             wm = wafer_map or load_wafer_prim_by_slot_key()
             if wafer_label_show_foup_slot_numbers():
                 for sk in FOUP_LABEL_SLOT_KEYS:
@@ -409,7 +412,9 @@ class WaferNumberLabelTracker:
                     if stage is not None and path:
                         path = resolve_wafer_prim_path_on_stage(stage, sk, path)
                     if label and path:
-                        self._prim_to_label[_normalize_path_key(path)] = label
+                        key = _normalize_path_key(path)
+                        self._prim_to_label[key] = label
+                        self._foup_baseline_paths.add(key)
             self._bump_revision()
             return len(self._prim_to_label)
 
@@ -570,21 +575,44 @@ class WaferNumberLabelTracker:
 
     def iter_visible_labels(self, stage: Usd.Stage) -> List[Tuple[str, str]]:
         """visible 인 항목 우선; 없으면 stage 에 있는 mapped prim 전부 (visibility 오판 대비)."""
+        static, dynamic = self.iter_visible_labels_split(stage)
+        return list(static) + list(dynamic)
+
+    def iter_visible_labels_split(
+        self, stage: Usd.Stage
+    ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
+        """(FOUP baseline 정적, 팔·장비 등 동적) — 동적만 매 update 프레임 위치 갱신."""
         with self._lock:
             items = list(self._prim_to_label.items())
-        visible: List[Tuple[str, str]] = []
-        any_on_stage: List[Tuple[str, str]] = []
+            foup_base = set(self._foup_baseline_paths)
+
+        static_vis: List[Tuple[str, str]] = []
+        static_on_stage: List[Tuple[str, str]] = []
+        dynamic_vis: List[Tuple[str, str]] = []
+        dynamic_on_stage: List[Tuple[str, str]] = []
+
         for path, text in items:
             if not path or not text:
                 continue
             prim = stage.GetPrimAtPath(path)
             if not prim or not prim.IsValid():
                 continue
-            any_on_stage.append((path, text))
-            if _prim_is_visible(prim):
-                visible.append((path, text))
-        chosen = visible if visible else any_on_stage
-        return _filter_labels_for_draw(chosen, stage)
+            is_foup = path in foup_base
+            if is_foup:
+                static_on_stage.append((path, text))
+                if _prim_is_visible(prim):
+                    static_vis.append((path, text))
+            else:
+                dynamic_on_stage.append((path, text))
+                if _prim_is_visible(prim):
+                    dynamic_vis.append((path, text))
+
+        static_chosen = static_vis if static_vis else static_on_stage
+        dynamic_chosen = dynamic_vis if dynamic_vis else dynamic_on_stage
+        return (
+            _filter_labels_for_draw(static_chosen, stage),
+            _filter_labels_for_draw(dynamic_chosen, stage),
+        )
 
     def mapped_prim_count(self) -> int:
         with self._lock:
@@ -642,6 +670,7 @@ class LamWaferFoupViewportLabels:
         self._built = False
         self._sched_token = 0
         self._post_update_sub: Any = None
+        self._update_sub: Any = None
         self._last_drawn_count = -1
         self._last_drawn_fingerprint: Tuple[Tuple[str, str], ...] = ()
         self._last_tracker_revision = -1
@@ -694,32 +723,53 @@ class LamWaferFoupViewportLabels:
             print(f"{_PRINT_PREFIX} SceneView removed (labels off)", flush=True)
 
     def _stop_position_poll(self) -> None:
-        if self._post_update_sub is not None:
-            try:
-                self._post_update_sub.unsubscribe()
-            except Exception:
-                pass
-            self._post_update_sub = None
+        for attr in ("_post_update_sub", "_update_sub"):
+            sub = getattr(self, attr, None)
+            if sub is not None:
+                try:
+                    sub.unsubscribe()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     def _start_position_poll(self) -> None:
-        if self._post_update_sub is not None:
-            return
         try:
             import omni.kit.app as _app  # type: ignore
-
-            stream = _app.get_app().get_post_update_event_stream()
-
-            def _on_post_update(_event) -> None:
-                if not self._can_operate() or not self._built or not self._labels_root:
-                    return
-                self._rebuild_labels()
-
-            self._post_update_sub = stream.create_subscription_to_pop(
-                _on_post_update,
-                name="morph.lam_control:wafer_foup_labels_poll",
-            )
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} post_update subscribe failed: {exc}", flush=True)
+            print(f"{_PRINT_PREFIX} poll subscribe failed: {exc}", flush=True)
+            return
+
+        if self._update_sub is None:
+            try:
+                upd = _app.get_app().get_update_event_stream()
+
+                def _on_update(_event) -> None:
+                    if not self._can_operate() or not self._built or not self._labels_root:
+                        return
+                    self._tick_dynamic_label_positions()
+
+                self._update_sub = upd.create_subscription_to_pop(
+                    _on_update,
+                    name="morph.lam_control:wafer_foup_labels_dynamic",
+                )
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} update subscribe failed: {exc}", flush=True)
+
+        if self._post_update_sub is None:
+            try:
+                post = _app.get_app().get_post_update_event_stream()
+
+                def _on_post_update(_event) -> None:
+                    if not self._can_operate() or not self._built or not self._labels_root:
+                        return
+                    self._rebuild_labels()
+
+                self._post_update_sub = post.create_subscription_to_pop(
+                    _on_post_update,
+                    name="morph.lam_control:wafer_foup_labels_structure",
+                )
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} post_update subscribe failed: {exc}", flush=True)
 
     def sync_layers(self, *, delay_frames: int = 12) -> None:
         if not wafer_viewport_labels_enabled():
@@ -778,7 +828,7 @@ class LamWaferFoupViewportLabels:
             return
         if self._built and self._viewport_window is viewport_window:
             self._schedule_rebuild_labels()
-            if self._post_update_sub is None:
+            if self._update_sub is None or self._post_update_sub is None:
                 self._start_position_poll()
             return
         if self._built:
@@ -806,7 +856,16 @@ class LamWaferFoupViewportLabels:
         self,
         prim: Usd.Prim,
         bbox_cache: Optional[UsdGeom.BBoxCache],
+        *,
+        xform_cache: Optional[UsdGeom.XformCache] = None,
     ) -> Optional[Tuple[float, float, float]]:
+        if xform_cache is not None:
+            try:
+                m = xform_cache.GetLocalToWorldTransform(prim)
+                t = m.ExtractTranslation()
+                return (float(t[0]), float(t[1]), float(t[2]))
+            except Exception:
+                pass
         if bbox_cache is not None:
             try:
                 bbox = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
@@ -815,6 +874,16 @@ class LamWaferFoupViewportLabels:
             except Exception:
                 pass
         return _prim_world_center(prim)
+
+    def _tick_dynamic_label_positions(self) -> None:
+        """팔·장비 등 이동 prim — TBS 애니(update) 직후 Xform 으로 위치만 갱신."""
+        stage = self._get_stage()
+        if not stage:
+            return
+        _static, dynamic = get_wafer_label_tracker().iter_visible_labels_split(stage)
+        if not dynamic:
+            return
+        self._update_label_positions(stage, dynamic, prefer_xform_cache=True)
 
     def _rebuild_labels(self) -> None:
         if not self._can_operate() or not self._built or not self._labels_root:
@@ -826,9 +895,17 @@ class LamWaferFoupViewportLabels:
             return
 
         tracker = get_wafer_label_tracker()
-        entries = tracker.iter_visible_labels(stage)
-        mapped = tracker.mapped_prim_count()
         rev = tracker.revision
+        if (
+            rev == self._last_tracker_revision
+            and self._label_transforms
+            and self._last_tracker_revision >= 0
+        ):
+            return
+
+        static_entries, dynamic_entries = tracker.iter_visible_labels_split(stage)
+        entries = list(static_entries) + list(dynamic_entries)
+        mapped = tracker.mapped_prim_count()
         fingerprint = tuple(sorted((a, b) for a, b in entries))
 
         if mapped > 0 and len(entries) == 0 and self._last_drawn_count != -2:
@@ -839,31 +916,21 @@ class LamWaferFoupViewportLabels:
             )
             self._last_drawn_count = -2
 
-        structural = (
+        if (
             len(entries) != self._last_drawn_count
             or fingerprint != self._last_drawn_fingerprint
             or rev != self._last_tracker_revision
-            or set(self._label_transforms.keys()) != {p for p, _ in entries}
-        )
-
-        if structural:
-            if (
-                len(entries) != self._last_drawn_count
-                or fingerprint != self._last_drawn_fingerprint
-                or rev != self._last_tracker_revision
-            ):
-                print(
-                    f"{_PRINT_PREFIX} drawing {len(entries)} label(s) "
-                    f"(mapped={mapped}, rev={rev})",
-                    flush=True,
-                )
-            self._last_drawn_count = len(entries)
-            self._last_drawn_fingerprint = fingerprint
-            self._last_tracker_revision = rev
-            self._sync_label_structure(stage, entries)
-            return
-
-        self._update_label_positions(stage, entries)
+        ):
+            print(
+                f"{_PRINT_PREFIX} drawing {len(entries)} label(s) "
+                f"(static={len(static_entries)} dynamic={len(dynamic_entries)} "
+                f"mapped={mapped} rev={rev})",
+                flush=True,
+            )
+        self._last_drawn_count = len(entries)
+        self._last_drawn_fingerprint = fingerprint
+        self._last_tracker_revision = rev
+        self._sync_label_structure(stage, entries)
 
     def _sync_label_structure(
         self, stage: Usd.Stage, entries: List[Tuple[str, str]]
@@ -892,38 +959,46 @@ class LamWaferFoupViewportLabels:
                     self._label_transforms[path_str] = root
 
     def _update_label_positions(
-        self, stage: Usd.Stage, entries: List[Tuple[str, str]]
+        self,
+        stage: Usd.Stage,
+        entries: List[Tuple[str, str]],
+        *,
+        prefer_xform_cache: bool = False,
     ) -> None:
         if not entries:
-            if self._label_transforms:
-                self._labels_root.clear()
-                self._label_transforms.clear()
             return
 
         bbox_cache: Optional[UsdGeom.BBoxCache] = None
-        try:
-            bbox_cache = UsdGeom.BBoxCache(
-                Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
-            )
-        except Exception:
-            bbox_cache = None
+        xform_cache: Optional[UsdGeom.XformCache] = None
+        if prefer_xform_cache:
+            try:
+                xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+            except Exception:
+                xform_cache = None
+        else:
+            try:
+                bbox_cache = UsdGeom.BBoxCache(
+                    Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
+                )
+            except Exception:
+                bbox_cache = None
 
-        for path_str, text in entries:
+        for path_str, _text in entries:
             prim = stage.GetPrimAtPath(path_str)
             if not prim or not prim.IsValid():
                 continue
-            pos = self._prim_world_pos(prim, bbox_cache)
+            pos = self._prim_world_pos(
+                prim, bbox_cache, xform_cache=xform_cache
+            )
             if pos is None:
                 continue
             node = self._label_transforms.get(path_str)
             if node is None:
-                self._sync_label_structure(stage, entries)
-                return
+                continue
             try:
                 node.transform = sc.Matrix44.get_translation_matrix(*pos)
             except Exception:
-                self._sync_label_structure(stage, entries)
-                return
+                continue
 
     def _build_one_label(
         self, world_pos: Tuple[float, float, float], text: str
