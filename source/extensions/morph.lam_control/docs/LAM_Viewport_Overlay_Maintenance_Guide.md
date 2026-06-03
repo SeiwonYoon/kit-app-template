@@ -154,7 +154,23 @@ v1 기본:
 
 ---
 
-## 6) (설계만) 웨이퍼·슬롯 시간별 스냅샷 / 추후 프리런
+## 6) CSV Play prim 숨김 (설정 SSOT · 구현 예정)
+
+**설정 파일:** `morph/lam_control/lam_viewport_overlay_config.py` — **「CSV Play 시 prim 숨김/보임」** 섹션
+
+| 항목 | 변수 |
+|------|------|
+| 숨길 prim 목록 | `PLAY_HIDE_PRIM_SPECS` (`PlayHidePrimSpec` — `prim_path` + 항목별 fade) |
+| 정지(초기화) 시 복구 | `PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET` |
+| 전역 fade | `PLAY_HIDE_FADE_ENABLED`, `PLAY_HIDE_FADE_DURATION_SEC`, `PLAY_HIDE_FADE_HIDE_IN`, `PLAY_HIDE_FADE_SHOW_IN` |
+| 앱 시작 체크 | `STARTUP_CHECK_PLAY_PRIM_HIDE` |
+
+**동작(구현 후):** Play 시작 / 정지(초기화) / Viewport 「prim숨김」체크 — 공통 함수 + phase 플래그.  
+Fade 미구현 시 `PLAY_HIDE_FADE_ENABLED=False` 로 즉시 hide/show.
+
+---
+
+## 7) (설계만) 웨이퍼·슬롯 시간별 스냅샷 / 추후 프리런
 
 **구현 전** 요구사항·데이터 모델은 아래 문서에 정리되어 있다. CSV Play 동작은 변경하지 않고 관측 레이어만 추가하는 방향이다.
 

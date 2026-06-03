@@ -4382,6 +4382,13 @@ def run_simulation_from_csv(
             )
             return
 
+        try:
+            from .lam_play_prim_hide import apply_play_prim_hide_phase
+
+            apply_play_prim_hide_phase("play_start")
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} play prim hide (play_start): {exc}", flush=True)
+
         n_act = len(action_blocks)
         n_all = len(blocks)
         src = "캐시" if from_cache else "빌드"
@@ -4493,6 +4500,7 @@ class LamSimulationCsvPlayWindow:
         self._foup_status_show_model: Any = None
         self._device_labels_show_model: Any = None
         self._pick_whitelist_model: Any = None
+        self._play_prim_hide_model: Any = None
         self._overlay_checkbox_syncing: bool = False
         self._overlay_checkbox_initialized: bool = False
         self._overlay_apply_pending: bool = False
@@ -4503,6 +4511,7 @@ class LamSimulationCsvPlayWindow:
         self._hud_schedule_row_labels: List[Any] = []
         self._hud_build_progress_model: Any = None
         self._csv_play_thread: Optional[threading.Thread] = None
+        self._csv_play_launch_lock = threading.Lock()
         self._csv_build_thread: Optional[threading.Thread] = None
         self._prepared_playback: Optional[CachedCsvPlayback] = None
         self._build_ui_ticker: Optional[_SecondsIntervalProgress] = None
@@ -4652,6 +4661,21 @@ class LamSimulationCsvPlayWindow:
                 except Exception:
                     _pick_def = False
                 self._pick_whitelist_model = SimpleBoolModel(_pick_def)
+        if self._play_prim_hide_model is None:
+            try:
+                from .lam_viewport_overlay_state import get_ui_model_play_prim_hide
+
+                self._play_prim_hide_model = get_ui_model_play_prim_hide()
+            except Exception:
+                try:
+                    from .lam_viewport_overlay_config import (  # type: ignore
+                        STARTUP_CHECK_PLAY_PRIM_HIDE,
+                    )
+
+                    _ph_def = bool(STARTUP_CHECK_PLAY_PRIM_HIDE)
+                except Exception:
+                    _ph_def = False
+                self._play_prim_hide_model = SimpleBoolModel(_ph_def)
         register_csv_play_timeline_window(self)
 
     # NOTE: overlay 토글은 changed_fn/모델 이벤트로만 동기화한다.
@@ -4770,6 +4794,29 @@ class LamSimulationCsvPlayWindow:
                 width=20,
                 height=int(row_height),
                 tooltip="Viewport 클릭 선택을 whitelist 루트로 제한",
+            )
+            ui.Spacer()
+
+    def mount_play_prim_hide_checkbox_ui(
+        self,
+        ui: Any,
+        *,
+        label_width: int = 52,
+        row_height: int = 22,
+        spacing: int = 4,
+    ) -> None:
+        """「prim숨김」 체크박스 (체크 ON=숨김). 시뮬 재생창·HUD 공통."""
+        self.ensure_playback_models()
+        m = self._play_prim_hide_model
+        if m is None:
+            return
+        with ui.HStack(spacing=int(spacing), height=int(row_height)):
+            ui.Label("prim숨김", width=int(label_width), height=int(row_height))
+            ui.CheckBox(
+                model=m,
+                width=20,
+                height=int(row_height),
+                tooltip="체크 시 PLAY_HIDE_PRIM_SPECS 경로 prim 숨김 (설정: lam_viewport_overlay_config)",
             )
             ui.Spacer()
 
@@ -5002,6 +5049,10 @@ class LamSimulationCsvPlayWindow:
                     self.mount_overlay_feature_checkboxes_ui(ui)
                 except Exception as exc:
                     self._log(f"overlay feature checkboxes UI: {exc}")
+                try:
+                    self.mount_play_prim_hide_checkbox_ui(ui, label_width=88)
+                except Exception as exc:
+                    self._log(f"play prim hide checkbox UI: {exc}")
                 with ui.HStack(spacing=6, height=28):
                     ui.Label("재생 배속", width=70)
                     try:
@@ -5924,6 +5975,15 @@ class LamSimulationCsvPlayWindow:
                     self._registry,
                     self._scheduler,
                 )
+                try:
+                    from .lam_play_prim_hide import apply_play_prim_hide_phase
+
+                    apply_play_prim_hide_phase("play_stop_reset")
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} play prim hide (stop_reset): {exc}",
+                        flush=True,
+                    )
                 self._log(
                     "정지(초기화) 완료 — 위치(TBS)·visibility 복원 (콘솔 [LAM/Sim] 확인)"
                 )
@@ -5946,18 +6006,23 @@ class LamSimulationCsvPlayWindow:
         if not self._csv_paths:
             self._log("CSV 없음 — lam/csv 에 파일을 추가하세요.")
             return
-        if self._csv_play_thread_alive():
-            if csv_playback_stop_requested() or csv_play_pause_armed():
-                if not self._reap_csv_play_thread(timeout=30.0):
+        # UI(main) 스레드에서 join 하면 재생 스레드의 dispatch_main_wait 와 deadlock →
+        # 재생 중 이중 Play 는 즉시 무시만 한다.
+        with self._csv_play_launch_lock:
+            if self._csv_play_thread_alive():
+                if csv_playback_stop_requested() or csv_play_pause_armed():
                     self._log(
                         "일시정지·정지 처리 중입니다 — "
                         "잠시 후 [재생]을 다시 눌러 주세요."
                     )
-                    return
-            else:
-                self._log(
-                    "이미 재생 중 — [일시정지] 후 Play(이어서) 또는 [정지(초기화)] 하세요."
-                )
+                    self._schedule_reap_csv_play_thread_after_stop(
+                        timeout=45.0,
+                        done_log="",
+                    )
+                else:
+                    self._log(
+                        "이미 재생 중 — [일시정지] 후 Play(이어서) 또는 [정지(초기화)] 하세요."
+                    )
                 return
         path = self._selected_csv_path()
         if path is None:
@@ -6107,12 +6172,20 @@ class LamSimulationCsvPlayWindow:
                     self._apply_schedule_row_highlight(frozenset())
 
                 _post_kit_main_thread(_ui_clear)
-                self._csv_play_thread = None
+                with self._csv_play_launch_lock:
+                    self._csv_play_thread = None
 
-        self._csv_play_thread = threading.Thread(
+        play_thread = threading.Thread(
             target=_worker, daemon=True, name="lam-sim-csv-play"
         )
-        self._csv_play_thread.start()
+        with self._csv_play_launch_lock:
+            if self._csv_play_thread_alive():
+                self._log(
+                    "재생 시작이 겹쳤습니다 — 잠시 후 [재생]을 다시 눌러 주세요."
+                )
+                return
+            self._csv_play_thread = play_thread
+        play_thread.start()
 
     def _read_script_editor_text(self) -> str:
         m = self._script_model

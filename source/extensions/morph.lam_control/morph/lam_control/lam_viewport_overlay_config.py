@@ -20,6 +20,7 @@ STARTUP_CHECK_WAFER_LABELS: bool = False  # 웨이퍼번호보기
 STARTUP_CHECK_FOUP_STATUS: bool = True  # FOUP상태보기
 STARTUP_CHECK_DEVICE_LABELS: bool = True  # 기기정보보기
 STARTUP_CHECK_PICK_WHITELIST: bool = False  # 선택제한 (Viewport 클릭 whitelist)
+STARTUP_CHECK_PLAY_PRIM_HIDE: bool = False  # prim숨김 (Viewport HUD · CSV 본창)
 
 
 # ---------------------------------------------------------------------------
@@ -29,6 +30,50 @@ STARTUP_CHECK_PICK_WHITELIST: bool = False  # 선택제한 (Viewport 클릭 whit
 # False(기본): FOUP 슬롯 번호는 숨기고, 팔·aligner·chamber 등 나머지 슬롯만 표시.
 # True: FOUP 75슬롯에도 카세트 번호(01~25) 표시.
 WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS: bool = False
+
+
+# ---------------------------------------------------------------------------
+# CSV Play 시 prim 숨김/보임 (경로·fade 는 이 섹션만 수정)
+# Play 시작 · 정지(초기화) · 「prim숨김」체크박스 — 구현: lam_play_prim_hide.py
+# ---------------------------------------------------------------------------
+
+# 정지(초기화) 클릭 시 숨겨 두었던 prim 을 다시 보이게 할지
+PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET: bool = True
+
+# 전역 fade (항목별 fade_* 가 None 이면 아래 값 사용)
+# Play 시작(play_start) fade: MDL opacity_constant 있으면 RTX 투명 보간,
+# 없으면 하위 Gprim 순차 hide(progressive, 46개 등 CAD mesh).
+# 체크박스(ui_hide/ui_show) 는 항상 즉시.
+PLAY_HIDE_FADE_ENABLED: bool = False
+PLAY_HIDE_FADE_DURATION_SEC: float = 0.35
+# hide 시 1→0, show 시 0→1 (항목별 override 가능)
+PLAY_HIDE_FADE_HIDE_IN: bool = True
+PLAY_HIDE_FADE_SHOW_IN: bool = True
+
+
+@dataclass(frozen=True)
+class PlayHidePrimSpec:
+    """CSV Play 시 숨길(또는 체크박스로 토글할) prim 한 항목.
+
+    - ``prim_path``: stage 절대 경로 (존재하는 prim 만 적용).
+    - ``fade_*``: None 이면 전역 ``PLAY_HIDE_FADE_*`` 사용.
+    """
+
+    prim_path: str
+    fade_enabled: bool | None = None
+    fade_duration_sec: float | None = None
+    fade_hide_in: bool | None = None  # 숨길 때 fade in (불투명→투명)
+    fade_show_in: bool | None = None  # 보일 때 fade in (투명→불투명)
+
+
+# 사용자가 여기 리스트에 경로 추가/삭제 (DeviceLabelSpec 과 동일 패턴)
+PLAY_HIDE_PRIM_SPECS: List[PlayHidePrimSpec] = [
+    PlayHidePrimSpec(
+        prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1001_000___________1262",
+        fade_enabled=True,
+        fade_duration_sec=2,
+    ),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +280,14 @@ __all__ = [
     "STARTUP_CHECK_FOUP_STATUS",
     "STARTUP_CHECK_DEVICE_LABELS",
     "STARTUP_CHECK_PICK_WHITELIST",
+    "STARTUP_CHECK_PLAY_PRIM_HIDE",
+    "PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET",
+    "PLAY_HIDE_FADE_ENABLED",
+    "PLAY_HIDE_FADE_DURATION_SEC",
+    "PLAY_HIDE_FADE_HIDE_IN",
+    "PLAY_HIDE_FADE_SHOW_IN",
+    "PlayHidePrimSpec",
+    "PLAY_HIDE_PRIM_SPECS",
     "WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS",
     "CSV_COL_EQP_ID",
     "CSV_COL_LOT_ID",

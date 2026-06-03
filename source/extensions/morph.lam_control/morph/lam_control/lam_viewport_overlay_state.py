@@ -60,10 +60,16 @@ def _startup_toggle_defaults() -> tuple[bool, bool, bool]:
 
 _f0, _d0, _p0 = _startup_toggle_defaults()
 
+try:
+    from .lam_viewport_overlay_config import STARTUP_CHECK_PLAY_PRIM_HIDE as _ph0
+except Exception:
+    _ph0 = False
+
 # 토글(체크박스) 상태 — 시뮬창/HUD 동기화용
 _toggle_foup_status: bool = _f0
 _toggle_device_labels: bool = _d0
 _toggle_pick_whitelist: bool = _p0
+_toggle_play_prim_hide: bool = bool(_ph0)
 
 # 토글이 UI/모델 이벤트로 왕복하는 것을 막기 위한 디바운스(초단기 반전 무시)
 _last_toggle_change_ts: Dict[str, float] = {"foup": 0.0, "device": 0.0, "pick": 0.0}
@@ -98,8 +104,10 @@ _ui_models_lock = threading.Lock()
 _ui_model_foup: Any = None
 _ui_model_device: Any = None
 _ui_model_pick: Any = None
+_ui_model_play_prim_hide: Any = None
 _ui_model_syncing: bool = False
 _ui_model_hooks_installed: bool = False
+_ui_model_play_prim_hook_installed: bool = False
 
 
 def ui_models_are_syncing() -> bool:
@@ -189,6 +197,66 @@ def get_ui_model_pick_whitelist() -> Any:
     return _ui_model_pick
 
 
+def _ensure_play_prim_hide_ui_model() -> None:
+    global _ui_model_play_prim_hide
+    if _ui_model_play_prim_hide is not None:
+        _install_play_prim_hide_ui_hook()
+        return
+    try:
+        from omni.ui import SimpleBoolModel  # type: ignore
+    except Exception:
+        return
+    with _ui_models_lock:
+        if _ui_model_play_prim_hide is None:
+            _ui_model_play_prim_hide = SimpleBoolModel(bool(get_toggle_play_prim_hide()))
+    _install_play_prim_hide_ui_hook()
+
+
+def _install_play_prim_hide_ui_hook() -> None:
+    global _ui_model_play_prim_hook_installed
+    if _ui_model_play_prim_hook_installed or _ui_model_play_prim_hide is None:
+        return
+
+    def _on_changed(*_a: Any) -> None:
+        if _ui_model_syncing:
+            return
+        try:
+            v = _read_model_bool(_ui_model_play_prim_hide)
+            set_toggle_play_prim_hide(v, from_ui_model=True)
+        except Exception:
+            pass
+
+    for hook in ("add_value_changed_fn", "add_item_changed_fn"):
+        try:
+            fn = getattr(_ui_model_play_prim_hide, hook, None)
+            if callable(fn):
+                fn(_on_changed)
+        except Exception:
+            pass
+    _ui_model_play_prim_hook_installed = True
+
+
+def get_ui_model_play_prim_hide() -> Any:
+    _ensure_play_prim_hide_ui_model()
+    return _ui_model_play_prim_hide
+
+
+def _sync_ui_model_play_prim_hide() -> None:
+    global _ui_model_syncing
+    _ensure_play_prim_hide_ui_model()
+    if _ui_model_play_prim_hide is None:
+        return
+    if _ui_model_syncing:
+        return
+    _ui_model_syncing = True
+    try:
+        _ui_model_play_prim_hide.set_value(bool(get_toggle_play_prim_hide()))
+    except Exception:
+        pass
+    finally:
+        _ui_model_syncing = False
+
+
 def _sync_ui_model_values() -> None:
     """state -> UI 모델 값 동기화(재귀 방지)."""
     global _ui_model_syncing
@@ -230,6 +298,13 @@ def apply_startup_checkbox_side_effects() -> None:
             disable_pick_whitelist()
     except Exception:
         pass
+    if get_toggle_play_prim_hide():
+        try:
+            from .lam_play_prim_hide import apply_play_prim_hide_phase
+
+            apply_play_prim_hide_phase("ui_hide")
+        except Exception:
+            pass
 
 
 def register_toggle_listener(fn) -> None:
@@ -383,6 +458,29 @@ def get_toggle_pick_whitelist() -> bool:
         return bool(_toggle_pick_whitelist)
 
 
+def set_toggle_play_prim_hide(enabled: bool, *, from_ui_model: bool = False) -> None:
+    """「prim숨김」 체크 ON=숨김, OFF=보임."""
+    prev = get_toggle_play_prim_hide()
+    with _lock:
+        global _toggle_play_prim_hide
+        _toggle_play_prim_hide = bool(enabled)
+    if not from_ui_model:
+        _sync_ui_model_play_prim_hide()
+    if bool(enabled) == bool(prev):
+        return
+    try:
+        from .lam_play_prim_hide import apply_play_prim_hide_phase
+
+        apply_play_prim_hide_phase("ui_hide" if bool(enabled) else "ui_show")
+    except Exception as exc:
+        print(f"[LAM/OverlayState] play_prim_hide apply failed: {exc}", flush=True)
+
+
+def get_toggle_play_prim_hide() -> bool:
+    with _lock:
+        return bool(_toggle_play_prim_hide)
+
+
 def update_progress_snap(snap: Dict[str, Any]) -> None:
     with _lock:
         global _progress_snap
@@ -501,6 +599,7 @@ def get_snapshot() -> Dict[str, Any]:
             "toggle_foup_status": bool(_toggle_foup_status),
             "toggle_device_labels": bool(_toggle_device_labels),
             "toggle_pick_whitelist": bool(_toggle_pick_whitelist),
+            "toggle_play_prim_hide": bool(_toggle_play_prim_hide),
             "progress": dict(_progress_snap),
             "active_schedule_keys": tuple(_active_schedule_keys),
             "foup_counts": {k: v for k, v in _foup_counts.items()},
@@ -524,6 +623,9 @@ __all__ = [
     "get_ui_model_foup_status",
     "get_ui_model_device_labels",
     "get_ui_model_pick_whitelist",
+    "set_toggle_play_prim_hide",
+    "get_toggle_play_prim_hide",
+    "get_ui_model_play_prim_hide",
     "ui_models_are_syncing",
     "update_progress_snap",
     "get_progress_snap",

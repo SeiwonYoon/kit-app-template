@@ -328,6 +328,18 @@ class LamCsvViewportControlsHud:
                                                 f"{_PRINT_PREFIX} overlay feature checkboxes: {exc}",
                                                 flush=True,
                                             )
+                                        try:
+                                            self._csv.mount_play_prim_hide_checkbox_ui(
+                                                ui,
+                                                label_width=_CHECKBOX_LABEL_WIDTH,
+                                                row_height=_CHECKBOX_ROW_HEIGHT,
+                                                spacing=4,
+                                            )
+                                        except Exception as exc:
+                                            print(
+                                                f"{_PRINT_PREFIX} play prim hide checkbox: {exc}",
+                                                flush=True,
+                                            )
                                         with ui.HStack(spacing=4, height=26):
                                             ui.Label("배속", width=36)
                                             sp_m = self._csv._speed_model
