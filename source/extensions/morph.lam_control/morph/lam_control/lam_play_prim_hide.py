@@ -105,6 +105,59 @@ def _run_instant_on_main_wait(phase: str) -> bool:
     return bool(ok)
 
 
+def planned_play_prim_hide_duration_sec() -> float:
+    """play_start 숨김 예상 소요 — fade 합산, 없으면 즉시(≈0)."""
+    specs = _load_specs()
+    if not specs:
+        return 0.0
+    if _any_spec_fade_for_hide():
+        return sum(
+            _resolve_fade_duration(s)
+            for s in specs
+            if _resolve_fade_enabled(s) and _resolve_fade_hide_in(s)
+        )
+    return 0.0
+
+
+def kickoff_play_prim_hide_play_start(done: threading.Event) -> bool:
+    """play_start 숨김 — main 에 시작만 걸고 worker 는 ``done`` 으로 완료 대기."""
+    specs = _load_specs()
+    if not specs:
+        done.set()
+        return False
+
+    err: List[Optional[BaseException]] = [None]
+
+    def _kickoff() -> None:
+        try:
+            if _any_spec_fade_for_hide():
+                _start_play_hide_fade_chain(lambda: done.set())
+            else:
+                _apply_phase_instant("play_start")
+                done.set()
+        except BaseException as e:
+            err[0] = e
+            done.set()
+
+    try:
+        from .lam_sequence_engine import _dispatch_main_wait
+
+        if not _dispatch_main_wait(_kickoff, timeout=5.0):
+            print(f"{_PRINT_PREFIX} play_start kickoff timeout", flush=True)
+            done.set()
+            return False
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} play_start kickoff failed: {exc}", flush=True)
+        try:
+            _kickoff()
+        except Exception:
+            done.set()
+        return False
+    if err[0] is not None:
+        print(f"{_PRINT_PREFIX} play_start failed: {err[0]}", flush=True)
+    return True
+
+
 def _apply_play_start_fade_async() -> bool:
     """fade: main 에서 update 구독 시작 → 호출 스레드는 완료까지 wait (렌더는 계속)."""
     total = sum(
@@ -837,4 +890,9 @@ def _apply_phase_instant(phase: str) -> None:
     print(f"{_PRINT_PREFIX} unknown phase: {phase}", flush=True)
 
 
-__all__ = ["PlayHidePhase", "apply_play_prim_hide_phase"]
+__all__ = [
+    "PlayHidePhase",
+    "apply_play_prim_hide_phase",
+    "kickoff_play_prim_hide_play_start",
+    "planned_play_prim_hide_duration_sec",
+]

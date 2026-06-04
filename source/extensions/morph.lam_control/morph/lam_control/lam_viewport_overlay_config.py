@@ -29,9 +29,16 @@ STARTUP_CHECK_PLAY_CAMERA_FLY: bool = True  # Play 시 preset 뷰로 fly (일시
 # 「뷰 저장」버튼으로 콘솔에 출력된 블록을 eye_xyz / target_xyz 에 붙여넣기.
 # ---------------------------------------------------------------------------
 PLAY_CAMERA_PRESET_ENABLED: bool = True
-PLAY_CAMERA_FLY_DURATION_SEC: float = 3
+PLAY_CAMERA_FLY_DURATION_SEC: float = 2
 PLAY_CAMERA_FLY_POSITION_EPS_M: float = 0.05
 PLAY_CAMERA_FLY_DIRECTION_EPS_DEG: float = 1.0
+
+# Play 시작 단계 사이 대기 [s] — 기준 시각 기준으로 다음 단계 시작
+# 카메라→prim: (카메라 fly 끝) + PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC
+#   예) fly 2s, delay -2 → 동시 시작 / delay 0 → fly 직후 / delay +2 → fly 후 2s
+# prim→CSV: (prim 숨김 끝) + PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC (음수면 fade 중 재생 시작)
+PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC: float = -2
+PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC: float = 2
 
 
 @dataclass(frozen=True)
@@ -313,6 +320,8 @@ __all__ = [
     "PLAY_CAMERA_FLY_DURATION_SEC",
     "PLAY_CAMERA_FLY_POSITION_EPS_M",
     "PLAY_CAMERA_FLY_DIRECTION_EPS_DEG",
+    "PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC",
+    "PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC",
     "PlayCameraPresetSpec",
     "PLAY_CAMERA_PRESET",
     "PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET",

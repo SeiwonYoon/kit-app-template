@@ -430,19 +430,30 @@ def _start_fly_animation(
         _finish()
 
 
-def run_play_camera_fly_before_start() -> None:
-    """Play worker 스레드 — main 에 fly 구독 시작, worker 는 완료 Event 만 대기."""
+def will_run_play_camera_fly() -> bool:
     try:
         from .lam_viewport_overlay_state import get_toggle_play_camera_fly  # type: ignore
     except Exception:
-        return
-    if not get_toggle_play_camera_fly():
-        return
-    if not play_camera_preset_configured():
-        return
+        return False
+    return bool(get_toggle_play_camera_fly()) and play_camera_preset_configured()
+
+
+def planned_camera_fly_duration_sec() -> float:
+    """스케줄용 — fly 가 켜져 있으면 config duration (실제 스킵 시에도 동일)."""
+    if not will_run_play_camera_fly():
+        return 0.0
+    return play_camera_fly_duration_sec()
+
+
+def kickoff_play_camera_fly(done: threading.Event) -> bool:
+    """Play worker — main 에 fly 시작만 걸고 즉시 반환. 완료는 ``done``."""
+    if done is None:
+        raise ValueError("done event required")
+    if not will_run_play_camera_fly():
+        done.set()
+        return False
 
     preset = get_play_camera_preset()
-    done = threading.Event()
     fly_started = False
     err: List[Optional[BaseException]] = [None]
 
@@ -452,15 +463,12 @@ def run_play_camera_fly_before_start() -> None:
             current = capture_current_view()
             if current is None:
                 print(
-                    f"{_PRINT_PREFIX} 현재 뷰 읽기 실패 — fly 생략 후 재생 진행",
+                    f"{_PRINT_PREFIX} 현재 뷰 읽기 실패 — fly 생략",
                     flush=True,
                 )
                 return
             if views_are_close(current, preset):
-                print(
-                    f"{_PRINT_PREFIX} 현재 뷰 ≈ preset — fly 생략",
-                    flush=True,
-                )
+                print(f"{_PRINT_PREFIX} 현재 뷰 ≈ preset — fly 생략", flush=True)
                 return
             print(
                 f"{_PRINT_PREFIX} fly 시작 "
@@ -482,19 +490,31 @@ def run_play_camera_fly_before_start() -> None:
         if not _dispatch_main_wait(_kickoff_on_main, timeout=5.0):
             print(f"{_PRINT_PREFIX} fly kickoff timeout", flush=True)
             done.set()
+            return False
     except Exception as exc:
         print(f"{_PRINT_PREFIX} fly kickoff failed: {exc}", flush=True)
         done.set()
+        return False
+    if err[0] is not None:
+        print(f"{_PRINT_PREFIX} fly error: {err[0]}", flush=True)
+    return bool(fly_started)
 
+
+def run_play_camera_fly_before_start() -> None:
+    """Play worker — fly 완료까지 대기 (레거시·단독 호출용)."""
+    if not will_run_play_camera_fly():
+        return
+    done = threading.Event()
+    kicked = kickoff_play_camera_fly(done)
+    if not kicked:
+        return
     wait_sec = play_camera_fly_duration_sec() + 8.0
     if not done.wait(timeout=wait_sec):
         print(
             f"{_PRINT_PREFIX} fly wait timeout ({wait_sec:.1f}s) — 재생 계속",
             flush=True,
         )
-    elif err[0] is not None:
-        print(f"{_PRINT_PREFIX} fly error: {err[0]}", flush=True)
-    elif fly_started:
+    else:
         print(f"{_PRINT_PREFIX} fly 완료", flush=True)
 
 
@@ -507,6 +527,9 @@ __all__ = [
     "log_play_camera_preset_capture",
     "play_camera_fly_duration_sec",
     "play_camera_preset_configured",
+    "kickoff_play_camera_fly",
+    "planned_camera_fly_duration_sec",
     "run_play_camera_fly_before_start",
     "views_are_close",
+    "will_run_play_camera_fly",
 ]

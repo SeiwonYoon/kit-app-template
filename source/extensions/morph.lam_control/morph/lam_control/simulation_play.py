@@ -6218,24 +6218,14 @@ class LamSimulationCsvPlayWindow:
 
                 if not resume_from_pause:
                     try:
-                        from .lam_play_camera_fly import run_play_camera_fly_before_start
+                        from .lam_play_start_sequence import run_play_start_preflight
 
-                        run_play_camera_fly_before_start()
+                        run_play_start_preflight(resume_from_pause=False)
                     except Exception as exc:
                         print(
-                            f"{_PRINT_PREFIX} play camera fly: {exc}",
+                            f"{_PRINT_PREFIX} play start preflight: {exc}",
                             flush=True,
                         )
-
-                try:
-                    from .lam_play_prim_hide import apply_play_prim_hide_phase
-
-                    apply_play_prim_hide_phase("play_start")
-                except Exception as exc:
-                    print(
-                        f"{_PRINT_PREFIX} play prim hide (play_start): {exc}",
-                        flush=True,
-                    )
 
                 run_simulation_from_csv(
                     self._registry,
