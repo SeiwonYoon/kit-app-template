@@ -2,7 +2,7 @@
 
 - FOUP 75슬롯 번호 표시 여부: ``lam_viewport_overlay_config.WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS``.
 - CSV Play 시작 baseline: 위 설정이 True 일 때만 FOUP1~3×25 에 번호 등록.
-- ``PRIM_VISIBILITY`` (pick hide SLOT / show ARM, place 반대) 실행 시
+- ``PRIM_VISIBILITY`` (pick hide SLOT / show ARM; place 는 팔 hide 시 SLOT 으로 이식) 실행 시
   ``WaferNumberLabelTracker`` 가 **동일 카세트 번호**를 팔·airlock·chamber 등으로 옮긴다.
 - airlock/chamber/aligner 슬롯 인덱스(1·2)가 아니라 **FOUP 에서 올린 웨이퍼 번호**가 유지된다.
 - 각 JSON 의 hide → show: hide 쪽 번호를 show prim 에 **항상** 이식 (hide 맵 항목은 제거해도 됨).
@@ -58,7 +58,7 @@ _FRAME_SLOT = "morph.lam_control:wafer_foup_labels"
 _LABEL_FONT_SIZE = 16
 _LABEL_COLOR = (1.0, 1.0, 1.0, 1.0)
 
-# 위치 추적: FOUP baseline(정적) / 팔·장비(동적) 분리 — 동적만 update 스트림에서 Transform 갱신
+# 위치 추적: FOUP baseline(정적) / 팔·장비(동적) 분리 — 동적은 post_update(TBS 이동 후)
 
 FOUP_LABEL_SLOT_KEYS: Tuple[str, ...] = tuple(
     f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
@@ -539,20 +539,40 @@ class WaferNumberLabelTracker:
                         changed = True
             elif po == "place":
                 if is_slot and visible:
+                    # 슬롯 show 만으로 prim 맵에 슬롯 경로를 넣지 않음 — 번호가 목적지로
+                    # 먼저 점프하고 웨이퍼(팔)는 뒤늦게 따라오는 현상 방지.
                     label = self._label_on_arm_for_place(arm_p, arm_sk)
                     if not label:
                         label = explicit or cassette
                     if label:
-                        self._prim_to_label[p] = label
                         if arm_sk:
                             self._arm_carried[arm_sk] = label
+                        if arm_p:
+                            self._assign_label_to_arm_paths(
+                                label,
+                                arm_sk=arm_sk,
+                                arm_p=arm_p,
+                                stage=stage,
+                            )
                         changed = True
                 elif is_arm and not visible:
                     label = self._pop_label_for_aliases(
                         p, arm_sk, arm_p, stage=stage
                     )
-                    if label and arm_sk:
-                        self._arm_carried[arm_sk] = label
+                    if not label and arm_sk:
+                        label = self._arm_carried.get(arm_sk)
+                    if label:
+                        placed = False
+                        for alias in _path_alias_set(
+                            slot_p, slot_key, slot_p, stage=stage
+                        ):
+                            if alias:
+                                self._prim_to_label[alias] = label
+                                placed = True
+                        if not placed and p:
+                            self._prim_to_label[p] = label
+                        if arm_sk:
+                            self._arm_carried.pop(arm_sk, None)
                         changed = True
             if changed:
                 self._bump_revision()
@@ -581,7 +601,7 @@ class WaferNumberLabelTracker:
     def iter_visible_labels_split(
         self, stage: Usd.Stage
     ) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]]]:
-        """(FOUP baseline 정적, 팔·장비 등 동적) — 동적만 매 update 프레임 위치 갱신."""
+        """(FOUP baseline 정적, 팔·장비 등 동적) — 동적만 post_update 에서 위치 갱신."""
         with self._lock:
             items = list(self._prim_to_label.items())
             foup_base = set(self._foup_baseline_paths)
@@ -670,7 +690,6 @@ class LamWaferFoupViewportLabels:
         self._built = False
         self._sched_token = 0
         self._post_update_sub: Any = None
-        self._update_sub: Any = None
         self._last_drawn_count = -1
         self._last_drawn_fingerprint: Tuple[Tuple[str, str], ...] = ()
         self._last_tracker_revision = -1
@@ -723,53 +742,34 @@ class LamWaferFoupViewportLabels:
             print(f"{_PRINT_PREFIX} SceneView removed (labels off)", flush=True)
 
     def _stop_position_poll(self) -> None:
-        for attr in ("_post_update_sub", "_update_sub"):
-            sub = getattr(self, attr, None)
-            if sub is not None:
-                try:
-                    sub.unsubscribe()
-                except Exception:
-                    pass
-                setattr(self, attr, None)
+        if self._post_update_sub is not None:
+            try:
+                self._post_update_sub.unsubscribe()
+            except Exception:
+                pass
+            self._post_update_sub = None
 
     def _start_position_poll(self) -> None:
+        if self._post_update_sub is not None:
+            return
         try:
             import omni.kit.app as _app  # type: ignore
+
+            post = _app.get_app().get_post_update_event_stream()
+
+            def _on_post_update(_event) -> None:
+                if not self._can_operate() or not self._built or not self._labels_root:
+                    return
+                # 구조(revision) → 위치: TBS translate(update) 이후 prim Xform 반영
+                self._rebuild_labels()
+                self._tick_dynamic_label_positions()
+
+            self._post_update_sub = post.create_subscription_to_pop(
+                _on_post_update,
+                name="morph.lam_control:wafer_foup_labels",
+            )
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} poll subscribe failed: {exc}", flush=True)
-            return
-
-        if self._update_sub is None:
-            try:
-                upd = _app.get_app().get_update_event_stream()
-
-                def _on_update(_event) -> None:
-                    if not self._can_operate() or not self._built or not self._labels_root:
-                        return
-                    self._tick_dynamic_label_positions()
-
-                self._update_sub = upd.create_subscription_to_pop(
-                    _on_update,
-                    name="morph.lam_control:wafer_foup_labels_dynamic",
-                )
-            except Exception as exc:
-                print(f"{_PRINT_PREFIX} update subscribe failed: {exc}", flush=True)
-
-        if self._post_update_sub is None:
-            try:
-                post = _app.get_app().get_post_update_event_stream()
-
-                def _on_post_update(_event) -> None:
-                    if not self._can_operate() or not self._built or not self._labels_root:
-                        return
-                    self._rebuild_labels()
-
-                self._post_update_sub = post.create_subscription_to_pop(
-                    _on_post_update,
-                    name="morph.lam_control:wafer_foup_labels_structure",
-                )
-            except Exception as exc:
-                print(f"{_PRINT_PREFIX} post_update subscribe failed: {exc}", flush=True)
+            print(f"{_PRINT_PREFIX} post_update subscribe failed: {exc}", flush=True)
 
     def sync_layers(self, *, delay_frames: int = 12) -> None:
         if not wafer_viewport_labels_enabled():
@@ -828,7 +828,7 @@ class LamWaferFoupViewportLabels:
             return
         if self._built and self._viewport_window is viewport_window:
             self._schedule_rebuild_labels()
-            if self._update_sub is None or self._post_update_sub is None:
+            if self._post_update_sub is None:
                 self._start_position_poll()
             return
         if self._built:
@@ -876,7 +876,7 @@ class LamWaferFoupViewportLabels:
         return _prim_world_center(prim)
 
     def _tick_dynamic_label_positions(self) -> None:
-        """팔·장비 등 이동 prim — TBS 애니(update) 직후 Xform 으로 위치만 갱신."""
+        """팔·장비 등 이동 prim — post_update 에서 Xform(이동 반영 후)으로 위치 갱신."""
         stage = self._get_stage()
         if not stage:
             return
@@ -973,6 +973,7 @@ class LamWaferFoupViewportLabels:
         if prefer_xform_cache:
             try:
                 xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+                xform_cache.SetTime(Usd.TimeCode.Default())
             except Exception:
                 xform_cache = None
         else:
