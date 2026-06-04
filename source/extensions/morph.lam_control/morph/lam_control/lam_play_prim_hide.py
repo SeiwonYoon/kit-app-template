@@ -2,6 +2,8 @@
 
 Fade 는 **update 이벤트(프레임)** 마다 opacity 를 갱신한다.
 (main 스레드 sleep 만 쓰면 뷰포트가 안 그려져 duration 후 한 번에 사라짐)
+
+Play 시작 fade: 이미 숨겨진 prim 은 다시 보이지 않음 — **현재 보이는 것만** fade hide.
 """
 
 from __future__ import annotations
@@ -332,8 +334,14 @@ def _preload_mdl_shader_inputs(slots: List[_ShaderOpacitySlot]) -> None:
         pass
 
 
-def _build_fade_targets(root_path: str) -> _FadeTargets:
+def _build_fade_targets(
+    root_path: str,
+    *,
+    visible_gprims_only: bool = False,
+) -> _FadeTargets:
     gpaths = _collect_gprim_paths(root_path)
+    if visible_gprims_only:
+        gpaths = [p for p in gpaths if _prim_is_draw_visible(p)]
     slots = _collect_shader_slots(gpaths)
     _preload_mdl_shader_inputs(slots)
     if not slots:
@@ -358,6 +366,39 @@ def _visibility_token(img: UsdGeom.Imageable) -> str:
     except Exception:
         pass
     return "inherited"
+
+
+def _prim_is_draw_visible(path: str) -> bool:
+    """현재 뷰포트에서 그려지는지(상속 포함)."""
+    _, img = _get_imageable(path)
+    if img is None:
+        return False
+    try:
+        vis = img.ComputeVisibility(Usd.TimeCode.Default())
+        return vis != UsdGeom.Tokens.invisible
+    except Exception:
+        return _visibility_token(img) != "invisible"
+
+
+def _read_mdl_opacity(targets: _FadeTargets) -> float:
+    """fade 시작 전 MDL opacity (없으면 1.0)."""
+    stage = _get_stage()
+    if stage is None or not targets.shader_slots:
+        return 1.0
+    vals: List[float] = []
+    for slot in targets.shader_slots:
+        prim = stage.GetPrimAtPath(slot.shader_path)
+        if not prim or not prim.IsValid():
+            continue
+        try:
+            inp = UsdShade.Shader(prim).GetInput(slot.input_name)
+            if inp and inp.HasAuthoredValue():
+                vals.append(float(inp.Get()))
+        except Exception:
+            pass
+    if not vals:
+        return 1.0
+    return float(max(0.0, min(1.0, max(vals))))
 
 
 def _capture_snapshot(path: str) -> None:
@@ -502,12 +543,23 @@ def _clear_mdl_fade_opacity(targets: _FadeTargets) -> None:
         pass
 
 
+def _play_start_nothing_visible_to_fade(path: str, targets: _FadeTargets) -> bool:
+    """Play 시작 — 이미 전부 숨김이면 fade 없이 스킵."""
+    if _prim_is_draw_visible(path):
+        use_mdl = targets.fade_mode == "mdl" and bool(targets.shader_slots)
+        if use_mdl:
+            return _read_mdl_opacity(targets) <= 0.01
+        return len(targets.sorted_gprim_paths) == 0
+    return True
+
+
 def _run_fade_on_update(
     *,
     duration_sec: float,
     to_visible: bool,
     targets: _FadeTargets,
     on_done: Callable[[], None],
+    from_current_visibility: bool = False,
 ) -> None:
     """main 스레드 — Kit update 마다 fade (mdl opacity 또는 progressive visibility)."""
     stage = _get_stage()
@@ -535,21 +587,40 @@ def _run_fade_on_update(
                 _set_visible_immediate(p, False)
     else:
         _capture_snapshot(path)
-        _set_visible_immediate(path, True)
-        if use_mdl:
-            _apply_mdl_fade_opacity(targets, 1.0)
+        if from_current_visibility:
+            if _play_start_nothing_visible_to_fade(path, targets):
+                _set_visible_immediate(path, False)
+                on_done()
+                return
+            if use_mdl:
+                start_op = _read_mdl_opacity(targets)
+                _apply_mdl_fade_opacity(targets, start_op)
+            else:
+                if not _prim_is_draw_visible(path):
+                    _set_visible_immediate(path, False)
+                    on_done()
+                    return
         else:
-            _show_all_gprims_under(targets)
+            _set_visible_immediate(path, True)
+            if use_mdl:
+                _apply_mdl_fade_opacity(targets, 1.0)
+            else:
+                _show_all_gprims_under(targets)
 
     print(
         f"{_PRINT_PREFIX} fade {'show' if to_visible else 'hide'} ({mode_label}): "
         f"{len(targets.gprim_paths)} Gprim, {len(targets.shader_slots)} shader, "
-        f"{duration_sec:.2f}s @ {path!r}",
+        f"{duration_sec:.2f}s @ {path!r}"
+        + (" from-current" if from_current_visibility and not to_visible else ""),
         flush=True,
     )
 
     t0 = time.monotonic()
-    box: Dict[str, object] = {"sub": None, "warmup": 0}
+    box: Dict[str, object] = {
+        "sub": None,
+        "warmup": 0,
+        "mdl_start_op": _read_mdl_opacity(targets) if (from_current_visibility and not to_visible and use_mdl) else 1.0,
+    }
 
     def _unsub() -> None:
         sub = box.get("sub")
@@ -594,7 +665,13 @@ def _run_fade_on_update(
             return
         u = elapsed / max(0.001, duration_sec)
         if use_mdl:
-            op = _smoothstep01(u) if to_visible else (1.0 - _smoothstep01(u))
+            if to_visible:
+                op = _smoothstep01(u)
+            elif from_current_visibility:
+                start_op = float(box.get("mdl_start_op", 1.0) or 1.0)
+                op = start_op * (1.0 - _smoothstep01(u))
+            else:
+                op = 1.0 - _smoothstep01(u)
             _apply_mdl_fade_opacity(targets, op)
         else:
             if to_visible:
@@ -657,12 +734,18 @@ def _start_play_hide_fade_chain(on_all_done: Callable[[], None]) -> None:
             return
         path, dur = queue[i]
         state["i"] = i + 1
-        targets = _build_fade_targets(path)
+        targets = _build_fade_targets(path, visible_gprims_only=True)
+        if _play_start_nothing_visible_to_fade(path, targets):
+            _capture_snapshot(path)
+            _set_visible_immediate(path, False)
+            _run_next()
+            return
         _run_fade_on_update(
             duration_sec=dur,
             to_visible=False,
             targets=targets,
             on_done=_run_next,
+            from_current_visibility=True,
         )
 
     _run_next()
