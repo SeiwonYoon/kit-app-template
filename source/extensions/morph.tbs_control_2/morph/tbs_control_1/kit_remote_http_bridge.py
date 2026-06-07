@@ -283,6 +283,8 @@ def _apply_per_screen_snapshot(ext: Any, snap: Dict[str, Any]) -> None:
         "fault_ep1": bool(snap.get("fault_ep1")),
         "fault_ep2": bool(snap.get("fault_ep2")),
         "fault_ep3": bool(snap.get("fault_ep3")),
+        "foup_proc_min": _g("foup_proc_min", 30.0),
+        "foup_proc_max": _g("foup_proc_max", 60.0),
     }
     _apply_web_fields(ext, f)
 
@@ -570,6 +572,14 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
         pass
     try:
         _set_float_model(getattr(ext, "_sim_ep_oht_max_model", None), max(0.1, _f("ep_oht_max", 10.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_foup_proc_min_model", None), max(0.1, _f("foup_proc_min", 30.0)))
+    except Exception:
+        pass
+    try:
+        _set_float_model(getattr(ext, "_sim_foup_proc_max_model", None), max(0.1, _f("foup_proc_max", 60.0)))
     except Exception:
         pass
     try:
