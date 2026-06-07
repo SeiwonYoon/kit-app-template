@@ -1,0 +1,6 @@
+{
+  "EAPEIS_PORT_ARRIVED": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" },
+  "EAPEIS_PORT_MOVE_TRANSFERING": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" },
+  "EISEAP_PORT_MOVE_REQ": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" },
+  "EAPEIS_PORT_REMOVED": { "json": "", "runner": "sequence_editor", "description": "(비움) 상세 매핑은 rules 또는 코드 케이스맵 사용" }
+}
