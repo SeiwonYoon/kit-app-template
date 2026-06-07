@@ -40,16 +40,50 @@ def _delay_prim_hide_to_play_sec() -> float:
         return 0.0
 
 
-def _sleep_until(deadline: float) -> None:
-    remain = float(deadline) - time.monotonic()
-    if remain > 1e-6:
-        time.sleep(remain)
+def _playback_stop_requested() -> bool:
+    try:
+        from .simulation_play import csv_playback_stop_requested  # type: ignore
+
+        return bool(csv_playback_stop_requested())
+    except Exception:
+        return False
 
 
-def run_play_start_preflight(*, resume_from_pause: bool) -> None:
-    """Play worker — CSV 재생 직전까지 타임라인 대기 (일시정지 이어서는 생략)."""
+def _sleep_until(deadline: float) -> bool:
+    """``True`` = deadline 까지 대기 완료, ``False`` = 일시정지·정지로 중단."""
+    end = float(deadline)
+    while True:
+        if _playback_stop_requested():
+            return False
+        remain = end - time.monotonic()
+        if remain <= 1e-6:
+            return True
+        time.sleep(min(0.05, remain))
+
+
+def _wait_event_until(event: threading.Event, deadline: float) -> bool:
+    """Event 또는 deadline 중 먼저 — stop 이면 ``False``."""
+    end = float(deadline)
+    while True:
+        if _playback_stop_requested():
+            return False
+        remain = end - time.monotonic()
+        if remain <= 1e-6:
+            return event.is_set()
+        if event.wait(timeout=min(0.05, remain)):
+            return True
+
+
+def run_play_start_preflight(*, resume_from_pause: bool) -> bool:
+    """Play worker — CSV 재생 직전까지 타임라인 대기 (일시정지 이어서는 생략).
+
+    ``False`` = 일시정지·정지로 preflight 중단(CSV 재생 생략).
+    """
     if resume_from_pause:
-        return
+        return True
+
+    if _playback_stop_requested():
+        return False
 
     from .lam_play_camera_fly import (  # type: ignore
         kickoff_play_camera_fly,
@@ -69,7 +103,12 @@ def run_play_start_preflight(*, resume_from_pause: bool) -> None:
     cam_planned = planned_camera_fly_duration_sec() if cam_kicked else 0.0
 
     if cam_kicked and delay_cp > 0.0:
-        cam_done.wait(timeout=max(15.0, cam_planned + 12.0))
+        cam_wait_deadline = time.monotonic() + max(15.0, cam_planned + 12.0)
+        if not _wait_event_until(cam_done, cam_wait_deadline):
+            print(f"{_PRINT_PREFIX} preflight aborted (camera wait)", flush=True)
+            return False
+        if _playback_stop_requested():
+            return False
         prim_start = time.monotonic() + delay_cp
         print(
             f"{_PRINT_PREFIX} prim hide @ camera end + {delay_cp:.2f}s",
@@ -84,14 +123,21 @@ def run_play_start_preflight(*, resume_from_pause: bool) -> None:
                 flush=True,
             )
 
-    _sleep_until(prim_start)
+    if not _sleep_until(prim_start):
+        print(f"{_PRINT_PREFIX} preflight aborted (before prim hide)", flush=True)
+        return False
 
     prim_done = threading.Event()
     prim_kicked = kickoff_play_prim_hide_play_start(prim_done)
     prim_planned = planned_play_prim_hide_duration_sec() if prim_kicked else 0.0
 
     if prim_kicked and delay_pp > 0.0:
-        prim_done.wait(timeout=max(20.0, prim_planned + 15.0))
+        prim_wait_deadline = time.monotonic() + max(20.0, prim_planned + 15.0)
+        if not _wait_event_until(prim_done, prim_wait_deadline):
+            print(f"{_PRINT_PREFIX} preflight aborted (prim hide wait)", flush=True)
+            return False
+        if _playback_stop_requested():
+            return False
         csv_start = time.monotonic() + delay_pp
         print(
             f"{_PRINT_PREFIX} CSV @ prim hide end + {delay_pp:.2f}s",
@@ -106,7 +152,9 @@ def run_play_start_preflight(*, resume_from_pause: bool) -> None:
                 flush=True,
             )
 
-    _sleep_until(csv_start)
+    if not _sleep_until(csv_start):
+        print(f"{_PRINT_PREFIX} preflight aborted (before CSV)", flush=True)
+        return False
 
     print(
         f"{_PRINT_PREFIX} preflight done "
@@ -114,6 +162,7 @@ def run_play_start_preflight(*, resume_from_pause: bool) -> None:
         f"prim_planned={prim_planned:.2f}s delay_pp={delay_pp:+.2f}s)",
         flush=True,
     )
+    return True
 
 
 __all__ = ["run_play_start_preflight"]
