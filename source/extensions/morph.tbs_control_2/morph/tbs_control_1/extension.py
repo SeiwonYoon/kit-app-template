@@ -57,6 +57,10 @@ import omni.usd as ou
 from carb.eventdispatcher import get_eventdispatcher
 
 from .control_window import build_control_window, on_sim_stop_clicked, refresh_object_list
+from .tbs_instance_registry import AnimationInstanceRegistry
+from .tbs_playback_scheduler import PlaybackScheduler
+from .tbs_runtime_evaluator import RuntimeEvaluator
+from .tbs_usd_window import TbsUsdWindow
 from .sim_multi_view import detach_stage_visibility_subscription, teardown_sim_multi_viewports
 from .kit_chrome_visibility import (
     KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH,
@@ -167,6 +171,10 @@ class Extension(omni.ext.IExt):
         self._control_window = None
         self._object_list_frame = None
         self._sequence_window = None
+        self._tbs_registry = None
+        self._tbs_scheduler = None
+        self._tbs_evaluator = None
+        self._tbs_usd_window = None
         self._kit_chrome_startup_task = None
 
         # 이전 비정상 종료 등으로 남은 보조 ViewportWindow / 보조 USD 컨텍스트 정리
@@ -175,8 +183,41 @@ class Extension(omni.ext.IExt):
         except Exception:
             pass
 
+        # LAM-style USD / sequence infrastructure (TBS 독립 복사)
+        self._tbs_registry = AnimationInstanceRegistry()
+        self._tbs_evaluator = RuntimeEvaluator(registry=self._tbs_registry)
+        self._tbs_scheduler = PlaybackScheduler(registry=self._tbs_registry, evaluator=self._tbs_evaluator)
+
         build_control_window(self)
-        self._sequence_window = SequenceEditorWindow()
+        self._tbs_usd_window = TbsUsdWindow(
+            self._tbs_registry,
+            self._tbs_scheduler,
+            self._tbs_evaluator,
+            ext_id=ext_id,
+        )
+        self._tbs_usd_window.show()
+        try:
+            self._tbs_evaluator.start()
+        except Exception:
+            pass
+        self._sequence_window = SequenceEditorWindow(
+            self._tbs_registry,
+            self._tbs_scheduler,
+            evaluator=self._tbs_evaluator,
+        )
+        self._sequence_window.show()
+
+        try:
+            from .equipment_autoload import request_equipment_autoload_for_ep_count, ep_count_from_combo_idx
+
+            idx = 0
+            request_equipment_autoload_for_ep_count(
+                self,
+                ep_count_from_combo_idx(idx),
+                reason="startup",
+            )
+        except Exception:
+            pass
 
         if KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH:
             self._kit_chrome_startup_task = asyncio.ensure_future(_deferred_apply_kit_chrome_hide(self))
@@ -329,3 +370,17 @@ class Extension(omni.ext.IExt):
             except Exception:
                 pass
             self._sequence_window = None
+        if self._tbs_usd_window is not None:
+            try:
+                self._tbs_usd_window.destroy()
+            except Exception:
+                pass
+            self._tbs_usd_window = None
+        if self._tbs_evaluator is not None:
+            try:
+                self._tbs_evaluator.stop()
+            except Exception:
+                pass
+            self._tbs_evaluator = None
+        self._tbs_scheduler = None
+        self._tbs_registry = None

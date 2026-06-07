@@ -217,7 +217,6 @@ from .curve_animation import (
     stop_prim_curve_animation,
 )
 from .kit_chrome_visibility import KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH, apply_kit_chrome_hidden
-from .load_window import build_load_ui_into_stack
 from .port_lot_visibility import (
     apply_port_lot_prim_visibility,
     apply_port_lot_prim_visibility_for_context,
@@ -893,7 +892,11 @@ def _execute_mapped_sequence_stub(
             if runner_obj is None:
                 try:
                     from .sequence_engine import SequenceRunner
-                    runner_obj = SequenceRunner()
+                    runner_obj = SequenceRunner(
+                        registry=getattr(ext, "_tbs_registry", None),
+                        scheduler=getattr(ext, "_tbs_scheduler", None),
+                        evaluator=getattr(ext, "_tbs_evaluator", None),
+                    )
                     runners[str(scr_i)] = runner_obj
                 except Exception:
                     runner_obj = getattr(ext, "_sim_runner", None)
@@ -2161,7 +2164,11 @@ def build_control_window(ext: Any) -> None:
     ext._sim_history_label = None
     ext._sim_anim_history_label = None
     ext._sim_port_state_label = None
-    ext._sim_runner = SequenceRunner()
+    ext._sim_runner = SequenceRunner(
+        registry=getattr(ext, "_tbs_registry", None),
+        scheduler=getattr(ext, "_tbs_scheduler", None),
+        evaluator=getattr(ext, "_tbs_evaluator", None),
+    )
     ext._sim_anim_active = {}
     ext._sim_anim_pending = []
     # 애니메이션 재생 중 sim tick을 잠시 멈추기 위한 플래그
@@ -2204,11 +2211,7 @@ def build_control_window(ext: Any) -> None:
                                 style=CHECKBOX_WHITE_STYLE,
                             )
                 ui.Spacer(height=6)
-                with ui.Frame(style={"background_color": 0xFF23262B}, height=0):
-                    with ui.VStack(padding=8, spacing=8):
-                        ui.Label("USD Load", height=24, style={"color": 0xFFDDDDDD})
-                        build_load_ui_into_stack(ext)
-                ui.Spacer(height=6)
+                # USD Load → 별도 창 ``TbsUsdWindow`` (extension.py)
                 # with ui.Frame(style={"background_color": 0xFF23262B}):
                 #     # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
                 #     with ui.VStack(padding=8, spacing=8):

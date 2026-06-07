@@ -32,7 +32,7 @@ def resolve_equipment_usd_for_ep_count(ep_count: int) -> Optional[str]:
 
 
 async def open_equipment_usd_path(ext: Any, resolved_path: str) -> None:
-    """검증 후 ``open_stage`` (load_window.on_load_usd 와 동일 후처리)."""
+    """Master open + Discover + auto-Extract (``TbsUsdWindow``)."""
     path = (resolved_path or "").strip()
     if not path:
         return
@@ -54,9 +54,20 @@ async def open_equipment_usd_path(ext: Any, resolved_path: str) -> None:
         print(f"{_PRINT_PREFIX} stat failed: {path} ({exc})", flush=True)
         return
 
-    import omni.usd as ou
+    win = getattr(ext, "_tbs_usd_window", None)
+    if win is not None:
+        try:
+            ok = win.open_master_at_path(path, log_prefix="EP autoload")
+            if not ok:
+                print(f"{_PRINT_PREFIX} open_master failed: {path}", flush=True)
+                return
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} open_master exception: {path} ({exc})", flush=True)
+            return
+    else:
+        import omni.usd as ou
 
-    ou.get_context().open_stage(path)
+        ou.get_context().open_stage(path)
     try:
         if "https://" in path.lower() and not getattr(ext, "_tbs_mdl_https_texture_hint_done", False):
             ext._tbs_mdl_https_texture_hint_done = True
