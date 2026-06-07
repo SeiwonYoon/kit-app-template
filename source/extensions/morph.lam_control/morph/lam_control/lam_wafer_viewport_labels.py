@@ -4,6 +4,8 @@
 - CSV Play 시작 baseline: 위 설정이 True 일 때만 FOUP1~3×25 에 번호 등록.
 - ``PRIM_VISIBILITY`` (pick hide SLOT / show ARM; place 는 팔 hide 시 SLOT 으로 이식) 실행 시
   ``WaferNumberLabelTracker`` 가 **동일 카세트 번호**를 팔·airlock·chamber 등으로 옮긴다.
+- pick: SLOT hide 시 번호만 보관 → **ARM show** 때 팔 prim 에 부여(선행 점프 방지).
+- place: SLOT show 시에도 맵은 팔에 유지 → **ARM hide** 때 SLOT 으로 이식.
 - airlock/chamber/aligner 슬롯 인덱스(1·2)가 아니라 **FOUP 에서 올린 웨이퍼 번호**가 유지된다.
 - 각 JSON 의 hide → show: hide 쪽 번호를 show prim 에 **항상** 이식 (hide 맵 항목은 제거해도 됨).
 """
@@ -58,7 +60,7 @@ _FRAME_SLOT = "morph.lam_control:wafer_foup_labels"
 _LABEL_FONT_SIZE = 16
 _LABEL_COLOR = (1.0, 1.0, 1.0, 1.0)
 
-# 위치 추적: FOUP baseline(정적) / 팔·장비(동적) 분리 — 동적은 post_update(TBS 이동 후)
+# 위치 추적: prim BBox 중심 — 매 post_update(및 이동 중 update) 동기 갱신
 
 FOUP_LABEL_SLOT_KEYS: Tuple[str, ...] = tuple(
     f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
@@ -518,14 +520,10 @@ class WaferNumberLabelTracker:
                         p, slot_key, slot_p, stage=stage
                     )
                     label = self._resolve_pick_label(ctx, popped=popped) or cassette
-                    if label:
-                        self._assign_label_to_arm_paths(
-                            label,
-                            arm_sk=arm_sk,
-                            arm_p=arm_p,
-                            stage=stage,
-                        )
-                        changed = True
+                    if label and arm_sk:
+                        # arm show 전까지 carried 만 — 번호가 팔 위치로 먼저 점프하지 않음
+                        self._arm_carried[arm_sk] = label
+                    changed = bool(label)
                 elif is_arm and visible:
                     label = self._resolve_pick_label(ctx) or cassette
                     if label:
@@ -690,6 +688,7 @@ class LamWaferFoupViewportLabels:
         self._built = False
         self._sched_token = 0
         self._post_update_sub: Any = None
+        self._motion_update_sub: Any = None
         self._last_drawn_count = -1
         self._last_drawn_fingerprint: Tuple[Tuple[str, str], ...] = ()
         self._last_tracker_revision = -1
@@ -748,6 +747,25 @@ class LamWaferFoupViewportLabels:
             except Exception:
                 pass
             self._post_update_sub = None
+        if self._motion_update_sub is not None:
+            try:
+                self._motion_update_sub.unsubscribe()
+            except Exception:
+                pass
+            self._motion_update_sub = None
+
+    @staticmethod
+    def _motion_animators_active() -> bool:
+        try:
+            from . import lam_rotate_animation as _lrx
+            from . import lam_translate_animation as _ltx
+
+            return bool(
+                _ltx.is_translate_animation_running()
+                or _lrx.is_rotate_animation_running()
+            )
+        except Exception:
+            return False
 
     def _start_position_poll(self) -> None:
         if self._post_update_sub is not None:
@@ -760,16 +778,52 @@ class LamWaferFoupViewportLabels:
             def _on_post_update(_event) -> None:
                 if not self._can_operate() or not self._built or not self._labels_root:
                     return
-                # 구조(revision) → 위치: TBS translate(update) 이후 prim Xform 반영
-                self._rebuild_labels()
-                self._tick_dynamic_label_positions()
+                tracker = get_wafer_label_tracker()
+                if tracker.revision != self._last_tracker_revision:
+                    self._rebuild_labels()
+                self._tick_all_label_positions()
+                self._sync_motion_update_sub()
 
             self._post_update_sub = post.create_subscription_to_pop(
                 _on_post_update,
                 name="morph.lam_control:wafer_foup_labels",
             )
+            self._sync_motion_update_sub()
         except Exception as exc:
             print(f"{_PRINT_PREFIX} post_update subscribe failed: {exc}", flush=True)
+
+    def _sync_motion_update_sub(self) -> None:
+        """TBS translate/rotate 중 — update tick 에서도 위치 갱신(웨이퍼와 동일 프레임)."""
+        if not self._can_operate() or not self._built or not self._labels_root:
+            return
+        if not self._motion_animators_active():
+            if self._motion_update_sub is not None:
+                try:
+                    self._motion_update_sub.unsubscribe()
+                except Exception:
+                    pass
+                self._motion_update_sub = None
+            return
+        if self._motion_update_sub is not None:
+            return
+        try:
+            import omni.kit.app as _app  # type: ignore
+
+            stream = _app.get_app().get_update_event_stream()
+
+            def _on_motion_update(_event) -> None:
+                if not self._can_operate() or not self._built or not self._labels_root:
+                    return
+                if not self._label_transforms:
+                    return
+                self._tick_all_label_positions()
+
+            self._motion_update_sub = stream.create_subscription_to_pop(
+                _on_motion_update,
+                name="morph.lam_control:wafer_foup_labels_motion",
+            )
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} motion update subscribe failed: {exc}", flush=True)
 
     def sync_layers(self, *, delay_frames: int = 12) -> None:
         if not wafer_viewport_labels_enabled():
@@ -856,34 +910,32 @@ class LamWaferFoupViewportLabels:
         self,
         prim: Usd.Prim,
         bbox_cache: Optional[UsdGeom.BBoxCache],
-        *,
-        xform_cache: Optional[UsdGeom.XformCache] = None,
     ) -> Optional[Tuple[float, float, float]]:
-        if xform_cache is not None:
-            try:
-                m = xform_cache.GetLocalToWorldTransform(prim)
-                t = m.ExtractTranslation()
-                return (float(t[0]), float(t[1]), float(t[2]))
-            except Exception:
-                pass
+        """웨이퍼 mesh BBox 중심 — pivot(Xform origin) 과 어긋나 끊김·선행 현상 방지."""
         if bbox_cache is not None:
             try:
                 bbox = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
-                c = bbox.GetMidpoint()
-                return (float(c[0]), float(c[1]), float(c[2]))
+                if not bbox.IsEmpty():
+                    c = bbox.GetMidpoint()
+                    return (float(c[0]), float(c[1]), float(c[2]))
             except Exception:
                 pass
         return _prim_world_center(prim)
 
-    def _tick_dynamic_label_positions(self) -> None:
-        """팔·장비 등 이동 prim — post_update 에서 Xform(이동 반영 후)으로 위치 갱신."""
+    def _tick_all_label_positions(self) -> None:
+        """visible 라벨 전부 — BBox 중심으로 매 프레임 위치만 갱신(구조 재빌드 없음)."""
+        if not self._label_transforms:
+            return
         stage = self._get_stage()
         if not stage:
             return
-        _static, dynamic = get_wafer_label_tracker().iter_visible_labels_split(stage)
-        if not dynamic:
+        static_entries, dynamic_entries = get_wafer_label_tracker().iter_visible_labels_split(
+            stage
+        )
+        entries = list(static_entries) + list(dynamic_entries)
+        if not entries:
             return
-        self._update_label_positions(stage, dynamic, prefer_xform_cache=True)
+        self._update_label_positions(stage, entries)
 
     def _rebuild_labels(self) -> None:
         if not self._can_operate() or not self._built or not self._labels_root:
@@ -931,6 +983,7 @@ class LamWaferFoupViewportLabels:
         self._last_drawn_fingerprint = fingerprint
         self._last_tracker_revision = rev
         self._sync_label_structure(stage, entries)
+        self._tick_all_label_positions()
 
     def _sync_label_structure(
         self, stage: Usd.Stage, entries: List[Tuple[str, str]]
@@ -962,21 +1015,17 @@ class LamWaferFoupViewportLabels:
         self,
         stage: Usd.Stage,
         entries: List[Tuple[str, str]],
-        *,
-        prefer_xform_cache: bool = False,
     ) -> None:
         if not entries:
             return
 
         bbox_cache: Optional[UsdGeom.BBoxCache] = None
-        xform_cache: Optional[UsdGeom.XformCache] = None
-        if prefer_xform_cache:
-            try:
-                xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-                xform_cache.SetTime(Usd.TimeCode.Default())
-            except Exception:
-                xform_cache = None
-        else:
+        try:
+            bbox_cache = UsdGeom.BBoxCache(
+                Usd.TimeCode.Default(),
+                [UsdGeom.Tokens.default_, UsdGeom.Tokens.render],
+            )
+        except Exception:
             try:
                 bbox_cache = UsdGeom.BBoxCache(
                     Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]
@@ -988,9 +1037,7 @@ class LamWaferFoupViewportLabels:
             prim = stage.GetPrimAtPath(path_str)
             if not prim or not prim.IsValid():
                 continue
-            pos = self._prim_world_pos(
-                prim, bbox_cache, xform_cache=xform_cache
-            )
+            pos = self._prim_world_pos(prim, bbox_cache)
             if pos is None:
                 continue
             node = self._label_transforms.get(path_str)
