@@ -24,6 +24,7 @@ _lock = threading.Lock()
 _visibility_snapshot: Dict[str, str] = {}
 
 _UI_PHASES = frozenset({"ui_hide", "ui_show"})
+_ui_phase_epoch: int = 0
 
 
 _OPACITY_INPUT_CANDIDATES: Tuple[str, ...] = (
@@ -58,6 +59,7 @@ class _FadeTargets:
 def apply_play_prim_hide_phase(phase: PlayHidePhase) -> bool:
     phase_s = str(phase)
     try:
+        # ui_hide/ui_show: fire-and-forget (main update 콜백 안에서 wait 하면 deadlock)
         if phase_s in _UI_PHASES:
             _schedule_instant_on_main(phase_s)
             return True
@@ -69,18 +71,45 @@ def apply_play_prim_hide_phase(phase: PlayHidePhase) -> bool:
         return False
 
 
+def _bump_ui_phase_epoch() -> int:
+    global _ui_phase_epoch
+    _ui_phase_epoch += 1
+    return _ui_phase_epoch
+
+
+def apply_play_prim_hide_ui_instant(phase: PlayHidePhase) -> bool:
+    """post_update·UI 콜백 등 **이미 main thread** 일 때 즉시 적용 (wait 없음)."""
+    phase_s = str(phase)
+    if phase_s not in _UI_PHASES:
+        return apply_play_prim_hide_phase(phase)
+    try:
+        _bump_ui_phase_epoch()
+        _apply_phase_instant(phase_s)
+        return True
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} ui_instant phase={phase_s} failed: {exc}", flush=True)
+        return False
+
+
 def _smoothstep01(t: float) -> float:
     t = max(0.0, min(1.0, float(t)))
     return t * t * (3.0 - 2.0 * t)
 
 
 def _schedule_instant_on_main(phase: str) -> None:
+    epoch = _ui_phase_epoch
+
+    def _run() -> None:
+        if epoch != _ui_phase_epoch:
+            return
+        _apply_phase_instant(phase)
+
     try:
         from .lam_sequence_engine import _dispatch_main
 
-        _dispatch_main(lambda: _apply_phase_instant(phase))
+        _dispatch_main(_run)
     except Exception:
-        _apply_phase_instant(phase)
+        _run()
 
 
 def _run_instant_on_main_wait(phase: str) -> bool:
@@ -200,6 +229,25 @@ def _load_specs():
         return list(PLAY_HIDE_PRIM_SPECS or [])
     except Exception:
         return []
+
+
+def prim_hide_specs_stage_status() -> Tuple[int, int]:
+    """``PLAY_HIDE_PRIM_SPECS`` 중 stage 에서 Imageable 로 찾은 개수 / 전체."""
+    specs = _load_specs()
+    paths = [
+        str(getattr(s, "prim_path", "") or "").strip()
+        for s in specs
+        if str(getattr(s, "prim_path", "") or "").strip()
+    ]
+    total = len(paths)
+    if total <= 0:
+        return 0, 0
+    found = 0
+    for path in paths:
+        _, img = _get_imageable(path)
+        if img is not None:
+            found += 1
+    return found, total
 
 
 def _resolve_fade_enabled(spec) -> bool:
@@ -562,6 +610,35 @@ def _show_all_gprims_under(targets: _FadeTargets) -> None:
         _set_visible_immediate(p, True)
 
 
+def _reset_mdl_opacity_for_show(targets: _FadeTargets) -> None:
+    """Play fade 등으로 session 에 남은 opacity override 를 제거(체크 해제 시 강제 표시)."""
+    stage = _get_stage()
+    if stage is None or not targets.shader_slots:
+        return
+    try:
+        with _session_edit(stage):
+            for slot in targets.shader_slots:
+                prim = stage.GetPrimAtPath(slot.shader_path)
+                if not prim or not prim.IsValid():
+                    continue
+                shader = UsdShade.Shader(prim)
+                inp = shader.GetInput(slot.input_name)
+                if inp:
+                    try:
+                        inp.Clear()
+                    except Exception:
+                        pass
+                if slot.enable_opacity_path:
+                    en = shader.GetInput(slot.enable_opacity_path)
+                    if en:
+                        try:
+                            en.Clear()
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
+
 def _clear_mdl_fade_opacity(targets: _FadeTargets) -> None:
     stage = _get_stage()
     if stage is None:
@@ -821,15 +898,36 @@ def _restore_all_specs() -> None:
             _apply_visibility_token(path, tok)
 
 
-def _hide_all_instant() -> None:
+def _hide_all_instant(*, snapshot_restore: Optional[str] = None) -> None:
     for spec in _load_specs():
         path = str(getattr(spec, "prim_path", "") or "").strip()
         if not path:
             continue
-        _capture_snapshot(path)
+        if snapshot_restore is not None:
+            with _lock:
+                _visibility_snapshot[path] = str(snapshot_restore)
+        else:
+            _capture_snapshot(path)
         targets = _build_fade_targets(path)
         _clear_mdl_fade_opacity(targets)
         _set_visible_immediate(path, False)
+
+
+def _force_show_all_specs() -> None:
+    """체크박스 해제(ui_show) — snapshot·fade 잔여와 무관하게 항상 표시."""
+    specs = _load_specs()
+    paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
+    paths = [p for p in paths if p]
+    with _lock:
+        for p in paths:
+            _visibility_snapshot.pop(p, None)
+    for path in paths:
+        targets = _build_fade_targets(path)
+        _set_visible_immediate(path, True)
+        _show_all_gprims_under(targets)
+        if targets.shader_slots:
+            _apply_mdl_fade_opacity(targets, 1.0)
+        _reset_mdl_opacity_for_show(targets)
 
 
 def _show_all_instant() -> None:
@@ -866,12 +964,25 @@ def _apply_phase_instant(phase: str) -> None:
                 PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET,
             )
 
-            restore = bool(PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET)
+            restore_cfg = bool(PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET)
         except Exception:
-            restore = True
+            restore_cfg = True
+        hide_checked = False
+        try:
+            from .lam_viewport_overlay_state import get_toggle_play_prim_hide
+
+            hide_checked = bool(get_toggle_play_prim_hide())
+        except Exception:
+            pass
+        restore = bool(restore_cfg) and not hide_checked
         if restore:
             _restore_all_specs()
             print(f"{_PRINT_PREFIX} play_stop_reset: restored visibility", flush=True)
+        elif hide_checked:
+            print(
+                f"{_PRINT_PREFIX} play_stop_reset: keep hidden (prim숨김 checked)",
+                flush=True,
+            )
         else:
             print(
                 f"{_PRINT_PREFIX} play_stop_reset: keep hidden (restore disabled)",
@@ -880,11 +991,24 @@ def _apply_phase_instant(phase: str) -> None:
         return
 
     if phase == "ui_hide":
-        _hide_all_instant()
+        # 해제 시 항상 보이게 — 이미 invisible 인 상태를 snapshot 에 남기지 않음
+        _hide_all_instant(snapshot_restore="inherited")
+        found, total = prim_hide_specs_stage_status()
+        if total > 0:
+            print(
+                f"{_PRINT_PREFIX} ui_hide: hid on stage {found}/{total} spec(s)",
+                flush=True,
+            )
         return
 
     if phase == "ui_show":
-        _show_all_instant()
+        _force_show_all_specs()
+        found, total = prim_hide_specs_stage_status()
+        if total > 0:
+            print(
+                f"{_PRINT_PREFIX} ui_show: force show on stage {found}/{total} spec(s)",
+                flush=True,
+            )
         return
 
     print(f"{_PRINT_PREFIX} unknown phase: {phase}", flush=True)
@@ -893,6 +1017,8 @@ def _apply_phase_instant(phase: str) -> None:
 __all__ = [
     "PlayHidePhase",
     "apply_play_prim_hide_phase",
+    "apply_play_prim_hide_ui_instant",
     "kickoff_play_prim_hide_play_start",
     "planned_play_prim_hide_duration_sec",
+    "prim_hide_specs_stage_status",
 ]

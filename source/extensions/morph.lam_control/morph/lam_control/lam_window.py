@@ -44,6 +44,7 @@ from .lam_viewport_overlay_state import (
     get_toggle_device_labels,
     get_toggle_foup_status,
     register_toggle_listener,
+    schedule_play_prim_hide_sync_after_stage_ready,
 )
 from .lam_wafer_viewport_labels import (
     LamWaferFoupViewportLabels,
@@ -373,6 +374,7 @@ class LamWindow:
         self._schedule_autoload_master_on_startup()
         self._sync_csv_viewport_hud()
         self._sync_wafer_foup_viewport_labels_only()
+        schedule_play_prim_hide_sync_after_stage_ready(delay_frames=48)
 
     def _sync_wafer_foup_viewport_labels_only(self, *, delay_frames: int = 12) -> None:
         """Viewport 3D 라벨 SceneView 마운트/해제 (체크 상태는 ``apply_wafer_label_visibility_from_ui``)."""
@@ -647,7 +649,18 @@ class LamWindow:
             extract_prefix = log_prefix or "Open Master"
             self._auto_extract_after_master_open(log_prefix=extract_prefix)
             self._refresh_wafer_labels_after_master_open(delay_frames=24)
+            self._refresh_play_prim_hide_after_master_open(delay_frames=24)
         return ok
+
+    def _refresh_play_prim_hide_after_master_open(self, *, delay_frames: int = 24) -> None:
+        """Open Master 후 「prim숨김」 체크 ON 이면 PLAY_HIDE_PRIM_SPECS 를 stage 에 맞게 숨김."""
+        try:
+            schedule_play_prim_hide_sync_after_stage_ready(delay_frames=delay_frames)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} play prim hide after master open schedule failed: {exc}",
+                flush=True,
+            )
 
     def _refresh_wafer_labels_after_master_open(self, *, delay_frames: int = 24) -> None:
         """Open Master 후 체크 ON 이면 트래커·SceneView 를 stage 경로에 맞게 다시 맞춘다."""

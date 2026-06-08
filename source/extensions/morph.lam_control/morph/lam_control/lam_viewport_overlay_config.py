@@ -20,7 +20,7 @@ STARTUP_CHECK_WAFER_LABELS: bool = False  # 웨이퍼번호보기
 STARTUP_CHECK_FOUP_STATUS: bool = True  # FOUP상태보기
 STARTUP_CHECK_DEVICE_LABELS: bool = True  # 기기정보보기
 STARTUP_CHECK_PICK_WHITELIST: bool = False  # 선택제한 (Viewport 클릭 whitelist)
-STARTUP_CHECK_PLAY_PRIM_HIDE: bool = False  # prim숨김 (Viewport HUD · CSV 본창)
+STARTUP_CHECK_PLAY_PRIM_HIDE: bool = True  # prim숨김 (Viewport HUD · CSV 본창)
 STARTUP_CHECK_PLAY_CAMERA_FLY: bool = True  # Play 시 preset 뷰로 fly (일시정지 이어서 제외)
 
 
@@ -72,6 +72,7 @@ WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS: bool = False
 # ---------------------------------------------------------------------------
 
 # 정지(초기화) 클릭 시 숨겨 두었던 prim 을 다시 보이게 할지
+# (「prim숨김」 체크 ON 이면 런타임에서 항상 복원 생략 — hidden 유지)
 PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET: bool = True
 
 # 전역 fade (항목별 fade_* 가 None 이면 아래 값 사용)

@@ -82,6 +82,7 @@ _last_toggle_change_ts: Dict[str, float] = {"foup": 0.0, "device": 0.0, "pick": 
 _last_toggle_change_val: Dict[str, bool] = {"foup": _f0, "device": _d0, "pick": _p0}
 
 _startup_checkbox_side_effects_applied: bool = False
+_play_prim_hide_retry_sub: Any = None
 
 # 2D 상태 패널 수동 입력
 _manual_eq_model: str = ""
@@ -291,6 +292,113 @@ def _sync_ui_model_values() -> None:
         _ui_model_syncing = False
 
 
+def _stop_play_prim_hide_retry_subscription() -> None:
+    global _play_prim_hide_retry_sub
+    if _play_prim_hide_retry_sub is None:
+        return
+    try:
+        _play_prim_hide_retry_sub.unsubscribe()
+    except Exception:
+        pass
+    _play_prim_hide_retry_sub = None
+
+
+def sync_play_prim_hide_side_effect(*, allow_schedule_retry: bool = True) -> None:
+    """「prim숨김」 체크 ON 이면 viewport prim 숨김을 실제로 반영 (launch·UI 마운트 재시도용)."""
+    if not get_toggle_play_prim_hide():
+        _stop_play_prim_hide_retry_subscription()
+        return
+    try:
+        from .lam_play_prim_hide import prim_hide_specs_stage_status
+
+        found, total = prim_hide_specs_stage_status()
+        if allow_schedule_retry and (total <= 0 or found < total):
+            schedule_play_prim_hide_sync_after_stage_ready(delay_frames=2)
+            return
+        if found > 0:
+            from .lam_play_prim_hide import apply_play_prim_hide_phase
+
+            apply_play_prim_hide_phase("ui_hide")
+    except Exception as exc:
+        print(f"[LAM/OverlayState] play_prim_hide sync failed: {exc}", flush=True)
+
+
+def schedule_play_prim_hide_sync_after_stage_ready(
+    *,
+    delay_frames: int = 24,
+    max_attempts: int = 180,
+) -> None:
+    """Master USD 로드·stage prim 등장 후 ui_hide 가 성공할 때까지 post_update 재시도."""
+    global _play_prim_hide_retry_sub
+    if not get_toggle_play_prim_hide():
+        _stop_play_prim_hide_retry_subscription()
+        return
+
+    _stop_play_prim_hide_retry_subscription()
+
+    frames_until_start = [max(0, int(delay_frames))]
+    attempts_left = [max(1, int(max_attempts))]
+
+    def _finish() -> None:
+        _stop_play_prim_hide_retry_subscription()
+
+    def _tick(_e=None) -> None:
+        if not get_toggle_play_prim_hide():
+            _finish()
+            return
+        if frames_until_start[0] > 0:
+            frames_until_start[0] -= 1
+            return
+        try:
+            from .lam_play_prim_hide import (
+                apply_play_prim_hide_ui_instant,
+                prim_hide_specs_stage_status,
+            )
+
+            found, total = prim_hide_specs_stage_status()
+            if total <= 0:
+                _finish()
+                return
+            if found > 0:
+                apply_play_prim_hide_ui_instant("ui_hide")
+                found, total = prim_hide_specs_stage_status()
+            if found >= total:
+                print(
+                    f"[LAM/OverlayState] play_prim_hide startup sync OK ({found}/{total})",
+                    flush=True,
+                )
+                _finish()
+                return
+        except Exception as exc:
+            print(
+                f"[LAM/OverlayState] play_prim_hide retry failed: {exc}",
+                flush=True,
+            )
+        attempts_left[0] -= 1
+        if attempts_left[0] <= 0:
+            print(
+                "[LAM/OverlayState] play_prim_hide startup sync gave up "
+                "(stage prim not ready?)",
+                flush=True,
+            )
+            _finish()
+
+    try:
+        import omni.kit.app as _app  # type: ignore
+
+        stream = _app.get_app().get_post_update_event_stream()
+        _play_prim_hide_retry_sub = stream.create_subscription_to_pop(
+            _tick,
+            name="morph.lam_control.play_prim_hide.startup_retry",
+        )
+    except Exception as exc:
+        print(
+            f"[LAM/OverlayState] play_prim_hide retry schedule failed: {exc}",
+            flush=True,
+        )
+        sync_play_prim_hide_side_effect(allow_schedule_retry=False)
+
+
 def apply_startup_checkbox_side_effects() -> None:
     """config 기본값 → Viewport 선택 제한 등 런타임 훅 1회 반영."""
     global _startup_checkbox_side_effects_applied
@@ -306,13 +414,7 @@ def apply_startup_checkbox_side_effects() -> None:
             disable_pick_whitelist()
     except Exception:
         pass
-    if get_toggle_play_prim_hide():
-        try:
-            from .lam_play_prim_hide import apply_play_prim_hide_phase
-
-            apply_play_prim_hide_phase("ui_hide")
-        except Exception:
-            pass
+    schedule_play_prim_hide_sync_after_stage_ready(delay_frames=4)
 
 
 def register_toggle_listener(fn) -> None:
@@ -476,10 +578,11 @@ def set_toggle_play_prim_hide(enabled: bool, *, from_ui_model: bool = False) -> 
         _sync_ui_model_play_prim_hide()
     if bool(enabled) == bool(prev):
         return
+    _stop_play_prim_hide_retry_subscription()
     try:
-        from .lam_play_prim_hide import apply_play_prim_hide_phase
+        from .lam_play_prim_hide import apply_play_prim_hide_ui_instant
 
-        apply_play_prim_hide_phase("ui_hide" if bool(enabled) else "ui_show")
+        apply_play_prim_hide_ui_instant("ui_hide" if bool(enabled) else "ui_show")
     except Exception as exc:
         print(f"[LAM/OverlayState] play_prim_hide apply failed: {exc}", flush=True)
 
@@ -701,6 +804,8 @@ __all__ = [
     "set_toggle_device_labels",
     "get_toggle_device_labels",
     "apply_startup_checkbox_side_effects",
+    "sync_play_prim_hide_side_effect",
+    "schedule_play_prim_hide_sync_after_stage_ready",
     "set_toggle_pick_whitelist",
     "get_toggle_pick_whitelist",
     "register_toggle_listener",
