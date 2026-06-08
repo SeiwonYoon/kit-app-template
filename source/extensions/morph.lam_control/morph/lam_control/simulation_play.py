@@ -6110,6 +6110,7 @@ class LamSimulationCsvPlayWindow:
                 self._log(
                     "정지(초기화) 완료 — 위치(TBS)·visibility 복원 (콘솔 [LAM/Sim] 확인)"
                 )
+                clear_csv_playback_stop()
             except Exception as exc:
                 err = f"정지(초기화) 오류: {exc}"
                 print(f"{_PRINT_PREFIX} {err}", flush=True)
@@ -6191,6 +6192,9 @@ class LamSimulationCsvPlayWindow:
             disarm_csv_play_pause_for_resume()
         else:
             clear_csv_play_pause_checkpoint()
+            # 정지(초기화)·일시정지 직후 request_stop 이 남은 stop 플래그를 해제하지 않으면
+            # worker 의 preflight·run_simulation_from_csv 진입 전에 조용히 return 됨.
+            clear_csv_playback_stop()
         prepared = self._prepared_playback
         if prepared is None or prepared.path.resolve() != path.resolve():
             prepared = get_cached_csv_playback(path)
@@ -6234,6 +6238,8 @@ class LamSimulationCsvPlayWindow:
                 if resume_from_pause:
                     clear_csv_playback_stop()
                     disarm_csv_play_pause_for_resume()
+                else:
+                    clear_csv_playback_stop()
                 nonlocal prepared
                 set_csv_play_live_speed_ui_reader(self._read_speed_scale)
                 set_csv_play_progress_ui_callback(_on_play_ui)
@@ -6293,6 +6299,12 @@ class LamSimulationCsvPlayWindow:
                         from .lam_play_start_sequence import run_play_start_preflight
 
                         if not run_play_start_preflight(resume_from_pause=False):
+                            msg = (
+                                "Play 시작 전처리(preflight) 중단 — "
+                                "정지·일시정지 직후라면 잠시 후 다시 [재생] 하세요."
+                            )
+                            print(f"{_PRINT_PREFIX} {msg}", flush=True)
+                            _post_kit_main_thread(lambda: self._log(msg))
                             return
                     except Exception as exc:
                         print(
@@ -6302,6 +6314,9 @@ class LamSimulationCsvPlayWindow:
                         return
 
                 if csv_playback_stop_requested():
+                    msg = "Play 취소 — 중지 플래그가 남아 있습니다. [재생]을 다시 눌러 주세요."
+                    print(f"{_PRINT_PREFIX} {msg}", flush=True)
+                    _post_kit_main_thread(lambda: self._log(msg))
                     return
 
                 run_simulation_from_csv(
