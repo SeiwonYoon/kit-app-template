@@ -13,7 +13,7 @@ TBS Control 1 확장 — 기능별 모듈 분리 버전 (진입점)
 
 【기능을 바꾸려면 어디를 보나】
 - 확장 의존성/표시 이름: 상위 폴더 extension.toml (이 모듈과 별개).
-- USD 로드 창만: load_window.py / usd_loader_utils.py
+- USD 로드: tbs_usd_window.py (SSOT) / tbs_ep_port_visibility.py
 - TBS 제어창(타임라인·XML·버튼): control_window.py (+ 필요 시 xml_generator.py 등)
 - 시퀀스 스텝 편집/실행: sequence_editor.py + sequence_engine.py
 - 뷰포트 3D 정보 패널: selection_overlay.py, viewport_overlay.py
@@ -23,7 +23,7 @@ TBS Control 1 확장 — 기능별 모듈 분리 버전 (진입점)
 --------------
 import 구조 (요약)
 --------------
-- load_window → USD Load
+- tbs_usd_window → Master USD Load
 - control_window → TBS 제어창
 - selection_overlay → 선택·오버레이
 - sequence_editor → 시퀀스 편집기
@@ -189,12 +189,44 @@ class Extension(omni.ext.IExt):
         self._tbs_scheduler = PlaybackScheduler(registry=self._tbs_registry, evaluator=self._tbs_evaluator)
 
         build_control_window(self)
+        from .tbs_ep_port_visibility import (
+            ep_count_from_combo_idx,
+            schedule_apply_ep_port_layout,
+        )
+
+        def _on_master_opened_for_ep() -> None:
+            try:
+                win = getattr(self, "_tbs_usd_window", None)
+                if win is not None:
+                    master = getattr(win, "_master", None)
+                    if master is not None:
+                        self._tbs_last_loaded_usd_path = str(
+                            getattr(master, "master_path", "") or ""
+                        )
+            except Exception:
+                pass
+            try:
+                idx = 0
+                if getattr(self, "_sim_ep_count_combo", None) is not None:
+                    idx = int(
+                        self._sim_ep_count_combo.model.get_item_value_model().as_int
+                    )
+            except Exception:
+                idx = 0
+            schedule_apply_ep_port_layout(
+                self,
+                ep_count_from_combo_idx(idx),
+                delay_frames=12,
+                reason="master_opened",
+            )
+
         self._tbs_usd_window = TbsUsdWindow(
             self._tbs_registry,
             self._tbs_scheduler,
             self._tbs_evaluator,
             ext_id=ext_id,
         )
+        self._tbs_usd_window.set_master_open_listener(_on_master_opened_for_ep)
         self._tbs_usd_window.show()
         try:
             self._tbs_evaluator.start()
@@ -206,18 +238,6 @@ class Extension(omni.ext.IExt):
             evaluator=self._tbs_evaluator,
         )
         self._sequence_window.show()
-
-        try:
-            from .equipment_autoload import request_equipment_autoload_for_ep_count, ep_count_from_combo_idx
-
-            idx = 0
-            request_equipment_autoload_for_ep_count(
-                self,
-                ep_count_from_combo_idx(idx),
-                reason="startup",
-            )
-        except Exception:
-            pass
 
         if KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH:
             self._kit_chrome_startup_task = asyncio.ensure_future(_deferred_apply_kit_chrome_hide(self))
@@ -347,9 +367,9 @@ class Extension(omni.ext.IExt):
             self._overlay = None
         usd_animation_control.stop_usd_animation()
         try:
-            from .equipment_autoload import teardown_equipment_autoload
+            from .tbs_ep_port_visibility import teardown_ep_port_visibility
 
-            teardown_equipment_autoload(self)
+            teardown_ep_port_visibility(self)
         except Exception:
             pass
         try:

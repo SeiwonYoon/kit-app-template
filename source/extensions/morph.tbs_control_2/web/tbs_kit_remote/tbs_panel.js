@@ -14,9 +14,9 @@
  * │                    │   (control_window 가 갱신한 진행현황·이력·포트상태)      │
  * ├────────────────────┼──────────────────────────────────────────────────────┤
  * │ GET /api/resources │ get_resource_usd_list() (usd_loader_utils)           │
- * │                    │ = load_window.get_resource_usd_list 과 동일 소스 │
+ * │                    │ resource 샘플 목록 SSOT (usd_loader_utils)           │
  * ├────────────────────┼──────────────────────────────────────────────────────┤
- * │ POST cmd:load_usd  │ load_window.on_load_usd(ext) + 경로/콤보 모델 반영      │
+ * │ POST cmd:load_usd  │ TbsUsdWindow.open_master_at_path(path)                  │
  * ├────────────────────┼──────────────────────────────────────────────────────┤
  * │ POST cmd:sim_start │ _apply_web_fields(ext,fields) → on_sim_start_clicked   │
  * │                    │ (control_window.py, 시뮬 엔진 TBSSimulationEngine 생성) │
@@ -191,7 +191,7 @@
   /**
    * GET /api/state — 주기적으로 Kit 쪽 UI 스냅샷을 가져와 웹 DOM 에 반영.
    * Kit: kit_remote_http_bridge._snapshot(ext)
-   *   - usd_status     ← load_window._load_status_label
+   *   - usd_status     ← TbsUsdWindow._log_label / master_path
    *   - progress       ← _sim_progress_label / _sim_progress_text
    *   - history        ← _sim_history_label / _sim_history_text
    *   - port_header, ports, ep3_visible ← 포트 상태 패널(_sim_port_cells 등)
@@ -462,7 +462,7 @@
   // ---------------------------------------------------------------------------
   /**
    * GET /api/resources — 샘플 USD 목록으로 f_resource_combo 옵션 채움.
-   * Kit: usd_loader_utils.get_resource_usd_list() = load_window 의 resource 콤보와 동일.
+   * Kit: usd_loader_utils.get_resource_usd_list() — resource 샘플 목록 SSOT.
    * "선택안함" 인덱스 0 은 get_load_path(ext) 에서 직접 경로 필드를 쓰는 것과 동일.
    */
   async function loadResources() {
@@ -494,7 +494,7 @@
   // onResourceChange()
   // ---------------------------------------------------------------------------
   /**
-   * resource 콤보 변경 시 load_window.on_resource_combo_changed 와 동일:
+   * resource 콤보 변경 시 path 필드만 갱신 (Kit UI 콤보 없음):
    * 선택안함이 아니면 해당 샘플 경로를 경로 입력칸에 복사.
    */
   function onResourceChange() {
@@ -588,7 +588,7 @@
     $("f_ep_count")?.addEventListener("change", syncEp3InitRow);
     syncEp3InitRow();
 
-    // USD 샘플 콤보 (load_window)
+    // USD 샘플 콤보 (GET /api/resources)
     $("f_resource_combo")?.addEventListener("change", onResourceChange);
 
     // XML 제너레이터 입력 프레임 표시 (control_window on_xml_seq_changed)
@@ -596,7 +596,7 @@
 
     // 표시모드 제거: log_mode UI/명령 미사용
 
-    // Load → load_window.on_load_usd(ext) (비동기 open_stage)
+    // Load → TbsUsdWindow.open_master_at_path (비동기 Master open)
     $("btnLoadUsd")?.addEventListener("click", async () => {
       try {
         await apiCommand({

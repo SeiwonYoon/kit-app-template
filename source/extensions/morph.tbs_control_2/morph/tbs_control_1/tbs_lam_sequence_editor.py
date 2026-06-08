@@ -1121,7 +1121,7 @@ class TbsLamSequenceEditor:
             self._set_status("초기화할 스텝이 없습니다.")
             return
 
-        from .tbs_sequence_engine import _collect_prim_paths_for_reset
+        from .tbs_lam_sequence_engine import _collect_prim_paths_for_reset
 
         paths = _collect_prim_paths_for_reset(steps)
         if not paths:
@@ -1147,7 +1147,7 @@ class TbsLamSequenceEditor:
         - TBS_OFFSET 0 으로 (main tick 에서 USD write, 완료까지 대기).
         - REPLAY/TIMELINE 인스턴스 virtual_time / state / evaluator 모드 정리.
         """
-        from .tbs_sequence_engine import (
+        from .tbs_lam_sequence_engine import (
             _dispatch_main_wait,
             _reset_tbs_offset_ops_for_paths,
         )

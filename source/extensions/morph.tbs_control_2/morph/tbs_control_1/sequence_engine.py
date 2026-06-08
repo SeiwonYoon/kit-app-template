@@ -54,13 +54,14 @@ class SequenceRunner(_LegacySequenceRunner):
         self._lam_runner: Any = None
         self._lam_thread: Optional[threading.Thread] = None
         self._lam_running = False
+        self._lam_last_steps: List[Dict[str, Any]] = []
 
     def is_running(self) -> bool:
         if self._lam_running:
             return True
         return super().is_running()
 
-    def stop(self) -> None:
+    def _halt_lam_runner(self) -> None:
         if self._lam_runner is not None:
             try:
                 self._lam_runner.stop()
@@ -68,10 +69,19 @@ class SequenceRunner(_LegacySequenceRunner):
                 pass
         self._lam_running = False
         self._lam_thread = None
-        super().stop()
 
     def pause(self) -> None:
-        self.stop()
+        """애니만 중단 — prim 위치는 유지 (시뮬 **정지**)."""
+        self._halt_lam_runner()
+        super().pause()
+
+    def stop(self) -> None:
+        """애니 중단 + baseline 복원 (시뮬 **리셋**·명시적 초기화)."""
+        self._halt_lam_runner()
+        steps = list(getattr(self, "_lam_last_steps", None) or [])
+        if steps:
+            self._steps = steps
+        super().stop()
 
     def _use_lam_engine(self, steps: List[Dict[str, Any]], usd_context_name: Optional[str]) -> bool:
         if self._tbs_registry is None or self._tbs_scheduler is None:
@@ -101,6 +111,8 @@ class SequenceRunner(_LegacySequenceRunner):
             except Exception:
                 pass
 
+        self._lam_last_steps = list(normalized)
+        self._steps = list(normalized)
         self._lam_runner = TbsLamSequenceRunner(self._tbs_registry, self._tbs_scheduler)
         self._lam_running = True
         cb = self.on_sequence_completed
@@ -108,7 +120,12 @@ class SequenceRunner(_LegacySequenceRunner):
 
         def _bg() -> None:
             try:
-                self._lam_runner.run(normalized, speed_scale=sp, quiet=True)
+                self._lam_runner.run(
+                    normalized,
+                    speed_scale=sp,
+                    quiet=True,
+                    reset_each_start=True,
+                )
             except Exception as exc:
                 print(f"[TBS/SEQ] lam runner failed: {exc}", flush=True)
             finally:

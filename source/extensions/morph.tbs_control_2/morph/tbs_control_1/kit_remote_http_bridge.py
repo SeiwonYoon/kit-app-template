@@ -29,7 +29,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import omni.kit.app as app
 
-from . import load_window, sim_multi_view
+from . import sim_multi_view
 from .kit_chrome_visibility import apply_kit_chrome_hidden, is_kit_chrome_hidden
 from .control_window import (
     _close_sim_gate_dialog,
@@ -45,8 +45,9 @@ from .control_window import (
     on_xml_seq_changed,
     refresh_object_list,
 )
-from .load_window import DEFAULT_USD_URL
-from .usd_loader_utils import get_resource_usd_list
+from .tbs_data_paths import resolve_local_data_path
+from .tbs_usd_window import default_load_usd_path
+from .usd_loader_utils import get_resource_usd_list, path_has_supported_stage_extension
 
 _WEB_ROOT = Path(__file__).resolve().parent.parent.parent / "web" / "tbs_kit_remote"
 
@@ -307,8 +308,22 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
 
     usd_status = ""
     try:
-        if getattr(ext, "_load_status_label", None) is not None:
-            usd_status = ext._load_status_label.text or ""
+        win = getattr(ext, "_tbs_usd_window", None)
+        if win is not None:
+            lbl = getattr(win, "_log_label", None)
+            if lbl is not None:
+                t = (lbl.text or "").strip()
+                if t and t != "(no log yet)":
+                    usd_status = t
+            if not usd_status:
+                master = getattr(win, "_master", None)
+                mp = str(getattr(master, "master_path", "") or "").strip() if master else ""
+                if mp:
+                    usd_status = f"Master: {mp}"
+            if not usd_status:
+                mdl = getattr(win, "_master_path_model", None)
+                if mdl is not None:
+                    usd_status = mdl.get_value_as_string() or ""
     except Exception:
         pass
 
@@ -636,19 +651,22 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
     cmd = str(data.get("cmd", "") or "").strip()
     if cmd == "load_usd":
         path = str(data.get("path", "") or "").strip()
-        ri = int(data.get("resource_index", 0) or 0)
-        try:
-            ext._path_model.set_value_as_string(path or getattr(ext, "DEFAULT_USD_URL", DEFAULT_USD_URL))
-        except Exception:
-            pass
-        try:
-            if getattr(ext, "_resource_combo", None) is not None and getattr(ext, "_resource_names", None):
-                n = len(ext._resource_names)
-                ext._resource_combo.model.get_item_value_model().set_value(max(0, min(ri, n - 1)))
-        except Exception:
-            pass
-        asyncio.ensure_future(load_window.on_load_usd(ext))
-        return {"ok": True}
+        if not path:
+            path = resolve_local_data_path(default_load_usd_path) or str(
+                default_load_usd_path or ""
+            )
+        if not path or not path_has_supported_stage_extension(path):
+            return {"ok": False, "error": "invalid usd path"}
+
+        def _open_master() -> bool:
+            win = getattr(ext, "_tbs_usd_window", None)
+            if win is None:
+                return False
+            resolved = resolve_local_data_path(path) or path
+            return bool(win.open_master_at_path(resolved, log_prefix="HTTP load_usd"))
+
+        ok = bool(_run_on_main(_open_master))
+        return {"ok": ok}
 
     if cmd == "apply_fields":
         fields = data.get("fields")

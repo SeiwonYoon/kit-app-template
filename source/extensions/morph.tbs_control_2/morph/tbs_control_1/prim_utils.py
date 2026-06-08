@@ -20,7 +20,7 @@ prim_utils.py — 스테이지/prim 조회 및 변환 유틸 (경로 수집, 이
 - 이름 검색 규칙: find_prim_path_by_name / find_all_prim_paths_by_name
 - translate 적용 방식: set_prim_translate_only (TBS_OFFSET op 이름은 xform_utils와 연동)
 
-사용처: control_window, load_window
+사용처: control_window
 
 【유지보수 시나리오】
 1) prim 목록에 특정 타입이 빠지는 경우

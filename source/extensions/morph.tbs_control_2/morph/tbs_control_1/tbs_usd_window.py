@@ -18,7 +18,8 @@ Viewport 정책 (REQ-007, 결정 A):
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional, Tuple
 
 from .tbs_data_paths import resolve_local_data_path
 from .tbs_composition_discovery import CompositionDiscovery
@@ -33,9 +34,9 @@ from .tbs_viewport import TbsViewport
 # ---------------------------------------------------------------------------
 # 앱 시작 시 합성(Master) USD 자동 로드 — 필요 시 아래만 수정
 # ---------------------------------------------------------------------------
-# True 이면 LAM Window 첫 show() 시 default_load_usd_path 를 「② 기존 합성 USD 열기」와
-# 동일하게 로드(Discover + Extract 자동). False 이면 기존과 동일(수동).
-load_automatically = False
+# True 이면 TBS USD Window 첫 show() 시 default_load_usd_path 를 「② 기존 합성 USD 열기」와
+# 동일하게 로드(Discover + Extract 자동). False 이면 수동 Open Master.
+load_automatically = True
 
 # 절대 경로 예 (Windows):
 #   default_load_usd_path = r"C:\Users\ptK\Documents\kit-app-template_mine\lam\usd\master.usd"
@@ -48,6 +49,28 @@ load_automatically = False
 #   default_load_usd_path = "usd/LAM_v02/FBX/Combine_01.usd"
 default_load_usd_path = "usd/master_1.usd"
 # default_load_usd_path = "usd/combine_05.usd"
+
+# ---------------------------------------------------------------------------
+# EP 포트 수별 prim visibility (USD 재로드 없음 — tbs_ep_port_visibility.py)
+# launch 기본 = EP2 (제어창 콤보 idx 0)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EpPortLayout:
+    hide_prims: Tuple[str, ...]
+    show_prims: Tuple[str, ...]
+
+
+EP2_PORT_LAYOUT = EpPortLayout(
+    hide_prims=("/World/aaa_1",),
+    show_prims=("/World/aaa",),
+)
+
+EP3_PORT_LAYOUT = EpPortLayout(
+    hide_prims=("/World/aaa",),
+    show_prims=("/World/aaa_1",),
+)
 
 _PRINT_PREFIX = "[TBS/USD]"
 
@@ -112,8 +135,13 @@ class TbsUsdWindow:
         self._inst_refresh_sub: Optional[Any] = None
         # 시작 자동 로드 — Kit Timeline UI 초기화와 겹치지 않도록 post_update 지연.
         self._autoload_sub: Optional[Any] = None
+        self._master_open_listener: Optional[Callable[[], None]] = None
 
         self._registry.add_listener(self._schedule_instances_ui_refresh)
+
+    def set_master_open_listener(self, fn: Optional[Callable[[], None]]) -> None:
+        """open_master 성공 후 콜백 (EP visibility 등)."""
+        self._master_open_listener = fn
 
     # ------------------------------------------------------------------ window
 
@@ -143,9 +171,9 @@ class TbsUsdWindow:
 
         self._asset_path_model = ui.SimpleStringModel("")
         self._instance_id_model = ui.SimpleStringModel("")
-        usd_dir = resolve_local_data_path("usd") or ""
+        resolved_default = resolve_local_data_path(default_load_usd_path) or ""
         self._master_path_model = ui.SimpleStringModel(
-            os.path.join(usd_dir, "test1.usd") if usd_dir else "usd/test1.usd"
+            resolved_default or str(default_load_usd_path or "")
         )
         self._results_path_model = ui.SimpleStringModel("")
 
@@ -293,6 +321,7 @@ class TbsUsdWindow:
                 self._log_label = ui.Label("(no log yet)", height=80, word_wrap=True)
 
         self._schedule_instances_ui_refresh()
+        self._schedule_autoload_master_on_startup()
 
     def _open_editor(self) -> None:
         """TBS: 시퀀스 편집기는 extension 별도 창 — USD 창에서 열지 않음."""
@@ -338,10 +367,54 @@ class TbsUsdWindow:
         return
 
     def _schedule_autoload_master_on_startup(self) -> None:
-        return
+        if not load_automatically:
+            return
+        if self._autoload_sub is not None:
+            return
+
+        frames_left = [3]
+
+        def _do(_e=None):
+            if frames_left[0] > 0:
+                frames_left[0] -= 1
+                return
+            if self._autoload_sub is not None:
+                try:
+                    self._autoload_sub.unsubscribe()
+                except Exception:
+                    pass
+                self._autoload_sub = None
+            self._try_autoload_master_on_startup()
+
+        try:
+            import omni.kit.app as _app  # type: ignore
+
+            stream = _app.get_app().get_post_update_event_stream()
+            self._autoload_sub = stream.create_subscription_to_pop(
+                _do, name="morph.tbs_control_1.tbs_usd_window.autoload_master"
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} autoload schedule failed: {exc} (즉시 시도)",
+                flush=True,
+            )
+            self._try_autoload_master_on_startup()
 
     def _try_autoload_master_on_startup(self) -> None:
-        return
+        if not load_automatically:
+            return
+        resolved = resolve_local_data_path(default_load_usd_path)
+        if not resolved:
+            self._log("자동 로드: default_load_usd_path 가 비어 있습니다.")
+            print(f"{_PRINT_PREFIX} autoload: empty default_load_usd_path", flush=True)
+            return
+        if self._master_path_model is not None:
+            try:
+                self._master_path_model.set_value(resolved)
+            except Exception:
+                pass
+        self._log(f"자동 로드 시작: {resolved}")
+        self._open_master_at_path(resolved, log_prefix="자동 로드")
 
     def destroy(self) -> None:
         try:
@@ -495,10 +568,16 @@ class TbsUsdWindow:
             self._log(f"{prefix}Discover added={len(added)}")
             extract_prefix = log_prefix or "Open Master"
             self._auto_extract_after_master_open(log_prefix=extract_prefix)
+            listener = self._master_open_listener
+            if callable(listener):
+                try:
+                    listener()
+                except Exception as exc:
+                    print(f"{_PRINT_PREFIX} master_open_listener: {exc}", flush=True)
         return ok
 
     def open_master_at_path(self, path: str, *, log_prefix: str = "") -> bool:
-        """equipment_autoload 등 외부에서 Master USD open + Discover + Extract."""
+        """HTTP·외부에서 Master USD open + Discover + Extract."""
         return self._open_master_at_path(path, log_prefix=log_prefix)
 
     def _on_save_master(self) -> None:
@@ -1779,6 +1858,9 @@ class TbsUsdWindow:
 
 __all__ = [
     "TbsUsdWindow",
+    "EpPortLayout",
+    "EP2_PORT_LAYOUT",
+    "EP3_PORT_LAYOUT",
     "load_automatically",
     "default_load_usd_path",
     "resolve_local_data_path",

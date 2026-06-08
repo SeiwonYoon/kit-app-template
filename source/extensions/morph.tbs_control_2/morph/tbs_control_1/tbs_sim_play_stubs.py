@@ -11,7 +11,9 @@ def csv_play_session_active() -> bool:
     return False
 
 
-def get_csv_play_anim_dt_scale() -> float:
+def get_csv_play_anim_dt_scale(speed_ref: float) -> float:
+    """MOVE/ROTATE 프레임 dt 배율. TBS 시퀀스 에디터는 CSV Play 없음 → 항상 1.0."""
+    _ = float(max(0.01, speed_ref or 1.0))
     return 1.0
 
 

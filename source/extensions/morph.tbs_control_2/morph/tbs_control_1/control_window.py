@@ -6,7 +6,7 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 
 【역할】
 - build_control_window(ext): "TBS 제어창" 창. 최상단 화면 옵션(기본 메뉴/패널 숨기기),
-  USD Load(load_window.build_load_ui_into_stack),
+  USD Load(TbsUsdWindow — extension.py),
   USD 타임라인(수동/자동), 가상 시그널 샘플,
   XML 제너레이터(6종 시퀀스 콤보·입력 필드), 우선 표시 접두사, prim 목록.
 - refresh_object_list(ext): 드롭다운/목록 갱신.
@@ -6064,6 +6064,10 @@ def on_sim_start_clicked(ext: Any) -> None:
         n_ch = 1
 
     on_sim_stop_clicked(ext)
+    try:
+        _restore_sim_prim_motion_to_initial(ext)
+    except Exception:
+        pass
     # FOUP 진행중 보호 표시 추가 안전망(이전 세션 잔여 차단):
     # - on_sim_stop_clicked 에서 이미 정리하지만, 어떤 경로로든 잔여가 남는 것을 막기 위해 한 번 더 비운다.
     try:
@@ -6351,20 +6355,20 @@ def on_sim_start_clicked(ext: Any) -> None:
                     r = runners.get(str(scr))
                     try:
                         if r is not None:
-                            r.stop()
+                            r.pause()
                     except Exception:
                         pass
                 else:
                     for r in list(runners.values()):
                         try:
                             if r is not None:
-                                r.stop()
+                                r.pause()
                         except Exception:
                             pass
             else:
                 runner = getattr(ext, "_sim_runner", None)
                 if runner is not None:
-                    runner.stop()
+                    runner.pause()
         except Exception:
             pass
         try:
@@ -6916,6 +6920,139 @@ def on_sim_start_clicked(ext: Any) -> None:
     th.start()
 
 
+def _restore_sim_prim_motion_to_initial(ext: Any) -> None:
+    """시뮬 **시작·리셋** 시 MOVE·ROTATE·FOUP·USD_TIMELINE prim 을 초기 자세로."""
+    paths_seen: set[str] = set()
+    paths: List[str] = []
+
+    def _add(path: str) -> None:
+        p = str(path or "").strip()
+        if p.startswith("/") and p not in paths_seen:
+            paths_seen.add(p)
+            paths.append(p)
+
+    try:
+        from . import port_lot_visibility as _plv
+
+        for p in (_plv.load_port_lot_prim_paths() or {}).values():
+            _add(str(p))
+    except Exception:
+        pass
+
+    try:
+        from .tbs_lam_sequence_engine import _collect_prim_paths_for_reset
+
+        runners = getattr(ext, "_sim_runners_by_screen", None)
+        if isinstance(runners, dict):
+            for r in runners.values():
+                if r is not None:
+                    for p in _collect_prim_paths_for_reset(
+                        getattr(r, "_lam_last_steps", None) or []
+                    ):
+                        _add(p)
+        r0 = getattr(ext, "_sim_runner", None)
+        if r0 is not None:
+            for p in _collect_prim_paths_for_reset(
+                getattr(r0, "_lam_last_steps", None) or []
+            ):
+                _add(p)
+    except Exception:
+        pass
+
+    try:
+        reg = getattr(ext, "_tbs_registry", None)
+        if reg is not None and hasattr(reg, "all_instances"):
+            for inst in reg.all_instances():
+                _add(str(getattr(inst, "prim_path", "") or ""))
+    except Exception:
+        pass
+
+    try:
+        from . import tbs_lam_rotate_animation as _lrx
+        from . import tbs_lam_translate_animation as _ltx
+
+        _ltx.stop_all_translate_animations()
+        _lrx.stop_all_rotate_animations()
+    except Exception:
+        pass
+    try:
+        stop_all_translate_animations(preserve_foup_port_lot_prims=False)
+        stop_all_rotate_animations()
+        stop_all_curve_animations()
+    except Exception:
+        pass
+
+    try:
+        from . import port_lot_visibility as _plv
+
+        _plv.clear_foup_in_progress()
+        _plv.clear_foup_lifted()
+        _plv.restore_port_lot_prims_to_authoring()
+    except Exception:
+        pass
+
+    try:
+        sch = getattr(ext, "_tbs_scheduler", None)
+        stop_fn = getattr(sch, "stop_all", None) if sch is not None else None
+        if callable(stop_fn):
+            stop_fn()
+    except Exception:
+        pass
+
+    def _do_on_main() -> None:
+        if paths:
+            from .tbs_lam_sequence_engine import _reset_tbs_offset_ops_for_paths
+
+            _reset_tbs_offset_ops_for_paths(paths)
+
+        try:
+            from .tbs_lam_sequence_editor import _range_start_seconds_for_instance
+
+            reg = getattr(ext, "_tbs_registry", None)
+            ev = getattr(ext, "_tbs_evaluator", None)
+            if reg is not None and hasattr(reg, "all_instances"):
+                for inst in reg.all_instances():
+                    pp = str(getattr(inst, "prim_path", "") or "").strip()
+                    if not pp.startswith("/"):
+                        continue
+                    try:
+                        inst.virtual_time = _range_start_seconds_for_instance(inst)
+                        inst.state = "stopped"
+                    except Exception:
+                        pass
+                    if ev is not None:
+                        for fn_name in (
+                            "end_replay_mode",
+                            "end_master_timeline_mode",
+                            "invalidate_mapping",
+                            "force_rebuild_attr_cache",
+                        ):
+                            fn = getattr(ev, fn_name, None)
+                            if callable(fn):
+                                try:
+                                    fn(pp)
+                                except Exception:
+                                    pass
+        except Exception:
+            pass
+
+        try:
+            usd_animation_control.stop_usd_animation(None)
+            usd_animation_control.reset_timeline_to_zero(None)
+        except Exception:
+            pass
+
+    try:
+        if threading.current_thread() is threading.main_thread():
+            _do_on_main()
+        else:
+            from .tbs_lam_sequence_engine import _dispatch_main_wait
+
+            _dispatch_main_wait(_do_on_main, timeout=20.0)
+    except Exception as exc:
+        print(f"[TBS/SIM] restore motion failed: {exc}", flush=True)
+
+
 def on_sim_stop_clicked(ext: Any) -> None:
     """
     시뮬레이션 중지(Stop).
@@ -7083,7 +7220,7 @@ def on_sim_stop_clicked(ext: Any) -> None:
             for r in list(runners.values()):
                 try:
                     if r is not None:
-                        r.stop()
+                        r.pause()
                 except Exception:
                     pass
     except Exception:
@@ -7091,7 +7228,7 @@ def on_sim_stop_clicked(ext: Any) -> None:
     runner = getattr(ext, "_sim_runner", None)
     if runner is not None:
         try:
-            runner.stop()
+            runner.pause()
         except Exception:
             pass
     # pause 상태 해제
@@ -7245,6 +7382,10 @@ def on_sim_reset_clicked(ext: Any) -> None:
     - EP 타임라인: t=0.0 초기 렌더 + 관련 dict를 완전 초기화
     """
     on_sim_stop_clicked(ext)
+    try:
+        _restore_sim_prim_motion_to_initial(ext)
+    except Exception:
+        pass
     try:
         clear_port_lot_authoring_cache()
     except Exception:
@@ -7545,7 +7686,7 @@ def on_sim_ep_count_changed(ext: Any) -> None:
         ext._sim_fault_ep3_model.set_value(False)
     _sync_ep3_port_cell_visibility(ext)
     try:
-        from .equipment_autoload import on_sim_ep_count_combo_changed
+        from .tbs_ep_port_visibility import on_sim_ep_count_combo_changed
 
         on_sim_ep_count_combo_changed(ext)
     except Exception:
@@ -7583,8 +7724,6 @@ def run_generator_from_parsed(ext: Any, parsed: dict) -> None:
 def on_refresh_prim_list(ext: Any) -> None:
     stage = get_stage()
     if not stage:
-        if getattr(ext, "_load_status_label", None):
-            ext._load_status_label.text = "스테이지가 없습니다. USD를 먼저 로드하세요."
         return
     ext._tracked_paths = collect_prim_paths_safe(stage)
     refresh_object_list(ext)

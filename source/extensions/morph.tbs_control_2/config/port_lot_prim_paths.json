@@ -1,11 +1,11 @@
 {
   "_comment": "포트 ID → 해당 포트에 놓인 LOT을 나타내는 USD prim 절대 경로. 빈 문자열이면 가시성 자동 제어 없음(기존과 동일). LOT 없으면 숨김, LOT 있으면 표시. INOUT=IN/OUT 포트, BP1~BP4=버퍼.",
-  "INOUT": "/Root/Cylinder_5",
-  "BP1": "/Root/Cylinder_6",
-  "BP2": "/Root/Cylinder_7",
-  "BP3": "/Root/Cylinder_8",
-  "BP4": "/Root/Cylinder_9",
-  "EP1": "/Root/Cylinder_1",
-  "EP2": "/Root/Cylinder_2",
-  "EP3": "/Root/Cylinder_3"
+  "INOUT": "/wafer_01/_01",
+  "BP1": "/wafer_01/_02",
+  "BP2": "/wafer_01/_03",
+  "BP3": "/wafer_01/_04",
+  "BP4": "/wafer_01/_05",
+  "EP1": "/wafer_01/_06",
+  "EP2": "/wafer_01/_07",
+  "EP3": "/wafer_01/_08"
 }
