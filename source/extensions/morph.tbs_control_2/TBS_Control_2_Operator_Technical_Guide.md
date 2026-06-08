@@ -2,7 +2,8 @@
 
 > **대상 독자**: Omniverse Kit / USD를 어느 정도 아는 엔지니어  
 > **목적**: `morph.tbs_control_2` 확장의 주요 기능을 **파일·코드·데이터 흐름**으로 따라갈 수 있게 설명  
-> **패키지명**: `morph.tbs_control_2` (Python 모듈 경로는 `morph/tbs_control_1/` — 역사적 이름 유지)
+> **패키지명**: `morph.tbs_control_2` (Python 모듈 경로는 `morph/tbs_control_1/` — 역사적 이름 유지)  
+> **용어가 낯설면** → **§0.1 용어 설명**을 먼저 읽으세요.
 
 ---
 
@@ -31,6 +32,7 @@ source/extensions/morph.tbs_control_2/
 
 **읽는 순서 추천**
 
+0. 이 문서 **§0.1 용어 설명** — 처음 보는 단어 정리  
 1. `extension.py` — 무엇이 언제 뜨는지  
 2. `control_window.py` 상단 docstring — 전체 파이프라인 요약  
 3. 이 문서 **§1.5** — JSON step 타입별 실행 원리·코드  
@@ -39,6 +41,7 @@ source/extensions/morph.tbs_control_2/
 
 | 궁금한 것 | 문서 섹션 |
 |-----------|-----------|
+| **처음 보는 용어 전체** | **§0.1 용어 설명** |
 | JSON Save/Load · 편집기 Run | §1.2 · §1.3 |
 | 시뮬 자동 JSON 실행 | §1.4 |
 | MOVE/ROTATE **TranslateOp/RotateXYZOp.Set** | §1.5.1 · §1.5.2 |
@@ -63,6 +66,123 @@ source/extensions/morph.tbs_control_2/
 | **② 원초 구현** | 그 호출 **안에서** USD/Kit/SimPy/UI API로 **실제 상태가 바뀌는** 코드 (마지막 write 한 줄까지) |
 
 개념·설계·체크리스트(§0, §2.1, §6~§8)는 표 형식을 생략할 수 있으나, **코드가 있는 소절은 반드시 ①②를 병기**합니다.
+
+---
+
+### 0.1 용어 설명 (Glossary)
+
+본문에 나오는 전문 용어를 **처음 읽는 사람 기준**으로 풀어 씁니다.  
+LAM 가이드(`LAM_Control_Operator_Technical_Guide.md`)와 **공통 용어**는 양쪽 문서에 비슷한 설명이 있습니다.
+
+#### A. 이 문서만의 읽기 방식
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **① 호출부** | “누가 누구를 부르나” — 버튼·이벤트·엔진이 호출하는 **함수·모듈 이름**과 흐름. 아직 prim이 움직이지 않을 수 있음. |
+| **② 원초 구현** | “실제로 무엇이 바뀌나” — USD `op.Set()`, `MakeInvisible()`, SimPy `env.timeout` 등 **화면·상태가 변하는 마지막 API**까지의 코드. |
+| **SSOT** | *Single Source of Truth* — 설정·경로를 **한 파일만** 고치면 전체에 반영되게 둔 “단일 진실 원천”. 예: `tbs_usd_window.py`. |
+| **래퍼 / 오케스트레이션** | 여러 단계를 묶어 호출하는 **중간 함수**. 예: `_execute_mapped_sequence_stub()` → `SequenceRunner.run()`. |
+
+#### B. Kit · USD · 그래픽 기본
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **Kit / Omniverse Kit** | NVIDIA 3D 앱 런타임. 이 확장(`morph.tbs_control_2`)은 Kit 안에서 로드되는 **플러그인(extension)**. |
+| **extension** | Kit 시작 시 `extension.py`의 `on_startup()`이 돌아가며 창·엔진을 띄우는 **확장 패키지** 단위. |
+| **USD** | *Universal Scene Description* — 3D 씬·애니메이션을 파일/레이어로 표현하는 포맷. `.usd` 파일. |
+| **stage** | USD **씬 전체**를 담는 작업 공간. 뷰포트에 보이는 3D 세계 = 하나의 stage. |
+| **prim** | stage 안의 **객체 하나** (로봇, 웨이퍼, 장비 메시 등). 경로 예: `/World/aaa`. |
+| **xform** | prim의 **위치·회전·크기**를 나타내는 변환(transform) 연산 묶음. |
+| **TranslateOp / RotateXYZOp** | xform 중 **이동(translate)** · **회전(rotate, 오일러 각도)** 을 담는 USD op. |
+| **author / write** | USD 파일·레이어에 값을 **기록**하는 것. 코드의 `op.Set(...)` 가 author. |
+| **timeSamples** | USD attribute에 **시간(프레임)별로 다른 값**이 배열로 저장된 것. FBX→USD 애니의 일반적 형태. |
+| **reference** | 다른 USD 파일을 **붙여 넣기**하는 방식. `AddReference(path)` — 원본은 유지, 합성 stage에서 참조. |
+| **Master USD** | TBS가 메인으로 여는 **합성용 루트 USD** 파일. `tbs_usd_window.py`의 `default_load_usd_path`. |
+| **뷰포트 (viewport)** | Kit 화면의 **3D 뷰 창**. 사용자가 장비를 보는 창. |
+| **main thread** | Kit UI·USD 쓰기가 안전한 **메인 스레드**. 백그라운드 스레드에서 직접 USD write 하면 deadlock 위험 → `_dispatch_main()` 사용. |
+
+#### C. 애니메이션 · JSON
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **시퀀스 JSON** | prim을 **어떻게 움직일지** 적은 파일. 최상위는 배열 `[]`, 원소 하나 = **step** 하나. |
+| **step** | JSON 한 줄(한 객체). `type` 필드로 MOVE / ROTATE / DELAY 등 구분. |
+| **MOVE** | 지정 prim을 (dx,dy,dz) 만큼 **이동**하는 step. |
+| **ROTATE** | 지정 prim을 (rx,ry,rz) 도(degree) 만큼 **회전**하는 step. |
+| **DELAY** | **아무 애니 없이 N초 대기**만 하는 step. |
+| **PRIM_VISIBILITY** | prim을 **보이기/숨기기** (`MakeVisible` / `MakeInvisible`). |
+| **USD_TIMELINE** | Kit 전역 **타임라인 슬라이더**(`omni.timeline`)로 USD에 구워진 프레임 애니를 재생하는 step. |
+| **TIMESAMPLES_REPLAY** | reference에 있는 **timeSamples**를 읽어 인스턴스 mirror에 다시 써서 재생하는 step (LAM 스타일, Option E). |
+| **TBS_OFFSET** | prim의 **원본 xform은 건드리지 않고**, 이름에 `TBS_OFFSET`이 들어간 translate/rotate op **만** 애니메이션하는 규약. Reset 시 0으로 되돌리기 쉬움. |
+| **델타 (delta)** | **현재 값 기준 변화량**. MOVE의 (dx,dy,dz)가 델타. `move_from_initial=true` 이면 절대 목표 좌표. |
+| **speed_scale / 배속** | 애니·대기 시간을 곱해 **빠르게/느리게** 재생하는 배율. 2.0 = 2배속. |
+| **ref (인스턴스 참조)** | TIMESAMPLES/USD_TIMELINE step이 **어느 등록 인스턴스**를 재생할지 가리키는 블록 (`prim_path`, `instance_id` 등). |
+| **run_with_previous** | 여러 step을 **동시에 시작**하는 그룹 옵션. 맨 아래 step이 시간 앵커. |
+
+#### D. TBS 시뮬레이션 · 이벤트
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **SimPy** | Python **이산사건 시뮬** 라이브러리. “몇 초 후에 일어남”을 `yield env.timeout(초)` 로 표현. |
+| **이산사건 시뮬** | 연속 물리가 아니라 **이벤트 시점**(LOT 도착, 이송 완료 등) 단위로 시간이 진행되는 시뮬. |
+| **env.now** | SimPy **시뮬레이션 시계**(초). 공정이 진행된 누적 시간. EP 막대 X축도 이 값. |
+| **env.timeout(sec)** | 시뮬 시계만 **sec만큼 앞으로** 보냄. 그동안 다른 generator도 진행 가능. |
+| **LOT** | 시뮬에서 다루는 **웨이퍼 묶음/작업 단위** 하나. `lot_id` 문자열로 식별. |
+| **포트 (port)** | 장비 입출구·버퍼·EP 등 **위치 ID**. 예: `INOUT`, `BP1`, `EP2`. |
+| **BP (Buffer Port)** | 버퍼 구간 포트. LOT가 EP로 가기 전 대기. |
+| **EP (Equipment Port)** | **장비(공정) 쪽 포트**. FOUP 공정이 여기서 진행. |
+| **OHT** | *Overhead Hoist Transport* — 천장 반송 **OHT** 구간(시뮬 이벤트·이송). |
+| **INOUT** | 라인 **투입/배출** 포트. |
+| **_emit_event** | 시뮬 엔진이 UI·애니 쪽으로 **이벤트 payload**를 보내는 함수. `seq`, `port_id`, `sim_time` 등 포함. |
+| **event_animation_rules.json** | “이벤트가 X이고 포트가 Y일 때 **어느 JSON**을 실행할지” 적은 **규칙 파일**. |
+| **rules 매칭** | 들어온 이벤트 `seq`·포트와 rules의 `when` 조건을 비교해 **JSON 경로를 고르는** 과정. |
+| **ANIM_EVENT 큐** | 시뮬 스레드 → 메인 스레드로 이벤트를 넘기는 **thread-safe 대기열**. `_drain_sim_log_queue()`가 소비. |
+| **랜덤 시간 (min/max)** | `SimulationTimingConfig`에서 `random.uniform(lo, hi)`로 “이송·공정에 **몇 초 걸릴지**” 한 번 뽑음. |
+
+#### E. FOUP · 포트 · material (TBS)
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **FOUP** | *Front Opening Unified Pod* — 웨이퍼 카세트 **용기**. TBS 시뮬에서 EP 공정 중 **Y축 이동 + material 색 변경**으로 표현. |
+| **FOUP_PROCESS_START / END** | EP에서 FOUP **공정 시작·종료** 이벤트. JSON 없이 `control_window`가 직접 translate+material 처리. |
+| **port_lot_prim_paths.json** | 포트 ID → **LOT 웨이퍼 prim 경로** 매핑. 예: `"EP2": "/wafer_01/_07"`. |
+| **MaterialBinding** | prim 표면에 **머티리얼(색·질감)** 을 연결. `UsdShade.MaterialBindingAPI.Bind(mat)`. |
+| **case_01 / case_02 / case_03** | 프로젝트 USD `Looks` 아래 **머티리얼 경로** (기본 / 공정중 / 공정완료 등). |
+| **포트 점유 (occupancy)** | 각 포트에 **LOT이 있는지** 상태. `ports_occupancy`: `"EP2": "LOT-001"` 또는 `""`(비음). |
+| **EP visibility** | EP2/EP3 레이아웃 전환 시 **USD 재로드 없이** 특정 prim만 show/hide (`tbs_ep_port_visibility.py`). |
+
+#### F. 프리런 · UI 막대
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **프리런 (pre-run)** | 시뮬을 **최대 속도로 끝까지 계산**해 이벤트·로그·progress만 **리스트로 기록**한 뒤, 나중에 wall-clock으로 **다시 재생**하는 방식. |
+| **SimTimelineItem** | 프리런 기록 한 줄: `(시뮬시각 t, kind, payload)`. kind = `log` \| `event` \| `progress`. |
+| **SimTimelinePlayer** | 기록된 타임라인을 **실시간 배속**으로 다시 emit — 그때 JSON 애니·막대가 실제로 갱신. |
+| **wall-clock** | PC **실제 경과 시간** (`time.perf_counter()`). 프리런 재생 시 “몇 초마다 다음 이벤트를보낼지” 기준. |
+| **EP 타임라인 막대** | 제어창 포트상태 아래 **EP1/EP2/EP3/ALL_EP** 행의 빨강(EMPTY)·초록(FULL) **누적 막대**. |
+| **세그먼트 (segment)** | 막대 안 **한 색 구간** 하나. `{empty: true/false, dur: 초}` — 같은 상태가 이어지면 dur만 증가. |
+| **virtual time (막대용)** | `sim_time`이 UI 큐 때문에 **점프**할 때 막대가 한꺼번에 차지 않게, wall-clock으로 **부드럽게** 누적하는 내부 시계. |
+| **total_est** | 막대 **전체 폭(초)** 스케일. 시뮬 총 예상 시간 또는 `max(30, t×1.2)`. |
+
+#### G. 엔진 · 레이어 (LAM/TBS 공통 개념)
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **L3 Registry** | stage에 등록된 **애니 인스턴스 목록** SSOT (`AnimationInstanceRegistry`). |
+| **L4 Scheduler** | 인스턴스 `state`·`speed`·`virtual_time` **재생 제어 API** (`PlaybackScheduler`). |
+| **L5 Evaluator / Option E** | 매 프레임 **timeSamples를 평가**해 mirror prim에 쓰는 루프. `omni.timeline` 대신 **인스턴스별 virtual_time**. |
+| **virtual_time** | 인스턴스 **자체 재생 시계**(초). Master 전역 timeline과 **독립**. |
+| **reauthor / mirror** | offscreen에서 읽은 pose를 master의 **mirror attribute default**에 다시 써서 화면에 반영. |
+| **legacy 엔진** | 분할 화면용 `usd_context_name`이 있을 때 쓰는 **구형** `sequence_engine_legacy` 경로. |
+| **LAM 엔진** | `TbsLamSequenceRunner` — 편집기 Run·registry 있을 때 기본. |
+
+#### H. 약어 · 파일
+
+| 용어 | 쉬운 설명 |
+|------|-----------|
+| **EAP** | *Equipment Automation Program* — 장비 자동화/상위 시스템 쪽 데이터 출처 맥락 (CSV 컬럼 등). |
+| **EAPEIS / XML** | TBS가 이벤트를 **XML 문자열**로 한 번 감싼 뒤 rules 매칭에 쓰는 레거시 호환 형식. |
+| **sim_sequences/** | `data/sim_sequences/*.json` — 시뮬·규칙이 참조하는 **애니 JSON** 저장 폴더. |
 
 ---
 
@@ -1259,6 +1379,8 @@ plv.apply_port_lot_prim_material_for_context(
 
 ### 4.1 왜 프리런을 쓰는가
 
+> **프리런** = 시뮬을 최대 속도로 끝까지 계산해 이벤트만 기록한 뒤, 나중에 같은 순서로 다시 재생. → §0.1 F절.
+
 실시간 tick으로 시뮬+애니+UI를 동시에 돌리면 배속·동기·막대 타이밍이 복잡해집니다.  
 **프리런** = (1) 시뮬 전체를 최대 속도로 계산해 타임라인 기록 → (2) wall-clock 배속 재생.
 
@@ -1585,4 +1707,4 @@ flowchart TB
 
 ---
 
-*문서 버전: 2026-06 v4 — 전 섹션 ①호출부 / ②원초 구현 형식 통일*
+*문서 버전: 2026-06 v5 — §0.1 용어 설명(Glossary) 추가*
