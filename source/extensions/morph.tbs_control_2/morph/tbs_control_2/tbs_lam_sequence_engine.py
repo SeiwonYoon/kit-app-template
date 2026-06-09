@@ -53,6 +53,10 @@ from pxr import Gf  # type: ignore  # noqa: E402,F401
 from .tbs_hide_helper import TbsHideController
 from .tbs_id_resolver import resolve_step_ref
 from .tbs_instance_registry import AnimationInstanceRegistry
+from .sequence_engine_legacy import (
+    _get_current_time_code,
+    _world_delta_to_tbs_offset_translate_delta,
+)
 from .tbs_offset_correction import apply_world_space_offset_correction
 from .tbs_playback_scheduler import PlaybackScheduler
 from .tbs_types import TBS_FIXED_FPS, RESOLVE_MISSING, ResolveResult, StepRef
@@ -1167,7 +1171,8 @@ class TbsLamSequenceRunner:
     # ----------------------------------------------------------------- MOVE
     # ``move_from_initial=True``: (dx,dy,dz) = TBS_OFFSET **절대 목표** (기준 0 = 905.92mm).
     #   자동 Z: dz=25.928 [TBS/mm] — ``lam_slot_z_config`` + ``build_steps_for_event``.
-    # ``move_from_initial=False``: 현재 위치에서 (dx,dy,dz) 만큼 **델타** 이동.
+    # ``move_from_initial=False``: (dx,dy,dz) = **월드(스테이지) 델타** — prim 마다
+    #   TBS_OFFSET 로컬 델타로 변환(legacy 와 동일, 쉼표 다중 prim 시 같은 방향).
     # 실제 USD write: ``lam_translate_animation`` (main thread).
 
     def _start_move(self, idx: int, step: dict, speed_scale: float) -> float:
@@ -1221,7 +1226,19 @@ class TbsLamSequenceRunner:
                             continue
                         seg_delta = (ddx, ddy, ddz)
                     else:
-                        seg_delta = (dx, dy, dz)
+                        world_delta = Gf.Vec3d(dx, dy, dz)
+                        prim = stage.GetPrimAtPath(p) if stage else None
+                        if prim and prim.IsValid():
+                            local_delta = _world_delta_to_tbs_offset_translate_delta(
+                                prim, world_delta, _get_current_time_code()
+                            )
+                            seg_delta = (
+                                float(local_delta[0]),
+                                float(local_delta[1]),
+                                float(local_delta[2]),
+                            )
+                        else:
+                            seg_delta = (dx, dy, dz)
                     _ltx.run_prim_translate_animation(
                         p,
                         [{"duration": duration, "delta": seg_delta}],
@@ -1236,7 +1253,8 @@ class TbsLamSequenceRunner:
                         )
                     else:
                         _seq_log(
-                            f"{_PRINT_PREFIX} (main) MOVE prim={p} d={seg_delta} dur={duration}",
+                            f"{_PRINT_PREFIX} (main) MOVE prim={p} "
+                            f"world_d=({dx},{dy},{dz}) local_d={seg_delta} dur={duration}",
                             flush=True,
                         )
                 except Exception as exc:

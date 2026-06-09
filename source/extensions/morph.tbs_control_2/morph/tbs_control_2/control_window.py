@@ -658,12 +658,13 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
     애니메이션 실행이력용 "예상 길이" 계산(보수적).
     - MOVE/ROTATE: duration_max가 있으면 max, 없으면 duration.
     - DELAY: duration
-    - USD_TIMELINE: 프레임 범위(start/end)로 추정
+    - USD_TIMELINE / TIMESAMPLES_REPLAY: 프레임 범위(start/end)로 추정
     """
     # NOTE(정책):
     # - "표시/예상 시간"은 **1배속 기준(콘텐츠 기준)** 으로 유지한다.
     # - 시뮬 배속(ext._sim_speed_model)은 "재생/진행 속도"만 바꾸고, 여기의 표기 시간에는 반영하지 않는다.
-    # - 단, USD_TIMELINE의 per-step 배속(step["speed_scale"])은 "그 스텝 자체를 빠르게 재생"하므로 표기에도 반영한다.
+    # - 단, USD_TIMELINE / TIMESAMPLES_REPLAY 의 per-step 배속(step["speed_scale"])은
+    #   "그 스텝 자체를 빠르게 재생"하므로 표기에도 반영한다.
     try:
         t = str((step or {}).get("type") or "").upper()
     except Exception:
@@ -675,14 +676,28 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
             return max(0.0, float((step or {}).get("duration", 0.0)))
         if t == "DELAY":
             return max(0.0, float((step or {}).get("duration", 0.0)))
-        if t == "USD_TIMELINE":
-            start = int((step or {}).get("start_frame", 0))
-            end = int((step or {}).get("end_frame", 0))
+        if t in ("USD_TIMELINE", "TIMESAMPLES_REPLAY"):
+            play = (step or {}).get("play") or {}
+            if not isinstance(play, dict):
+                play = {}
+
+            def _frame_val(key: str, default: int = 0) -> int:
+                if key in play and play[key] is not None:
+                    return int(play[key])
+                if key in (step or {}) and (step or {}).get(key) is not None:
+                    return int((step or {}).get(key))
+                return default
+
+            start = _frame_val("start_frame", 0)
+            end = _frame_val("end_frame", 0)
             if end <= start:
                 return 0.0
-            # 정책: 기본 30fps(TPS) 기반 환산 + 배속 반영
+            # 정책: 기본 30fps(TPS) 기반 환산 + 배속 반영 (tbs_lam_sequence_engine 과 동일 schema)
             try:
-                step_sp = float((step or {}).get("speed_scale", 1.0))
+                if "speed_scale" in play and play["speed_scale"] is not None:
+                    step_sp = float(play["speed_scale"])
+                else:
+                    step_sp = float((step or {}).get("speed_scale", 1.0))
             except Exception:
                 step_sp = 1.0
             step_sp = max(0.01, float(step_sp))
