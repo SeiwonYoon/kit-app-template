@@ -375,8 +375,8 @@ _EVENT_ANIM_RULES_MTIME: Optional[float] = None
 
 
 def _extension_root_dir() -> Path:
-    """이 파일 기준 확장 루트(.../morph.tbs_control_1). config·data 경로 계산에 사용."""
-    # .../source/extensions/morph.tbs_control_1
+    """이 파일 기준 확장 루트(.../morph.tbs_control_2). config·data 경로 계산에 사용."""
+    # .../source/extensions/morph.tbs_control_2
     return Path(__file__).resolve().parents[2]
 
 
@@ -408,7 +408,7 @@ def _sequence_json_search_roots() -> Tuple[Path, ...]:
 
         rt = carb.tokens.get_tokens_interface().resolve("${root}")
         if rt:
-            src = Path(rt) / "source" / "extensions" / "morph.tbs_control_1"
+            src = Path(rt) / "source" / "extensions" / "morph.tbs_control_2"
             if (src / "data" / "sim_sequences").is_dir():
                 _add(src)
     except Exception:
@@ -422,7 +422,7 @@ def _sequence_json_search_roots() -> Tuple[Path, ...]:
             if not isinstance(ext, dict) or not ext.get("enabled"):
                 continue
             eid = str(ext.get("id", "") or "")
-            if eid != "morph.tbs_control_1" and not eid.startswith("morph.tbs_control_1-"):
+            if eid != "morph.tbs_control_2" and not eid.startswith("morph.tbs_control_2-"):
                 continue
             epath = em.get_extension_path(eid)
             if not epath:
@@ -2594,17 +2594,17 @@ def on_xml_ok_clicked(ext: Any) -> None:
         ext._last_generated_xml = xml
         print(xml, flush=True)
     except Exception as e:
-        print(f"[morph.tbs_control_1][xml_generator] XML 생성 실패: {e}", flush=True)
+        print(f"[morph.tbs_control_2][xml_generator] XML 생성 실패: {e}", flush=True)
 
 
 def on_xml_run_clicked(ext: Any) -> None:
     xml_text = (ext._last_generated_xml or "").strip()
     if not xml_text:
-        print("[morph.tbs_control_1][xml_generator] 저장된 XML이 없습니다. 먼저 OK로 XML을 생성하세요.", flush=True)
+        print("[morph.tbs_control_2][xml_generator] 저장된 XML이 없습니다. 먼저 OK로 XML을 생성하세요.", flush=True)
         return
     parsed = xml_generator.parse_xml_string(xml_text)
     if not parsed:
-        print("[morph.tbs_control_1][xml_generator] XML 역파싱 실패.", flush=True)
+        print("[morph.tbs_control_2][xml_generator] XML 역파싱 실패.", flush=True)
         return
     lines = ["[XML PARSE RESULT]"]
     if parsed.get("action_desc"):
@@ -3469,7 +3469,7 @@ def _close_sim_gate_dialog(ext: Any, done_event: Any) -> None:
             try:
                 app.get_app().get_post_update_event_stream().create_subscription_to_pop(
                     _defer_destroy,
-                    name="morph.tbs_control_1:sim_gate_destroy",
+                    name="morph.tbs_control_2:sim_gate_destroy",
                 )
             except Exception:
                 pass
@@ -4193,7 +4193,7 @@ def _drain_sim_log_queue(ext: Any) -> None:
                                 pass
                         ext._sim_playback_ui_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
                             lambda _e: _tick_playback(ext),
-                            name="morph.tbs_control_1:sim_playback_tick",
+                            name="morph.tbs_control_2:sim_playback_tick",
                         )
                     except Exception:
                         pass
@@ -5488,7 +5488,7 @@ def _schedule_foup_label_reset(ext: Any, screen_idx: int, ep_id: str, delay_sec:
                 pass
 
         sub_holder["sub"] = app.get_app().get_update_event_stream().create_subscription_to_pop(
-            _on_update, name="morph.tbs_control_1.foup_label_reset"
+            _on_update, name="morph.tbs_control_2.foup_label_reset"
         )
         try:
             holders = getattr(ext, "_foup_label_reset_subs", None)
@@ -5553,7 +5553,7 @@ def _schedule_foup_inprogress_unmark(ext: Any, prim_path: str, delay_sec: float 
                 pass
 
         sub_holder["sub"] = app.get_app().get_update_event_stream().create_subscription_to_pop(
-            _on_update, name="morph.tbs_control_1.foup_unmark"
+            _on_update, name="morph.tbs_control_2.foup_unmark"
         )
         try:
             holders = getattr(ext, "_foup_unmark_subs", None)
@@ -6744,7 +6744,7 @@ def on_sim_start_clicked(ext: Any) -> None:
     try:
         ext._sim_log_ui_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
             lambda e: _drain_sim_log_queue(ext),
-            name="morph.tbs_control_1:sim_log_ui_drain",
+            name="morph.tbs_control_2:sim_log_ui_drain",
         )
     except Exception as e:
         _append_sim_log(ext, f"[SIM UI] 로그 큐 드레인 구독 실패: {e}")
@@ -6811,7 +6811,7 @@ def on_sim_start_clicked(ext: Any) -> None:
     th_pr = threading.Thread(
         target=_prerun_thread_body,
         args=(run_gen,),
-        name="morph.tbs_control_1.sim_prerun",
+        name="morph.tbs_control_2.sim_prerun",
         daemon=True,
     )
     ext._sim_thread = th_pr
@@ -6915,7 +6915,7 @@ def on_sim_start_clicked(ext: Any) -> None:
             except Exception:
                 print(f"[SIM] tick thread 예외: {err}", flush=True)
 
-    th = threading.Thread(target=_tick_loop, name="morph.tbs_control_1.sim_tick", daemon=True)
+    th = threading.Thread(target=_tick_loop, name="morph.tbs_control_2.sim_tick", daemon=True)
     ext._sim_thread = th
     th.start()
 

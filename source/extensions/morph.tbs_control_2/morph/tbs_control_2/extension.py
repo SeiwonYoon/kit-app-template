@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-NvidiaProprietary
 
 """
-TBS Control 1 확장 — 기능별 모듈 분리 버전 (진입점)
+TBS Control 2 확장 — 기능별 모듈 분리 버전 (진입점)
 
 【extension.py 역할】
 - Omni 확장 IExt: on_startup / on_shutdown.
@@ -95,6 +95,27 @@ except Exception:
     start_tbs_remote_http_bridge = None  # type: ignore[misc, assignment]
     stop_tbs_remote_http_bridge = None  # type: ignore[misc, assignment]
 
+_PRINT_PREFIX = "[TBS]"
+
+
+def _log_extension_load_paths(ext_id: str) -> None:
+    """hot-reload 진단: 실제 import 경로와 확장 루트를 콘솔에 남긴다."""
+    try:
+        import importlib
+
+        import carb  # type: ignore
+
+        usd = importlib.import_module("morph.tbs_control_2.tbs_usd_window")
+        ctrl = importlib.import_module("morph.tbs_control_2.control_window")
+        em = app.get_app().get_extension_manager()
+        ext_path = em.get_extension_path(ext_id) if em else None
+        carb.log_warn(f"{_PRINT_PREFIX} morph.tbs_control_2 loaded from: {__file__}")
+        carb.log_warn(f"{_PRINT_PREFIX} extension id={ext_id} kit_path={ext_path}")
+        carb.log_warn(f"{_PRINT_PREFIX} tbs_usd_window from: {getattr(usd, '__file__', '?')}")
+        carb.log_warn(f"{_PRINT_PREFIX} control_window from: {getattr(ctrl, '__file__', '?')}")
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} load-path diagnostic failed: {exc}", flush=True)
+
 
 def _want_tbs_remote_http_bridge() -> bool:
     """브라우저 HTTP 브리지를 기동할지. 기본 True; 명시적으로 끌 때만 False."""
@@ -155,6 +176,8 @@ class Extension(omni.ext.IExt):
 
     def on_startup(self, ext_id: str) -> None:
         """확장 로드 시: xform 경고 필터, TBS 제어창(USD Load 포함)/시퀀스 창, 오버레이, 이벤트 구독."""
+        print(f"{_PRINT_PREFIX} on_startup ext_id={ext_id}", flush=True)
+        _log_extension_load_paths(ext_id)
         install_xform_op_order_warning_filter()
         self._ext_id = ext_id
         self._tracked_paths: List[str] = []
@@ -252,7 +275,7 @@ class Extension(omni.ext.IExt):
             if ctx is not None:
                 self._fps_stage_sub = ctx.get_stage_event_stream().create_subscription_to_pop(
                     lambda _e: _apply_stage_default_fps_30(),
-                    name="morph.tbs_control_1:DefaultFPS30",
+                    name="morph.tbs_control_2:DefaultFPS30",
                 )
         except Exception:
             self._fps_stage_sub = None
@@ -270,7 +293,7 @@ class Extension(omni.ext.IExt):
         # try:
         #     event_name = ctx.stage_event_name(ou.StageEventType.SELECTION_CHANGED)
         #     self._selection_sub = ed.observe_event(
-        #         observer_name="morph.tbs_control_1:SelectionChanged",
+        #         observer_name="morph.tbs_control_2:SelectionChanged",
         #         event_name=event_name,
         #         on_event=lambda e: on_selection_changed(self, e),
         #     )
@@ -279,14 +302,14 @@ class Extension(omni.ext.IExt):
         # try:
         #     self._stage_stream_sub = ctx.get_stage_event_stream().create_subscription_to_pop(
         #         lambda e: on_selection_changed(self, e),
-        #         name="morph.tbs_control_1:StageEvents",
+        #         name="morph.tbs_control_2:StageEvents",
         #     )
         # except Exception:
         #     pass
         # try:
         #     self._post_update_sub = app.get_app().get_post_update_event_stream().create_subscription_to_pop(
         #         lambda e: on_post_update(self, e),
-        #         name="morph.tbs_control_1:PostUpdate",
+        #         name="morph.tbs_control_2:PostUpdate",
         #     )
         # except Exception:
         #     pass
@@ -312,6 +335,7 @@ class Extension(omni.ext.IExt):
 
     def on_shutdown(self) -> None:
         """확장 언로드 시: 시뮬 정지, 구독 해제, translate/curve/rotate/usd 애니 정지, 창 destroy."""
+        print(f"{_PRINT_PREFIX} on_shutdown", flush=True)
         t = getattr(self, "_kit_chrome_startup_task", None)
         if t is not None and not t.done():
             try:

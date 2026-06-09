@@ -23,7 +23,7 @@
 ## Phase B+ wiring
 
 `lam_runtime_evaluator.RuntimeEvaluator` 가 `_RUNTIME_USE_OPTION_E=True` 일 때
-`AnimationInstanceRuntime` 를 instance 마다 1 개씩 lazy 생성한다. `morph.tbs_control_1`
+`AnimationInstanceRuntime` 를 instance 마다 1 개씩 lazy 생성한다. `morph.tbs_control_2`
 import 0.
 
 ## multi-instance / multi-JSON 동시 재생과의 정합성
@@ -42,7 +42,7 @@ import 0.
 
 ## TBS 영향
 
-본 모듈은 **`morph.tbs_control_1` 의 어떤 심볼도 import 하지 않는다**.
+본 모듈은 **`morph.tbs_control_2` 의 어떤 심볼도 import 하지 않는다**.
 TBS 의 default context / stage / sequence runner / port_lot_visibility 등 보호 영역
 변경 0 (LAM_Independent_Playback_Plan.md §3.1).
 """

@@ -1322,7 +1322,7 @@ class SequenceRunner:
             try:
                 self._unhide_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
                     lambda e: _process_due(),
-                    name="morph.tbs_control_1.sequence_engine.unhide_queue",
+                    name="morph.tbs_control_2.sequence_engine.unhide_queue",
                 )
             except Exception:
                 # fallback: delay 무시하고 즉시 처리
@@ -1359,7 +1359,7 @@ class SequenceRunner:
 
             self._next_tick_sub = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
                 _do,
-                name="morph.tbs_control_1.sequence_engine.next_frame",
+                name="morph.tbs_control_2.sequence_engine.next_frame",
             )
         except Exception:
             fn()
@@ -1627,7 +1627,7 @@ class SequenceRunner:
         try:
             sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
                 _on_update,
-                name="morph.tbs_control_1.sequence_engine.intra_group",
+                name="morph.tbs_control_2.sequence_engine.intra_group",
             )
             sub_holder[0] = sub
             self._intra_group_subs.append(sub)
@@ -1657,7 +1657,7 @@ class SequenceRunner:
             try:
                 self._group_timer_sub = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
                     _immediate,
-                    name="morph.tbs_control_1.sequence_engine.group_timer_immediate",
+                    name="morph.tbs_control_2.sequence_engine.group_timer_immediate",
                 )
             except Exception:
                 self._call_next_frame(fn)
@@ -1679,7 +1679,7 @@ class SequenceRunner:
         try:
             self._group_timer_sub = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
                 _on_update,
-                name="morph.tbs_control_1.sequence_engine.group_timer",
+                name="morph.tbs_control_2.sequence_engine.group_timer",
             )
         except Exception:
             self._call_next_frame(fn)
@@ -1902,7 +1902,7 @@ class SequenceRunner:
             try:
                 sub_ref[0] = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
                     _on_update,
-                    name="morph.tbs_control_1.sequence_engine.delay_parallel",
+                    name="morph.tbs_control_2.sequence_engine.delay_parallel",
                 )
                 self._delay_subs.append(sub_ref[0])
             except Exception:

@@ -196,7 +196,7 @@ def run_prim_rotate_animation(
     }
     if _update_sub is None:
         stream = omni.kit.app.get_app().get_update_event_stream()
-        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_1.rotate_animation")
+        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_2.rotate_animation")
 
 
 def run_prim_rotate_pivot_local_animation(
@@ -265,7 +265,7 @@ def run_prim_rotate_pivot_local_animation(
     }
     if _update_sub is None:
         stream = omni.kit.app.get_app().get_update_event_stream()
-        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_1.rotate_animation")
+        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_2.rotate_animation")
 
 
 def _get_current_time_code() -> Usd.TimeCode:
@@ -347,7 +347,7 @@ def run_prim_rotate_lock_world_center_animation(
     }
     if _update_sub is None:
         stream = omni.kit.app.get_app().get_update_event_stream()
-        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_1.rotate_animation")
+        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_2.rotate_animation")
 
 
 def _matrix_from_rotate_xyz_deg(v) -> Gf.Matrix4d:
@@ -549,7 +549,7 @@ def run_local_euler_pivot_rotate_animation(
                     pass
 
     stream = omni.kit.app.get_app().get_update_event_stream()
-    _world_pivot_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_1.local_euler_pivot_rotate")
+    _world_pivot_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_2.local_euler_pivot_rotate")
 
 def run_world_euler_pivot_rotate_animation(
     prim_paths: List[str],
@@ -707,7 +707,7 @@ def run_world_euler_pivot_rotate_animation(
 
     try:
         stream = omni.kit.app.get_app().get_update_event_stream()
-        _world_pivot_sub = stream.create_subscription_to_pop(_on_we_update, name="morph.tbs_control_1.world_euler_pivot_rotate")
+        _world_pivot_sub = stream.create_subscription_to_pop(_on_we_update, name="morph.tbs_control_2.world_euler_pivot_rotate")
     except Exception:
         _world_pivot_state = None
         if on_completed:
@@ -862,7 +862,7 @@ def run_world_pivot_rotate_animation(
 
     try:
         stream = omni.kit.app.get_app().get_update_event_stream()
-        _world_pivot_sub = stream.create_subscription_to_pop(_on_wp_update, name="morph.tbs_control_1.world_pivot_rotate")
+        _world_pivot_sub = stream.create_subscription_to_pop(_on_wp_update, name="morph.tbs_control_2.world_pivot_rotate")
     except Exception:
         _world_pivot_state = None
         if on_completed:

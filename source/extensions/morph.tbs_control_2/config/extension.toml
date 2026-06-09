@@ -1,5 +1,5 @@
 [package]
-title = "TBS Control 1"
+title = "TBS Control 2"
 version = "0.1.0"
 description = "TBS 개발계획: USD 로드, 장비 prim 제어창, 가상 이벤트 애니메이션 (기능별 모듈 분리 버전)."
 category = "Example"
@@ -20,7 +20,7 @@ repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
 [settings]
 
 [[python.module]]
-name = "morph.tbs_control_1"
+name = "morph.tbs_control_2"
 
 [python.pipapi]
 requirements = ["simpy", "openpyxl"]

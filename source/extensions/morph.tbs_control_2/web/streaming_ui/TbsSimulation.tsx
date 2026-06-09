@@ -5,7 +5,7 @@
  *   src/pages/Home/components/TbsSimulation.tsx
  *   Home/index.tsx 에서 import TbsSimulation from "./components/TbsSimulation" 후 <TbsSimulation />
  *
- * 연결: morph.tbs_control_1 의 kit_remote_http_bridge.py 와 동일 HTTP 계약
+ * 연결: morph.tbs_control_2 의 kit_remote_http_bridge.py 와 동일 HTTP 계약
  *   GET  /api/state
  *   GET  /api/resources
  *   POST /api/command  { cmd, ... }  — kit_chrome_hide: { hidden: boolean }

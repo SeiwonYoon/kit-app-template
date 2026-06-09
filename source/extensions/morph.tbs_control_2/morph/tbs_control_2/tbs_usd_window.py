@@ -194,7 +194,7 @@ class TbsUsdWindow:
                     height=18,
                 )
                 ui.Label(
-                    "※ 주의: tbs_control_1 의 [USD Load] 를 누르면 기본 stage 가 새로 열려 LAM 의 author 가 사라집니다. (LAM 작업 중에는 누르지 마세요.)",
+                    "※ 주의: tbs_control_2 의 [USD Load] 를 누르면 기본 stage 가 새로 열려 LAM 의 author 가 사라집니다. (LAM 작업 중에는 누르지 마세요.)",
                     height=18,
                 )
                 ui.Separator()
@@ -391,7 +391,7 @@ class TbsUsdWindow:
 
             stream = _app.get_app().get_post_update_event_stream()
             self._autoload_sub = stream.create_subscription_to_pop(
-                _do, name="morph.tbs_control_1.tbs_usd_window.autoload_master"
+                _do, name="morph.tbs_control_2.tbs_usd_window.autoload_master"
             )
         except Exception as exc:
             print(
@@ -1036,7 +1036,7 @@ class TbsUsdWindow:
 
             stream = _app.get_app().get_post_update_event_stream()
             self._inst_refresh_sub = stream.create_subscription_to_pop(
-                _do, name="morph.tbs_control_1.lam_window.instances_refresh"
+                _do, name="morph.tbs_control_2.lam_window.instances_refresh"
             )
         except Exception:
             self._inst_refresh_pending = False
@@ -1789,7 +1789,7 @@ class TbsUsdWindow:
                 )
             return
 
-        # 성공 — 클립보드 복사. omni.kit.clipboard.copy 가 사용 가능 (tbs_control_1 에서
+        # 성공 — 클립보드 복사. omni.kit.clipboard.copy 가 사용 가능 (tbs_control_2 에서
         # 이미 검증된 패턴) 이지만 import 실패 fallback 도 준비한다.
         bytes_len = len(text.encode("utf-8", errors="ignore"))
         copied = False

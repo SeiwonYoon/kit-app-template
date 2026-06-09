@@ -29,7 +29,7 @@ LAM 흐름
 
 TBS 영향
 ========
-본 모듈은 **`morph.tbs_control_1` 의 어떤 심볼도 import 하지 않는다.** master(default)
+본 모듈은 **`morph.tbs_control_2` 의 어떤 심볼도 import 하지 않는다.** master(default)
 context 의 timeline 만 잠시 점유하며, bake 시작 전 timeline 시각·재생 상태를 저장했다가
 종료 시 복원한다 (best-effort).
 """

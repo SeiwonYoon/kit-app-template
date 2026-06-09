@@ -1770,7 +1770,7 @@ def attach_stage_visibility_subscription(ext: Any, sync_fn: Callable[[], None]) 
     try:
         ext._sim_split_stage_sub = ctx.get_stage_event_stream().create_subscription_to_pop(
             lambda _e: sync_fn(),
-            name="morph.tbs_control_1:sim_multi_split_visibility",
+            name="morph.tbs_control_2:sim_multi_split_visibility",
         )
     except Exception:
         ext._sim_split_stage_sub = None
@@ -1850,7 +1850,7 @@ def _snapshot_hud_frame_slot(ext: Any) -> str:
     """``ViewportWindow.get_frame`` 슬롯 ID(확장 인스턴스별로 분리)."""
     eid = str(getattr(ext, "_ext_id", "") or "").strip()
     if not eid:
-        eid = "morph.tbs_control_1"
+        eid = "morph.tbs_control_2"
     return f"{eid}:sim_snapshot_hud"
 
 
@@ -1944,7 +1944,7 @@ def _ensure_sim_screen1_live_hud_subscription(ext: Any) -> None:
     try:
         ext._tbs_sim_hud_screen1_live_sub = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
             lambda e: _sim_screen1_hud_post_tick(ext, e),
-            name="morph.tbs_control_1:sim_hud_screen1_live",
+            name="morph.tbs_control_2:sim_hud_screen1_live",
         )
     except Exception:
         try:

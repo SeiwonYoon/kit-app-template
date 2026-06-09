@@ -209,7 +209,7 @@ def _dispatch_main(fn: Callable[[], None]) -> None:
     try:
         import omni.kit.app as _kapp  # cache hit (lam_translate_animation 가 모듈 최상단에서 이미 로드).
         box["sub"] = _kapp.get_app().get_update_event_stream().create_subscription_to_pop(
-            _do, name="morph.tbs_control_1.sequence_engine.dispatch_main"
+            _do, name="morph.tbs_control_2.sequence_engine.dispatch_main"
         )
     except Exception as exc:
         # fallback — Kit 가 없는 환경/테스트. 그냥 직접 호출 (이 환경에선 deadlock 도 없을 것).

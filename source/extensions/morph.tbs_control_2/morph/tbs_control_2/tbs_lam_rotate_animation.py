@@ -1,39 +1,40 @@
-"""LAM MOVE animator — TBS `translate_animation.py` 와 동일 동작을 LAM 측에 별도 구현.
+"""LAM ROTATE animator — simple 모드 한 가지만 지원.
 
-REQ-002 0줄 변경 원칙(USD_Timeline_Spec.md §12) 으로 본 모듈은 `morph.tbs_control_1`
-의 어떤 모듈도 import 하지 않고 동일한 의미·동일한 op 규약을 자체 구현한다.
+REQ-002 0줄 변경 원칙(USD_Timeline_Spec.md §12) 으로 본 모듈은 `morph.tbs_control_2`
+의 어떤 모듈도 import 하지 않는다.
 
-규약 (TBS 와 동일):
-- prim 의 누적 translate 는 `_OFFSET_SUFFIX = "TBS_OFFSET"` 라는 suffix 의 TranslateOp
-  하나에만 author 한다. 자산 USD 가 가진 다른 translate op 와 분리되어 baseline 복원이
-  쉬워진다.
-- 입력은 segment list — 각 segment 는 `{"duration": float_seconds, "delta": [dx,dy,dz]}`.
-  start_pos 는 호출 시점의 _OFFSET_SUFFIX 값.
-- omni.kit.app 의 update_event_stream 으로 매 프레임 t = elapsed/duration 으로 보간.
-- 완료 시 on_completed 콜백.
+지원 모드:
+- **simple** — `_OFFSET_SUFFIX = "TBS_OFFSET"` 의 RotateXYZOp 에 (rx, ry, rz) 누적 보간.
 
-LAM 은 default 컨텍스트(`""`)만 사용하므로 컨텍스트 키 분리는 단순화한다.
+『월드 피봇 회전 / lock_world_center』 모드는 LAM 사용 시나리오에서 안정적으로 동작하지
+않아 2026-05-12 에 제거되었다. 외부 모듈이 import 하는
+`stop_world_pivot_rotate_animation` 은 호환을 위해 no-op 으로 남겨 둔다.
+
+LAM 은 default 컨텍스트(`""`) 만 사용한다.
 """
 
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
 
-# IMPORTANT — Kit / pxr 모듈은 반드시 모듈 최상단에서 import 한다(TBS translate_animation 와 동일 정책).
+# IMPORTANT — Kit / pxr 모듈은 반드시 모듈 최상단에서 import 한다(TBS rotate_animation 와 동일 정책).
 # 함수 내부 lazy import 로 두면 background thread 에서 첫 호출 시 처음 import 가 일어나는데,
 # 그 시점에 main thread 가 MDL 컴파일/RTX 렌더 패스로 import lock 을 잡고 있으면
-# cross-wait 으로 영구 deadlock 이 발생한다(=Run 누르자마자 freeze 증상의 실제 원인).
-import omni.kit.app  # type: ignore  # noqa: E402
+# cross-wait 으로 영구 deadlock 이 발생한다.
+import omni.kit.app  # type: ignore  # noqa: E402,F401
 import omni.usd as ou  # type: ignore  # noqa: E402
-from pxr import Gf, UsdGeom  # type: ignore  # noqa: E402
+from pxr import Gf, UsdGeom  # type: ignore  # noqa: E402,F401
 
 
-_PRINT_PREFIX = "[TBS/MOVE]"
+_PRINT_PREFIX = "[TBS/ROT]"
 _OFFSET_SUFFIX = "TBS_OFFSET"
 
-_animations: Dict[str, Dict[str, Any]] = {}
+
+_rot_animations: Dict[str, Dict[str, Any]] = {}
 _update_sub = None
 
+
+# ----------------------------------------------------------------- helpers
 
 def _stage():
     try:
@@ -43,36 +44,36 @@ def _stage():
         return None
 
 
-def is_translate_animation_running() -> bool:
-    return bool(_animations)
+def is_rotate_animation_running() -> bool:
+    return bool(_rot_animations)
 
 
-def is_prim_translate_animation_running(prim_path: str) -> bool:
-    """지정 prim 에 대한 TBS_OFFSET translate 보간이 진행 중인지."""
-    return bool(prim_path) and prim_path in _animations
+def is_prim_rotate_animation_running(prim_path: str) -> bool:
+    """지정 prim 에 대한 TBS_OFFSET rotate 보간이 진행 중인지."""
+    return bool(prim_path) and prim_path in _rot_animations
 
 
-def _get_or_create_offset_translate_op(prim):
+def _get_or_create_offset_rotate_op(prim):
     try:
         x = UsdGeom.Xformable(prim)
         if not x:
             return None
         for op in x.GetOrderedXformOps():
             try:
-                if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and _OFFSET_SUFFIX in op.GetName():
+                if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ and _OFFSET_SUFFIX in op.GetName():
                     return op
             except Exception:
                 continue
-        return x.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
+        return x.AddRotateXYZOp(opSuffix=_OFFSET_SUFFIX)
     except Exception:
         return None
 
 
-def _get_prim_local_translate(prim):
+def _get_prim_local_rotate_xyz(prim):
     if not prim or not prim.IsValid():
         return Gf.Vec3f(0, 0, 0)
     try:
-        op = _get_or_create_offset_translate_op(prim)
+        op = _get_or_create_offset_rotate_op(prim)
         if op:
             v = op.Get()
             if v is not None:
@@ -82,69 +83,81 @@ def _get_prim_local_translate(prim):
     return Gf.Vec3f(0, 0, 0)
 
 
-def _set_prim_translate(prim, position) -> None:
+def _set_prim_rotate_xyz(prim, euler_deg_xyz) -> None:
     if not prim or not prim.IsValid():
         return
     try:
-        op = _get_or_create_offset_translate_op(prim)
+        op = _get_or_create_offset_rotate_op(prim)
         if op:
-            op.Set(Gf.Vec3f(float(position[0]), float(position[1]), float(position[2])))
+            op.Set(
+                Gf.Vec3f(
+                    float(euler_deg_xyz[0]),
+                    float(euler_deg_xyz[1]),
+                    float(euler_deg_xyz[2]),
+                )
+            )
     except Exception:
         pass
 
 
-def read_tbs_offset_translate_xyz(prim_path: str) -> tuple[float, float, float]:
-    """prim 의 ``TBS_OFFSET`` TranslateOp 현재값 (x, y, z). 없으면 (0,0,0)."""
+def zero_tbs_offset_rotate_at_path(prim_path: str) -> None:
+    """`TBS_OFFSET` RotateXYZOp 을 (0,0,0) 으로 설정(Run(reset) / Return 시 초기 자세 복귀)."""
+    stage = _stage()
+    if not stage:
+        return
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim or not prim.IsValid():
+        return
+    _set_prim_rotate_xyz(prim, Gf.Vec3f(0.0, 0.0, 0.0))
+
+
+def read_tbs_offset_rotate_xyz_deg(prim_path: str) -> tuple[float, float, float]:
+    """현재 prim 의 `TBS_OFFSET` RotateXYZ 값을 (rx,ry,rz) deg 로 반환 — **read-only**.
+
+    `lam_sequence_engine` 의 `rotate_from_initial` 분기가 "현재 각도" 를 읽을 때 사용.
+
+    **중요**: 본 함수는 `AddRotateXYZOp` 등 어떤 USD write 도 수행하지 않는다.
+    op 가 아직 author 되지 않았으면 `(0,0,0)` 을 반환한다 (TBS_OFFSET 가 없으면 회전 0
+    이라는 정의와 일치). main thread 밖에서 호출되어도 안전하도록 read-only.
+    """
     stage = _stage()
     if not stage:
         return (0.0, 0.0, 0.0)
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
         return (0.0, 0.0, 0.0)
-    v = _get_prim_local_translate(prim)
-    return (float(v[0]), float(v[1]), float(v[2]))
+    try:
+        x = UsdGeom.Xformable(prim)
+        if not x:
+            return (0.0, 0.0, 0.0)
+        for op in x.GetOrderedXformOps():
+            try:
+                if (
+                    op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ
+                    and _OFFSET_SUFFIX in op.GetName()
+                ):
+                    v = op.Get()
+                    if v is None:
+                        return (0.0, 0.0, 0.0)
+                    return (float(v[0]), float(v[1]), float(v[2]))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return (0.0, 0.0, 0.0)
 
 
-def zero_tbs_offset_translate_at_path(prim_path: str) -> None:
-    """`TBS_OFFSET` TranslateOp 을 (0,0,0) 으로 설정(Run(reset) 시 초기 위치 복귀)."""
-    stage = _stage()
-    if not stage:
-        return
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return
-    stop_prim_translate_animation(prim_path)
-    _set_prim_translate(prim, Gf.Vec3f(0.0, 0.0, 0.0))
+# ----------------------------------------------------------------- public (run)
 
-
-def snap_tbs_offset_translate_to_absolute(
-    prim_path: str,
-    x: float,
-    y: float,
-    z: float,
-) -> None:
-    """``move_from_initial=True`` 목표 좌표로 TBS_OFFSET translate 즉시 스냅."""
-    stage = _stage()
-    if not stage:
-        return
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return
-    stop_prim_translate_animation(prim_path)
-    _set_prim_translate(
-        prim,
-        Gf.Vec3f(float(x), float(y), float(z)),
-    )
-
-
-def run_prim_translate_animation(
+def run_prim_rotate_animation(
     prim_path: str,
     segments: List[Dict[str, Any]],
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
     speed_ref: float = 1.0,
 ) -> None:
-    global _animations, _update_sub
+    """simple 모드 — TBS_OFFSET RotateXYZ 에 (rx,ry,rz) 누적 보간."""
+    global _rot_animations
     if not segments:
         return
     stage = _stage()
@@ -155,7 +168,7 @@ def run_prim_translate_animation(
         print(f"{_PRINT_PREFIX} prim not found: {prim_path}", flush=True)
         return
 
-    start_pos = _get_prim_local_translate(prim)
+    start_rot = _get_prim_local_rotate_xyz(prim)
     normalized: List[Dict[str, Any]] = []
     for seg in segments:
         d = seg.get("delta")
@@ -175,9 +188,9 @@ def run_prim_translate_animation(
                 pass
         return
 
-    _animations[prim_path] = {
-        "prim_path": prim_path,
-        "start_pos": Gf.Vec3f(start_pos[0], start_pos[1], start_pos[2]),
+    _rot_animations[prim_path] = {
+        "kind": "simple",
+        "start_rot": Gf.Vec3f(start_rot[0], start_rot[1], start_rot[2]),
         "segments": normalized,
         "segment_index": 0,
         "elapsed_in_segment": 0.0,
@@ -188,18 +201,23 @@ def run_prim_translate_animation(
     _ensure_update_sub()
 
 
-def stop_prim_translate_animation(prim_path: str) -> bool:
-    global _animations
-    if prim_path in _animations:
-        _animations.pop(prim_path, None)
+def stop_world_pivot_rotate_animation() -> None:
+    """레거시 호환 no-op (월드 피봇 회전 기능 제거됨)."""
+    return None
+
+
+def stop_prim_rotate_animation(prim_path: str) -> bool:
+    global _rot_animations
+    if prim_path in _rot_animations:
+        _rot_animations.pop(prim_path, None)
         _maybe_release_update_sub()
         return True
     return False
 
 
-def stop_all_translate_animations() -> None:
-    global _animations, _update_sub
-    _animations.clear()
+def stop_all_rotate_animations() -> None:
+    global _rot_animations, _update_sub
+    _rot_animations.clear()
     if _update_sub is not None:
         try:
             _update_sub.unsubscribe()
@@ -217,7 +235,7 @@ def _ensure_update_sub() -> None:
     try:
         stream = omni.kit.app.get_app().get_update_event_stream()
         _update_sub = stream.create_subscription_to_pop(
-            _on_update, name="morph.tbs_control_1.translate_animation"
+            _on_update, name="morph.tbs_control_2.rotate_animation"
         )
     except Exception as exc:
         print(f"{_PRINT_PREFIX} subscribe update failed: {exc}", flush=True)
@@ -225,7 +243,7 @@ def _ensure_update_sub() -> None:
 
 def _maybe_release_update_sub() -> None:
     global _update_sub
-    if not _animations and _update_sub is not None:
+    if not _rot_animations and _update_sub is not None:
         try:
             _update_sub.unsubscribe()
         except Exception:
@@ -242,19 +260,20 @@ def _on_update(e) -> None:
         from .tbs_sim_play_stubs import get_csv_play_anim_dt_scale
     except Exception:
         get_csv_play_anim_dt_scale = None  # type: ignore
-    if not _animations:
+    if not _rot_animations:
         return
     stage = _stage()
     if not stage:
         return
 
     to_remove: List[str] = []
-    for prim_path, state in list(_animations.items()):
+    for prim_path, state in list(_rot_animations.items()):
         try:
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
                 to_remove.append(prim_path)
                 continue
+
             frame_dt = dt
             if get_csv_play_anim_dt_scale is not None:
                 frame_dt = dt * float(
@@ -263,23 +282,27 @@ def _on_update(e) -> None:
             segments = state["segments"]
             idx = state["segment_index"]
             elapsed = state["elapsed_in_segment"] + frame_dt
-            base_pos = state["start_pos"]
+            base_rot = state["start_rot"]
             for i in range(idx):
                 d = segments[i]["delta"]
-                base_pos = Gf.Vec3f(base_pos[0] + d[0], base_pos[1] + d[1], base_pos[2] + d[2])
+                base_rot = Gf.Vec3f(
+                    base_rot[0] + d[0], base_rot[1] + d[1], base_rot[2] + d[2]
+                )
             duration = float(segments[idx]["duration"])
             delta = segments[idx]["delta"]
             if elapsed >= duration:
                 state["elapsed_in_segment"] = 0.0
                 state["segment_index"] = idx + 1
                 final_this = Gf.Vec3f(
-                    base_pos[0] + delta[0], base_pos[1] + delta[1], base_pos[2] + delta[2]
+                    base_rot[0] + delta[0],
+                    base_rot[1] + delta[1],
+                    base_rot[2] + delta[2],
                 )
                 if state["segment_index"] >= len(segments):
-                    _set_prim_translate(prim, final_this)
+                    _set_prim_rotate_xyz(prim, final_this)
                     if state["loop"]:
                         state["segment_index"] = 0
-                        state["start_pos"] = final_this
+                        state["start_rot"] = final_this
                     else:
                         cb = state.get("on_completed")
                         if cb:
@@ -300,31 +323,31 @@ def _on_update(e) -> None:
                         final_this[1] + next_d[1] * t,
                         final_this[2] + next_d[2] * t,
                     )
-                    _set_prim_translate(prim, current)
+                    _set_prim_rotate_xyz(prim, current)
                 continue
             state["elapsed_in_segment"] = elapsed
-            t = elapsed / duration
-            current = Gf.Vec3f(
-                base_pos[0] + delta[0] * t,
-                base_pos[1] + delta[1] * t,
-                base_pos[2] + delta[2] * t,
+            t = elapsed / duration if duration > 0 else 1.0
+            current_rot = Gf.Vec3f(
+                base_rot[0] + delta[0] * t,
+                base_rot[1] + delta[1] * t,
+                base_rot[2] + delta[2] * t,
             )
-            _set_prim_translate(prim, current)
+            _set_prim_rotate_xyz(prim, current_rot)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} update error path={prim_path}: {exc}", flush=True)
             to_remove.append(prim_path)
     for k in to_remove:
-        _animations.pop(k, None)
+        _rot_animations.pop(k, None)
     _maybe_release_update_sub()
 
 
 __all__ = [
-    "is_translate_animation_running",
-    "is_prim_translate_animation_running",
-    "read_tbs_offset_translate_xyz",
-    "run_prim_translate_animation",
-    "stop_prim_translate_animation",
-    "stop_all_translate_animations",
-    "zero_tbs_offset_translate_at_path",
-    "snap_tbs_offset_translate_to_absolute",
+    "is_rotate_animation_running",
+    "is_prim_rotate_animation_running",
+    "run_prim_rotate_animation",
+    "stop_world_pivot_rotate_animation",
+    "stop_prim_rotate_animation",
+    "stop_all_rotate_animations",
+    "zero_tbs_offset_rotate_at_path",
+    "read_tbs_offset_rotate_xyz_deg",
 ]

@@ -916,7 +916,7 @@ def start_tbs_remote_http_bridge(ext: Any) -> None:
     try:
         _update_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
             _pump_main_queue,
-            name="morph.tbs_control_1:tbs_remote_main_queue",
+            name="morph.tbs_control_2:tbs_remote_main_queue",
         )
     except Exception as e:
         try:

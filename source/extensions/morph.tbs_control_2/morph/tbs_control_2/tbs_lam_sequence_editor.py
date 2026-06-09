@@ -387,7 +387,7 @@ class TbsLamSequenceEditor:
 
             stream = _app.get_app().get_post_update_event_stream()
             self._refresh_sub = stream.create_subscription_to_pop(
-                _do, name="morph.tbs_control_1.sequence_editor.refresh"
+                _do, name="morph.tbs_control_2.sequence_editor.refresh"
             )
         except Exception:
             # fallback: 즉시 호출 (최후 수단). Kit 가 없는 환경/테스트 등.

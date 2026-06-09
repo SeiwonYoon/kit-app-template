@@ -17,7 +17,7 @@
     Bake 가 master 안 인스턴스 prim 산하의 동일 (sub_path, attr_name) 페어를 찾아
     capture 하도록 한다. 기존 `xformOp:* / visibility` 만 보던 좁은 필터를 대체.
 
-본 모듈은 **`morph.tbs_control_1` 의 어떤 심볼도 import 하지 않는다**. 또한 master stage 에
+본 모듈은 **`morph.tbs_control_2` 의 어떤 심볼도 import 하지 않는다**. 또한 master stage 에
 영향을 주지 않는다 — 자산 USD 만 독립적으로 연다.
 """
 

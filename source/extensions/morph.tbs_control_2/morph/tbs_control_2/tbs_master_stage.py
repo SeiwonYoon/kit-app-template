@@ -33,7 +33,7 @@ def _slug_for_tag(s: str) -> str:
 # 이유: 사용자 환경의 일부 Kit 빌드에서 `viewport.usd_context_name` setter 가 silent 하게
 # 무시되어 default viewport·Stage 패널·Property 패널이 LAM 의 prim 을 못 보는 문제가
 # 발생. default 컨텍스트를 같이 쓰면 모든 Kit 기본 패널이 자동으로 LAM 의 author 를 본다.
-# 트레이드오프: tbs_control_1 의 USD Load 가 default stage 를 새로 열면 LAM 의 author 도
+# 트레이드오프: tbs_control_2 의 USD Load 가 default stage 를 새로 열면 LAM 의 author 도
 # 같이 사라진다(REQ-007 §트레이드오프). 사용자가 명시적으로 누른 경우만 발생.
 LAM_MASTER_CONTEXT_NAME = ""
 

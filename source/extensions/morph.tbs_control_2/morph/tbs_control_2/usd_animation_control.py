@@ -301,7 +301,7 @@ def play_usd_animation(
 
                 st["_speed_sub"] = kit_app.get_app().get_update_event_stream().create_subscription_to_pop(
                     _on_update,
-                    name="morph.tbs_control_1:usd_animation_speed_driver",
+                    name="morph.tbs_control_2:usd_animation_speed_driver",
                 )
             except Exception:
                 pass
@@ -382,7 +382,7 @@ def play_usd_animation(
                 stream = tl.get_timeline_event_stream()
                 st["_loop_sub"] = stream.create_subscription_to_pop(
                     _on_tick,
-                    name="morph.tbs_control_1:usd_animation_loop",
+                    name="morph.tbs_control_2:usd_animation_loop",
                 )
             except Exception:
                 pass
@@ -457,7 +457,7 @@ def play_usd_animation(
                                     st["_end_fix_sub"] = None
                             st["_end_fix_sub"] = app.get_app().get_post_update_event_stream().create_subscription_to_pop(
                                 _fix,
-                                name="morph.tbs_control_1:usd_animation_end_fix",
+                                name="morph.tbs_control_2:usd_animation_end_fix",
                             )
                         except Exception:
                             pass
@@ -473,7 +473,7 @@ def play_usd_animation(
                 stream = tl.get_timeline_event_stream()
                 st["_complete_sub"] = stream.create_subscription_to_pop(
                     _on_complete,
-                    name="morph.tbs_control_1:usd_animation_complete",
+                    name="morph.tbs_control_2:usd_animation_complete",
                 )
             except Exception:
                 st["_complete_sub"] = None

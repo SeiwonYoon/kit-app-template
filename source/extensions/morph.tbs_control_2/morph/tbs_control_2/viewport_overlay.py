@@ -52,7 +52,7 @@ def _post_update_once(callback):
                 sub_ref[0] = None
     stream = app.get_app().get_post_update_event_stream()
     sub_ref[0] = stream.create_subscription_to_pop(
-        _on_event, name="morph.tbs_control_1:ViewportOverlayPostUpdateOnce"
+        _on_event, name="morph.tbs_control_2:ViewportOverlayPostUpdateOnce"
     )
     return sub_ref[0]
 
@@ -107,7 +107,7 @@ class PrimInfoOverlay:
             import omni.usd as ou
             ctx = ou.get_context()
         except Exception as e:
-            carb.log_warn(f"[morph.tbs_control_1] _rebuild_panels: get_context 실패: {e}")
+            carb.log_warn(f"[morph.tbs_control_2] _rebuild_panels: get_context 실패: {e}")
             return
         stage = ctx.get_stage() if ctx else None
         if not stage:
@@ -160,7 +160,7 @@ class PrimInfoOverlay:
         def _close(_sender=None):
             if on_close:
                 on_close(path_to_close)
-        close_gesture = sc.ClickGesture(name="morph.tbs_control_1:ClosePanel", on_ended_fn=_close)
+        close_gesture = sc.ClickGesture(name="morph.tbs_control_2:ClosePanel", on_ended_fn=_close)
         root = sc.Transform(
             look_at=sc.Transform.LookAt.CAMERA,
             transform=sc.Matrix44.get_translation_matrix(*world_pos),

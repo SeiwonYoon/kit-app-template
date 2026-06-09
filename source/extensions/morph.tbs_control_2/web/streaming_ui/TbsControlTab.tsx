@@ -64,7 +64,7 @@
 
  * [Kit 쪽 대응]
 
- *   morph.tbs_control_2 / morph/tbs_control_1/kit_remote_http_bridge.py
+ *   morph.tbs_control_2 / morph/tbs_control_2/kit_remote_http_bridge.py
 
  *
 

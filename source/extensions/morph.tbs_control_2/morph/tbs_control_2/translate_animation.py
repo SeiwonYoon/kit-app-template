@@ -168,7 +168,7 @@ def run_prim_translate_animation(
     }
     if _update_sub is None:
         stream = omni.kit.app.get_app().get_update_event_stream()
-        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_1.translate_animation")
+        _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_2.translate_animation")
 
 
 def stop_prim_translate_animation(prim_path: str, usd_context_name: Optional[str] = None) -> bool:

@@ -61,7 +61,7 @@ def post_update_once(callback):
                 sub_ref[0] = None
     stream = app.get_app().get_post_update_event_stream()
     sub_ref[0] = stream.create_subscription_to_pop(
-        _on_event, name="morph.tbs_control_1:PostUpdateOnce"
+        _on_event, name="morph.tbs_control_2:PostUpdateOnce"
     )
     return sub_ref[0]
 

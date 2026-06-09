@@ -1,5 +1,5 @@
 """
-morph.tbs_control_1 패키지
+morph.tbs_control_2 패키지
 
 【역할】
 - extension 모듈 re-export (패키지 import 시 확장 API 노출).

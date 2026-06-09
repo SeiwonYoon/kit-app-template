@@ -174,7 +174,7 @@ def run_prim_curve_animation(
     }
     if _update_sub is None:
         stream = omni.kit.app.get_app().get_update_event_stream()
-        _update_sub = stream.create_subscription_to_pop(_on_curve_update, name="morph.tbs_control_1.curve_animation")
+        _update_sub = stream.create_subscription_to_pop(_on_curve_update, name="morph.tbs_control_2.curve_animation")
 
 
 def stop_prim_curve_animation(prim_path: str) -> bool:

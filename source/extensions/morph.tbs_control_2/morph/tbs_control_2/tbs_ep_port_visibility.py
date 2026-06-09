@@ -216,7 +216,7 @@ def schedule_apply_ep_port_layout(
         global _apply_retry_sub
         _apply_retry_sub = stream.create_subscription_to_pop(
             _tick,
-            name="morph.tbs_control_1.ep_port_visibility.apply",
+            name="morph.tbs_control_2.ep_port_visibility.apply",
         )
     except Exception as exc:
         print(f"{_PRINT_PREFIX} schedule failed: {exc}", flush=True)
