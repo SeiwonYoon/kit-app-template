@@ -241,6 +241,7 @@ from .selection_overlay import show_prim_info_in_viewport
 from .signal_parser import parse_signal
 from .sequence_engine import SequenceRunner
 from . import sim_multi_view
+from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 from .simulation_engine import (
     Lot,
     SimulationInitConfig,
@@ -1243,19 +1244,29 @@ def _capture_per_screen_sim_settings(ext: Any) -> Dict[str, Any]:
     try:
         d["ep_count_idx"] = int(ext._sim_ep_count_combo.model.get_item_value_model().as_int)
     except Exception:
-        d["ep_count_idx"] = 0
+        d["ep_count_idx"] = int(_SIM_DEF.ep_count_idx)
     try:
         d["lot_count"] = max(1, ext._sim_lot_count_model.get_value_as_int())
     except Exception:
-        d["lot_count"] = 6
+        d["lot_count"] = int(_SIM_DEF.lot_count)
     try:
         d["spawn_min"] = float(ext._sim_lot_spawn_min_model.get_value_as_float())
         d["spawn_max"] = float(ext._sim_lot_spawn_max_model.get_value_as_float())
         d["pue_min"] = float(ext._sim_pickup_evt_min_model.get_value_as_float())
         d["pue_max"] = float(ext._sim_pickup_evt_max_model.get_value_as_float())
     except Exception:
-        d["spawn_min"], d["spawn_max"] = 15.0, 40.0
-        d["pue_min"], d["pue_max"] = 50.0, 70.0
+        d["spawn_min"], d["spawn_max"] = float(_SIM_DEF.lot_spawn_min), float(_SIM_DEF.lot_spawn_max)
+        d["pue_min"], d["pue_max"] = float(_SIM_DEF.pickup_min), float(_SIM_DEF.pickup_max)
+    _timing_snap_defaults = {
+        "oht_bp1_min": float(_SIM_DEF.oht_to_bp1_min),
+        "oht_bp1_max": float(_SIM_DEF.oht_to_bp1_max),
+        "bp1_bp_min": float(_SIM_DEF.bp1_to_bp_min),
+        "bp1_bp_max": float(_SIM_DEF.bp1_to_bp_max),
+        "bp_ep_min": float(_SIM_DEF.bp_to_ep_min),
+        "bp_ep_max": float(_SIM_DEF.bp_to_ep_max),
+        "ep_oht_min": float(_SIM_DEF.ep_to_oht_min),
+        "ep_oht_max": float(_SIM_DEF.ep_to_oht_max),
+    }
     for key, attr in (
         ("oht_bp1_min", "_sim_oht_bp1_min_model"),
         ("oht_bp1_max", "_sim_oht_bp1_max_model"),
@@ -1266,19 +1277,21 @@ def _capture_per_screen_sim_settings(ext: Any) -> Dict[str, Any]:
         ("ep_oht_min", "_sim_ep_oht_min_model"),
         ("ep_oht_max", "_sim_ep_oht_max_model"),
     ):
+        fb = float(_timing_snap_defaults.get(key, _SIM_DEF.oht_to_bp1_min))
         try:
             m = getattr(ext, attr, None)
-            d[key] = float(m.get_value_as_float()) if m is not None else 5.0
+            d[key] = float(m.get_value_as_float()) if m is not None else fb
         except Exception:
-            d[key] = 5.0
+            d[key] = fb
     # FOUP 공정 시간(min/max)
     try:
         mnm = getattr(ext, "_sim_foup_proc_min_model", None)
         mxm = getattr(ext, "_sim_foup_proc_max_model", None)
-        d["foup_proc_min"] = float(mnm.get_value_as_float()) if mnm is not None else 30.0
-        d["foup_proc_max"] = float(mxm.get_value_as_float()) if mxm is not None else 60.0
+        d["foup_proc_min"] = float(mnm.get_value_as_float()) if mnm is not None else float(_SIM_DEF.foup_process_min)
+        d["foup_proc_max"] = float(mxm.get_value_as_float()) if mxm is not None else float(_SIM_DEF.foup_process_max)
     except Exception:
-        d["foup_proc_min"], d["foup_proc_max"] = 30.0, 60.0
+        d["foup_proc_min"] = float(_SIM_DEF.foup_process_min)
+        d["foup_proc_max"] = float(_SIM_DEF.foup_process_max)
     for key, attr in (
         ("init_inout", "_sim_init_inout_model"),
         ("init_bp1", "_sim_init_bp1_model"),
@@ -1483,9 +1496,9 @@ def _fault_ports_from_snapshot(snap: Dict[str, Any], ep_count: int) -> Set[str]:
 def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[SimulationTimingConfig, SimulationInitConfig]:
     """화면별 스냅샷으로 채널 전용 ``SimulationTimingConfig`` / ``SimulationInitConfig`` 를 만든다."""
     try:
-        ep_count_idx = int(snap.get("ep_count_idx", 0) or 0)
+        ep_count_idx = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
     except Exception:
-        ep_count_idx = 0
+        ep_count_idx = int(_SIM_DEF.ep_count_idx)
     ep_count = 2 if ep_count_idx == 0 else 3
     initial_full_ports: List[str] = []
     if bool(snap.get("init_inout")):
@@ -1505,17 +1518,17 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
     if ep_count >= 3 and bool(snap.get("init_ep3")):
         initial_full_ports.append("EP3")
     try:
-        spawn_imin = max(0.1, float(snap.get("spawn_min", 15.0)))
-        spawn_imax = max(0.1, float(snap.get("spawn_max", 40.0)))
+        spawn_imin = max(0.1, float(snap.get("spawn_min", _SIM_DEF.lot_spawn_min)))
+        spawn_imax = max(0.1, float(snap.get("spawn_max", _SIM_DEF.lot_spawn_max)))
     except Exception:
-        spawn_imin, spawn_imax = 15.0, 40.0
+        spawn_imin, spawn_imax = float(_SIM_DEF.lot_spawn_min), float(_SIM_DEF.lot_spawn_max)
     if spawn_imin > spawn_imax:
         spawn_imin, spawn_imax = spawn_imax, spawn_imin
     try:
-        pue_min = max(0.1, float(snap.get("pue_min", 50.0)))
-        pue_max = max(0.1, float(snap.get("pue_max", 70.0)))
+        pue_min = max(0.1, float(snap.get("pue_min", _SIM_DEF.pickup_min)))
+        pue_max = max(0.1, float(snap.get("pue_max", _SIM_DEF.pickup_max)))
     except Exception:
-        pue_min, pue_max = 50.0, 70.0
+        pue_min, pue_max = float(_SIM_DEF.pickup_min), float(_SIM_DEF.pickup_max)
     if pue_min > pue_max:
         pue_min, pue_max = pue_max, pue_min
 
@@ -1526,25 +1539,25 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
             return default
 
     timing = SimulationTimingConfig(
-        oht_to_bp1_min=_f_snap("oht_bp1_min"),
-        oht_to_bp1_max=_f_snap("oht_bp1_max"),
-        bp1_to_bp_min=_f_snap("bp1_bp_min"),
-        bp1_to_bp_max=_f_snap("bp1_bp_max"),
-        bp_to_ep_min=_f_snap("bp_ep_min"),
-        bp_to_ep_max=_f_snap("bp_ep_max"),
-        ep_to_oht_min=_f_snap("ep_oht_min"),
-        ep_to_oht_max=_f_snap("ep_oht_max"),
+        oht_to_bp1_min=_f_snap("oht_bp1_min", float(_SIM_DEF.oht_to_bp1_min)),
+        oht_to_bp1_max=_f_snap("oht_bp1_max", float(_SIM_DEF.oht_to_bp1_max)),
+        bp1_to_bp_min=_f_snap("bp1_bp_min", float(_SIM_DEF.bp1_to_bp_min)),
+        bp1_to_bp_max=_f_snap("bp1_bp_max", float(_SIM_DEF.bp1_to_bp_max)),
+        bp_to_ep_min=_f_snap("bp_ep_min", float(_SIM_DEF.bp_to_ep_min)),
+        bp_to_ep_max=_f_snap("bp_ep_max", float(_SIM_DEF.bp_to_ep_max)),
+        ep_to_oht_min=_f_snap("ep_oht_min", float(_SIM_DEF.ep_to_oht_min)),
+        ep_to_oht_max=_f_snap("ep_oht_max", float(_SIM_DEF.ep_to_oht_max)),
         lot_spawn_interval_min=spawn_imin,
         lot_spawn_interval_max=spawn_imax,
         pickup_event_interval_min=pue_min,
         pickup_event_interval_max=pue_max,
-        foup_process_min=_f_snap("foup_proc_min", 30.0),
-        foup_process_max=_f_snap("foup_proc_max", 60.0),
+        foup_process_min=_f_snap("foup_proc_min", float(_SIM_DEF.foup_process_min)),
+        foup_process_max=_f_snap("foup_proc_max", float(_SIM_DEF.foup_process_max)),
     )
     try:
-        lot_count = max(1, int(snap.get("lot_count", 6) or 6))
+        lot_count = max(1, int(snap.get("lot_count", _SIM_DEF.lot_count) or _SIM_DEF.lot_count))
     except Exception:
-        lot_count = 6
+        lot_count = int(_SIM_DEF.lot_count)
     proc_pri = False
     try:
         ppm = getattr(ext, "_sim_process_time_priority_model", None)
@@ -2087,28 +2100,26 @@ def build_control_window(ext: Any) -> None:
     ext._xml_port_id_model = ui.SimpleIntModel(1)
     ext._last_generated_xml = ""
     ext._priority_prefix_model = ui.SimpleStringModel(DEFAULT_PRIORITY_NAME_PREFIX)
-    ext._sim_lot_count_model = ui.SimpleIntModel(6)
-    ext._sim_lot_spawn_min_model = ui.SimpleFloatModel(15.0)
-    ext._sim_lot_spawn_max_model = ui.SimpleFloatModel(40.0)
-    ext._sim_pickup_evt_min_model = ui.SimpleFloatModel(50.0)
-    ext._sim_pickup_evt_max_model = ui.SimpleFloatModel(70.0)
-    ext._sim_speed_model = ui.SimpleFloatModel(1.0)
-    # 로그 주기 기본값: 1초 고정(요구사항)
-    ext._sim_log_interval_model = ui.SimpleFloatModel(1.0)
+    ext._sim_lot_count_model = ui.SimpleIntModel(int(_SIM_DEF.lot_count))
+    ext._sim_lot_spawn_min_model = ui.SimpleFloatModel(float(_SIM_DEF.lot_spawn_min))
+    ext._sim_lot_spawn_max_model = ui.SimpleFloatModel(float(_SIM_DEF.lot_spawn_max))
+    ext._sim_pickup_evt_min_model = ui.SimpleFloatModel(float(_SIM_DEF.pickup_min))
+    ext._sim_pickup_evt_max_model = ui.SimpleFloatModel(float(_SIM_DEF.pickup_max))
+    ext._sim_speed_model = ui.SimpleFloatModel(float(_SIM_DEF.sim_speed))
+    ext._sim_log_interval_model = ui.SimpleFloatModel(float(_SIM_DEF.log_interval_sec))
     ext._sim_confirm_each_step_model = ui.SimpleBoolModel(False)
     # 공정설정 시간 우선(기본 OFF)
     ext._sim_process_time_priority_model = ui.SimpleBoolModel(False)
-    ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(5.0)
-    ext._sim_oht_bp1_max_model = ui.SimpleFloatModel(10.0)
-    ext._sim_bp1_bp_min_model = ui.SimpleFloatModel(5.0)
-    ext._sim_bp1_bp_max_model = ui.SimpleFloatModel(10.0)
-    ext._sim_bp_ep_min_model = ui.SimpleFloatModel(5.0)
-    ext._sim_bp_ep_max_model = ui.SimpleFloatModel(10.0)
-    ext._sim_ep_oht_min_model = ui.SimpleFloatModel(5.0)
-    ext._sim_ep_oht_max_model = ui.SimpleFloatModel(10.0)
-    # FOUP 공정 시간(EP 상) — min/max 랜덤 범위
-    ext._sim_foup_proc_min_model = ui.SimpleFloatModel(30.0)
-    ext._sim_foup_proc_max_model = ui.SimpleFloatModel(60.0)
+    ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_min))
+    ext._sim_oht_bp1_max_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_max))
+    ext._sim_bp1_bp_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_min))
+    ext._sim_bp1_bp_max_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_max))
+    ext._sim_bp_ep_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp_to_ep_min))
+    ext._sim_bp_ep_max_model = ui.SimpleFloatModel(float(_SIM_DEF.bp_to_ep_max))
+    ext._sim_ep_oht_min_model = ui.SimpleFloatModel(float(_SIM_DEF.ep_to_oht_min))
+    ext._sim_ep_oht_max_model = ui.SimpleFloatModel(float(_SIM_DEF.ep_to_oht_max))
+    ext._sim_foup_proc_min_model = ui.SimpleFloatModel(float(_SIM_DEF.foup_process_min))
+    ext._sim_foup_proc_max_model = ui.SimpleFloatModel(float(_SIM_DEF.foup_process_max))
     ext._sim_ep_count_combo = None
     # 초기 적재 포트: IN/OUT + BP1~BP4 + EP1~EP3
     # (EP 개수=2이면 BP4/EP3은 UI에서 숨기며 값도 강제로 False로 유지)
@@ -2323,7 +2334,7 @@ def build_control_window(ext: Any) -> None:
                             ui.Label("LOT 수", width=80)
                             ui.IntField(model=ext._sim_lot_count_model, width=80)
                             ui.Label("EP 개수", width=55)
-                            ext._sim_ep_count_combo = ui.ComboBox(0, "2", "3")
+                            ext._sim_ep_count_combo = ui.ComboBox(int(_SIM_DEF.ep_count_idx), "2", "3")
                             ext._sim_ep_count_combo.model.add_item_changed_fn(lambda m, *a: on_sim_ep_count_changed(ext))
                         with ui.HStack(spacing=8, height=28):
                             ui.Label("LOT생성간격", width=100)
@@ -2868,10 +2879,10 @@ def _ep_count_idx_for_port_panel(ext: Any, screen_1based: int) -> int:
         snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
         idx = si - 1
         if 0 <= idx < len(snaps) and isinstance(snaps[idx], dict):
-            return int(snaps[idx].get("ep_count_idx", 0) or 0)
+            return int(snaps[idx].get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
         # 화면2~4가 미저장(None)인 경우: 화면1 기본값을 폴백으로 사용
         if si > 1 and len(snaps) >= 1 and isinstance(snaps[0], dict):
-            return int(snaps[0].get("ep_count_idx", 0) or 0)
+            return int(snaps[0].get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
     except Exception:
         pass
     try:
@@ -6148,9 +6159,14 @@ def on_sim_start_clicked(ext: Any) -> None:
     # 공정 시간/간격/초기포트/고장포트 등 “시뮬 입력값”은 스냅샷(dict) 하나로 통일한다.
     # - 분할(N>1): 화면별로 저장된 스냅샷을 사용
     # - 단일(N==1): 화면1 스냅샷(없으면 현재 UI값을 캡처한 dict)을 사용
-    ep_count = 2
+    ep_count = _SIM_DEF.ep_count()
     timing = SimulationTimingConfig()
-    init_cfg = SimulationInitConfig(ep_count=2, initial_full_ports=[], max_oht_lots=6, process_time_priority=False)
+    init_cfg = SimulationInitConfig(
+        ep_count=ep_count,
+        initial_full_ports=[],
+        max_oht_lots=int(_SIM_DEF.lot_count),
+        process_time_priority=False,
+    )
     snap_1: Dict[str, Any] = {}
     if n_ch <= 1:
         try:
@@ -6330,9 +6346,9 @@ def on_sim_start_clicked(ext: Any) -> None:
             except Exception:
                 s0 = {}
         try:
-            ep_idx0 = int(s0.get("ep_count_idx", 0) or 0)
+            ep_idx0 = int(s0.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
         except Exception:
-            ep_idx0 = 0
+            ep_idx0 = int(_SIM_DEF.ep_count_idx)
         ep_cnt0 = 2 if int(ep_idx0) == 0 else 3
         occ_init = _occ_from_snap(s0, ep_cnt0)
         try:

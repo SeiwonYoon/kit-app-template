@@ -45,6 +45,7 @@ from .control_window import (
     on_xml_seq_changed,
     refresh_object_list,
 )
+from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 from .tbs_data_paths import resolve_local_data_path
 from .tbs_usd_window import default_load_usd_path
 from .usd_loader_utils import get_resource_usd_list, path_has_supported_stage_extension
@@ -225,25 +226,25 @@ def _apply_per_screen_snapshot(ext: Any, snap: Dict[str, Any]) -> None:
     if not isinstance(snap, dict) or not snap:
         return
     try:
-        ep_idx = int(snap.get("ep_count_idx", 0) or 0)
+        ep_idx = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
     except Exception:
-        ep_idx = 0
+        ep_idx = int(_SIM_DEF.ep_count_idx)
     try:
-        lc = max(1, int(snap.get("lot_count", 6) or 6))
+        lc = max(1, int(snap.get("lot_count", _SIM_DEF.lot_count) or _SIM_DEF.lot_count))
     except Exception:
-        lc = 6
+        lc = int(_SIM_DEF.lot_count)
     try:
-        smin = max(0.1, float(snap.get("spawn_min", 15.0)))
-        smax = max(0.1, float(snap.get("spawn_max", 40.0)))
+        smin = max(0.1, float(snap.get("spawn_min", _SIM_DEF.lot_spawn_min)))
+        smax = max(0.1, float(snap.get("spawn_max", _SIM_DEF.lot_spawn_max)))
     except Exception:
-        smin, smax = 15.0, 40.0
+        smin, smax = float(_SIM_DEF.lot_spawn_min), float(_SIM_DEF.lot_spawn_max)
     if smin > smax:
         smin, smax = smax, smin
     try:
-        pmin = max(0.1, float(snap.get("pue_min", 50.0)))
-        pmax = max(0.1, float(snap.get("pue_max", 70.0)))
+        pmin = max(0.1, float(snap.get("pue_min", _SIM_DEF.pickup_min)))
+        pmax = max(0.1, float(snap.get("pue_max", _SIM_DEF.pickup_max)))
     except Exception:
-        pmin, pmax = 50.0, 70.0
+        pmin, pmax = float(_SIM_DEF.pickup_min), float(_SIM_DEF.pickup_max)
     if pmin > pmax:
         pmin, pmax = pmax, pmin
 
@@ -260,14 +261,14 @@ def _apply_per_screen_snapshot(ext: Any, snap: Dict[str, Any]) -> None:
         "lot_spawn_max": smax,
         "pickup_min": pmin,
         "pickup_max": pmax,
-        "oht_min": _g("oht_bp1_min"),
-        "oht_max": _g("oht_bp1_max"),
-        "bp1_bp_min": _g("bp1_bp_min"),
-        "bp1_bp_max": _g("bp1_bp_max"),
-        "bp_ep_min": _g("bp_ep_min"),
-        "bp_ep_max": _g("bp_ep_max"),
-        "ep_oht_min": _g("ep_oht_min"),
-        "ep_oht_max": _g("ep_oht_max"),
+        "oht_min": _g("oht_bp1_min", float(_SIM_DEF.oht_to_bp1_min)),
+        "oht_max": _g("oht_bp1_max", float(_SIM_DEF.oht_to_bp1_max)),
+        "bp1_bp_min": _g("bp1_bp_min", float(_SIM_DEF.bp1_to_bp_min)),
+        "bp1_bp_max": _g("bp1_bp_max", float(_SIM_DEF.bp1_to_bp_max)),
+        "bp_ep_min": _g("bp_ep_min", float(_SIM_DEF.bp_to_ep_min)),
+        "bp_ep_max": _g("bp_ep_max", float(_SIM_DEF.bp_to_ep_max)),
+        "ep_oht_min": _g("ep_oht_min", float(_SIM_DEF.ep_to_oht_min)),
+        "ep_oht_max": _g("ep_oht_max", float(_SIM_DEF.ep_to_oht_max)),
         "init_inout": bool(snap.get("init_inout")),
         "init_bp1": bool(snap.get("init_bp1")),
         "init_bp2": bool(snap.get("init_bp2")),
@@ -284,8 +285,8 @@ def _apply_per_screen_snapshot(ext: Any, snap: Dict[str, Any]) -> None:
         "fault_ep1": bool(snap.get("fault_ep1")),
         "fault_ep2": bool(snap.get("fault_ep2")),
         "fault_ep3": bool(snap.get("fault_ep3")),
-        "foup_proc_min": _g("foup_proc_min", 30.0),
-        "foup_proc_max": _g("foup_proc_max", 60.0),
+        "foup_proc_min": _g("foup_proc_min", float(_SIM_DEF.foup_process_min)),
+        "foup_proc_max": _g("foup_proc_max", float(_SIM_DEF.foup_process_max)),
     }
     _apply_web_fields(ext, f)
 
@@ -516,37 +517,49 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
         return bool(f.get(key))
 
     try:
-        _set_int_model(getattr(ext, "_sim_lot_count_model", None), max(1, _i("lot_count", 6)))
+        _set_int_model(getattr(ext, "_sim_lot_count_model", None), max(1, _i("lot_count", int(_SIM_DEF.lot_count))))
     except Exception:
         pass
     try:
-        ext._sim_ep_count_combo.model.get_item_value_model().set_value(0 if _i("ep_count_index", 0) == 0 else 1)
+        ext._sim_ep_count_combo.model.get_item_value_model().set_value(
+            0 if _i("ep_count_index", int(_SIM_DEF.ep_count_idx)) == 0 else 1
+        )
         on_sim_ep_count_changed(ext)
     except Exception:
         pass
     # NOTE: 어떤 1개 모델 접근이 실패해도 speed/log 등 핵심 값 적용이 누락되지 않게 개별 적용한다.
     try:
-        _set_float_model(getattr(ext, "_sim_lot_spawn_min_model", None), max(0.1, _f("lot_spawn_min", 15.0)))
+        _set_float_model(
+            getattr(ext, "_sim_lot_spawn_min_model", None), max(0.1, _f("lot_spawn_min", float(_SIM_DEF.lot_spawn_min)))
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_lot_spawn_max_model", None), max(0.1, _f("lot_spawn_max", 40.0)))
+        _set_float_model(
+            getattr(ext, "_sim_lot_spawn_max_model", None), max(0.1, _f("lot_spawn_max", float(_SIM_DEF.lot_spawn_max)))
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_pickup_evt_min_model", None), max(0.1, _f("pickup_min", 50.0)))
+        _set_float_model(
+            getattr(ext, "_sim_pickup_evt_min_model", None), max(0.1, _f("pickup_min", float(_SIM_DEF.pickup_min)))
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_pickup_evt_max_model", None), max(0.1, _f("pickup_max", 70.0)))
+        _set_float_model(
+            getattr(ext, "_sim_pickup_evt_max_model", None), max(0.1, _f("pickup_max", float(_SIM_DEF.pickup_max)))
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_speed_model", None), max(0.1, _f("speed", 1.0)))
+        _set_float_model(getattr(ext, "_sim_speed_model", None), max(0.1, _f("speed", float(_SIM_DEF.sim_speed))))
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_log_interval_model", None), max(0.0, _f("log_interval", 0.0)))
+        _set_float_model(
+            getattr(ext, "_sim_log_interval_model", None), max(0.0, _f("log_interval", float(_SIM_DEF.log_interval_sec)))
+        )
     except Exception:
         pass
     try:
@@ -558,43 +571,71 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_oht_bp1_min_model", None), max(0.1, _f("oht_min", 5.0)))
+        _set_float_model(
+            getattr(ext, "_sim_oht_bp1_min_model", None),
+            max(0.1, _f("oht_min", float(_SIM_DEF.oht_to_bp1_min))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_oht_bp1_max_model", None), max(0.1, _f("oht_max", 10.0)))
+        _set_float_model(
+            getattr(ext, "_sim_oht_bp1_max_model", None),
+            max(0.1, _f("oht_max", float(_SIM_DEF.oht_to_bp1_max))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_bp1_bp_min_model", None), max(0.1, _f("bp1_bp_min", 5.0)))
+        _set_float_model(
+            getattr(ext, "_sim_bp1_bp_min_model", None),
+            max(0.1, _f("bp1_bp_min", float(_SIM_DEF.bp1_to_bp_min))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_bp1_bp_max_model", None), max(0.1, _f("bp1_bp_max", 10.0)))
+        _set_float_model(
+            getattr(ext, "_sim_bp1_bp_max_model", None),
+            max(0.1, _f("bp1_bp_max", float(_SIM_DEF.bp1_to_bp_max))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_bp_ep_min_model", None), max(0.1, _f("bp_ep_min", 5.0)))
+        _set_float_model(
+            getattr(ext, "_sim_bp_ep_min_model", None),
+            max(0.1, _f("bp_ep_min", float(_SIM_DEF.bp_to_ep_min))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_bp_ep_max_model", None), max(0.1, _f("bp_ep_max", 10.0)))
+        _set_float_model(
+            getattr(ext, "_sim_bp_ep_max_model", None),
+            max(0.1, _f("bp_ep_max", float(_SIM_DEF.bp_to_ep_max))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_ep_oht_min_model", None), max(0.1, _f("ep_oht_min", 5.0)))
+        _set_float_model(
+            getattr(ext, "_sim_ep_oht_min_model", None),
+            max(0.1, _f("ep_oht_min", float(_SIM_DEF.ep_to_oht_min))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_ep_oht_max_model", None), max(0.1, _f("ep_oht_max", 10.0)))
+        _set_float_model(
+            getattr(ext, "_sim_ep_oht_max_model", None),
+            max(0.1, _f("ep_oht_max", float(_SIM_DEF.ep_to_oht_max))),
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_foup_proc_min_model", None), max(0.1, _f("foup_proc_min", 30.0)))
+        _set_float_model(
+            getattr(ext, "_sim_foup_proc_min_model", None), max(0.1, _f("foup_proc_min", float(_SIM_DEF.foup_process_min)))
+        )
     except Exception:
         pass
     try:
-        _set_float_model(getattr(ext, "_sim_foup_proc_max_model", None), max(0.1, _f("foup_proc_max", 60.0)))
+        _set_float_model(
+            getattr(ext, "_sim_foup_proc_max_model", None), max(0.1, _f("foup_proc_max", float(_SIM_DEF.foup_process_max)))
+        )
     except Exception:
         pass
     try:

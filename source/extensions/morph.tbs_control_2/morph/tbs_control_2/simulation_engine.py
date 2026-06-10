@@ -72,10 +72,12 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
    - 이 파일 config dataclass와 사용 함수에 연결
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import random
 import threading
+
+from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 
 
 try:
@@ -83,15 +85,6 @@ try:
 except Exception:
     simpy = None
 
-
-BP1_TO_BP_MIN = 5.0
-BP1_TO_BP_MAX = 10.0
-BP_TO_EP_MIN = 5.0
-BP_TO_EP_MAX = 10.0
-EP_TO_OHT_MIN = 5.0
-EP_TO_OHT_MAX = 10.0
-OHT_TO_BP1_MIN = 5.0
-OHT_TO_BP1_MAX = 10.0
 
 INOUT_PORT = "INOUT"
 BUFFER_PORTS_MAX = ("BP1", "BP2", "BP3", "BP4")
@@ -133,26 +126,24 @@ class Lot:
 
 @dataclass
 class SimulationTimingConfig:
-    """구간별 이동·스폰·회수 티켓 간격의 난수 범위(초). rand_* 로 샘플링한다."""
-    oht_to_bp1_min: float = OHT_TO_BP1_MIN
-    oht_to_bp1_max: float = OHT_TO_BP1_MAX
-    bp1_to_bp_min: float = BP1_TO_BP_MIN
-    bp1_to_bp_max: float = BP1_TO_BP_MAX
-    bp_to_ep_min: float = BP_TO_EP_MIN
-    bp_to_ep_max: float = BP_TO_EP_MAX
-    ep_to_oht_min: float = EP_TO_OHT_MIN
-    ep_to_oht_max: float = EP_TO_OHT_MAX
-    # OHT 측 LOT 생성(대기열 적재) 간격
-    lot_spawn_interval_min: float = 15.0
-    lot_spawn_interval_max: float = 40.0
-    # READYTOUNLOAD(회수 시도) 이벤트 간격 — 공정 시간과 별개
-    pickup_event_interval_min: float = 50.0
-    pickup_event_interval_max: float = 70.0
-    # FOUP 공정(EP 상) 랜덤 범위(초)
-    # - 요구사항: EP 안착 후 FOUP 공정이 진행되며, 전역적으로 동시에 1개만 진행
-    # - Removed(회수)는 FOUP 공정(+종료 -3.2 이동 1초) 완료 전에는 대기
-    foup_process_min: float = 30.0
-    foup_process_max: float = 60.0
+    """구간별 이동·스폰·회수 티켓 간격의 난수 범위(초). rand_* 로 샘플링한다.
+
+    필드 기본값은 ``sim_control_defaults.SIM_CONTROL_DEFAULTS`` 를 따른다.
+    """
+    oht_to_bp1_min: float = _SIM_DEF.oht_to_bp1_min
+    oht_to_bp1_max: float = _SIM_DEF.oht_to_bp1_max
+    bp1_to_bp_min: float = _SIM_DEF.bp1_to_bp_min
+    bp1_to_bp_max: float = _SIM_DEF.bp1_to_bp_max
+    bp_to_ep_min: float = _SIM_DEF.bp_to_ep_min
+    bp_to_ep_max: float = _SIM_DEF.bp_to_ep_max
+    ep_to_oht_min: float = _SIM_DEF.ep_to_oht_min
+    ep_to_oht_max: float = _SIM_DEF.ep_to_oht_max
+    lot_spawn_interval_min: float = _SIM_DEF.lot_spawn_min
+    lot_spawn_interval_max: float = _SIM_DEF.lot_spawn_max
+    pickup_event_interval_min: float = _SIM_DEF.pickup_min
+    pickup_event_interval_max: float = _SIM_DEF.pickup_max
+    foup_process_min: float = _SIM_DEF.foup_process_min
+    foup_process_max: float = _SIM_DEF.foup_process_max
 
     @staticmethod
     def _norm(a: float, b: float) -> tuple:
@@ -229,11 +220,14 @@ class SimulationLogConfig:
 
 @dataclass
 class SimulationInitConfig:
-    """시뮬 시작 조건: EP 개수·초기 적재 포트·OHT가 추가 투입할 LOT 수."""
+    """시뮬 시작 조건: EP 개수·초기 적재 포트·OHT가 추가 투입할 LOT 수.
 
-    ep_count: int = 2
+    ``ep_count`` / ``max_oht_lots`` 기본값은 ``sim_control_defaults`` 를 따른다.
+    """
+
+    ep_count: int = field(default_factory=_SIM_DEF.ep_count)
     initial_full_ports: Optional[List[str]] = None
-    max_oht_lots: int = 0
+    max_oht_lots: int = field(default_factory=lambda: int(_SIM_DEF.lot_count))
     # True면 공정(랜덤) 시간만 소모하고 애니 길이는 무시(UI에서 애니 스킵/중단과 연동)
     process_time_priority: bool = False
     # 고장(비활성) 포트: 목록에 포함된 포트는 라우팅/선택에서 제외한다.

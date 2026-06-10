@@ -112,6 +112,7 @@ import omni.kit.app as kit_app
 import omni.ui as ui
 
 from .prim_utils import get_stage
+from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 
 
 def _env_flag(name: str) -> bool:
@@ -1956,9 +1957,9 @@ def _ensure_sim_screen1_live_hud_subscription(ext: Any) -> None:
 def _format_initial_load_ports_line(snap: Dict[str, Any]) -> str:
     """스냅샷/캡처 dict 기준 초기 적재(풀) 포트 목록."""
     try:
-        ep2 = int(snap.get("ep_count_idx", 0) or 0) == 0
+        ep2 = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx) == 0
     except Exception:
-        ep2 = True
+        ep2 = int(_SIM_DEF.ep_count_idx) == 0
     pairs = (
         ("INOUT", "init_inout"),
         ("BP1", "init_bp1"),
@@ -2014,24 +2015,24 @@ def _describe_snapshot_for_viewport_hud(
     - ``live_control_panel=True`` (화면1): 제어창과 동기 표시. 글리프 깨짐 방지로 ``|`` 구분·``시뮬`` 표기.
     """
     try:
-        ep2 = int(snap.get("ep_count_idx", 0) or 0) == 0
+        ep2 = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx) == 0
     except Exception:
-        ep2 = True
+        ep2 = int(_SIM_DEF.ep_count_idx) == 0
     ep_s = "EP2구성" if ep2 else "EP3구성"
     try:
-        lots = max(1, int(snap.get("lot_count", 6) or 6))
+        lots = max(1, int(snap.get("lot_count", _SIM_DEF.lot_count) or _SIM_DEF.lot_count))
     except Exception:
-        lots = 6
+        lots = int(_SIM_DEF.lot_count)
     try:
-        smn = float(snap.get("spawn_min", 15.0))
-        smx = float(snap.get("spawn_max", 40.0))
+        smn = float(snap.get("spawn_min", _SIM_DEF.lot_spawn_min))
+        smx = float(snap.get("spawn_max", _SIM_DEF.lot_spawn_max))
     except Exception:
-        smn, smx = 15.0, 40.0
+        smn, smx = float(_SIM_DEF.lot_spawn_min), float(_SIM_DEF.lot_spawn_max)
     try:
-        pmn = float(snap.get("pue_min", 50.0))
-        pmx = float(snap.get("pue_max", 70.0))
+        pmn = float(snap.get("pue_min", _SIM_DEF.pickup_min))
+        pmx = float(snap.get("pue_max", _SIM_DEF.pickup_max))
     except Exception:
-        pmn, pmx = 50.0, 70.0
+        pmn, pmx = float(_SIM_DEF.pickup_min), float(_SIM_DEF.pickup_max)
     fc = _fault_count_from_snapshot_dict(snap)
     init_line = _format_initial_load_ports_line(snap)
     if live_control_panel:
