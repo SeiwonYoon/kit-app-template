@@ -974,10 +974,9 @@ def _execute_mapped_sequence_stub(
                 # - ARRIVED(OHT->*) 애니가 "포트 도착"을 의미하므로, 완료 후 생성 토큰 1개 소모
                 # - REMOVED 애니가 "회수 진행"이므로, 완료 후 회수 토큰 1개 소모
                 # (요청으로 제거) 포트상태 좌/우 점 표시 기능 비활성화
-                # 정책 변경:
-                # - 애니메이션 완료 후에는 "완료된 자세 그대로" 유지한다.
-                # - 다음 애니메이션 시작 시점에만 시퀀서 stop() 경로(=baseline 복원/초기화)가 동작하도록,
-                #   완료 직후 baseline을 현재 자세로 덮어쓰지 않는다.
+                # 정책:
+                # - 애니 완료 직후에는 자세를 유지한다.
+                # - 다음 JSON 시작 직전 `_reset_sim_motion_before_json_run` 에서 위치를 초기화한다.
                 # 화면별 pending 큐에서 다음 job만 이어서 실행
                 pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
                 pending = []
@@ -992,7 +991,20 @@ def _execute_mapped_sequence_stub(
                     nxt = pending.pop(0)
                     if isinstance(pending_by, dict):
                         pending_by[str(scr_i)] = pending
-                    _start_job(nxt)
+                    # LAM 시퀀스 완료 콜백은 background thread — 여기서 USD reset/run 하면
+                    # _dispatch_main_wait 교착·Kit freeze 가 난다. 다음 job 은 main tick 에서만 시작.
+                    def _run_pending_job_on_main() -> None:
+                        _start_job(nxt)
+
+                    try:
+                        if threading.current_thread() is threading.main_thread():
+                            _run_pending_job_on_main()
+                        else:
+                            from .tbs_lam_sequence_engine import _dispatch_main
+
+                            _dispatch_main(_run_pending_job_on_main)
+                    except Exception:
+                        _run_pending_job_on_main()
                     return
                 if pause_evt is not None:
                     try:
@@ -1052,6 +1064,12 @@ def _execute_mapped_sequence_stub(
             # JSON 시퀀스 재생 중에도 sim tick이 돌아가야 _wait_with_progress(공정)와 애니가 동시에 진행된다.
             # 배속>1일 때만 pause_evt.set()으로 tick을 잠시 맞춤(1배속에서는 set 하지 않음).
             _ctx_run = _usd_context_name_for_sim_screen(ext, scr_i)
+            # 시뮬 중 새 JSON: 포트 숨김/보임은 _sim_ui_sink_anim_event 에서 이미 반영됨.
+            # 위치·TBS_OFFSET·TIMESAMPLES 인스턴스만 실행 전 초기 자세로 복원한다.
+            try:
+                _reset_sim_motion_before_json_run(ext, job, runner_obj=runner_obj)
+            except Exception as exc:
+                print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
             if runner_obj is not None:
                 runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run, speed_scale=sp)
             try:
@@ -6939,8 +6957,43 @@ def on_sim_start_clicked(ext: Any) -> None:
     th.start()
 
 
-def _restore_sim_prim_motion_to_initial(ext: Any) -> None:
-    """시뮬 **시작·리셋** 시 MOVE·ROTATE·FOUP·USD_TIMELINE prim 을 초기 자세로."""
+def _reset_sim_motion_before_json_run(
+    ext: Any,
+    job: Dict[str, Any],
+    *,
+    runner_obj: Any = None,
+) -> None:
+    """시뮬 중 **새 JSON** 직전 — 포트 가시성은 유지하고 위치·재생 상태만 초기화."""
+    try:
+        scr_i = int(str((job or {}).get("tbs_sim_screen", "1") or "1").strip() or "1")
+    except Exception:
+        scr_i = 1
+    scr_i = max(1, scr_i)
+    ctx = _usd_context_name_for_sim_screen(ext, scr_i)
+    extra = (job or {}).get("parsed") if isinstance((job or {}).get("parsed"), list) else []
+    if runner_obj is not None:
+        try:
+            if getattr(runner_obj, "is_running", lambda: False)():
+                runner_obj.pause()
+        except Exception:
+            pass
+    _restore_sim_prim_motion_to_initial(
+        ext,
+        extra_steps=extra,
+        usd_context_name=ctx,
+    )
+
+
+def _restore_sim_prim_motion_to_initial(
+    ext: Any,
+    *,
+    extra_steps: Optional[List[Dict[str, Any]]] = None,
+    usd_context_name: Optional[str] = None,
+) -> None:
+    """시뮬 **시작·리셋** 및 **JSON 전환** 시 MOVE·ROTATE·FOUP·USD_TIMELINE prim 을 초기 자세로.
+
+    포트 LOT 숨김/보임(visibility)은 건드리지 않는다 — transform·TBS_OFFSET·인스턴스 replay 만 복원.
+    """
     paths_seen: set[str] = set()
     paths: List[str] = []
 
@@ -6975,6 +7028,9 @@ def _restore_sim_prim_motion_to_initial(ext: Any) -> None:
                 getattr(r0, "_lam_last_steps", None) or []
             ):
                 _add(p)
+        if extra_steps:
+            for p in _collect_prim_paths_for_reset(extra_steps):
+                _add(p)
     except Exception:
         pass
 
@@ -6986,39 +7042,37 @@ def _restore_sim_prim_motion_to_initial(ext: Any) -> None:
     except Exception:
         pass
 
-    try:
-        from . import tbs_lam_rotate_animation as _lrx
-        from . import tbs_lam_translate_animation as _ltx
-
-        _ltx.stop_all_translate_animations()
-        _lrx.stop_all_rotate_animations()
-    except Exception:
-        pass
-    try:
-        stop_all_translate_animations(preserve_foup_port_lot_prims=False)
-        stop_all_rotate_animations()
-        stop_all_curve_animations()
-    except Exception:
-        pass
-
-    try:
-        from . import port_lot_visibility as _plv
-
-        _plv.clear_foup_in_progress()
-        _plv.clear_foup_lifted()
-        _plv.restore_port_lot_prims_to_authoring()
-    except Exception:
-        pass
-
-    try:
-        sch = getattr(ext, "_tbs_scheduler", None)
-        stop_fn = getattr(sch, "stop_all", None) if sch is not None else None
-        if callable(stop_fn):
-            stop_fn()
-    except Exception:
-        pass
-
     def _do_on_main() -> None:
+        # USD write / stage 접근은 반드시 main thread 에서만 수행한다.
+        try:
+            from . import tbs_lam_rotate_animation as _lrx
+            from . import tbs_lam_translate_animation as _ltx
+
+            _ltx.stop_all_translate_animations()
+            _lrx.stop_all_rotate_animations()
+        except Exception:
+            pass
+        try:
+            stop_all_translate_animations(preserve_foup_port_lot_prims=False)
+            stop_all_rotate_animations()
+            stop_all_curve_animations()
+        except Exception:
+            pass
+        try:
+            from . import port_lot_visibility as _plv
+
+            _plv.clear_foup_in_progress()
+            _plv.clear_foup_lifted()
+            _plv.restore_port_lot_prims_to_authoring()
+        except Exception:
+            pass
+        try:
+            sch = getattr(ext, "_tbs_scheduler", None)
+            stop_fn = getattr(sch, "stop_all", None) if sch is not None else None
+            if callable(stop_fn):
+                stop_fn()
+        except Exception:
+            pass
         if paths:
             from .tbs_lam_sequence_engine import _reset_tbs_offset_ops_for_paths
 
@@ -7056,8 +7110,8 @@ def _restore_sim_prim_motion_to_initial(ext: Any) -> None:
             pass
 
         try:
-            usd_animation_control.stop_usd_animation(None)
-            usd_animation_control.reset_timeline_to_zero(None)
+            usd_animation_control.stop_usd_animation(usd_context_name)
+            usd_animation_control.reset_timeline_to_zero(usd_context_name)
         except Exception:
             pass
 
