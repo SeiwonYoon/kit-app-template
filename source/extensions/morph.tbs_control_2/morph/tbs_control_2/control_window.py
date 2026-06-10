@@ -659,6 +659,7 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
     - MOVE/ROTATE: duration_max가 있으면 max, 없으면 duration.
     - DELAY: duration
     - USD_TIMELINE / TIMESAMPLES_REPLAY: 프레임 범위(start/end)로 추정
+    - PRIM_VISIBILITY / SET_PRIM_VISIBILITY / PRIM_HIDE / PRIM_SHOW: duration (기본 0.02, tbs_lam_sequence_engine 과 동일)
     """
     # NOTE(정책):
     # - "표시/예상 시간"은 **1배속 기준(콘텐츠 기준)** 으로 유지한다.
@@ -676,6 +677,9 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
             return max(0.0, float((step or {}).get("duration", 0.0)))
         if t == "DELAY":
             return max(0.0, float((step or {}).get("duration", 0.0)))
+        if t in ("PRIM_VISIBILITY", "SET_PRIM_VISIBILITY", "PRIM_HIDE", "PRIM_SHOW"):
+            # sticky visibility tail — _start_set_prim_visibility 와 동일 (1배속 표기).
+            return max(0.0, float((step or {}).get("duration", 0.02) or 0.02))
         if t in ("USD_TIMELINE", "TIMESAMPLES_REPLAY"):
             play = (step or {}).get("play") or {}
             if not isinstance(play, dict):
@@ -746,8 +750,8 @@ def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]], *
             # (USD_TIMELINE step["speed_scale"]만 _estimate_step_duration_sec_for_log 내부에서 반영)
             dur = _estimate_step_duration_sec_for_log(st, speed_scale=1.0)
             if dur is None:
-                # 알 수 없는 타입/auto 타임라인이 섞이면 전체 추정도 None 처리
-                return None
+                # 미지원 타입은 해당 스텝만 0초로 간주(시퀀스 전체 추정은 계속).
+                dur = 0.0
             group_finish = max(group_finish, t0 + off + float(dur))
         last_finish = max(last_finish, group_finish)
 
@@ -765,7 +769,7 @@ def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]], *
                 anchor_off = 0.0
         anchor_dur = _estimate_step_duration_sec_for_log(anchor_step, speed_scale=1.0)
         if anchor_dur is None:
-            return None
+            anchor_dur = 0.0
         anchor_end = t0 + anchor_off + float(anchor_dur)
 
         try:
@@ -5683,7 +5687,7 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
         # 1-E) START 면 +Y320, END 면 -Y320 (1.0초 부드러운 이동)
         #     - 좌표 단위(320)는 USD 스테이지 단위에 맞춰 사용자가 조정한 값
         #     - 같은 prim 의 진행 중 translate 가 있으면 먼저 정지(중첩 방지)
-        dy = 320 if seq_u0 == "FOUP_PROCESS_START" else -320
+        dy = 4 if seq_u0 == "FOUP_PROCESS_START" else -4
         try:
             stop_prim_translate_animation(prim_path, usd_context_name=ctx_nm)
         except Exception:
