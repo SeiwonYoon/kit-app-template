@@ -407,6 +407,20 @@ class Extension(omni.ext.IExt):
         if self._control_window is not None:
             self._control_window.destroy()
             self._control_window = None
+        try:
+            mon = getattr(self, "_sim_monitor_window", None)
+            if mon is not None:
+                mon.destroy()
+                self._sim_monitor_window = None
+        except Exception:
+            pass
+        try:
+            tt = getattr(self, "_sim_timetable_window", None)
+            if tt is not None:
+                tt.destroy()
+                self._sim_timetable_window = None
+        except Exception:
+            pass
         self._object_list_frame = None
         if self._sequence_window is not None:
             try:

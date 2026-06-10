@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
@@ -23,6 +24,302 @@ class SimPreRunResult:
     final_sim_time: float
     total_est_sec: float
     items: Tuple[SimTimelineItem, ...]
+
+
+@dataclass
+class EpBarPrecomputed:
+    """프리런 progress 시계열로 미리 계산한 EP 막대 rows."""
+
+    total_est: float
+    rows: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    ep_ports: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class TimetableRowMeta:
+    """타임테이블 UI 한 줄(클릭 단위) 메타."""
+
+    row_index: int
+    t: float
+    kind: str  # "event" | "step"
+    json_obj: Dict[str, Any]
+    display_line: str
+    through_item_index: int  # Fast-apply 시 items[0..through_item_index] 포함
+
+
+def _f_val(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(str(x).strip() or default)
+    except Exception:
+        return float(default)
+
+
+def _s_val(v: Any) -> str:
+    try:
+        return str(v).strip() if v is not None else ""
+    except Exception:
+        return ""
+
+
+def _push_bar_seg(segs: List[Dict[str, Any]], empty: bool, dur: float) -> None:
+    if dur <= 1e-9:
+        return
+    if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(empty):
+        segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dur)
+    else:
+        segs.append({"empty": bool(empty), "dur": float(dur)})
+    if len(segs) > 220:
+        del segs[:-200]
+
+
+def build_ep_bar_from_progress_items(
+    items: Tuple[SimTimelineItem, ...],
+    *,
+    final_sim_time: float,
+    ep_ports: Optional[List[str]] = None,
+) -> EpBarPrecomputed:
+    """
+    프리런 ``progress`` payload의 ``ep_occ`` 를 시간순으로 누적해 완성 막대 rows 를 만든다.
+    """
+    eps: List[str] = []
+    if ep_ports:
+        eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
+    rows: Dict[str, List[Dict[str, Any]]] = {}
+    t_last: Optional[float] = None
+    total_est = max(0.0, float(final_sim_time))
+
+    prog_items = [it for it in items if str(it.kind).lower() == "progress" and isinstance(it.payload, dict)]
+    prog_items.sort(key=lambda it: float(it.t))
+
+    for it in prog_items:
+        p = dict(it.payload)
+        t_now = _f_val(p.get("sim_time", it.t), float(it.t))
+        if t_last is None:
+            t_last = t_now
+            continue
+        dt = max(0.0, t_now - float(t_last))
+        t_last = t_now
+        if dt <= 1e-9:
+            continue
+
+        ep_occ = p.get("ep_occ", {})
+        if not isinstance(ep_occ, dict):
+            ep_occ = {}
+        ep_list = list(eps)
+        if not ep_list:
+            ep_ports_raw = p.get("ep_ports", [])
+            if isinstance(ep_ports_raw, list) and ep_ports_raw:
+                ep_list = [str(x).strip().upper() for x in ep_ports_raw if str(x).strip().upper().startswith("EP")]
+        if not ep_list:
+            ep_list = sorted(
+                [str(k).strip().upper() for k in ep_occ.keys() if str(k).strip().upper().startswith("EP")],
+                key=lambda x: int(str(x).replace("EP", "") or "0"),
+            )
+        if not ep_list:
+            ep_list = ["EP1", "EP2"]
+
+        all_empty = str(p.get("all_ep_empty", "0")).strip() in ("1", "true", "True", "ON", "on")
+        for ep in ep_list:
+            if ep not in rows:
+                rows[ep] = []
+            v = str(ep_occ.get(ep, "EMPTY")).strip().upper()
+            _push_bar_seg(rows[ep], empty=(v == "EMPTY"), dur=dt)
+        if "ALL_EP" not in rows:
+            rows["ALL_EP"] = []
+        _push_bar_seg(rows["ALL_EP"], empty=bool(all_empty), dur=dt)
+        eps = ep_list
+
+    if not eps:
+        eps = ["EP1", "EP2"]
+    for r in list(eps) + ["ALL_EP"]:
+        if r not in rows:
+            rows[r] = []
+
+    if total_est <= 0.0 and t_last is not None:
+        total_est = max(30.0, float(t_last))
+
+    return EpBarPrecomputed(total_est=float(total_est), rows=rows, ep_ports=tuple(eps))
+
+
+def truncate_bar_rows_at_t(rows: Dict[str, List[Dict[str, Any]]], t_cut: float) -> Dict[str, List[Dict[str, Any]]]:
+    """완성 rows 에서 ``t_cut`` 초까지만 잘라 복사본을 반환."""
+    t_cut = max(0.0, float(t_cut))
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for row_name, segs in (rows or {}).items():
+        acc = 0.0
+        clipped: List[Dict[str, Any]] = []
+        for seg in segs or []:
+            if not isinstance(seg, dict):
+                continue
+            dur = float(seg.get("dur", 0.0))
+            if acc + dur <= t_cut + 1e-9:
+                clipped.append({"empty": bool(seg.get("empty")), "dur": dur})
+                acc += dur
+            elif acc < t_cut - 1e-9:
+                rem = t_cut - acc
+                clipped.append({"empty": bool(seg.get("empty")), "dur": rem})
+                acc = t_cut
+                break
+            else:
+                break
+        out[str(row_name)] = clipped
+    return out
+
+
+def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
+    """
+    ``_build_prerun_timetable_text`` 와 동일 필터·정렬로 UI 행 메타를 만든다.
+    각 행은 ``through_item_index`` 로 Fast-apply 범위를 지정한다.
+    """
+    si = int(res.screen)
+    total = max(0.0, float(res.final_sim_time))
+    items = res.items
+    item_by_key: Dict[Tuple[float, str, str], int] = {}
+    for idx, it in enumerate(items):
+        kind = str(it.kind or "").strip().lower()
+        p = it.payload
+        if kind == "event" and isinstance(p, dict):
+            seq = _s_val(p.get("seq")).upper()
+            if seq:
+                item_by_key[(round(float(it.t), 4), "event", seq)] = idx
+        elif kind == "progress" and isinstance(p, dict):
+            st = _s_val(p.get("status")).upper()
+            el = _f_val(p.get("elapsed", 0.0), 0.0)
+            if st == "RUNNING" and abs(el) <= 1e-9:
+                ev = _s_val(p.get("event_seq") or p.get("sequence_name")).upper()
+                if ev:
+                    item_by_key[(round(float(it.t), 4), "step", ev)] = idx
+
+    rows_data: List[Dict[str, Any]] = []
+    for it in items:
+        kind = str(it.kind or "").strip().lower()
+        p = it.payload
+        t_val = round(_f_val(it.t, 0.0), 2)
+        if kind == "event" and isinstance(p, dict):
+            seq = _s_val(p.get("seq")).upper()
+            if not seq:
+                continue
+            row: Dict[str, Any] = {"t": t_val, "screen": si, "kind": "event", "event": seq}
+            for k in ("port_id", "from_port_id", "to_port_id", "lot_id", "foup_id", "lot_seq"):
+                v = _s_val(p.get(k))
+                if v:
+                    row[k] = v
+            rows_data.append(row)
+        elif kind == "progress" and isinstance(p, dict):
+            st = _s_val(p.get("status")).upper()
+            el = _f_val(p.get("elapsed", 0.0), 0.0)
+            if st != "RUNNING" or abs(el) > 1e-9:
+                continue
+            ev = _s_val(p.get("event_seq") or p.get("sequence_name")).upper()
+            if not ev:
+                continue
+            row = {"t": t_val, "screen": si, "kind": "step", "event": ev}
+            pid = _s_val(p.get("port_id"))
+            if pid:
+                row["port_id"] = pid
+            label = _s_val(p.get("label"))
+            if label:
+                row["label"] = label
+            row["anim"] = _s_val(p.get("linked_anim_json"))
+            row["proc_sec"] = round(_f_val(p.get("proc_sec", 0.0), 0.0), 2)
+            row["anim_sec"] = round(_f_val(p.get("anim_sec", 0.0), 0.0), 2)
+            detail = _s_val(p.get("detail"))
+            if detail:
+                row["detail"] = detail
+            ptp = _s_val(p.get("process_time_priority"))
+            if ptp:
+                row["process_time_priority"] = ptp
+            rows_data.append(row)
+
+    if not rows_data:
+        return []
+
+    kind_prio = {"event": 0, "step": 1}
+    rows_data.sort(
+        key=lambda r: (
+            float(r.get("t", 0.0)),
+            int(kind_prio.get(str(r.get("kind", "")), 9)),
+        )
+    )
+
+    metas: List[TimetableRowMeta] = []
+    for ri, r in enumerate(rows_data):
+        t_val = float(r.get("t", 0.0))
+        kind = str(r.get("kind", ""))
+        ev = _s_val(r.get("event")).upper()
+        key = (round(t_val, 4), kind, ev)
+        through = int(item_by_key.get(key, -1))
+        if through < 0:
+            through = _find_through_item_index(items, t_val, kind, ev, ri, rows_data)
+        prefix = f"[{t_val:.1f} / {total:.1f}] " if total > 0.0 else f"[{t_val:.1f}] "
+        try:
+            js = json.dumps(r, ensure_ascii=False)
+        except Exception:
+            js = str(r)
+        metas.append(
+            TimetableRowMeta(
+                row_index=int(ri),
+                t=t_val,
+                kind=kind,
+                json_obj=dict(r),
+                display_line=prefix + js,
+                through_item_index=int(through),
+            )
+        )
+    return metas
+
+
+def _find_through_item_index(
+    items: Tuple[SimTimelineItem, ...],
+    t_val: float,
+    kind: str,
+    ev: str,
+    row_index: int,
+    rows_data: List[Dict[str, Any]],
+) -> int:
+    """item_by_key 미스 시 행 순서 기준으로 through 인덱스 추정."""
+    best = -1
+    for idx, it in enumerate(items):
+        if float(it.t) > float(t_val) + 1e-6:
+            break
+        ik = str(it.kind or "").strip().lower()
+        p = it.payload
+        if ik == "event" and isinstance(p, dict) and kind == "event":
+            if _s_val(p.get("seq")).upper() == ev and abs(float(it.t) - t_val) <= 1e-3:
+                best = idx
+        elif ik == "progress" and isinstance(p, dict) and kind == "step":
+            st = _s_val(p.get("status")).upper()
+            el = _f_val(p.get("elapsed", 0.0), 0.0)
+            if st == "RUNNING" and abs(el) <= 1e-9:
+                ev2 = _s_val(p.get("event_seq") or p.get("sequence_name")).upper()
+                if ev2 == ev and abs(float(it.t) - t_val) <= 1e-3:
+                    best = idx
+    if best >= 0:
+        return best
+    for idx, it in enumerate(items):
+        if float(it.t) <= float(t_val) + 1e-6:
+            best = idx
+    return max(0, best)
+
+
+def resolve_seek_through_index(
+    metas: List[TimetableRowMeta],
+    clicked_row_index: int,
+) -> Tuple[float, int]:
+    """
+    클릭 행 기준 seek 목표 (t, through_item_index).
+    동일 t 의 상단 행들이 모두 포함되도록 through 를 상향 조정한다.
+    """
+    if not metas:
+        return 0.0, 0
+    ri = max(0, min(int(clicked_row_index), len(metas) - 1))
+    clicked = metas[ri]
+    t_target = float(clicked.t)
+    through = int(clicked.through_item_index)
+    for m in metas[: ri + 1]:
+        if abs(float(m.t) - t_target) <= 1e-6:
+            through = max(through, int(m.through_item_index))
+    return t_target, through
 
 
 class PlaybackEnv:
@@ -100,6 +397,26 @@ class SimTimelinePlayer:
         with self._lock:
             return float(self._sim_now_by_screen.get(int(screen), 0.0))
 
+    def cursor(self, screen: int) -> int:
+        with self._lock:
+            return int(self._cursor_by_screen.get(int(screen), 0))
+
+    def seek(self, screen: int, *, target_t: float, item_cursor: int) -> None:
+        """재생 커서를 ``target_t`` / ``item_cursor`` 로 옮기고 wall-clock 기준을 재설정."""
+        scr = int(screen)
+        t = max(0.0, float(target_t))
+        ic = max(0, int(item_cursor))
+        with self._lock:
+            res = self._results.get(scr)
+            if res is not None:
+                t = min(float(res.final_sim_time), t)
+                ic = min(ic, len(res.items))
+            self._t0_sim_by_screen[scr] = t
+            self._sim_now_by_screen[scr] = t
+            self._cursor_by_screen[scr] = ic
+            self._t0_wall = time.perf_counter()
+            self._playing = True
+
     def tick(self) -> None:
         with self._lock:
             if not self._playing:
@@ -110,20 +427,18 @@ class SimTimelinePlayer:
             except Exception:
                 sp = 1.0
             wall_dt = time.perf_counter() - float(self._t0_wall)
-            # 화면별로 독립 시간 축을 가진다(프리런 결과가 화면별로 다를 수 있음)
             for scr, res in self._results.items():
-                t_sim = float(self._t0_sim_by_screen.get(scr, 0.0)) + float(wall_dt) * float(sp)
+                t_base = float(self._t0_sim_by_screen.get(scr, 0.0))
+                t_sim = t_base + float(wall_dt) * float(sp)
                 t_sim = min(float(res.final_sim_time), float(t_sim))
                 self._sim_now_by_screen[scr] = float(t_sim)
 
-        # emit는 lock 밖에서(emit가 UI/로그에 영향을 주므로 re-entrancy 방지)
         for scr, res in self._results.items():
             t_sim = self.sim_now(scr)
             i = 0
             with self._lock:
                 i = int(self._cursor_by_screen.get(scr, 0))
             items = res.items
-            # time-ordered emit
             while i < len(items) and float(items[i].t) <= float(t_sim) + 1e-9:
                 it = items[i]
                 try:
@@ -133,9 +448,6 @@ class SimTimelinePlayer:
                 i += 1
             with self._lock:
                 self._cursor_by_screen[scr] = int(i)
-                if t_sim >= float(res.final_sim_time) - 1e-9:
-                    # 화면별 종료에 도달했으면 더 이상 emit할 게 없다.
-                    pass
 
 
 def prerun_engine_to_timeline(
@@ -158,7 +470,6 @@ def prerun_engine_to_timeline(
                 return 0.0
         return 0.0
 
-    # 콜백 래핑: engine이 호출하는 콜백은 이미 engine 내부에서 event_tags 병합이 끝난 merged payload이다.
     def on_log(line: str) -> None:
         try:
             items.append(SimTimelineItem(t=float(getattr(engine.env, "now", 0.0) or 0.0), kind="log", payload=str(line)))
@@ -171,7 +482,6 @@ def prerun_engine_to_timeline(
     def on_progress(payload: Dict[str, Any]) -> None:
         items.append(SimTimelineItem(t=_t_from_payload(payload), kind="progress", payload=dict(payload)))
 
-    # 엔진에 콜백을 주입(생성자에서 이미 들어갔더라도 프리런 전용으로 덮는다)
     try:
         engine._on_log = on_log  # type: ignore[attr-defined]
     except Exception:
@@ -185,8 +495,6 @@ def prerun_engine_to_timeline(
     except Exception:
         pass
 
-    final_sim = 0.0
-    # 가능한 빠르게: tick에 큰 델타를 주되, 내부 step guard(10000) 때문에 loop로 반복한다.
     steps = 0
     while True:
         try:
@@ -213,7 +521,6 @@ def prerun_engine_to_timeline(
     except Exception:
         te = 0.0
 
-    # 안정적 재생을 위해 t, kind 순으로 정렬(동일 시각엔 log->event->progress 순으로)
     kind_prio = {"log": 0, "event": 1, "progress": 2}
     try:
         items.sort(key=lambda it: (float(it.t), int(kind_prio.get(str(it.kind), 9))))

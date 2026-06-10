@@ -827,6 +827,18 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # 1b) 시뮬 모니터 창
+        try:
+            _set_visible(getattr(ext, "_sim_monitor_window", None), not hide)
+        except Exception:
+            pass
+
+        # 1c) 타임테이블 창
+        try:
+            _set_visible(getattr(ext, "_sim_timetable_window", None), not hide)
+        except Exception:
+            pass
+
         # 2) 시퀀스 편집기(SequenceEditorWindow 내부 _window)
         try:
             sw = getattr(ext, "_sequence_window", None)

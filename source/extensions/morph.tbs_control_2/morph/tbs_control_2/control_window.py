@@ -192,7 +192,7 @@ control_window.py — TBS 제어창 UI 및 이벤트 핸들러
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import copy
 import random
 import threading
@@ -257,10 +257,22 @@ from .translate_animation import (
 )
 
 from .control_sim_prerun_playback import (
+    EpBarPrecomputed,
     PlaybackEngine,
     SimPreRunResult,
     SimTimelinePlayer,
+    build_ep_bar_from_progress_items,
+    build_timetable_row_metas,
     prerun_engine_to_timeline,
+    resolve_seek_through_index,
+    truncate_bar_rows_at_t,
+)
+from .control_sim_timetable_ui import (
+    build_timetable_column_ui,
+    mount_interactive_timetable,
+    refresh_all_timetable_highlights,
+    refresh_timetable_row_highlight,
+    set_timetable_busy_label,
 )
 
 MAX_PRIMS_DISPLAY = 80
@@ -1731,6 +1743,245 @@ def _sim_monitor_channel_count(ext: Any) -> int:
     return max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
 
 
+def _snapshot_foup_label_state(ext: Any) -> Dict[int, Dict[str, Tuple[str, int]]]:
+    """재빌드 전 화면별·EP별 FOUP 라벨 (text, color) 스냅샷."""
+    out: Dict[int, Dict[str, Tuple[str, int]]] = {}
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(chans, list):
+        return out
+    for ch in chans:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            si = int(ch.get("screen", 0))
+        except Exception:
+            continue
+        if si <= 0:
+            continue
+        labels = ch.get("foup_progress_labels")
+        if not isinstance(labels, dict):
+            continue
+        row: Dict[str, Tuple[str, int]] = {}
+        for ep_id, lbl in labels.items():
+            if lbl is None:
+                continue
+            try:
+                txt = str(getattr(lbl, "text", "") or "")
+                col = int(getattr(lbl, "style", {}).get("color", 0xFF888888))  # type: ignore[union-attr]
+            except Exception:
+                txt, col = "", 0xFF888888
+            row[str(ep_id)] = (txt, int(col))
+        if row:
+            out[si] = row
+    return out
+
+
+def _foup_label_idle_text(screen_num: int, ep_id: str) -> str:
+    """EP 별 FOUP 라벨의 'idle(대기)' 텍스트를 한 곳에서 생성한다(생성/리셋 일관성)."""
+    if int(screen_num or 1) <= 1:
+        return f"{ep_id} FOUP 공정: 대기"
+    return f"{ep_id} FOUP 공정(화면{int(screen_num)}): 대기"
+
+
+def _make_foup_line_label(screen: int, ep_id: str) -> Any:
+    """FOUP 한 줄 — 불투명 배경 ZStack 으로 형제 repaint 전파를 줄인다."""
+    idle_text = _foup_label_idle_text(int(screen), str(ep_id))
+    lbl: Any = None
+    with ui.Frame(height=22):
+        with ui.ZStack():
+            ui.Rectangle(
+                width=ui.Fraction(1.0),
+                height=22,
+                style={"background_color": 0xFF1A1E26},
+            )
+            lbl = ui.Label(
+                idle_text,
+                word_wrap=False,
+                height=22,
+                style={"color": 0xFF888888},
+            )
+    return lbl
+
+
+def _create_foup_labels_in_vstack(ext: Any, ch: Dict[str, Any], screen: int) -> Dict[str, Any]:
+    """채널 dict 에 EP1~3 FOUP Label 을 만들고 ext·채널에 등록한다(호출부가 VStack context 안)."""
+    labels: Dict[str, Any] = {}
+    if not isinstance(ch.get("_foup_label_cache"), dict):
+        ch["_foup_label_cache"] = {}
+    for ep_id in ("EP1", "EP2", "EP3"):
+        labels[ep_id] = _make_foup_line_label(int(screen), str(ep_id))
+    ch["foup_progress_labels"] = labels
+    ch["foup_progress_label"] = labels.get("EP1")
+    try:
+        by = getattr(ext, "_sim_foup_labels_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_foup_labels_by_screen = by
+        by[int(screen)] = dict(labels)
+    except Exception:
+        pass
+    return labels
+
+
+def _restore_foup_label_state(channels: List[Dict[str, Any]], saved: Dict[int, Dict[str, Tuple[str, int]]]) -> None:
+    for ch in channels:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            si = int(ch.get("screen", 0))
+        except Exception:
+            continue
+        row = saved.get(si)
+        if not isinstance(row, dict):
+            continue
+        labels = ch.get("foup_progress_labels")
+        if not isinstance(labels, dict):
+            continue
+        for ep_id, pair in row.items():
+            lbl = labels.get(str(ep_id))
+            if lbl is None or not isinstance(pair, tuple) or len(pair) < 2:
+                continue
+            txt, col = str(pair[0]), int(pair[1])
+            _set_foup_progress_label(ch, str(ep_id), lbl, txt, {"color": col})
+
+
+def _clear_foup_inner_stack(ext: Any) -> Any:
+    """FOUP 전용 inner VStack 을 비운다(``destroy()`` 누적 방지 — ``clear()`` 우선)."""
+    outer = getattr(ext, "_sim_foup_outer_host", None)
+    if outer is None:
+        return None
+    inner = getattr(ext, "_sim_foup_inner_stack", None)
+    # 과거 ``child.destroy()`` 실패로 outer 아래 VStack 이 여러 개 쌓인 경우 일괄 제거.
+    try:
+        kids = list(getattr(outer, "children", []) or [])
+        if inner is None or len(kids) > 1:
+            try:
+                outer.clear()
+            except Exception:
+                pass
+            inner = None
+            ext._sim_foup_inner_stack = None
+    except Exception:
+        pass
+    if inner is None:
+        with outer:
+            ext._sim_foup_inner_stack = ui.VStack(spacing=2)
+        inner = getattr(ext, "_sim_foup_inner_stack", None)
+    if inner is None:
+        return None
+    try:
+        inner.clear()
+    except Exception:
+        try:
+            for child in list(getattr(inner, "children", []) or []):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return inner
+
+
+def _foup_labels_mounted(labels: Any) -> bool:
+    if not isinstance(labels, dict) or len(labels) < 3:
+        return False
+    for lbl in labels.values():
+        if lbl is None:
+            return False
+    return True
+
+
+def _rebind_foup_labels_to_channels(ext: Any, channels: List[Dict[str, Any]]) -> None:
+    """기존 FOUP 위젯 참조만 채널 dict 에 연결(위젯 재생성·clear 없음)."""
+    by = getattr(ext, "_sim_foup_labels_by_screen", None)
+    if not isinstance(by, dict):
+        by = {}
+        ext._sim_foup_labels_by_screen = by
+    for ch in channels:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            si = int(ch.get("screen", 0))
+        except Exception:
+            continue
+        if si <= 0:
+            continue
+        labels = by.get(si)
+        if not _foup_labels_mounted(labels):
+            continue
+        ch["foup_progress_labels"] = labels
+        ch["foup_progress_label"] = labels.get("EP1")
+        if not isinstance(ch.get("_foup_label_cache"), dict):
+            ch["_foup_label_cache"] = {}
+
+
+def _foup_layout_ready(ext: Any, channels: List[Dict[str, Any]]) -> bool:
+    by = getattr(ext, "_sim_foup_labels_by_screen", None)
+    if not isinstance(by, dict):
+        return False
+    for ch in channels:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            si = int(ch.get("screen", 0))
+        except Exception:
+            continue
+        if si <= 0:
+            continue
+        if not _foup_labels_mounted(by.get(si)):
+            return False
+    return bool(channels)
+
+
+def _rebuild_sim_foup_outer_row(ext: Any, channels: List[Dict[str, Any]]) -> None:
+    """
+    FOUP 공정 3줄을 ``_sim_monitor_split_host`` **밖** 고정 영역에 그린다.
+
+    모니터 재조립(시뮬 Start 등)마다 clear 하지 않고, **분할 수가 바뀔 때만** UI 를 다시 만든다.
+    """
+    if not channels:
+        return
+    layout_n = len(channels)
+    prev_n = int(getattr(ext, "_sim_foup_layout_n", 0) or 0)
+    if layout_n == prev_n and _foup_layout_ready(ext, channels):
+        _rebind_foup_labels_to_channels(ext, channels)
+        return
+    saved = _snapshot_foup_label_state(ext)
+    inner = _clear_foup_inner_stack(ext)
+    if inner is None:
+        return
+    try:
+        ext._sim_foup_layout_n = int(layout_n)
+        ext._sim_foup_labels_by_screen = {}
+    except Exception:
+        pass
+    with inner:
+        if len(channels) == 1:
+            _create_foup_labels_in_vstack(ext, channels[0], int(channels[0].get("screen", 1) or 1))
+        else:
+            with ui.HStack(spacing=8):
+                for ch in channels:
+                    if not isinstance(ch, dict):
+                        continue
+                    try:
+                        si = int(ch.get("screen", 1) or 1)
+                    except Exception:
+                        si = 1
+                    with ui.VStack(spacing=2, width=ui.Fraction(1.0)):
+                        ui.Label(f"화면{si}", height=14, style={"color": 0xFF9AA4B2})
+                        _create_foup_labels_in_vstack(ext, ch, si)
+    _restore_foup_label_state(channels, saved)
+    _rebind_foup_labels_to_channels(ext, channels)
+
+
+def _sync_foup_labels_to_channels(ext: Any, channels: List[Dict[str, Any]]) -> None:
+    """모니터 재빌드 후 FOUP 위젯을 유지·재연결만 한다(깜빡임 방지)."""
+    if not channels:
+        return
+    _rebuild_sim_foup_outer_row(ext, channels)
+
+
 def _snapshot_monitor_channel_texts(ext: Any) -> Tuple[Dict[int, str], Dict[int, str]]:
     """
     ``_sim_monitor_channels`` 에서 화면별 진행/이력 라벨 텍스트를 읽어 재빌드 시 복원한다.
@@ -1752,13 +2003,11 @@ def _snapshot_monitor_channel_texts(ext: Any) -> Tuple[Dict[int, str], Dict[int,
             continue
         if si <= 0:
             continue
-        hl = ch.get("history_label")
         pl = ch.get("progress_label")
-        if hl is not None:
-            try:
-                saved_h[si] = str(hl.text or "")
-            except Exception:
-                pass
+        try:
+            saved_h[si] = _get_channel_history_text(ch, ext)
+        except Exception:
+            pass
         if pl is not None:
             try:
                 saved_p[si] = str(pl.text or "")
@@ -1780,13 +2029,33 @@ def _ep_occ_timeline_layout_dims(ext: Any) -> Tuple[int, int, int, int, int]:
     except Exception:
         nsp = 1
     if nsp <= 1:
-        return (420, 64, 56, 6, 6)
+        return (270, 64, 56, 2, 3)
     if nsp == 2:
         # 약 ~270px 행 폭 목표(이름+막대+초+간격+프레임 여유)
         return (168, 48, 44, 3, 4)
     if nsp == 3:
         return (120, 44, 40, 2, 3)
     return (88, 40, 36, 2, 2)
+
+
+def _sim_channel_upper_height(ext: Any) -> int:
+    """포트·EP막대·진행현황 고정 높이(타임테이블 패널과 분리)."""
+    return 84 + _ep_timeline_host_height(ext) + 168 + 8
+
+
+def _ep_timeline_host_height(ext: Any) -> int:
+    """EP 막대 줄 수(EP1/EP2[/EP3]/ALL_EP)에 맞춘 ScrollingFrame 높이."""
+    try:
+        idx = int(ext._sim_ep_count_combo.model.get_item_value_model().as_int)
+    except Exception:
+        idx = 0
+    n_bars = 4 if idx == 1 else 3
+    _, _, _, frame_pad, _ = _ep_occ_timeline_layout_dims(ext)
+    bar_h = 14
+    tick_h = 14
+    inner_sp = 3
+    h = int(frame_pad) * 2 + tick_h + inner_sp + n_bars * bar_h + max(0, n_bars - 1) * inner_sp + 2
+    return max(68, int(h))
 
 
 def _ep_timeline_host_horizontal_scroll_policy(ext: Any) -> Any:
@@ -1815,108 +2084,89 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     ch: Dict[str, Any] = {"screen": int(screen)}
     ch["port_cells"] = {}
     ch["port_cell_boxes"] = {}
-    ch["port_frame"] = ui.ScrollingFrame(height=112, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
-    with ch["port_frame"]:
-        with ui.VStack(spacing=4):
-            ch["port_header"] = ui.Label(
-                f"[포트상태·화면{screen}] 대기 중", height=20, style={"color": 0xFFBFE7FF}
-            )
-            with ui.VStack(spacing=4):
-                with ui.HStack(spacing=4, height=24):
-                    with ui.ZStack(width=90, height=24):
-                        ch["port_cell_boxes"]["BP1"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+    ch["column_root"] = ui.VStack(spacing=1, width=ui.Fraction(1.0), height=ui.Fraction(1.0))
+    with ch["column_root"]:
+        # 상단(포트·막대·진행)과 타임테이블을 분리 — 상단 갱신이 타임테이블 scroll_y 를 리셋하지 않게 한다.
+        ch["monitor_upper_frame"] = ui.Frame(height=ui.Fraction(1.0))
+        with ch["monitor_upper_frame"]:
+            with ui.VStack(spacing=1):
+                ch["port_frame"] = ui.ScrollingFrame(height=84, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
+                with ch["port_frame"]:
+                    with ui.VStack(spacing=2):
+                        ch["port_header"] = ui.Label(
+                            f"[포트상태·화면{screen}] 대기 중", height=18, style={"color": 0xFFBFE7FF}
                         )
-                        ch["port_cells"]["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                    with ui.ZStack(width=90, height=24):
-                        ch["port_cell_boxes"]["BP2"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
-                        )
-                        ch["port_cells"]["BP2"] = ui.Label("BP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                    with ui.ZStack(width=90, height=24):
-                        ch["port_cell_boxes"]["BP3"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
-                        )
-                        ch["port_cells"]["BP3"] = ui.Label("BP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                    ch["port_bp4_cell_container"] = ui.ZStack(width=90, height=24)
-                    with ch["port_bp4_cell_container"]:
-                        ch["port_cell_boxes"]["BP4"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
-                        )
-                        ch["port_cells"]["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                with ui.HStack(spacing=4, height=24):
-                    with ui.ZStack(width=90, height=24):
-                        ch["port_cell_boxes"]["INOUT"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
-                        )
-                        ch["port_cells"]["INOUT"] = ui.Label("IN/OUT:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                    with ui.ZStack(width=90, height=24):
-                        ch["port_cell_boxes"]["EP1"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
-                        )
-                        ch["port_cells"]["EP1"] = ui.Label("EP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                    with ui.ZStack(width=90, height=24):
-                        ch["port_cell_boxes"]["EP2"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
-                        )
-                        ch["port_cells"]["EP2"] = ui.Label("EP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-                    ch["port_ep3_cell_container"] = ui.ZStack(width=90, height=24)
-                    with ch["port_ep3_cell_container"]:
-                        ch["port_cell_boxes"]["EP3"] = ui.Rectangle(
-                            style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
-                        )
-                        ch["port_ep3_cell"] = ui.Label("EP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
-            pass
-    # EP 타임라인 전용 영역(포트상태 바로 아래, 스크롤 밖 고정)
-    # - 진행현황/이력과 독립적으로 항상 보이게 별도 영역으로 둔다.
-    # NOTE: ui.Frame(height=..) 가 일부 Kit 버전에서 레이아웃에 의해 축소/클리핑되는 사례가 있어,
-    # 고정 높이가 확실한 ScrollingFrame을 사용한다(스크롤바는 숨김).
-    ch["ep_timeline_host"] = ui.ScrollingFrame(
-        height=130,
-        horizontal_scrollbar_policy=_ep_timeline_host_horizontal_scroll_policy(ext),
-        vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
-        style={"background_color": 0x221A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
-    )
-    with ch["ep_timeline_host"]:
-        ui.Label("", height=1)  # placeholder to stabilize layout
-    ch["ep_timeline_widget"] = None
-    # 진행현황: 텍스트 + EP 점유 타임라인(막대그래프)
-    # 진행현황은 "로그 텍스트" 중심으로 유지. (그래프는 포트상태 아래 전용 영역으로 분리됨)
-    # 요구사항: FOUP 공정 진행 표시는 EP 포트별로 "줄을 다르게 고정"하여 깜빡임 없이 표시한다.
-    # EP1/EP2/EP3 각 22px 라벨 3줄(총 ~66px) + 기존 텍스트 영역을 함께 두기 위해
-    # progress_frame 의 높이를 200 → 270 으로 늘려 자리만 확보한다(레이아웃 안정성).
-    ch["progress_frame"] = ui.ScrollingFrame(height=270, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
-    with ch["progress_frame"]:
-        with ui.VStack(spacing=4):
-            # FOUP 공정 진행 라벨(EP 포트별 고정 줄):
-            # - 항상 EP1/EP2/EP3 라벨 3개를 만들어 두고, 각 EP 가 자기 줄만 갱신한다.
-            # - 진행 중이 아닐 때는 "대기"(회색), 진행 중에는 노란색 텍스트로 구분.
-            # - EP 카운트가 1/2 인 경우에도 라벨은 그대로 두고 "대기"로만 표시(레이아웃 흔들림 방지).
-            ch["foup_progress_labels"] = {}
-            for ep_id in ("EP1", "EP2", "EP3"):
-                idle_text = (
-                    f"{ep_id} FOUP 공정: 대기"
-                    if screen == 1
-                    else f"{ep_id} FOUP 공정(화면{screen}): 대기"
+                        with ui.VStack(spacing=2):
+                            with ui.HStack(spacing=4, height=24):
+                                with ui.ZStack(width=90, height=24):
+                                    ch["port_cell_boxes"]["BP1"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_cells"]["BP1"] = ui.Label("BP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                with ui.ZStack(width=90, height=24):
+                                    ch["port_cell_boxes"]["BP2"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_cells"]["BP2"] = ui.Label("BP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                with ui.ZStack(width=90, height=24):
+                                    ch["port_cell_boxes"]["BP3"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_cells"]["BP3"] = ui.Label("BP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                ch["port_bp4_cell_container"] = ui.ZStack(width=90, height=24)
+                                with ch["port_bp4_cell_container"]:
+                                    ch["port_cell_boxes"]["BP4"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_cells"]["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                            with ui.HStack(spacing=4, height=24):
+                                with ui.ZStack(width=90, height=24):
+                                    ch["port_cell_boxes"]["INOUT"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_cells"]["INOUT"] = ui.Label("IN/OUT:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                with ui.ZStack(width=90, height=24):
+                                    ch["port_cell_boxes"]["EP1"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_cells"]["EP1"] = ui.Label("EP1:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                with ui.ZStack(width=90, height=24):
+                                    ch["port_cell_boxes"]["EP2"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_cells"]["EP2"] = ui.Label("EP2:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                                ch["port_ep3_cell_container"] = ui.ZStack(width=90, height=24)
+                                with ch["port_ep3_cell_container"]:
+                                    ch["port_cell_boxes"]["EP3"] = ui.Rectangle(
+                                        style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
+                                    )
+                                    ch["port_ep3_cell"] = ui.Label("EP3:-", width=90, height=24, style={"color": 0xFFFFFFFF})
+                ch["foup_progress_labels"] = {}
+                ch["_foup_label_cache"] = {}
+                ch["foup_progress_frame"] = None
+                ch["foup_progress_label"] = None
+                ch["ep_timeline_host"] = ui.ScrollingFrame(
+                    height=_ep_timeline_host_height(ext),
+                    horizontal_scrollbar_policy=_ep_timeline_host_horizontal_scroll_policy(ext),
+                    vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
+                    style={"background_color": 0x221A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
                 )
-                lbl = ui.Label(
-                    idle_text,
-                    word_wrap=False,
-                    height=22,
-                    style={"color": 0xFF888888},
-                )
-                ch["foup_progress_labels"][ep_id] = lbl
-            # 호환용(스냅샷/복원/구버전 참조 안전망): 첫 번째 EP 라벨을 단일 슬롯에 매핑해 둔다.
-            # _update_sim_progress 의 FOUP 분기는 dict 우선으로 동작한다.
-            ch["foup_progress_label"] = ch["foup_progress_labels"]["EP1"]
-            ch["progress_label"] = ui.Label("", word_wrap=True, height=170, style={"color": 0xFFFFFFFF})
-            # 진행현황 영역에서는 그래프를 표시하지 않는다(포트상태 아래 전용 영역으로 분리).
-            ch["progress_ep_timeline_host"] = None
-            ch["progress_ep_timeline_widget"] = None
-    ch["history_frame"] = ui.ScrollingFrame(height=118, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
-    with ch["history_frame"]:
-        ch["history_label"] = ui.Label("", word_wrap=True, height=114, style={"color": 0xFFFFFFFF})
-    ch["history_label"].text = "[SIM] 대기 중" if screen == 1 else f"[SIM·화면{screen}] 대기 중"
+                with ch["ep_timeline_host"]:
+                    ch["ep_timeline_busy_label"] = ui.Label("", height=1)
+                ch["ep_timeline_widget"] = None
+                ch["progress_frame"] = ui.ScrollingFrame(height=168, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
+                with ch["progress_frame"]:
+                    ch["progress_label"] = ui.Label("", word_wrap=True, height=158, style={"color": 0xFFFFFFFF})
+                    ch["progress_ep_timeline_host"] = None
+                    ch["progress_ep_timeline_widget"] = None
+    try:
+        by = getattr(ext, "_sim_timetable_display_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_timetable_display_by_screen = by
+        by[str(int(screen))] = "[SIM] 대기 중" if screen == 1 else f"[SIM·화면{screen}] 대기 중"
+    except Exception:
+        pass
     ch["progress_label"].text = "[진행현황] 없음" if screen == 1 else f"[진행현황·화면{screen}] 없음"
     return ch
 
@@ -1947,7 +2197,7 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
     n = _sim_monitor_channel_count(ext)
     channels: List[Dict[str, Any]] = []
     with host:
-        ext._sim_monitor_split_inner = ui.VStack(spacing=6)
+        ext._sim_monitor_split_inner = ui.VStack(spacing=4, height=ui.Fraction(1.0))
     inner = getattr(ext, "_sim_monitor_split_inner", None)
     if inner is None:
         return
@@ -1955,32 +2205,32 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
         if n == 1:
             channels.append(_create_sim_monitor_channel_column(ext, 1))
         elif n == 2:
-            with ui.HStack(spacing=6):
+            with ui.HStack(spacing=6, height=ui.Fraction(1.0)):
                 # width=0 은 HStack 자식에서 가로 공간을 못 받아 패널이 전부 0폭으로 사라질 수 있음 → 균등 분할
-                with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                     channels.append(_create_sim_monitor_channel_column(ext, 1))
-                with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                     channels.append(_create_sim_monitor_channel_column(ext, 2))
         elif n == 3:
-            with ui.VStack(spacing=6):
-                with ui.VStack(spacing=4):
+            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                with ui.VStack(spacing=4, height=ui.Fraction(0.5)):
                     channels.append(_create_sim_monitor_channel_column(ext, 1))
-                with ui.HStack(spacing=6):
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 2))
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 3))
         else:
-            with ui.VStack(spacing=6):
-                with ui.HStack(spacing=6):
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 1))
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 2))
-                with ui.HStack(spacing=6):
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 3))
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 4))
 
     for ch in channels:
@@ -1992,7 +2242,11 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
             continue
         if si in saved_h and str(saved_h.get(si) or "").strip():
             try:
-                ch["history_label"].text = saved_h[si]
+                by_tb = getattr(ext, "_sim_timetable_display_by_screen", None)
+                if not isinstance(by_tb, dict):
+                    by_tb = {}
+                    ext._sim_timetable_display_by_screen = by_tb
+                by_tb[str(si)] = str(saved_h[si])
             except Exception:
                 pass
         if si in saved_p and str(saved_p.get(si) or "").strip():
@@ -2030,6 +2284,11 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
     except Exception:
         pass
 
+    try:
+        _sync_foup_labels_to_channels(ext, channels)
+    except Exception:
+        pass
+
     if n == 1 and len(channels) == 1:
         c0 = channels[0]
         try:
@@ -2045,7 +2304,7 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
             ext._sim_progress_label = c0["progress_label"]
             ext._sim_history_label = c0["history_label"]
             if getattr(ext, "_sim_history_text", None) is not None:
-                ext._sim_history_text.set_value(c0["history_label"].text)
+                ext._sim_history_text.set_value(_get_channel_history_text(c0, ext))
             if getattr(ext, "_sim_progress_text", None) is not None:
                 ext._sim_progress_text.set_value(c0["progress_label"].text)
         except Exception:
@@ -2070,6 +2329,241 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
         _sync_ep3_port_cell_visibility(ext)
     except Exception:
         pass
+
+
+def _clear_timetable_channel_widgets(ch: Dict[str, Any]) -> None:
+    """채널 dict 에 붙은 타임테이블 위젯만 제거(스크롤 위치는 유지)."""
+    saved_scroll = float(ch.get("_tt_scroll_y", 0.0) or 0.0)
+    panel = ch.get("timetable_panel")
+    if panel is not None:
+        try:
+            panel.destroy()
+        except Exception:
+            pass
+    for key in (
+        "timetable_panel",
+        "timetable_viewport",
+        "timetable_placer",
+        "timetable_host",
+        "timetable_scroll_track",
+        "timetable_scroll_thumb_placer",
+        "timetable_scroll_thumb",
+        "timetable_inner",
+        "timetable_busy_widget",
+        "history_frame",
+        "history_label",
+        "timetable_column_root",
+    ):
+        ch[key] = None
+    ch["timetable_row_buttons"] = []
+    ch["timetable_row_labels"] = []
+    ch["timetable_row_label_pairs"] = []
+    ch["timetable_row_bgs"] = []
+    ch["timetable_interactive"] = False
+    ch["_timetable_row_style_cache"] = {}
+    ch["_tt_scroll_y"] = saved_scroll
+
+
+def _mount_timetable_ui_on_channel(ch: Dict[str, Any], screen: int) -> None:
+    """기존 채널 dict 에 타임테이블 전용 창용 UI를 장착한다."""
+    _clear_timetable_channel_widgets(ch)
+    col = ui.VStack(spacing=2, width=ui.Fraction(1.0), height=ui.Fraction(1.0))
+    ch["timetable_column_root"] = col
+    with col:
+        build_timetable_column_ui(ch, screen=int(screen), viewport_h=480)
+
+
+def _rebuild_sim_timetable_split_ui(ext: Any) -> None:
+    """뷰포트 분할 수에 맞춰 타임테이블 전용 창 영역을 다시 그린다."""
+    host = getattr(ext, "_sim_timetable_split_host", None)
+    if host is None:
+        return
+    base_channels = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(base_channels, list) or not base_channels:
+        return
+    inn = getattr(ext, "_sim_timetable_split_inner", None)
+    if inn is not None:
+        try:
+            inn.destroy()
+        except Exception:
+            pass
+        try:
+            ext._sim_timetable_split_inner = None
+        except Exception:
+            pass
+    n = _sim_monitor_channel_count(ext)
+    channels: List[Dict[str, Any]] = list(base_channels)
+    with host:
+        ext._sim_timetable_split_inner = ui.VStack(spacing=4, height=ui.Fraction(1.0))
+    inner = getattr(ext, "_sim_timetable_split_inner", None)
+    if inner is None:
+        return
+    ch_idx = 0
+
+    def _next_ch(screen: int) -> Dict[str, Any]:
+        nonlocal ch_idx
+        if ch_idx < len(channels):
+            ch = channels[ch_idx]
+            ch_idx += 1
+            if isinstance(ch, dict):
+                return ch
+        return {"screen": int(screen)}
+
+    with inner:
+        if n == 1:
+            ch0 = _next_ch(1)
+            _mount_timetable_ui_on_channel(ch0, 1)
+        elif n == 2:
+            with ui.HStack(spacing=6, height=ui.Fraction(1.0)):
+                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                    _mount_timetable_ui_on_channel(_next_ch(1), 1)
+                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                    _mount_timetable_ui_on_channel(_next_ch(2), 2)
+        elif n == 3:
+            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                with ui.VStack(spacing=4, height=ui.Fraction(0.5)):
+                    _mount_timetable_ui_on_channel(_next_ch(1), 1)
+                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                        _mount_timetable_ui_on_channel(_next_ch(2), 2)
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                        _mount_timetable_ui_on_channel(_next_ch(3), 3)
+        else:
+            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                        _mount_timetable_ui_on_channel(_next_ch(1), 1)
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                        _mount_timetable_ui_on_channel(_next_ch(2), 2)
+                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                        _mount_timetable_ui_on_channel(_next_ch(3), 3)
+                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                        _mount_timetable_ui_on_channel(_next_ch(4), 4)
+
+    try:
+        ext._sim_timetable_layout_n = n
+    except Exception:
+        pass
+    try:
+        _remount_interactive_timetables(ext)
+    except Exception:
+        pass
+    try:
+        refresh_all_timetable_highlights(ext)
+    except Exception:
+        pass
+
+
+def _rebuild_all_sim_ui_panels(ext: Any) -> None:
+    """모니터·타임테이블 창을 분할 수에 맞게 함께 재조립한다."""
+    _rebuild_sim_monitor_split_ui(ext)
+    _rebuild_sim_timetable_split_ui(ext)
+    try:
+        chans = getattr(ext, "_sim_monitor_channels", None)
+        if isinstance(chans, list) and chans and isinstance(chans[0], dict):
+            hf = chans[0].get("history_frame")
+            if hf is not None:
+                ext._sim_history_frame = hf
+    except Exception:
+        pass
+
+
+def build_sim_timetable_window(ext: Any) -> None:
+    """프리런 타임테이블 전용 창 — 모니터 창과 분리해 스크롤·하이라이트 안정화."""
+    if getattr(ext, "_sim_timetable_window", None) is not None:
+        return
+    try:
+        ws = getattr(ui, "Workspace", None)
+        if ws is not None and hasattr(ws, "get_window"):
+            old = ws.get_window("TBS 타임테이블")
+            if old is not None:
+                try:
+                    old.destroy()
+                except Exception:
+                    try:
+                        old.visible = False
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    ext._sim_timetable_window = ui.Window("TBS 타임테이블", width=720, height=560)
+    with ext._sim_timetable_window.frame:
+        with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
+            with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
+                with ui.VStack(padding=8, spacing=4, height=ui.Fraction(1.0)):
+                    ui.Label(
+                        "프리런 타임테이블 — 행 클릭으로 Seek",
+                        height=22,
+                        style={"color": 0xFFBFE7FF, "font_size": 13},
+                    )
+                    ext._sim_timetable_split_host = ui.Frame(
+                        height=ui.Fraction(1.0),
+                        style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
+                    )
+
+
+def build_sim_monitor_window(ext: Any) -> None:
+    """
+    시뮬 모니터 전용 창 — FOUP·포트·EP막대·진행현황.
+
+    타임테이블은 ``build_sim_timetable_window`` 별도 창에서 표시한다.
+    """
+    if getattr(ext, "_sim_monitor_window", None) is not None:
+        return
+    try:
+        ws = getattr(ui, "Workspace", None)
+        if ws is not None and hasattr(ws, "get_window"):
+            old = ws.get_window("TBS 시뮬 모니터")
+            if old is not None:
+                try:
+                    old.destroy()
+                except Exception:
+                    try:
+                        old.visible = False
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    ext._sim_monitor_window = ui.Window("TBS 시뮬 모니터", width=710, height=620)
+    with ext._sim_monitor_window.frame:
+        with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
+            with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
+                with ui.VStack(padding=8, spacing=4, height=ui.Fraction(1.0)):
+                    with ui.HStack(spacing=8, height=28):
+                        ui.Label(
+                            "시뮬 진행 모니터",
+                            width=140,
+                            height=24,
+                            style={"color": 0xFFDDDDDD},
+                        )
+                        ui.Spacer()
+                        ui.Button(
+                            "진행현황+Sim로그 복사",
+                            width=180,
+                            clicked_fn=lambda: on_copy_sim_progress(ext),
+                        )
+                    ui.Label("FOUP 공정", height=18, style={"color": 0xFFBFE7FF})
+                    with ui.Frame(height=78, style={"background_color": 0xFF1A1E26, "border_width": 0}):
+                        ext._sim_foup_outer_host = ui.VStack(spacing=2, height=74)
+                        with ext._sim_foup_outer_host:
+                            ext._sim_foup_inner_stack = ui.VStack(spacing=2)
+                    try:
+                        ext._sim_foup_layout_n = 0
+                        ext._sim_foup_labels_by_screen = {}
+                    except Exception:
+                        pass
+                    ext._sim_monitor_split_host = ui.Frame(
+                        height=ui.Fraction(1.0),
+                        style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
+                    )
+                    ext._rebuild_sim_monitor_split_ui_fn = lambda: _rebuild_all_sim_ui_panels(ext)
+                    ext._rebuild_sim_timetable_split_ui_fn = lambda: _rebuild_all_sim_ui_panels(ext)
+                    ext._sim_port_state_label = ui.Label(
+                        "", word_wrap=False, width=0, height=0, visible=False
+                    )
 
 
 def build_control_window(ext: Any) -> None:
@@ -2108,6 +2602,11 @@ def build_control_window(ext: Any) -> None:
     ext._sim_speed_model = ui.SimpleFloatModel(float(_SIM_DEF.sim_speed))
     ext._sim_log_interval_model = ui.SimpleFloatModel(float(_SIM_DEF.log_interval_sec))
     ext._sim_confirm_each_step_model = ui.SimpleBoolModel(False)
+    ext._sim_bar_preview_model = ui.SimpleBoolModel(False)
+    try:
+        ext._sim_bar_preview_model.add_value_changed_fn(lambda *_a: _on_sim_bar_preview_toggled(ext))
+    except Exception:
+        pass
     # 공정설정 시간 우선(기본 OFF)
     ext._sim_process_time_priority_model = ui.SimpleBoolModel(False)
     ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_min))
@@ -2196,11 +2695,17 @@ def build_control_window(ext: Any) -> None:
     ext._sim_progress_frame = None
     ext._sim_history_frame = None
     ext._sim_anim_history_frame = None
+    ext._sim_monitor_window = None
     ext._sim_monitor_split_host = None
     ext._sim_monitor_split_inner = None
+    ext._sim_timetable_window = None
+    ext._sim_timetable_split_host = None
+    ext._sim_timetable_split_inner = None
+    ext._sim_timetable_layout_n = 1
     ext._sim_monitor_channels = []
     ext._sim_monitor_layout_n = 1
     ext._rebuild_sim_monitor_split_ui_fn = None
+    ext._rebuild_sim_timetable_split_ui_fn = None
     ext._sim_port_state_frame = None
     ext._sim_port_state_header_label = None
     ext._sim_port_cells = {}
@@ -2227,7 +2732,7 @@ def build_control_window(ext: Any) -> None:
     ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
 
-    ext._control_window = ui.Window("EBS 제어창", width=800, height=840)
+    ext._control_window = ui.Window("EBS 제어창", width=800, height=560)
     with ext._control_window.frame:
         with ui.ScrollingFrame(
             height=ui.Fraction(1.0),
@@ -2480,10 +2985,15 @@ def build_control_window(ext: Any) -> None:
                         with ui.HStack(spacing=8, height=28):
                             ui.CheckBox(model=ext._sim_process_time_priority_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("공정설정 시간 우선", width=120)
-                            ui.CheckBox(model=ext._sim_confirm_each_step_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("각 공정 확인", width=80)
+                            ui.CheckBox(model=ext._sim_bar_preview_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            ui.Label("결과 미리보기", width=90)
+                            # 각 공정 확인 — 당분간 UI 비표시(모델·on_gate 로직은 유지)
+                            # ui.CheckBox(model=ext._sim_confirm_each_step_model, width=30, style=CHECKBOX_WHITE_STYLE)
+                            # ui.Label("각 공정 확인", width=80)
                             ui.Spacer(width=8)
-                            ui.Button("시작", width=72, clicked_fn=lambda: on_sim_start_clicked(ext))
+                            ext._sim_start_button = ui.Button(
+                                "시작", width=72, clicked_fn=lambda: on_sim_start_clicked(ext)
+                            )
                             ui.Button("정지", width=72, clicked_fn=lambda: on_sim_stop_clicked(ext))
                             ui.Button("리셋", width=72, clicked_fn=lambda: on_sim_reset_clicked(ext))
                         ext._sim_per_screen_block = ui.VStack(spacing=4, visible=False)
@@ -2511,35 +3021,33 @@ def build_control_window(ext: Any) -> None:
                                         clicked_fn=lambda e=ext, k=si: _on_save_sim_settings_to_screen(e, k),
                                     )
                         ext._sync_sim_per_screen_rows_fn = lambda: _refresh_sim_per_screen_rows(ext)
-                        with ui.HStack(spacing=8, height=24):
-                            ui.Button("진행현황+Sim로그 복사", width=160, clicked_fn=lambda: on_copy_sim_progress(ext))
-                        # 모니터 영역(포트/EP타임라인/진행/이력)은 높이가 커질 수 있어
-                        # 레이아웃 누적/확장 버그가 화면을 밀어내지 않도록 고정 높이 스크롤 컨테이너로 감싼다.
-                        ext._sim_monitor_split_host = ui.ScrollingFrame(
-                            height=520,
-                            horizontal_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_OFF,
-                            vertical_scrollbar_policy=ui.ScrollBarPolicy.SCROLLBAR_ALWAYS_ON,
-                        )
-                        ext._rebuild_sim_monitor_split_ui_fn = lambda: _rebuild_sim_monitor_split_ui(ext)
-                        _rebuild_sim_monitor_split_ui(ext)
-                        ext._sim_port_state_label = ui.Label("", word_wrap=False, width=0, height=0, visible=False)
-                        on_sim_ep_count_changed(ext)
-                        # 초기 1회: 제어창 UI 값으로 기본 스냅샷(화면1)을 채운다.
-                        _sync_default_sim_snapshot_from_ui(ext)
-                ui.Spacer(height=6)
-                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-                ui.Spacer(height=8)
-                ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=20)
-                ui.StringField(model=ext._priority_prefix_model, height=22)
-                # 요구사항: “우선표시 이름 규칙” 아래 영역은 당분간 사용하지 않으므로 숨김 처리.
-                # (주석처리 수준으로 UI에서 안 보이게)
-                if False:
-                    ui.Spacer(height=4)
-                    ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=20)
-                    ui.Button("목록 새로고침", height=28, clicked_fn=lambda: on_refresh_prim_list(ext))
-                    ui.Spacer(height=4)
-                    with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
-                        ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
+                # 우선 표시 이름 규칙·USD prim 목록 등 하단 UI는 당분간 비표시 (모델은 유지).
+                # ui.Spacer(height=6)
+                # ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                # ui.Spacer(height=8)
+                # ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=20)
+                # ui.StringField(model=ext._priority_prefix_model, height=22)
+                # ui.Spacer(height=4)
+                # ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=20)
+                # ui.Button("목록 새로고침", height=28, clicked_fn=lambda: on_refresh_prim_list(ext))
+                # ui.Spacer(height=4)
+                # with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
+                #     ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
+    build_sim_monitor_window(ext)
+    build_sim_timetable_window(ext)
+    try:
+        _rebuild_all_sim_ui_panels(ext)
+    except Exception:
+        pass
+    try:
+        on_sim_ep_count_changed(ext)
+    except Exception:
+        pass
+    try:
+        _sync_default_sim_snapshot_from_ui(ext)
+    except Exception:
+        pass
+
     ext._sync_sim_multi_split_row_visibility_fn = _sync_sim_multi_split_row_visibility
     # 우선표시 이름 규칙 아래 UI를 숨겼으므로 목록 refresh도 비활성
     # refresh_object_list(ext)
@@ -2695,14 +3203,23 @@ def _append_sim_log_channel(ext: Any, screen: int, msg: str) -> None:
     ch = chans[idx]
     if not isinstance(ch, dict):
         return
-    lbl = ch.get("history_label")
-    prev = (lbl.text if lbl is not None else "").strip()
+    try:
+        by_tb = getattr(ext, "_sim_timetable_display_by_screen", None)
+        if isinstance(by_tb, dict) and str(by_tb.get(str(int(screen)), "") or "").strip():
+            return
+    except Exception:
+        pass
+    if ch.get("timetable_interactive"):
+        return
+    prev = _get_channel_history_text(ch, ext).strip()
     merged = f"{prev}\n{msg}".strip() if prev else msg
     rows = merged.splitlines()
     if len(rows) > 200:
         merged = "\n".join(rows[-200:])
-    if lbl is not None:
-        lbl.text = merged
+    try:
+        _set_channel_history_text(ch, merged)
+    except Exception:
+        pass
 
 
 def _append_sim_log(ext: Any, line: str) -> None:
@@ -2728,6 +3245,12 @@ def _append_sim_log(ext: Any, line: str) -> None:
     if only_tb:
         if not (raw.startswith("[SIM] 타임테이블(프리런)") or raw.startswith("[화면")):
             return
+        try:
+            by_tb = getattr(ext, "_sim_timetable_display_by_screen", None)
+            if isinstance(by_tb, dict) and any(str(v or "").strip() for v in by_tb.values()):
+                return
+        except Exception:
+            pass
     chans = getattr(ext, "_sim_monitor_channels", None)
     if isinstance(chans, list) and len(chans) > 1:
         m0 = re.match(r"^\[화면(\d+)\]\s*", raw)
@@ -3034,9 +3557,48 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
     # 포트상태 아래 EP 타임라인(전용 영역) 갱신 — 멀티 채널 UI가 없어도(USD 미로드 등) 스냅샷/웹 막대용 상태는 누적
     try:
         ch_tl = ch if ch is not None else {"screen": int(screen), "ep_timeline_host": None}
-        _update_ep_timeline_under_port_state(ext, ch_tl, occ, t)
+        t_tl = t if t else f"{_resolve_ep_timeline_sim_time(ext, int(screen), ''):.2f}"
+        _update_ep_timeline_under_port_state(ext, ch_tl, occ, t_tl)
     except Exception:
         pass
+
+
+def _resolve_ep_timeline_sim_time(ext: Any, screen: int, sim_time_text: str) -> float:
+    """
+    EP 막대·진행현황이 같은 시계를 쓰도록 sim 시각을 통일한다.
+    프리런 재생 중에는 ``SimTimelinePlayer.sim_now`` 를 최우선(진행현황 t(sim) 과 동일).
+    """
+    si = int(screen)
+    t_parsed = 0.0
+    try:
+        t_parsed = float(str(sim_time_text or "").strip() or "0.0")
+    except Exception:
+        t_parsed = 0.0
+    player = getattr(ext, "_sim_playback_player", None)
+    if player is not None:
+        try:
+            if hasattr(player, "is_playing") and player.is_playing():
+                t_play = float(player.sim_now(si))
+                return float(t_play)
+        except Exception:
+            pass
+        try:
+            t_play = float(player.sim_now(si))
+            if t_play > t_parsed + 1e-6:
+                return float(t_play)
+        except Exception:
+            pass
+    if t_parsed > 1e-9:
+        return float(t_parsed)
+    try:
+        by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+        if isinstance(by_lp, dict) and isinstance(by_lp.get(str(si)), dict):
+            t2 = float(str(by_lp[str(si)].get("sim_time", "") or "0").strip() or "0")
+            if t2 > 1e-9:
+                return float(t2)
+    except Exception:
+        pass
+    return float(t_parsed)
 
 
 def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict[str, Any], sim_time_text: str) -> None:
@@ -3047,78 +3609,81 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     except Exception:
         screen = 1
     scr_key = str(screen)
-    try:
-        t_now = float(str(sim_time_text or "0").strip() or "0.0")
-    except Exception:
-        return
+    t_now = _resolve_ep_timeline_sim_time(ext, screen, sim_time_text)
 
-    # 막대그래프 점프(버스트) 방지:
-    # - sim_time_text는 UI 큐 드레인/렌더 지연에 따라 띄엄띄엄 갱신될 수 있다.
-    # - 그 경우 dt가 크게 잡혀 세그먼트가 한 번에 누적되며 막대가 "몇 배 빨리" 채워진 것처럼 보인다.
-    # - 해결: bar 누적에는 wall-clock 기반의 virtual time을 사용해 일정 속도로 전진시키고,
-    #   target(sim_time)을 따라가되 한 프레임에 큰 dt를 먹지 않도록 clamp 한다.
-    try:
-        vt_by = getattr(ext, "_sim_ep_timeline_virtual_time_by_screen", None)
-        if not isinstance(vt_by, dict):
-            vt_by = {}
-            ext._sim_ep_timeline_virtual_time_by_screen = vt_by
-    except Exception:
-        vt_by = {}
+    # 프리런 막대·재생 중: 진행현황 t(sim) 과 동일 축 — virtual time 보간 사용 안 함
+    pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
+    bar_pre = pre_by.get(scr_key) if isinstance(pre_by, dict) else None
+    use_precomputed = isinstance(bar_pre, EpBarPrecomputed)
+    player = getattr(ext, "_sim_playback_player", None)
+    playback_lock = use_precomputed or (
+        player is not None and hasattr(player, "is_playing") and player.is_playing()
+    )
+
+    if playback_lock:
+        t_bar = float(t_now)
+        _sync_ep_bar_virtual_time_to_sim(ext, screen, t_bar)
+    else:
+        # 라이브 엔진(프리런 전): wall-clock virtual time 으로 버스트 완화
         try:
-            ext._sim_ep_timeline_virtual_time_by_screen = vt_by
+            vt_by = getattr(ext, "_sim_ep_timeline_virtual_time_by_screen", None)
+            if not isinstance(vt_by, dict):
+                vt_by = {}
+                ext._sim_ep_timeline_virtual_time_by_screen = vt_by
         except Exception:
-            pass
-    try:
-        vprev = float(vt_by.get(scr_key, 0.0) or 0.0)
-    except Exception:
-        vprev = 0.0
-    try:
-        # reset/재시작 등으로 target이 감소하면 즉시 맞춘다.
+            vt_by = {}
+            try:
+                ext._sim_ep_timeline_virtual_time_by_screen = vt_by
+            except Exception:
+                pass
+        try:
+            vprev = float(vt_by.get(scr_key, 0.0) or 0.0)
+        except Exception:
+            vprev = 0.0
         if t_now + 1e-9 < vprev:
             vprev = float(t_now)
-    except Exception:
-        pass
-    try:
-        now_wall = float(time.perf_counter())
-    except Exception:
-        now_wall = 0.0
-    try:
-        last_wall = float(vt_by.get(f"_wall_{scr_key}", 0.0) or 0.0)
-    except Exception:
-        last_wall = 0.0
-    if last_wall <= 0.0 or now_wall <= 0.0:
-        dt_wall = 0.0
-    else:
-        dt_wall = max(0.0, float(now_wall) - float(last_wall))
-    try:
-        vt_by[f"_wall_{scr_key}"] = float(now_wall)
-    except Exception:
-        pass
-    # wall 기준 전진량(상한): 시뮬 배속을 반영해 bar가 sim_time 증가 속도를 따라가게 한다.
-    # - 배속이 높을수록(sim_time이 더 빠르게 전진) dt_adv도 비례해서 커져야 한다.
-    # - 단, 프레임 드랍/큐 지연이 있어도 "한 번에 확 뛰는" 느낌을 줄이기 위해 상한은 유지하되 배속에 비례해 확장한다.
-    try:
-        sp_model = getattr(ext, "_sim_speed_model", None)
-        sp = float(sp_model.get_value_as_float()) if sp_model is not None else 1.0
-    except Exception:
-        sp = 1.0
-    if sp <= 0.0:
-        sp = 1.0
-    # 배속 반영 전진량(초/호출)
-    dt_adv_raw = float(dt_wall) * float(sp)
-    # 상한(초/호출): 기본 0.20s를 배속에 비례 확장
-    dt_adv_cap = 0.20 * float(sp)
-    dt_adv = min(float(dt_adv_cap), float(dt_adv_raw))
-    vnow = float(vprev) + float(dt_adv)
-    # target(t_now)을 넘지 않도록 clamp (표시 t(sim)보다 막대가 앞서가지 않게)
-    if vnow > float(t_now):
-        vnow = float(t_now)
-    try:
-        vt_by[scr_key] = float(vnow)
-    except Exception:
-        pass
-    # bar 누적은 virtual time 기준으로 진행(표시 라벨은 t_now 그대로 사용 가능)
-    t_bar = float(vnow)
+        try:
+            now_wall = float(time.perf_counter())
+        except Exception:
+            now_wall = 0.0
+        try:
+            last_wall = float(vt_by.get(f"_wall_{scr_key}", 0.0) or 0.0)
+        except Exception:
+            last_wall = 0.0
+        if last_wall <= 0.0 or now_wall <= 0.0:
+            dt_wall = 0.0
+        else:
+            dt_wall = max(0.0, float(now_wall) - float(last_wall))
+        try:
+            vt_by[f"_wall_{scr_key}"] = float(now_wall)
+        except Exception:
+            pass
+        try:
+            sp_model = getattr(ext, "_sim_speed_model", None)
+            sp = float(sp_model.get_value_as_float()) if sp_model is not None else 1.0
+        except Exception:
+            sp = 1.0
+        if sp <= 0.0:
+            sp = 1.0
+        dt_adv_raw = float(dt_wall) * float(sp)
+        dt_adv_cap = 0.20 * float(sp)
+        dt_adv = min(float(dt_adv_cap), float(dt_adv_raw))
+        vnow = float(vprev) + float(dt_adv)
+        if vnow > float(t_now):
+            vnow = float(t_now)
+        try:
+            vt_by[scr_key] = float(vnow)
+        except Exception:
+            pass
+        t_bar = float(vnow)
+
+    preview_full = False
+    if use_precomputed:
+        try:
+            pm = getattr(ext, "_sim_bar_preview_model", None)
+            preview_full = bool(pm.get_value_as_bool()) if pm is not None else False
+        except Exception:
+            preview_full = False
 
     st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
     if not isinstance(st_by, dict):
@@ -3130,11 +3695,20 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         st_by[scr_key] = st
     t_last = st.get("t_last", None)
     st["t_last"] = t_bar
-    if t_last is None:
-        # 첫 프레임은 누적 없이 렌더만
+    if use_precomputed and bar_pre is not None:
         dt = 0.0
+        if preview_full:
+            rows_state = {k: list(v) for k, v in (bar_pre.rows or {}).items()}
+        else:
+            rows_state = truncate_bar_rows_at_t(bar_pre.rows, t_bar)
+        st["rows"] = rows_state
+        if float(bar_pre.total_est) > 0.0:
+            st["total_est_fixed"] = float(bar_pre.total_est)
     else:
-        dt = max(0.0, float(t_bar) - float(t_last))
+        if t_last is None:
+            dt = 0.0
+        else:
+            dt = max(0.0, float(t_bar) - float(t_last))
 
     # EP 줄은 항상 EP1/EP2를 표시하고, EP3는 설정(EP count=3)일 때만 추가한다.
     eps = ["EP1", "EP2"]
@@ -3243,19 +3817,54 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     last_te = st.get("_ep_tl_last_ui_te")
     last_fp = st.get("_ep_tl_last_ui_occ_fp")
     last_layout = st.get("_ep_tl_last_ui_layout")
-    if (
-        old is not None
-        and dt <= 1e-9
-        and isinstance(last_te, (int, float))
-        and abs(float(last_te) - te_snap) <= 1e-2
-        and last_fp == occ_fp
-        and isinstance(last_layout, tuple)
-        and len(last_layout) == 5
-        and tuple(int(x) for x in last_layout) == cur_layout
-    ):
+    last_t_bar = st.get("_ep_tl_last_ui_t_bar")
+    last_preview = st.get("_ep_tl_last_preview")
+    skip_render = False
+    if use_precomputed:
+        time_stable = (
+            isinstance(last_t_bar, (int, float))
+            and abs(float(last_t_bar) - float(t_bar)) <= 1e-4
+        )
+    else:
+        time_stable = dt <= 1e-9
+    if old is not None and time_stable:
+        layout_ok = (
+            isinstance(last_layout, tuple)
+            and len(last_layout) == 5
+            and tuple(int(x) for x in last_layout) == cur_layout
+        )
+        base_ok = (
+            isinstance(last_te, (int, float))
+            and abs(float(last_te) - te_snap) <= 1e-2
+            and last_fp == occ_fp
+            and layout_ok
+        )
+        if use_precomputed:
+            # 프리컴pute 슬라이스: virtual time(t_bar)·미리보기 토글이 바뀌면 반드시 다시 그린다.
+            if (
+                base_ok
+                and isinstance(last_t_bar, (int, float))
+                and abs(float(last_t_bar) - float(t_bar)) <= 1e-4
+                and bool(last_preview) == bool(preview_full)
+            ):
+                skip_render = True
+            elif (
+                base_ok
+                and bool(last_preview) == bool(preview_full)
+                and last_fp == occ_fp
+            ):
+                # t_bar만 전진: UI rebuild 를 ~12Hz 로 제한(형제 영역 합성 깜빡임 완화).
+                try:
+                    lw = float(st.get("_ep_tl_last_render_wall", 0.0) or 0.0)
+                    if (time.perf_counter() - lw) < 0.08:
+                        skip_render = True
+                except Exception:
+                    pass
+        elif base_ok:
+            skip_render = True
+    if skip_render:
         return
 
-    # UI 렌더(고정 폭)
     if old is not None:
         try:
             old.destroy()
@@ -3270,9 +3879,9 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         return 0xFF0000FF if empty else 0xFF00FF00
 
     with host:
-        ch["ep_timeline_widget"] = ui.VStack(spacing=6)
+        ch["ep_timeline_widget"] = ui.VStack(spacing=2)
         with ui.Frame(style={"padding": int(frame_pad)}):
-            with ui.VStack(spacing=6):
+            with ui.VStack(spacing=3):
                 # 시간 라벨(너무 촘촘하면 안 보이므로 최대 8개 정도만)
                 with ui.HStack(height=14, spacing=0):
                     ui.Spacer(width=NAME_W)
@@ -3362,6 +3971,9 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         st["_ep_tl_last_ui_te"] = float(te_snap)
         st["_ep_tl_last_ui_occ_fp"] = occ_fp
         st["_ep_tl_last_ui_layout"] = cur_layout
+        st["_ep_tl_last_ui_t_bar"] = float(t_bar)
+        st["_ep_tl_last_preview"] = bool(preview_full) if use_precomputed else False
+        st["_ep_tl_last_render_wall"] = float(time.perf_counter())
     except Exception:
         pass
 
@@ -3369,7 +3981,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
 def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
     """
     멀티 시뮬에서 한 화면의 ANIM/큐 폭주로 다른 화면의 ``timeline_only`` 가 밀리면
-    포트 아래 EP 막대가 멈춘 것처럼 보인다. 각 엔진 ``env.now`` 와 마지막 점유 스냅샷으로 전 화면을 한 번에 맞춘다.
+    포트 아래 EP 막대가 멈춘 것처럼 보인다. 재생 중에는 ``SimTimelinePlayer.sim_now`` 를 쓴다.
     """
     chans = getattr(ext, "_sim_monitor_channels", None)
     engs = getattr(ext, "_sim_engines", None)
@@ -3381,6 +3993,7 @@ def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
     if not isinstance(last_by, dict):
         last_by = {}
     empty_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+    player = getattr(ext, "_sim_playback_player", None)
     for i, ch in enumerate(chans):
         if not isinstance(ch, dict):
             continue
@@ -3389,10 +4002,12 @@ def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
         eng = engs[i] if i < len(engs) else None
         if eng is None or bool(getattr(eng, "is_done", False)):
             continue
-        try:
-            t_now = float(getattr(getattr(eng, "env", None), "now", 0.0) or 0.0)
-        except Exception:
-            t_now = 0.0
+        t_now = _resolve_ep_timeline_sim_time(ext, si, "")
+        if player is None:
+            try:
+                t_now = float(getattr(getattr(eng, "env", None), "now", 0.0) or 0.0)
+            except Exception:
+                t_now = 0.0
         occ = last_by.get(sk) if isinstance(last_by.get(sk), dict) else None
         if occ is None:
             occ = dict(empty_occ)
@@ -3971,6 +4586,724 @@ def _dispatch_sim_ui_queue_item(ext: Any, kind: str, payload: Any, panel_mode: S
         _sim_ui_sink_history_line(ext, line, panel_mode)
 
 
+def _sync_ep_bar_virtual_time_to_sim(ext: Any, screen: int, t_sim: float) -> None:
+    """EP 막대 virtual time 을 현재 sim 시각에 맞춘다(미리보기 해제·Seek 직후)."""
+    sk = str(int(screen))
+    try:
+        vt_by = getattr(ext, "_sim_ep_timeline_virtual_time_by_screen", None)
+        if not isinstance(vt_by, dict):
+            vt_by = {}
+            ext._sim_ep_timeline_virtual_time_by_screen = vt_by
+        vt_by[sk] = float(t_sim)
+        vt_by[f"_wall_{sk}"] = float(time.perf_counter())
+    except Exception:
+        pass
+    try:
+        st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
+        if isinstance(st_by, dict) and isinstance(st_by.get(sk), dict):
+            st_by[sk]["t_last"] = float(t_sim)
+    except Exception:
+        pass
+
+
+def _on_sim_bar_preview_toggled(ext: Any) -> None:
+    """결과 미리보기 토글 시 막대 캐시 무효화 → 즉시 한 프레임 재렌더."""
+    try:
+        st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
+        if isinstance(st_by, dict):
+            for st in st_by.values():
+                if isinstance(st, dict):
+                    for k in (
+                        "_ep_tl_last_ui_te",
+                        "_ep_tl_last_ui_occ_fp",
+                        "_ep_tl_last_ui_layout",
+                        "_ep_tl_last_ui_t_bar",
+                        "_ep_tl_last_preview",
+                    ):
+                        st.pop(k, None)
+    except Exception:
+        pass
+    try:
+        player = getattr(ext, "_sim_playback_player", None)
+        chans = getattr(ext, "_sim_monitor_channels", None)
+        last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if player is None or not isinstance(chans, list) or not chans:
+            return
+        empty_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+        for i, ch in enumerate(chans):
+            if not isinstance(ch, dict):
+                continue
+            si = i + 1
+            try:
+                tnow = float(player.sim_now(si))
+            except Exception:
+                tnow = 0.0
+            _sync_ep_bar_virtual_time_to_sim(ext, si, tnow)
+            occ = empty_occ
+            if isinstance(last_by, dict) and isinstance(last_by.get(str(si)), dict):
+                occ = dict(last_by.get(str(si)) or empty_occ)
+            _update_ep_timeline_under_port_state(ext, ch, occ, f"{tnow:.2f}")
+    except Exception:
+        pass
+
+
+def _set_sim_start_enabled(ext: Any, enabled: bool) -> None:
+    btn = getattr(ext, "_sim_start_button", None)
+    if btn is None:
+        return
+    try:
+        btn.enabled = bool(enabled)
+    except Exception:
+        pass
+
+
+def _set_sim_prerun_ui_busy(ext: Any, busy: bool) -> None:
+    """프리런 중 막대·타임테이블 '계산 중…' 표시 및 Start 비활성."""
+    _set_sim_start_enabled(ext, not bool(busy))
+    try:
+        ext._sim_prerun_ui_busy = bool(busy)
+    except Exception:
+        pass
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(chans, list):
+        return
+    for ch in chans:
+        if not isinstance(ch, dict):
+            continue
+        si = int(ch.get("screen", 1) or 1)
+        try:
+            bl = ch.get("ep_timeline_busy_label")
+            if bl is not None:
+                bl.text = "프리런 계산 중…" if busy else ""
+                bl.visible = bool(busy)
+        except Exception:
+            pass
+        try:
+            set_timetable_busy_label(ch, bool(busy), screen=si)
+        except Exception:
+            pass
+    if not bool(busy):
+        try:
+            _remount_interactive_timetables(ext)
+        except Exception:
+            pass
+
+
+def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: int) -> None:
+    """Seek Fast-apply: 포트·FOUP 가시성만 반영(JSON 애니 생략)."""
+    if not isinstance(payload, dict):
+        return
+    scr = int(screen)
+    occ = payload.get("ports_occupancy", {})
+    if not isinstance(occ, dict):
+        occ = {}
+    ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
+    try:
+        apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
+    except Exception:
+        try:
+            apply_port_lot_prim_visibility(occ)
+        except Exception:
+            pass
+    try:
+        by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if not isinstance(by_prev, dict):
+            by_prev = {}
+            ext._sim_last_ports_occupancy_by_screen = by_prev
+        if occ:
+            by_prev[str(scr)] = dict(occ)
+    except Exception:
+        pass
+    try:
+        _update_port_occupancy_panel(ext, occ, str(payload.get("sim_time", "")), screen=scr)
+    except Exception:
+        pass
+
+
+def _extract_ep_id_from_foup_payload(payload: Dict[str, Any]) -> str:
+    ep_id = str(payload.get("port_id", "") or "").strip().upper()
+    if ep_id:
+        return ep_id
+    try:
+        import re as _re
+
+        src_txt = (str(payload.get("label", "") or "") + " " + str(payload.get("detail", "") or "")).upper()
+        m = _re.search(r"\bEP(\d+)\b", src_txt)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 3:
+                return f"EP{n}"
+    except Exception:
+        pass
+    return ""
+
+
+def _cancel_foup_label_reset_subs(ext: Any) -> None:
+    """Seek/리셋 시 보류 중인 FOUP 라벨 자동 복귀 타이머를 취소."""
+    try:
+        holders = getattr(ext, "_foup_label_reset_subs", None)
+        if not isinstance(holders, list):
+            return
+        for h in holders:
+            try:
+                s = h.get("sub")
+                if s is not None:
+                    s.unsubscribe()
+            except Exception:
+                pass
+        ext._foup_label_reset_subs = []
+    except Exception:
+        pass
+
+
+def _sync_foup_labels_at_seek(ext: Any, *, screen: int, items: List[Any], play_cursor: int) -> None:
+    """Seek 시점까지 누적된 FOUP_PROCESS progress 로 FOUP 공정 라벨을 동기화."""
+    _cancel_foup_label_reset_subs(ext)
+    try:
+        chans = getattr(ext, "_sim_monitor_channels", None)
+        if not isinstance(chans, list) or not (0 < int(screen) <= len(chans)):
+            return
+        ch = chans[int(screen) - 1]
+        if not isinstance(ch, dict):
+            return
+        labels = ch.get("foup_progress_labels") or {}
+        if not isinstance(labels, dict):
+            return
+        screen_num = int(ch.get("screen", screen) or screen)
+        try:
+            ch["_foup_label_cache"] = {}
+        except Exception:
+            pass
+        for ep_id, lbl in labels.items():
+            if lbl is None:
+                continue
+            _set_foup_progress_label(
+                ch,
+                str(ep_id),
+                lbl,
+                _foup_label_idle_text(screen_num, str(ep_id)),
+                {"color": 0xFF888888},
+            )
+        last_foup_by_ep: Dict[str, Dict[str, Any]] = {}
+        for i in range(max(0, int(play_cursor))):
+            if i >= len(items):
+                break
+            it = items[i]
+            kind = str(getattr(it, "kind", "") or "").strip().lower()
+            p = getattr(it, "payload", None)
+            if kind != "progress" or not isinstance(p, dict):
+                continue
+            ev_seq = str(p.get("event_seq") or p.get("sequence_name") or "").strip().upper()
+            if ev_seq != "FOUP_PROCESS":
+                continue
+            ep_id = _extract_ep_id_from_foup_payload(p)
+            if ep_id:
+                last_foup_by_ep[ep_id] = dict(p)
+        for _ep_id, p in last_foup_by_ep.items():
+            st = str(p.get("status", "")).strip().upper()
+            lab_u = str(p.get("label", "") or "").upper()
+            if st == "DONE" and "-Y" in lab_u:
+                continue
+            if not str(p.get("label", "") or "").strip():
+                continue
+            try:
+                last_key = getattr(ext, "_sim_progress_last_key", None)
+                if isinstance(last_key, dict):
+                    slot = str(p.get("tbs_sim_screen", screen) or screen).strip() or "1"
+                    last_key.pop(f"_panel_{slot}", None)
+            except Exception:
+                pass
+            _update_sim_progress(ext, p)
+    except Exception:
+        pass
+
+
+def _apply_seek_progress_panel(ext: Any, *, screen: int, t_target: float) -> None:
+    """Seek 후 진행현황 텍스트를 마지막 progress payload 기준으로 갱신."""
+    sk = str(int(screen))
+    try:
+        by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+        lp = by_lp.get(sk) if isinstance(by_lp, dict) else None
+        if not isinstance(lp, dict) or not str(lp.get("label", "") or "").strip():
+            return
+        last_key = getattr(ext, "_sim_progress_last_key", None)
+        if isinstance(last_key, dict):
+            last_key.pop(f"_panel_{sk}", None)
+        p_prog = dict(lp)
+        p_prog["sim_time"] = f"{float(t_target):.2f}"
+        _update_sim_progress(ext, p_prog)
+    except Exception:
+        pass
+
+
+def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[float, int]:
+    """
+    클릭한 타임테이블 행까지 items 를 state-only 로 적용.
+    반환: (target_t, play_cursor) — Visible 재생은 ``play_cursor`` 부터.
+    """
+    results = getattr(ext, "_sim_prerun_results_by_screen", None)
+    metas_by = getattr(ext, "_sim_timetable_row_metas_by_screen", None)
+    if not isinstance(results, dict):
+        return 0.0, 0
+    res = results.get(int(screen))
+    if res is None:
+        return 0.0, 0
+    metas = []
+    if isinstance(metas_by, dict):
+        metas = list(metas_by.get(str(int(screen)), []) or [])
+    if not metas:
+        metas = build_timetable_row_metas(res)
+    t_target, through = resolve_seek_through_index(metas, int(row_index))
+    play_cursor = max(0, int(through))
+
+    try:
+        stop_all_translate_animations()
+        stop_all_curve_animations()
+        stop_all_rotate_animations()
+    except Exception:
+        pass
+    try:
+        _restore_sim_prim_motion_to_initial(ext)
+    except Exception:
+        pass
+
+    items = res.items
+    for i in range(play_cursor):
+        if i >= len(items):
+            break
+        it = items[i]
+        kind = str(it.kind or "").strip().lower()
+        if kind == "event" and isinstance(it.payload, dict):
+            _apply_sim_event_state_only(ext, dict(it.payload), screen=int(screen))
+        elif kind == "progress" and isinstance(it.payload, dict):
+            p = dict(it.payload)
+            occ = p.get("ports_occupancy", {})
+            if isinstance(occ, dict) and occ:
+                _apply_sim_event_state_only(ext, p, screen=int(screen))
+            try:
+                by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+                if not isinstance(by_lp, dict):
+                    by_lp = {}
+                    ext._sim_progress_last_payload_by_screen = by_lp
+                by_lp[str(int(screen))] = dict(p)
+            except Exception:
+                pass
+
+    # 막대 virtual time / 슬라이스 기준 시각
+    sk = str(int(screen))
+    _sync_ep_bar_virtual_time_to_sim(ext, int(screen), float(t_target))
+    try:
+        st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
+        if not isinstance(st_by, dict):
+            st_by = {}
+            ext._sim_ep_occ_timeline_state_by_screen = st_by
+        st_by[sk] = {"t_last": float(t_target), "rows": {}, "total_est_fixed": None}
+    except Exception:
+        pass
+
+    try:
+        ext._sim_playback_done = False
+    except Exception:
+        pass
+
+    player = getattr(ext, "_sim_playback_player", None)
+    if player is not None and hasattr(player, "seek"):
+        try:
+            player.seek(int(screen), target_t=float(t_target), item_cursor=int(play_cursor))
+        except Exception:
+            pass
+
+    engs = getattr(ext, "_sim_engines", None)
+    if isinstance(engs, list) and int(screen) - 1 < len(engs):
+        eng = engs[int(screen) - 1]
+        if eng is not None:
+            try:
+                if hasattr(eng, "_set_now"):
+                    eng._set_now(float(t_target))  # type: ignore[attr-defined]
+                elif hasattr(eng, "env") and eng.env is not None:
+                    eng.env.now = float(t_target)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+    try:
+        chans = getattr(ext, "_sim_monitor_channels", None)
+        if isinstance(chans, list) and 0 < int(screen) <= len(chans):
+            ch = chans[int(screen) - 1]
+            occ = {}
+            by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+            if isinstance(by_prev, dict) and isinstance(by_prev.get(sk), dict):
+                occ = dict(by_prev.get(sk) or {})
+            _update_ep_timeline_under_port_state(ext, ch, occ, f"{float(t_target):.2f}")
+    except Exception:
+        pass
+
+    try:
+        _sync_foup_labels_at_seek(ext, screen=int(screen), items=items, play_cursor=int(play_cursor))
+    except Exception:
+        pass
+    try:
+        _apply_seek_progress_panel(ext, screen=int(screen), t_target=float(t_target))
+    except Exception:
+        pass
+    return float(t_target), int(play_cursor)
+
+
+def _on_timetable_row_seek(ext: Any, screen: int, row_index: int) -> None:
+    try:
+        t_target, _pc = _fast_apply_prerun_seek(ext, screen=int(screen), row_index=int(row_index))
+        print(f"[SIM] 타임테이블 Seek 화면{int(screen)} 행{int(row_index)} → t={float(t_target):.2f}", flush=True)
+        try:
+            refresh_timetable_row_highlight(ext, screen=int(screen), sim_now=float(t_target))
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[SIM] timetable seek 실패: {e}", flush=True)
+
+
+def _remount_interactive_timetables(ext: Any) -> None:
+    """모니터 UI 재조립 후 저장된 메타로 클릭 가능 타임테이블을 다시 장착."""
+    meta_by = getattr(ext, "_sim_timetable_row_metas_by_screen", None)
+    if not isinstance(meta_by, dict) or not meta_by:
+        return
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(chans, list):
+        return
+    for ch in chans:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            si = int(ch.get("screen", 0))
+        except Exception:
+            continue
+        if si <= 0:
+            continue
+        metas = list(meta_by.get(str(si), []) or [])
+        if not metas:
+            continue
+        header = f"[SIM] 타임테이블(프리런) — 화면{si}"
+        by_txt = getattr(ext, "_sim_timetable_display_by_screen", None)
+        if isinstance(by_txt, dict) and str(by_txt.get(str(si), "") or "").strip():
+            pass
+        else:
+            try:
+                tb = _build_timetable_label_text(header, metas)
+                if not isinstance(by_txt, dict):
+                    by_txt = {}
+                    ext._sim_timetable_display_by_screen = by_txt
+                by_txt[str(si)] = tb
+            except Exception:
+                pass
+
+        def _mk_seek_cb(screen_i: int = si) -> Callable[[int], None]:
+            return lambda row_i: _on_timetable_row_seek(ext, int(screen_i), int(row_i))
+
+        try:
+            mount_interactive_timetable(
+                ext,
+                ch,
+                screen=si,
+                header=header,
+                row_metas=metas,
+                on_row_clicked=_mk_seek_cb(),
+            )
+            ch["timetable_interactive"] = True
+        except Exception as e:
+            print(f"[SIM] 타임테이블 재장착 실패(화면{si}): {e}", flush=True)
+    try:
+        refresh_all_timetable_highlights(ext)
+    except Exception:
+        pass
+
+
+def _get_channel_history_text(ch: Dict[str, Any], ext: Any = None) -> str:
+    try:
+        si = int(ch.get("screen", 0))
+    except Exception:
+        si = 0
+    if ext is not None and si > 0:
+        by = getattr(ext, "_sim_timetable_display_by_screen", None)
+        if isinstance(by, dict):
+            txt = str(by.get(str(si), "") or "").strip()
+            if txt:
+                return txt
+    lbl = ch.get("history_label")
+    if lbl is not None:
+        try:
+            return str(getattr(lbl, "text", "") or "")
+        except Exception:
+            pass
+    model = ch.get("history_model")
+    if model is not None:
+        try:
+            return str(model.as_string or "")
+        except Exception:
+            pass
+    return ""
+
+
+def _set_channel_history_text(ch: Dict[str, Any], text: str, *, ext: Any = None) -> None:
+    txt = str(text or "")
+    if ch.get("timetable_interactive"):
+        return
+    try:
+        si = int(ch.get("screen", 0))
+    except Exception:
+        si = 0
+    if ext is not None and si > 0:
+        try:
+            by = getattr(ext, "_sim_timetable_display_by_screen", None)
+            if not isinstance(by, dict):
+                by = {}
+                ext._sim_timetable_display_by_screen = by
+            by[str(si)] = txt
+        except Exception:
+            pass
+    lbl = ch.get("history_label")
+    if lbl is not None:
+        try:
+            lbl.text = txt
+            try:
+                lbl.visible = True
+            except Exception:
+                pass
+        except Exception:
+            pass
+    model = ch.get("history_model")
+    if model is not None:
+        try:
+            model.set_value(txt)
+        except Exception:
+            pass
+
+
+def _scroll_sim_monitor_to_timetable(ext: Any) -> None:
+    """프리런 직후 타임테이블 전용 창을 앞으로 가져온다."""
+    tw = getattr(ext, "_sim_timetable_window", None)
+    if tw is not None:
+        try:
+            tw.visible = True
+            if hasattr(tw, "focus"):
+                tw.focus()
+        except Exception:
+            pass
+
+
+def _build_timetable_label_text(header: str, metas: List[Any]) -> str:
+    lines = [str(header or "").strip()]
+    for m in metas or []:
+        lines.append(str(getattr(m, "display_line", m)))
+    txt = "\n".join([ln for ln in lines if ln]).strip()
+    return txt if txt else "[SIM] 타임테이블(프리런) — 항목 없음"
+
+
+def _schedule_deferred_timetable_refresh(ext: Any, *, screen: int, text: str) -> None:
+    """Kit 레이아웃 1프레임 뒤 타임테이블 Label 을 다시 채운다(StringField 잔여·클리핑 대비)."""
+    pending = {"screen": int(screen), "text": str(text or "")}
+
+    def _once(_e: Any) -> None:
+        try:
+            sub = getattr(ext, "_sim_timetable_deferred_sub", None)
+            if sub is not None:
+                try:
+                    sub.unsubscribe()
+                except Exception:
+                    pass
+                ext._sim_timetable_deferred_sub = None
+        except Exception:
+            pass
+        try:
+            si = int(pending.get("screen", 1))
+            txt = str(pending.get("text", "") or "").strip()
+            if not txt:
+                return
+            chans = getattr(ext, "_sim_monitor_channels", None)
+            ch = None
+            if isinstance(chans, list) and 0 < si <= len(chans):
+                ch = chans[si - 1]
+            if isinstance(ch, dict):
+                _apply_timetable_text_to_channel(ext, ch, screen=si, text=txt, _deferred=True)
+        except Exception:
+            pass
+
+    try:
+        sub_old = getattr(ext, "_sim_timetable_deferred_sub", None)
+        if sub_old is not None:
+            try:
+                sub_old.unsubscribe()
+            except Exception:
+                pass
+        ext._sim_timetable_deferred_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
+            _once,
+            name="morph.tbs_control_2:timetable_deferred_refresh",
+        )
+    except Exception:
+        pass
+
+
+def _apply_timetable_text_to_channel(
+    ext: Any,
+    ch: Dict[str, Any],
+    *,
+    screen: int,
+    text: str,
+    _deferred: bool = False,
+    show_label: bool = True,
+) -> None:
+    """타임테이블 본문을 ext 에 백업하고, 필요 시 Label 폴백으로 표시한다."""
+    try:
+        txt = str(text or "").strip()
+        if not txt:
+            return
+        try:
+            by = getattr(ext, "_sim_timetable_display_by_screen", None)
+            if not isinstance(by, dict):
+                by = {}
+                ext._sim_timetable_display_by_screen = by
+            by[str(int(screen))] = txt
+        except Exception:
+            pass
+        if int(screen) == 1 and getattr(ext, "_sim_history_text", None) is not None:
+            try:
+                ext._sim_history_text.set_value(txt)
+            except Exception:
+                pass
+        if not show_label or ch.get("timetable_interactive"):
+            return
+        _set_channel_history_text(ch, txt, ext=ext)
+        try:
+            hf = ch.get("history_frame")
+            if hf is not None:
+                hf.visible = True
+        except Exception:
+            pass
+        try:
+            lbl = ch.get("history_label")
+            if lbl is not None and hasattr(lbl, "height"):
+                n_lines = max(1, len(txt.splitlines()))
+                lbl.height = max(230, min(8000, 14 * n_lines))
+        except Exception:
+            pass
+        shown = _get_channel_history_text(ch, ext)
+        print(
+            f"[SIM] 타임테이블 UI 적용(화면{int(screen)}): {len(txt)}자, {len(txt.splitlines())}줄"
+            f", label표시={len(shown)}자"
+            f"{', deferred' if _deferred else ''}",
+            flush=True,
+        )
+        if not _deferred and len(shown) < max(32, len(txt) // 4):
+            _schedule_deferred_timetable_refresh(ext, screen=int(screen), text=txt)
+    except Exception:
+        pass
+
+
+def _restore_timetable_display(ext: Any, *, screen: Optional[int] = None) -> None:
+    """다른 UI 갱신으로 타임테이블 Label 이 덮였을 때 백업본을 복원."""
+    by = getattr(ext, "_sim_timetable_display_by_screen", None)
+    if not isinstance(by, dict) or not by:
+        return
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(chans, list):
+        return
+    for ch in chans:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            si = int(ch.get("screen", 0))
+        except Exception:
+            continue
+        if si <= 0:
+            continue
+        if screen is not None and int(screen) != si:
+            continue
+        if ch.get("timetable_interactive"):
+            continue
+        txt = str(by.get(str(si), "") or "").strip()
+        if not txt:
+            continue
+        cur = _get_channel_history_text(ch, ext).strip()
+        if cur == txt:
+            continue
+        if (not cur.startswith("[SIM] 타임테이블(프리런)")) or (len(cur) < max(32, len(txt) // 3)):
+            try:
+                _apply_timetable_text_to_channel(ext, ch, screen=si, text=txt, show_label=True)
+            except Exception:
+                pass
+
+
+def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) -> None:
+    """프리런 완료 후 막대 사전 계산·인터랙티브 타임테이블 장착."""
+    if not isinstance(results, dict) or not results:
+        return
+    _set_sim_prerun_ui_busy(ext, False)
+    bar_by: Dict[str, EpBarPrecomputed] = {}
+    meta_by: Dict[str, List[Any]] = {}
+    for scr, res in results.items():
+        try:
+            si = int(scr)
+        except Exception:
+            continue
+        bar = build_ep_bar_from_progress_items(
+            res.items,
+            final_sim_time=float(res.final_sim_time),
+        )
+        bar_by[str(si)] = bar
+        metas = build_timetable_row_metas(res)
+        meta_by[str(si)] = metas
+        header = f"[SIM] 타임테이블(프리런) — 화면{si}"
+        chans = getattr(ext, "_sim_monitor_channels", None)
+        ch = None
+        if isinstance(chans, list) and 0 < si <= len(chans):
+            ch = chans[si - 1]
+        if isinstance(ch, dict):
+            tb_map = _build_prerun_timetable_text({si: res}) or {}
+            txt = str(tb_map.get(si) or "").strip()
+            if not txt:
+                txt = _build_timetable_label_text(header, metas)
+            _apply_timetable_text_to_channel(ext, ch, screen=si, text=txt, show_label=not metas)
+            if metas:
+                def _mk_seek_cb(screen_i: int = si) -> Callable[[int], None]:
+                    return lambda row_i: _on_timetable_row_seek(ext, int(screen_i), int(row_i))
+
+                try:
+                    mount_interactive_timetable(
+                        ext,
+                        ch,
+                        screen=si,
+                        header=header,
+                        row_metas=metas,
+                        on_row_clicked=_mk_seek_cb(),
+                    )
+                    ch["timetable_interactive"] = True
+                    print(
+                        f"[SIM] 타임테이블 인터랙티브(화면{si}): {len(metas)}행, 클릭·하이라이트 활성",
+                        flush=True,
+                    )
+                    try:
+                        refresh_timetable_row_highlight(ext, screen=si, sim_now=0.0)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    ch["timetable_interactive"] = False
+                    print(f"[SIM] 타임테이블 인터랙티브 장착 실패(화면{si}): {e}", flush=True)
+                    _apply_timetable_text_to_channel(ext, ch, screen=si, text=txt, show_label=True)
+            else:
+                ch["timetable_interactive"] = False
+                if "[SIM] 타임테이블(프리런)" not in txt:
+                    print(f"[SIM] 타임테이블(화면{si}): 표시할 event/step 항목 없음", flush=True)
+        try:
+            print(header, flush=True)
+            for m in metas:
+                print(m.display_line, flush=True)
+        except Exception:
+            pass
+    try:
+        ext._sim_ep_bar_prerun_by_screen = bar_by
+        ext._sim_timetable_row_metas_by_screen = meta_by
+    except Exception:
+        pass
+    _scroll_sim_monitor_to_timetable(ext)
+
+
 def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
     """
     프리런 결과(SimPreRunResult.items)를 **JSON 라인 형식의 타임테이블**로 만든다.
@@ -4071,9 +5404,6 @@ def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
             except Exception:
                 continue
 
-        if not rows:
-            continue
-
         # 같은 시각이면 event 를 먼저, step 을 다음에
         kind_prio = {"event": 0, "step": 1}
         try:
@@ -4086,6 +5416,8 @@ def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
 
         lines: List[str] = []
         lines.append(f"[SIM] 타임테이블(프리런) — 화면{si}")
+        if not rows:
+            lines.append('{"kind":"info","message":"표시할 event/step 항목 없음"}')
         for r in rows:
             try:
                 lines.append(json.dumps(r, ensure_ascii=False))
@@ -4123,39 +5455,22 @@ def _drain_sim_log_queue(ext: Any) -> None:
                     except Exception:
                         pass
 
-                    # 프리런 타임테이블을 [SIM] 창(이력) + 콘솔에 출력
+                    # 프리런 완료 시 막대 사전계산 + 인터랙티브 타임테이블(매 Start 마다 갱신)
                     try:
-                        printed = bool(getattr(ext, "_sim_prerun_timetable_printed", False))
-                    except Exception:
-                        printed = False
-                    if not printed:
+                        _finalize_prerun_ui_assets(ext, results)
+                    except Exception as e:
+                        print(f"[SIM] 프리런 UI 자산 구성 실패: {e}", flush=True)
                         try:
-                            ext._sim_prerun_timetable_printed = True
+                            tb_by = _build_prerun_timetable_text(results) or {}
+                            for si, txt in tb_by.items():
+                                if str(txt or "").strip():
+                                    print(str(txt), flush=True)
                         except Exception:
                             pass
-                        try:
-                            tb_by = _build_prerun_timetable_text(results)
-                        except Exception:
-                            tb_by = {}
-                        if isinstance(tb_by, dict) and tb_by:
-                            for si, txt in tb_by.items():
-                                if not str(txt or "").strip():
-                                    continue
-                                try:
-                                    # UI [SIM] 창(화면별 history_label)에 블록 형태로 붙인다.
-                                    _append_sim_log_channel(ext, int(si), str(txt))
-                                except Exception:
-                                    pass
-                                # 콘솔에도 동일 블록 출력(화면별 구분)
-                                try:
-                                    print(str(txt), flush=True)
-                                except Exception:
-                                    pass
-                        else:
-                            try:
-                                _append_sim_log(ext, "[SIM] 타임테이블 생성: 표시할 DONE progress 항목이 없습니다.")
-                            except Exception:
-                                pass
+                    try:
+                        ext._sim_prerun_timetable_printed = True
+                    except Exception:
+                        pass
 
                     # UI 그래프 동기화용 playback 엔진 생성
                     playback_engs: List[Any] = []
@@ -4343,6 +5658,10 @@ def _tick_playback(ext: Any) -> None:
         if not getattr(player, "is_playing", lambda: False)():
             return
         player.tick()
+        try:
+            refresh_all_timetable_highlights(ext)
+        except Exception:
+            pass
         # env.now는 UI 막대 동기화에 사용되므로 화면별로 업데이트한다.
         engs = getattr(ext, "_sim_engines", None)
         results = getattr(ext, "_sim_prerun_results_by_screen", None)
@@ -4935,13 +6254,20 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 except Exception:
                     stage = ""
                 body = f"{head}: 진행 [{stage}]" if stage else f"{head}: 진행"
-                lbl.text = f"{body} | {st} {pct}% ({el}/{tot}) | t={t_sim}"
-                # 진행 중 색(노랑), DONE 색(연한 회녹색) 으로 구분
                 try:
-                    color = 0xFFFFE08A if str(st).upper() == "RUNNING" else 0xFF9FBFA0
-                    lbl.style = {"color": color}
+                    t_disp = f"{float(t_sim):.1f}"
                 except Exception:
-                    pass
+                    t_disp = str(t_sim)
+                new_txt = f"{body} | {st} {pct}% ({el}/{tot}) | t={t_disp}"
+                color = 0xFFFFE08A if str(st).upper() == "RUNNING" else 0xFF9FBFA0
+                if chf is not None and ep_id:
+                    _set_foup_progress_label(chf, ep_id, lbl, new_txt, {"color": color})
+                else:
+                    try:
+                        lbl.text = new_txt
+                        lbl.style = {"color": color}
+                    except Exception:
+                        pass
             # -Y(공정 종료 복귀) DONE 수신 시 해당 EP 만 1.05초 뒤 "대기" 로 되돌린다.
             try:
                 lab_u = str(payload.get("label", "") or "").upper()
@@ -5182,7 +6508,6 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
         _push(ep, empty=(v == "EMPTY"), dur=dt)
     _push("ALL_EP", empty=bool(all_ep_empty), dur=dt)
 
-    # 위젯 재구성(진행 로그 갱신 주기 수준이라 rebuild 비용 OK)
     old = ch.get("progress_ep_timeline_widget", None)
     if old is not None:
         try:
@@ -5434,11 +6759,34 @@ def _normalize_port_text_from_xml(parsed_val: str, original_text: str) -> str:
     return p
 
 
-def _foup_label_idle_text(screen_num: int, ep_id: str) -> str:
-    """EP 별 FOUP 라벨의 'idle(대기)' 텍스트를 한 곳에서 생성한다(생성/리셋 일관성)."""
-    if int(screen_num or 1) <= 1:
-        return f"{ep_id} FOUP 공정: 대기"
-    return f"{ep_id} FOUP 공정(화면{int(screen_num)}): 대기"
+def _set_foup_progress_label(ch: Dict[str, Any], ep_id: str, lbl: Any, text: str, style: Dict[str, Any]) -> None:
+    """동일 텍스트·스타일이면 FOUP 라벨을 다시 쓰지 않아 깜빡임을 줄인다."""
+    if lbl is None:
+        return
+    try:
+        cache = ch.get("_foup_label_cache")
+        if not isinstance(cache, dict):
+            cache = {}
+            ch["_foup_label_cache"] = cache
+        key = str(ep_id or "").strip().upper()
+        sig = (str(text or ""), int(style.get("color", 0)) if isinstance(style, dict) else 0)
+        if cache.get(key) == sig:
+            return
+        cache[key] = sig
+        lbl.text = str(text or "")
+        try:
+            cur_col = int(getattr(lbl, "style", {}).get("color", 0))  # type: ignore[union-attr]
+        except Exception:
+            cur_col = None
+        new_col = int(style.get("color", 0)) if isinstance(style, dict) else 0
+        if cur_col != new_col:
+            lbl.style = dict(style or {})
+    except Exception:
+        try:
+            lbl.text = str(text or "")
+            lbl.style = dict(style or {})
+        except Exception:
+            pass
 
 
 def _reset_foup_label_now(ext: Any, screen_idx: int, ep_id: str) -> None:
@@ -5456,14 +6804,13 @@ def _reset_foup_label_now(ext: Any, screen_idx: int, ep_id: str) -> None:
         if lbl is None:
             return
         screen_num = int(chf.get("screen", si) or si)
-        try:
-            lbl.text = _foup_label_idle_text(screen_num, str(ep_id))
-        except Exception:
-            pass
-        try:
-            lbl.style = {"color": 0xFF888888}
-        except Exception:
-            pass
+        _set_foup_progress_label(
+            chf,
+            str(ep_id),
+            lbl,
+            _foup_label_idle_text(screen_num, str(ep_id)),
+            {"color": 0xFF888888},
+        )
     except Exception:
         pass
 
@@ -5487,14 +6834,17 @@ def _reset_all_foup_labels(ext: Any) -> None:
             for ep_id, lbl in labels.items():
                 if lbl is None:
                     continue
-                try:
-                    lbl.text = _foup_label_idle_text(screen_num, str(ep_id))
-                except Exception:
-                    pass
-                try:
-                    lbl.style = {"color": 0xFF888888}
-                except Exception:
-                    pass
+                _set_foup_progress_label(
+                    ch,
+                    str(ep_id),
+                    lbl,
+                    _foup_label_idle_text(screen_num, str(ep_id)),
+                    {"color": 0xFF888888},
+                )
+            try:
+                ch["_foup_label_cache"] = {}
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -6141,7 +7491,7 @@ def on_sim_start_clicked(ext: Any) -> None:
     # 버튼 아래의 빈 공간이 점점 커지는 현상이 발생할 수 있어,
     # 시작 시점에 모니터 영역을 한 번 깨끗하게 재빌드한다.
     try:
-        _rebuild_sim_monitor_split_ui(ext)
+        _rebuild_all_sim_ui_panels(ext)
     except Exception:
         pass
     # 실행 세대 토큰: stop/reset 후 남은 이벤트/애니 job을 무시하기 위해 사용
@@ -6238,11 +7588,12 @@ def on_sim_start_clicked(ext: Any) -> None:
             ht = "[SIM] 초기화" if si == 1 else f"[SIM·화면{si}] 초기화"
             pt = "[진행현황] 초기화 (시뮬레이션 시작 대기)" if si == 1 else f"[진행현황·화면{si}] 초기화 (대기)"
             ph = f"[포트상태·화면{si}] 초기화 (이벤트 대기)"
-            hl = ch.get("history_label")
             pl = ch.get("progress_label")
             phdr = ch.get("port_header")
-            if hl is not None:
-                hl.text = ht
+            try:
+                _set_channel_history_text(ch, ht)
+            except Exception:
+                pass
             if pl is not None:
                 pl.text = pt
             if phdr is not None:
@@ -6271,8 +7622,17 @@ def on_sim_start_clicked(ext: Any) -> None:
             except Exception:
                 pass
     else:
+        try:
+            chans_s = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chans_s, list) and chans_s and isinstance(chans_s[0], dict):
+                _set_channel_history_text(chans_s[0], "[SIM] 초기화")
+        except Exception:
+            pass
         if getattr(ext, "_sim_history_label", None) is not None:
-            ext._sim_history_label.text = "[SIM] 초기화"
+            try:
+                ext._sim_history_label.text = "[SIM] 초기화"
+            except Exception:
+                pass
         if getattr(ext, "_sim_progress_label", None) is not None:
             ext._sim_progress_label.text = "[진행현황] 초기화 (시뮬레이션 시작 대기)"
         if getattr(ext, "_sim_port_state_label", None) is not None:
@@ -6789,6 +8149,10 @@ def on_sim_start_clicked(ext: Any) -> None:
         pass
     speed_value = max(0.1, ext._sim_speed_model.get_value_as_float())
     _append_sim_log(ext, "[SIM] 프리런 시작: 내부적으로 전체 시뮬을 먼저 계산합니다...")
+    try:
+        _set_sim_prerun_ui_busy(ext, True)
+    except Exception:
+        pass
     # SIM 현황(이력) 영역은 타임테이블 전용으로 유지
     try:
         ext._sim_history_timetable_only = True
@@ -6804,11 +8168,17 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     # prerun 결과/플레이어 상태 초기화
     try:
+        ext._sim_timetable_display_by_screen = {}
+    except Exception:
+        pass
+    try:
         ext._sim_prerun_done_evt = threading.Event()
         ext._sim_prerun_results_by_screen = None
         ext._sim_playback_player = None
         ext._sim_playback_ui_sub = None
         ext._sim_prerun_timetable_printed = False
+        ext._sim_playback_started = False
+        ext._sim_playback_done = False
     except Exception:
         pass
 
@@ -7177,6 +8547,10 @@ def on_sim_stop_clicked(ext: Any) -> None:
         ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
     except Exception:
         ext._sim_run_gen = 1
+    try:
+        _set_sim_prerun_ui_busy(ext, False)
+    except Exception:
+        pass
     # FOUP 진행중 보호 표시 정리(안전망):
     # - END 후 1초 unmark 가 잡히기 전에 stop 이 들어오면 보호 플래그가 남을 수 있다.
     # - 보류 중인 unmark subscription 도 함께 해제하여 잔여 콜백을 차단한다.
@@ -7504,11 +8878,12 @@ def on_sim_reset_clicked(ext: Any) -> None:
             ht = "[SIM] 리셋 완료" if si == 1 else f"[SIM·화면{si}] 리셋 완료"
             pt = "[진행현황] 없음" if si == 1 else f"[진행현황·화면{si}] 없음"
             ph = f"[포트상태·화면{si}] 없음"
-            hl = ch.get("history_label")
             pl = ch.get("progress_label")
             phdr = ch.get("port_header")
-            if hl is not None:
-                hl.text = ht
+            try:
+                _set_channel_history_text(ch, ht)
+            except Exception:
+                pass
             if pl is not None:
                 pl.text = pt
             if phdr is not None:
@@ -7541,8 +8916,17 @@ def on_sim_reset_clicked(ext: Any) -> None:
             except Exception:
                 pass
     else:
+        try:
+            chans_s = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chans_s, list) and chans_s and isinstance(chans_s[0], dict):
+                _set_channel_history_text(chans_s[0], "[SIM] 리셋 완료")
+        except Exception:
+            pass
         if getattr(ext, "_sim_history_label", None) is not None:
-            ext._sim_history_label.text = "[SIM] 리셋 완료"
+            try:
+                ext._sim_history_label.text = "[SIM] 리셋 완료"
+            except Exception:
+                pass
         if getattr(ext, "_sim_progress_label", None) is not None:
             ext._sim_progress_label.text = "[진행현황] 없음"
         if getattr(ext, "_sim_port_state_header_label", None) is not None:
@@ -7690,7 +9074,7 @@ def on_copy_sim_progress(ext: Any) -> None:
                 if pt:
                     pb.append(f"=== 화면{si} 진행현황 ===\n{pt}")
             if hl is not None:
-                ht = str(hl.text or "").strip()
+                ht = _get_channel_history_text(ch).strip()
                 if ht:
                     hb.append(f"=== 화면{si} Sim 로그 ===\n{ht}")
         progress = "\n\n".join(pb).strip()
@@ -7701,7 +9085,14 @@ def on_copy_sim_progress(ext: Any) -> None:
         if not progress.strip() and getattr(ext, "_sim_progress_text", None):
             progress = ext._sim_progress_text.as_string or ""
         if getattr(ext, "_sim_history_label", None) is not None:
-            history = ext._sim_history_label.text or ""
+            try:
+                chans_s = getattr(ext, "_sim_monitor_channels", None)
+                if isinstance(chans_s, list) and chans_s and isinstance(chans_s[0], dict):
+                    history = _get_channel_history_text(chans_s[0])
+                else:
+                    history = ext._sim_history_label.text or ""
+            except Exception:
+                history = ext._sim_history_label.text or ""
         if not history.strip() and getattr(ext, "_sim_history_text", None):
             history = ext._sim_history_text.as_string or ""
 
