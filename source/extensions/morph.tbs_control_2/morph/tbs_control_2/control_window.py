@@ -4836,6 +4836,117 @@ def _apply_seek_progress_panel(ext: Any, *, screen: int, t_target: float) -> Non
         pass
 
 
+def _seek_extra_steps_for_restore(ext: Any, *, screen: int) -> List[Dict[str, Any]]:
+    """Seek 직전 재생 중이던 JSON step — prim 경로 수집용."""
+    out: List[Dict[str, Any]] = []
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(active_by, dict):
+            job = active_by.get(str(int(screen)))
+            if isinstance(job, dict):
+                parsed = job.get("parsed")
+                if isinstance(parsed, list):
+                    out.extend(s for s in parsed if isinstance(s, dict))
+    except Exception:
+        pass
+    return out
+
+
+def _purge_anim_events_from_sim_queue(ext: Any, *, screen: int) -> None:
+    """Seek 직전 해당 화면 ANIM_EVENT 큐 항목을 폐기(잔여 이벤트로 애니 재시작 방지)."""
+    q = getattr(ext, "_sim_log_queue", None)
+    if q is None:
+        return
+    scr_s = str(int(screen))
+    pending_items: List[Any] = []
+    while True:
+        try:
+            pending_items.append(q.get_nowait())
+        except Exception:
+            break
+    for item in pending_items:
+        try:
+            if isinstance(item, tuple) and len(item) == 2:
+                kind, payload = item
+            else:
+                kind, payload = SimUiQueueKind.HISTORY_LINE.value, item
+            if _coerce_sim_ui_queue_kind(kind) == SimUiQueueKind.ANIM_EVENT and isinstance(payload, dict):
+                try:
+                    ps = str(payload.get("tbs_sim_screen", "1") or "1").strip() or "1"
+                except Exception:
+                    ps = "1"
+                if ps == scr_s:
+                    continue
+            q.put_nowait(item)
+        except Exception:
+            pass
+
+
+def _halt_anim_for_prerun_seek(ext: Any, *, screen: int) -> None:
+    """타임테이블 Seek — 재생 중 JSON·pending·러너를 화면별로 정리."""
+    scr_s = str(int(screen))
+    try:
+        pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+        if isinstance(pending_by, dict):
+            pending_by[scr_s] = []
+    except Exception:
+        pass
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(active_by, dict):
+            active_by[scr_s] = {}
+    except Exception:
+        pass
+    if int(screen) == 1 and not _is_multi_viewport_sim(ext):
+        try:
+            ext._sim_anim_pending = []
+            ext._sim_anim_active = {}
+        except Exception:
+            pass
+    try:
+        pause_map = getattr(ext, "_sim_tick_pause_events_by_screen", None)
+        if isinstance(pause_map, dict):
+            pe = pause_map.get(scr_s)
+            if pe is not None:
+                pe.clear()
+    except Exception:
+        pass
+    try:
+        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+        if isinstance(until_by, dict):
+            until_by[scr_s] = None
+    except Exception:
+        pass
+    try:
+        runners = getattr(ext, "_sim_runners_by_screen", None)
+        runner_paused = False
+        if isinstance(runners, dict):
+            r = runners.get(scr_s)
+            if r is not None:
+                try:
+                    if getattr(r, "is_running", lambda: False)():
+                        r.pause()
+                    runner_paused = True
+                except Exception:
+                    pass
+        if not runner_paused and int(screen) == 1:
+            r0 = getattr(ext, "_sim_runner", None)
+            if r0 is not None:
+                try:
+                    if getattr(r0, "is_running", lambda: False)():
+                        r0.pause()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        stop_all_translate_animations()
+        stop_all_curve_animations()
+        stop_all_rotate_animations()
+    except Exception:
+        pass
+
+
 def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[float, int]:
     """
     클릭한 타임테이블 행까지 items 를 state-only 로 적용.
@@ -4856,14 +4967,32 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
     t_target, through = resolve_seek_through_index(metas, int(row_index))
     play_cursor = max(0, int(through))
 
+    scr_i = int(screen)
+    ctx = _usd_context_name_for_sim_screen(ext, scr_i)
+
+    player = getattr(ext, "_sim_playback_player", None)
+    if player is not None:
+        try:
+            if getattr(player, "is_playing", lambda: False)():
+                player.stop()
+        except Exception:
+            pass
+
     try:
-        stop_all_translate_animations()
-        stop_all_curve_animations()
-        stop_all_rotate_animations()
+        _purge_anim_events_from_sim_queue(ext, screen=scr_i)
     except Exception:
         pass
     try:
-        _restore_sim_prim_motion_to_initial(ext)
+        _halt_anim_for_prerun_seek(ext, screen=scr_i)
+    except Exception:
+        pass
+    try:
+        extra = _seek_extra_steps_for_restore(ext, screen=scr_i)
+        _restore_sim_prim_motion_to_initial(
+            ext,
+            extra_steps=extra if extra else None,
+            usd_context_name=ctx,
+        )
     except Exception:
         pass
 
