@@ -1,6 +1,6 @@
 """TBS 제어창·시뮬 엔진 공통 기본값 (SSOT).
 
-제어창 LOT 수, EP 개수, LOT 생성/회수 간격, FOUP 공정 시간, 구간별 이동 랜덤 범위,
+제어창 LOT 수, EP 개수, LOT 생성/회수 간격, FOUP 공정 시간·Y 이동량, 구간별 이동 랜덤 범위,
 시뮬 속도 배율, 로그 주기 등 **초기값**은 이 파일만 수정한다.
 """
 
@@ -26,6 +26,10 @@ class SimControlDefaults:
     # FOUP 공정(EP 상) 시간(초)
     foup_process_min: float = 30.0
     foup_process_max: float = 60.0
+
+    # FOUP 공정 중 EP LOT prim Y축 이동량(스테이지 단위).
+    # START 시 +값, END 시 -값, 포트 위치 복원 시 plateau = baseline + 이 값.
+    foup_proc_y_lift: float = 4.0
 
     # OHT → IN/OUT·EP 직접 투입
     oht_to_bp1_min: float = 5.0

@@ -221,6 +221,8 @@ from .port_lot_visibility import (
     apply_port_lot_prim_visibility,
     apply_port_lot_prim_visibility_for_context,
     clear_port_lot_authoring_cache,
+    foup_proc_y_lift,
+    sync_port_lot_positions_after_visibility,
 )
 from .prim_info import get_prim_display_name, safe_str
 from .prim_utils import (
@@ -272,7 +274,10 @@ from .control_sim_timetable_ui import (
     mount_interactive_timetable,
     refresh_all_timetable_highlights,
     refresh_timetable_row_highlight,
+    reset_timetable_channel_to_idle,
     set_timetable_busy_label,
+    timetable_rows_locked,
+    unlock_timetable_rows,
 )
 
 MAX_PRIMS_DISPLAY = 80
@@ -2171,6 +2176,32 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     return ch
 
 
+def _sim_ui_shell_rebuild_allowed(ext: Any) -> bool:
+    """Start/Reset 직전에만 UI 셸(모니터·타임테이블) 전체 재조립을 허용한다."""
+    if bool(getattr(ext, "_sim_timetable_allow_shell_rebuild", False)):
+        return True
+    return not timetable_rows_locked(ext)
+
+
+def _resolve_timetable_channel_for_screen(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
+    """타임테이블 전용 창에 실제로 붙어 있는 채널 dict 를 찾는다."""
+    try:
+        si = int(screen)
+    except Exception:
+        return None
+    by = getattr(ext, "_sim_timetable_channels", None)
+    if isinstance(by, dict):
+        ch = by.get(str(si))
+        if isinstance(ch, dict) and ch.get("timetable_host") is not None:
+            return ch
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if isinstance(chans, list) and 0 < si <= len(chans):
+        cand = chans[si - 1]
+        if isinstance(cand, dict) and cand.get("timetable_host") is not None:
+            return cand
+    return None
+
+
 def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
     """
     뷰포트 분할 수(1~4)에 맞춰 제어창 하단 시뮼 모니터 영역을 다시 그린다.
@@ -2180,6 +2211,8 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
     - 분할 전 각 채널의 진행/이력 문자열은 ``_snapshot_monitor_channel_texts`` 로 백업 후 복원한다.
     - 단일 채널일 때는 ``ext._sim_progress_label`` 등 레거시 단일 위젯 참조를 [0] 채널에 다시 연결한다.
     """
+    if not _sim_ui_shell_rebuild_allowed(ext):
+        return
     host = getattr(ext, "_sim_monitor_split_host", None)
     if host is None:
         return
@@ -2331,9 +2364,51 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
         pass
 
 
-def _clear_timetable_channel_widgets(ch: Dict[str, Any]) -> None:
-    """채널 dict 에 붙은 타임테이블 위젯만 제거(스크롤 위치는 유지)."""
-    saved_scroll = float(ch.get("_tt_scroll_y", 0.0) or 0.0)
+def _clear_sim_timetable_storage(ext: Any) -> None:
+    """이전 프리런 타임테이블 메타·백업을 비운다."""
+    try:
+        ext._sim_timetable_row_metas_by_screen = {}
+        ext._sim_timetable_display_by_screen = {}
+        ext._sim_timetable_channels = {}
+    except Exception:
+        pass
+
+
+def _reset_all_channel_timetables_to_idle(
+    ext: Any,
+    *,
+    message: str = "타임테이블 대기 중 — Start 후 프리런 결과 표시",
+) -> None:
+    """모든 화면 타임테이블에서 기존 행을 제거하고 대기 문구만 남긴다."""
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(chans, list):
+        return
+    for ch in chans:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            si = int(ch.get("screen", 1) or 1)
+        except Exception:
+            si = 1
+        try:
+            unlock_timetable_rows(ext)
+            reset_timetable_channel_to_idle(ch, screen=si, message=message, ext=ext, force=True)
+        except Exception:
+            pass
+
+
+def _clear_timetable_channel_widgets(ch: Dict[str, Any], ext: Any = None) -> None:
+    """채널 dict 에 붙은 타임테이블 위젯만 제거(Start/Reset 시 스크롤 맨 위)."""
+    if ext is not None and timetable_rows_locked(ext) and not bool(
+        getattr(ext, "_sim_timetable_allow_shell_rebuild", False)
+    ):
+        return
+    col = ch.get("timetable_column_root")
+    if col is not None:
+        try:
+            col.destroy()
+        except Exception:
+            pass
     panel = ch.get("timetable_panel")
     if panel is not None:
         try:
@@ -2361,12 +2436,13 @@ def _clear_timetable_channel_widgets(ch: Dict[str, Any]) -> None:
     ch["timetable_row_bgs"] = []
     ch["timetable_interactive"] = False
     ch["_timetable_row_style_cache"] = {}
-    ch["_tt_scroll_y"] = saved_scroll
+    ch["_timetable_highlight_t"] = None
+    ch["_tt_scroll_y"] = 0.0
 
 
-def _mount_timetable_ui_on_channel(ch: Dict[str, Any], screen: int) -> None:
+def _mount_timetable_ui_on_channel(ch: Dict[str, Any], screen: int, ext: Any = None) -> None:
     """기존 채널 dict 에 타임테이블 전용 창용 UI를 장착한다."""
-    _clear_timetable_channel_widgets(ch)
+    _clear_timetable_channel_widgets(ch, ext)
     col = ui.VStack(spacing=2, width=ui.Fraction(1.0), height=ui.Fraction(1.0))
     ch["timetable_column_root"] = col
     with col:
@@ -2375,6 +2451,8 @@ def _mount_timetable_ui_on_channel(ch: Dict[str, Any], screen: int) -> None:
 
 def _rebuild_sim_timetable_split_ui(ext: Any) -> None:
     """뷰포트 분할 수에 맞춰 타임테이블 전용 창 영역을 다시 그린다."""
+    if not _sim_ui_shell_rebuild_allowed(ext):
+        return
     host = getattr(ext, "_sim_timetable_split_host", None)
     if host is None:
         return
@@ -2412,51 +2490,45 @@ def _rebuild_sim_timetable_split_ui(ext: Any) -> None:
     with inner:
         if n == 1:
             ch0 = _next_ch(1)
-            _mount_timetable_ui_on_channel(ch0, 1)
+            _mount_timetable_ui_on_channel(ch0, 1, ext)
         elif n == 2:
             with ui.HStack(spacing=6, height=ui.Fraction(1.0)):
                 with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                    _mount_timetable_ui_on_channel(_next_ch(1), 1)
+                    _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
                 with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                    _mount_timetable_ui_on_channel(_next_ch(2), 2)
+                    _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
         elif n == 3:
             with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
                 with ui.VStack(spacing=4, height=ui.Fraction(0.5)):
-                    _mount_timetable_ui_on_channel(_next_ch(1), 1)
+                    _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
                 with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(2), 2)
+                        _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(3), 3)
+                        _mount_timetable_ui_on_channel(_next_ch(3), 3, ext)
         else:
             with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
                 with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(1), 1)
+                        _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(2), 2)
+                        _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
                 with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(3), 3)
+                        _mount_timetable_ui_on_channel(_next_ch(3), 3, ext)
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(4), 4)
+                        _mount_timetable_ui_on_channel(_next_ch(4), 4, ext)
 
     try:
         ext._sim_timetable_layout_n = n
-    except Exception:
-        pass
-    try:
-        _remount_interactive_timetables(ext)
-    except Exception:
-        pass
-    try:
-        refresh_all_timetable_highlights(ext)
     except Exception:
         pass
 
 
 def _rebuild_all_sim_ui_panels(ext: Any) -> None:
     """모니터·타임테이블 창을 분할 수에 맞게 함께 재조립한다."""
+    if not _sim_ui_shell_rebuild_allowed(ext):
+        return
     _rebuild_sim_monitor_split_ui(ext)
     _rebuild_sim_timetable_split_ui(ext)
     try:
@@ -4394,6 +4466,7 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     except Exception:
         pass
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
+    active_ep = _remember_foup_active_ep(ext, scr, p)
     try:
         apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
     except Exception:
@@ -4401,6 +4474,10 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
             apply_port_lot_prim_visibility(occ)
         except Exception:
             pass
+    try:
+        sync_port_lot_positions_after_visibility(ctx_nm, foup_proc_active_ep=active_ep)
+    except Exception:
+        pass
     _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")), screen=scr)
     # 포트상태 갱신 전용 이벤트: 목록에 없는 내부 이벤트이므로 애니/공정확인창을 띄우지 않는다.
     try:
@@ -4657,13 +4734,33 @@ def _set_sim_start_enabled(ext: Any, enabled: bool) -> None:
         pass
 
 
+def _clear_ep_prerun_busy_labels(ext: Any) -> None:
+    """EP 막대 '프리런 계산 중…' 라벨만 끈다."""
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(chans, list):
+        return
+    for ch in chans:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            bl = ch.get("ep_timeline_busy_label")
+            if bl is not None:
+                bl.text = ""
+                bl.visible = False
+        except Exception:
+            pass
+
+
 def _set_sim_prerun_ui_busy(ext: Any, busy: bool) -> None:
-    """프리런 중 막대·타임테이블 '계산 중…' 표시 및 Start 비활성."""
+    """프리런 시작 시에만 막대·타임테이블 busy 표시. 해제 시 타임테이블 행은 건드리지 않는다."""
     _set_sim_start_enabled(ext, not bool(busy))
     try:
         ext._sim_prerun_ui_busy = bool(busy)
     except Exception:
         pass
+    if not bool(busy):
+        _clear_ep_prerun_busy_labels(ext)
+        return
     chans = getattr(ext, "_sim_monitor_channels", None)
     if not isinstance(chans, list):
         return
@@ -4674,19 +4771,40 @@ def _set_sim_prerun_ui_busy(ext: Any, busy: bool) -> None:
         try:
             bl = ch.get("ep_timeline_busy_label")
             if bl is not None:
-                bl.text = "프리런 계산 중…" if busy else ""
-                bl.visible = bool(busy)
+                bl.text = "프리런 계산 중…"
+                bl.visible = True
         except Exception:
             pass
         try:
-            set_timetable_busy_label(ch, bool(busy), screen=si)
+            set_timetable_busy_label(ch, True, screen=si, ext=ext)
         except Exception:
             pass
-    if not bool(busy):
-        try:
-            _remount_interactive_timetables(ext)
-        except Exception:
-            pass
+
+
+def _remember_foup_active_ep(ext: Any, screen: int, payload: Dict[str, Any]) -> str:
+    """엔진 payload 의 ``foup_proc_active_ep`` 를 화면별로 기억·조회."""
+    scr = int(screen)
+    ep = str(payload.get("foup_proc_active_ep", "") or "").strip().upper()
+    try:
+        by = getattr(ext, "_sim_foup_proc_active_ep_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_foup_proc_active_ep_by_screen = by
+        if ep:
+            by[str(scr)] = ep
+        elif "foup_proc_active_ep" in payload:
+            by[str(scr)] = ""
+    except Exception:
+        pass
+    if ep:
+        return ep
+    try:
+        by = getattr(ext, "_sim_foup_proc_active_ep_by_screen", None)
+        if isinstance(by, dict):
+            return str(by.get(str(scr), "") or "").strip().upper()
+    except Exception:
+        pass
+    return ""
 
 
 def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: int) -> None:
@@ -4698,6 +4816,7 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
     if not isinstance(occ, dict):
         occ = {}
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
+    active_ep = _remember_foup_active_ep(ext, scr, payload)
     try:
         apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
     except Exception:
@@ -4705,6 +4824,10 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
             apply_port_lot_prim_visibility(occ)
         except Exception:
             pass
+    try:
+        sync_port_lot_positions_after_visibility(ctx_nm, foup_proc_active_ep=active_ep)
+    except Exception:
+        pass
     try:
         by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
         if not isinstance(by_prev, dict):
@@ -4992,6 +5115,8 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
             ext,
             extra_steps=extra if extra else None,
             usd_context_name=ctx,
+            preserve_foup_offsets=True,
+            foup_proc_active_ep=_remember_foup_active_ep(ext, scr_i, {}),
         )
     except Exception:
         pass
@@ -5087,61 +5212,6 @@ def _on_timetable_row_seek(ext: Any, screen: int, row_index: int) -> None:
             pass
     except Exception as e:
         print(f"[SIM] timetable seek 실패: {e}", flush=True)
-
-
-def _remount_interactive_timetables(ext: Any) -> None:
-    """모니터 UI 재조립 후 저장된 메타로 클릭 가능 타임테이블을 다시 장착."""
-    meta_by = getattr(ext, "_sim_timetable_row_metas_by_screen", None)
-    if not isinstance(meta_by, dict) or not meta_by:
-        return
-    chans = getattr(ext, "_sim_monitor_channels", None)
-    if not isinstance(chans, list):
-        return
-    for ch in chans:
-        if not isinstance(ch, dict):
-            continue
-        try:
-            si = int(ch.get("screen", 0))
-        except Exception:
-            continue
-        if si <= 0:
-            continue
-        metas = list(meta_by.get(str(si), []) or [])
-        if not metas:
-            continue
-        header = f"[SIM] 타임테이블(프리런) — 화면{si}"
-        by_txt = getattr(ext, "_sim_timetable_display_by_screen", None)
-        if isinstance(by_txt, dict) and str(by_txt.get(str(si), "") or "").strip():
-            pass
-        else:
-            try:
-                tb = _build_timetable_label_text(header, metas)
-                if not isinstance(by_txt, dict):
-                    by_txt = {}
-                    ext._sim_timetable_display_by_screen = by_txt
-                by_txt[str(si)] = tb
-            except Exception:
-                pass
-
-        def _mk_seek_cb(screen_i: int = si) -> Callable[[int], None]:
-            return lambda row_i: _on_timetable_row_seek(ext, int(screen_i), int(row_i))
-
-        try:
-            mount_interactive_timetable(
-                ext,
-                ch,
-                screen=si,
-                header=header,
-                row_metas=metas,
-                on_row_clicked=_mk_seek_cb(),
-            )
-            ch["timetable_interactive"] = True
-        except Exception as e:
-            print(f"[SIM] 타임테이블 재장착 실패(화면{si}): {e}", flush=True)
-    try:
-        refresh_all_timetable_highlights(ext)
-    except Exception:
-        pass
 
 
 def _get_channel_history_text(ch: Dict[str, Any], ext: Any = None) -> str:
@@ -5363,7 +5433,12 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
     """프리런 완료 후 막대 사전 계산·인터랙티브 타임테이블 장착."""
     if not isinstance(results, dict) or not results:
         return
-    _set_sim_prerun_ui_busy(ext, False)
+    try:
+        ext._sim_prerun_ui_busy = False
+    except Exception:
+        pass
+    _set_sim_start_enabled(ext, True)
+    _clear_ep_prerun_busy_labels(ext)
     bar_by: Dict[str, EpBarPrecomputed] = {}
     meta_by: Dict[str, List[Any]] = {}
     for scr, res in results.items():
@@ -5379,10 +5454,11 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
         metas = build_timetable_row_metas(res)
         meta_by[str(si)] = metas
         header = f"[SIM] 타임테이블(프리런) — 화면{si}"
-        chans = getattr(ext, "_sim_monitor_channels", None)
-        ch = None
-        if isinstance(chans, list) and 0 < si <= len(chans):
-            ch = chans[si - 1]
+        ch = _resolve_timetable_channel_for_screen(ext, si)
+        if ch is None:
+            chans = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chans, list) and 0 < si <= len(chans):
+                ch = chans[si - 1]
         if isinstance(ch, dict):
             tb_map = _build_prerun_timetable_text({si: res}) or {}
             txt = str(tb_map.get(si) or "").strip()
@@ -5428,6 +5504,10 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
     try:
         ext._sim_ep_bar_prerun_by_screen = bar_by
         ext._sim_timetable_row_metas_by_screen = meta_by
+    except Exception:
+        pass
+    try:
+        refresh_all_timetable_highlights(ext)
     except Exception:
         pass
     _scroll_sim_monitor_to_timetable(ext)
@@ -6346,6 +6426,17 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                             ep_id = f"EP{n}"
                 except Exception:
                     pass
+            try:
+                lab_probe = str(payload.get("label", "") or "")
+                det_probe = str(payload.get("detail", "") or "")
+                if ep_id and ("공정" in lab_probe or "공정" in det_probe) and ("-Y" not in lab_probe):
+                    by_f = getattr(ext, "_sim_foup_proc_active_ep_by_screen", None)
+                    if not isinstance(by_f, dict):
+                        by_f = {}
+                        ext._sim_foup_proc_active_ep_by_screen = by_f
+                    by_f[str(si)] = str(ep_id)
+            except Exception:
+                pass
             labels = (chf or {}).get("foup_progress_labels") if chf else None
             lbl = None
             if isinstance(labels, dict) and ep_id:
@@ -7192,10 +7283,11 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             _plv.apply_port_lot_prim_material_for_context(ctx_nm, prim_path, mat_path)
         except Exception:
             pass
-        # 1-E) START 면 +Y320, END 면 -Y320 (1.0초 부드러운 이동)
-        #     - 좌표 단위(320)는 USD 스테이지 단위에 맞춰 사용자가 조정한 값
+        # 1-E) START 면 +Y lift, END 면 -Y lift (1.0초 부드러운 이동)
+        #     - Y lift 는 sim_control_defaults.foup_proc_y_lift (SSOT)
         #     - 같은 prim 의 진행 중 translate 가 있으면 먼저 정지(중첩 방지)
-        dy = 4 if seq_u0 == "FOUP_PROCESS_START" else -4
+        lift = float(foup_proc_y_lift())
+        dy = lift if seq_u0 == "FOUP_PROCESS_START" else -lift
         try:
             stop_prim_translate_animation(prim_path, usd_context_name=ctx_nm)
         except Exception:
@@ -7590,6 +7682,11 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception:
         n_ch = 1
 
+    try:
+        unlock_timetable_rows(ext)
+        _clear_sim_timetable_storage(ext)
+    except Exception:
+        pass
     on_sim_stop_clicked(ext)
     try:
         _restore_sim_prim_motion_to_initial(ext)
@@ -7620,9 +7717,14 @@ def on_sim_start_clicked(ext: Any) -> None:
     # 버튼 아래의 빈 공간이 점점 커지는 현상이 발생할 수 있어,
     # 시작 시점에 모니터 영역을 한 번 깨끗하게 재빌드한다.
     try:
+        ext._sim_timetable_allow_shell_rebuild = True
         _rebuild_all_sim_ui_panels(ext)
+        ext._sim_timetable_allow_shell_rebuild = False
     except Exception:
-        pass
+        try:
+            ext._sim_timetable_allow_shell_rebuild = False
+        except Exception:
+            pass
     # 실행 세대 토큰: stop/reset 후 남은 이벤트/애니 job을 무시하기 위해 사용
     try:
         ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
@@ -8297,7 +8399,7 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     # prerun 결과/플레이어 상태 초기화
     try:
-        ext._sim_timetable_display_by_screen = {}
+        _clear_sim_timetable_storage(ext)
     except Exception:
         pass
     try:
@@ -8492,10 +8594,13 @@ def _reset_sim_motion_before_json_run(
                 runner_obj.pause()
         except Exception:
             pass
+    active_ep = _remember_foup_active_ep(ext, scr_i, {})
     _restore_sim_prim_motion_to_initial(
         ext,
         extra_steps=extra,
         usd_context_name=ctx,
+        preserve_foup_offsets=True,
+        foup_proc_active_ep=active_ep,
     )
 
 
@@ -8504,10 +8609,13 @@ def _restore_sim_prim_motion_to_initial(
     *,
     extra_steps: Optional[List[Dict[str, Any]]] = None,
     usd_context_name: Optional[str] = None,
+    preserve_foup_offsets: bool = False,
+    foup_proc_active_ep: str = "",
 ) -> None:
     """시뮬 **시작·리셋** 및 **JSON 전환** 시 MOVE·ROTATE·FOUP·USD_TIMELINE prim 을 초기 자세로.
 
     포트 LOT 숨김/보임(visibility)은 건드리지 않는다 — transform·TBS_OFFSET·인스턴스 replay 만 복원.
+    ``preserve_foup_offsets=True`` 이면 FOUP 공정 플래그를 지우지 않고 EP plateau 를 유지한다.
     """
     paths_seen: set[str] = set()
     paths: List[str] = []
@@ -8568,7 +8676,7 @@ def _restore_sim_prim_motion_to_initial(
         except Exception:
             pass
         try:
-            stop_all_translate_animations(preserve_foup_port_lot_prims=False)
+            stop_all_translate_animations(preserve_foup_port_lot_prims=bool(preserve_foup_offsets))
             stop_all_rotate_animations()
             stop_all_curve_animations()
         except Exception:
@@ -8576,9 +8684,13 @@ def _restore_sim_prim_motion_to_initial(
         try:
             from . import port_lot_visibility as _plv
 
-            _plv.clear_foup_in_progress()
-            _plv.clear_foup_lifted()
-            _plv.restore_port_lot_prims_to_authoring()
+            if not preserve_foup_offsets:
+                _plv.clear_foup_in_progress()
+                _plv.clear_foup_lifted()
+            _plv.restore_port_lot_prims_to_authoring(
+                usd_context_name=usd_context_name,
+                foup_proc_active_ep=str(foup_proc_active_ep or ""),
+            )
         except Exception:
             pass
         try:
@@ -8973,6 +9085,11 @@ def on_sim_reset_clicked(ext: Any) -> None:
     - 포트 박스: 각 포트를 '-'로 표기하고 스타일을 초기화
     - EP 타임라인: t=0.0 초기 렌더 + 관련 dict를 완전 초기화
     """
+    try:
+        unlock_timetable_rows(ext)
+        _clear_sim_timetable_storage(ext)
+    except Exception:
+        pass
     on_sim_stop_clicked(ext)
     try:
         _restore_sim_prim_motion_to_initial(ext)
@@ -9150,6 +9267,13 @@ def on_sim_reset_clicked(ext: Any) -> None:
     # 최근 요약/대기 토큰 초기화
     try:
         ext._sim_recent_story_blocks = []
+    except Exception:
+        pass
+    try:
+        _reset_all_channel_timetables_to_idle(
+            ext,
+            message="타임테이블 초기화됨 — Start 후 프리런 결과 표시",
+        )
     except Exception:
         pass
     # (요청으로 제거) 점 표시 기능 비활성화

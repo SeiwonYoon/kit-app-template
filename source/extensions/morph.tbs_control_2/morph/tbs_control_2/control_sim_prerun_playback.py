@@ -61,6 +61,67 @@ def _s_val(v: Any) -> str:
         return ""
 
 
+def _format_timetable_proc_line_ko(proc_sec: float, anim_sec: float, *, process_time_priority: bool) -> str:
+    p = max(0.0, float(proc_sec))
+    a = max(0.0, float(anim_sec))
+    if process_time_priority:
+        return f"공정시간 우선: {p:.1f}s (공정 {p:.1f}s)"
+    if a > 1e-9:
+        return f"공정시간: {max(p, a):.1f}s (max(공정 {p:.1f}s, 애니 {a:.1f}s))"
+    return f"공정시간: {p:.1f}s"
+
+
+def _format_timetable_anim_line_ko(anim: str, anim_sec: float) -> str:
+    name = _s_val(anim)
+    if not name:
+        return "애니메이션: 없음"
+    bn = name.replace("\\", "/").rsplit("/", 1)[-1]
+    a = max(0.0, float(anim_sec))
+    if a > 1e-9:
+        return f"애니메이션: {bn} (추정 {a:.1f}s)"
+    return f"애니메이션: {bn}"
+
+
+def format_timetable_display_line(row: Dict[str, Any]) -> str:
+    """
+    타임테이블 UI 한 줄.
+
+    - 앞부분: ``t``·``screen``·``event`` 등 핵심 필드만 담은 짧은 JSON (kind/detail/proc_sec/anim_sec 키 제외)
+    - 뒷부분: 엔진 로그와 동일 톤의 ``공정시간: …`` · ``애니메이션: …`` 한글 문구
+    """
+    kind = _s_val(row.get("kind")).lower()
+    proc_sec = _f_val(row.get("proc_sec", 0.0), 0.0)
+    anim_sec = _f_val(row.get("anim_sec", 0.0), 0.0)
+    anim_file = _s_val(row.get("anim"))
+    ptp = _s_val(row.get("process_time_priority")).lower() in ("1", "true", "on", "yes")
+
+    omit_keys = frozenset({"kind", "detail", "proc_sec", "anim_sec"})
+    disp: Dict[str, Any] = {}
+    for k, v in row.items():
+        if k in omit_keys:
+            continue
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        if k == "anim":
+            disp[k] = anim_file.replace("\\", "/").rsplit("/", 1)[-1] if anim_file else ""
+            continue
+        disp[k] = v
+
+    parts: List[str] = []
+    try:
+        parts.append(json.dumps(disp, ensure_ascii=False, separators=(",", ":")))
+    except Exception:
+        parts.append(str(disp))
+
+    if kind == "step":
+        parts.append(_format_timetable_proc_line_ko(proc_sec, anim_sec, process_time_priority=ptp))
+        parts.append(_format_timetable_anim_line_ko(anim_file, anim_sec))
+
+    return "  ".join(p for p in parts if str(p).strip())
+
+
 def _push_bar_seg(segs: List[Dict[str, Any]], empty: bool, dur: float) -> None:
     if dur <= 1e-9:
         return
@@ -172,7 +233,6 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
     각 행은 ``through_item_index`` 로 Fast-apply 범위를 지정한다.
     """
     si = int(res.screen)
-    total = max(0.0, float(res.final_sim_time))
     items = res.items
     item_by_key: Dict[Tuple[float, str, str], int] = {}
     for idx, it in enumerate(items):
@@ -251,18 +311,13 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
         through = int(item_by_key.get(key, -1))
         if through < 0:
             through = _find_through_item_index(items, t_val, kind, ev, ri, rows_data)
-        prefix = f"[{t_val:.1f} / {total:.1f}] " if total > 0.0 else f"[{t_val:.1f}] "
-        try:
-            js = json.dumps(r, ensure_ascii=False)
-        except Exception:
-            js = str(r)
         metas.append(
             TimetableRowMeta(
                 row_index=int(ri),
                 t=t_val,
                 kind=kind,
                 json_obj=dict(r),
-                display_line=prefix + js,
+                display_line=format_timetable_display_line(r),
                 through_item_index=int(through),
             )
         )

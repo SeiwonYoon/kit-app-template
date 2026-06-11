@@ -24,6 +24,7 @@ import omni.usd as ou
 from pxr import Gf, Sdf, UsdGeom, UsdShade
 
 from .rotate_animation import stop_prim_rotate_animation
+from .sim_control_defaults import SIM_CONTROL_DEFAULTS
 from .translate_animation import stop_prim_translate_animation, stop_prim_translate_animation_all_contexts
 
 _CONFIG_FILENAME = "port_lot_prim_paths.json"
@@ -41,11 +42,11 @@ _PORT_LOT_AUTHORING: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
 _FOUP_IN_PROGRESS_PATHS: Set[str] = set()
 
 # FOUP plateau(=+Y 1초 애니가 끝난 시점 ~ -Y 시작 직전) prim 경로 집합.
-# - 의미: prim 이 baseline+(0, 320, 0) 자리에 머물러야 하는 구간.
+# - 의미: prim 이 baseline+(0, foup_proc_y_lift, 0) 자리에 머물러야 하는 구간.
 # - 사용처: "포트 초기화" 가 발생하는 두 경로
 #   (1) restore_port_lot_prims_to_authoring()
 #   (2) SequenceRunner._restore_baseline()
-#   양쪽 모두 이 집합에 들어있는 prim 은 baseline 이 아니라 baseline+(0,320,0) 로 set 한다.
+#   양쪽 모두 이 집합에 들어있는 prim 은 baseline 이 아니라 baseline+Y lift 로 set 한다.
 # - 마킹/해제는 control_window 의 FOUP 분기에서 한다.
 #   START 의 +Y 1초 애니 ``on_completed`` 콜백에서 add,
 #   END 이벤트 진입 시 즉시 discard(이후 -Y 복귀 애니 진행은 _FOUP_IN_PROGRESS_PATHS 의 skip 로 보호).
@@ -185,7 +186,7 @@ def is_foup_in_progress(prim_path: str) -> bool:
 
 def mark_foup_lifted(prim_path: str, lifted: bool) -> None:
     """
-    FOUP plateau 표시(+Y 320 자리에 머물러야 하는 상태) 등록/해제.
+    FOUP plateau 표시(+Y lift 자리에 머물러야 하는 상태) 등록/해제.
     - +Y 1초 애니가 끝났을 때 True
     - FOUP_PROCESS_END 이벤트 진입 즉시 False(이후 -Y 복귀 애니는 _FOUP_IN_PROGRESS_PATHS 의 skip 로 보호)
     """
@@ -204,53 +205,87 @@ def clear_foup_lifted() -> None:
 
 
 def is_foup_lifted(prim_path: str) -> bool:
-    """해당 path 가 FOUP plateau(+Y 320 자리) 상태인지 반환."""
+    """해당 path 가 FOUP plateau(+Y lift 자리) 상태인지 반환."""
     return str(prim_path or "").strip() in _FOUP_LIFTED_PATHS
 
 
-def get_foup_lifted_translate(prim_path: str) -> Optional[Gf.Vec3f]:
+def foup_proc_y_lift() -> float:
+    """FOUP 공정 Y 오프셋 — ``sim_control_defaults.SimControlDefaults.foup_proc_y_lift`` SSOT."""
+    try:
+        return float(SIM_CONTROL_DEFAULTS.foup_proc_y_lift)
+    except Exception:
+        return 4.0
+
+
+def prim_path_for_port(port_id: str) -> str:
+    """포트 ID → ``port_lot_prim_paths.json`` 매핑 prim 경로."""
+    pid = str(port_id or "").strip().upper()
+    if not pid:
+        return ""
+    return str((load_port_lot_prim_paths() or {}).get(pid, "") or "").strip()
+
+
+def _port_id_for_prim_path(prim_path: str) -> str:
+    p = str(prim_path or "").strip()
+    if not p:
+        return ""
+    for port, mapped in (load_port_lot_prim_paths() or {}).items():
+        if str(mapped or "").strip() == p:
+            return str(port).strip().upper()
+    return ""
+
+
+def get_foup_restore_translate(
+    prim_path: str,
+    *,
+    foup_proc_active_ep: str = "",
+) -> Optional[Gf.Vec3f]:
     """
-    "포트 초기화 시점에 공정중인 포트만 baseline+320 자리로 set" 규칙의 단일 진입점.
+    포트 위치 복원 시 공정 중 EP 는 baseline+Y lift, 그 외는 ``None``(통상 baseline 복원).
 
-    동작:
-    - prim_path 가 plateau(_FOUP_LIFTED_PATHS) 상태이고 baseline 이 캐시되어 있으면
-      ``baseline + (0, FOUP_PROC_Y_LIFT, 0)`` 를 돌려준다.
-    - 위 조건이 아니면 ``None`` (호출자는 통상 처리를 진행).
-
-    사용처(두 "포트 초기화" 경로):
-    - ``restore_port_lot_prims_to_authoring()``
-    - ``sequence_engine.SequenceRunner._restore_baseline()``
+    - +Y/-Y 애니 진행 중(lifted 아님): ``None`` — 애니가 끝날 때까지 건드리지 않음.
+    - plateau 플래그 또는 엔진 ``foup_proc_active_ep`` 와 매칭되는 EP prim: offset 위치 반환.
     """
     p = str(prim_path or "").strip()
     if not p:
         return None
-    if p not in _FOUP_LIFTED_PATHS:
+    if p in _FOUP_IN_PROGRESS_PATHS and p not in _FOUP_LIFTED_PATHS:
+        return None
+    active_ep = str(foup_proc_active_ep or "").strip().upper()
+    port_id = _port_id_for_prim_path(p)
+    should_offset = p in _FOUP_LIFTED_PATHS
+    if not should_offset and active_ep and port_id == active_ep:
+        should_offset = True
+        mark_foup_lifted(p, True)
+    if not should_offset:
         return None
     rec = _PORT_LOT_AUTHORING.get(p)
     if rec is None:
         return None
     base_t = rec[0]
+    lift = float(foup_proc_y_lift())
     try:
         return Gf.Vec3f(
             float(base_t[0]),
-            float(base_t[1]) + float(FOUP_PROC_Y_LIFT),
+            float(base_t[1]) + lift,
             float(base_t[2]),
         )
     except Exception:
         return None
 
 
-# FOUP plateau 복원 시 Y 오프셋(스테이지 단위). handle_sim_event_for_animation FOUP 분기와 동일.
-FOUP_PROC_Y_LIFT: float = 320.0
+def get_foup_lifted_translate(prim_path: str) -> Optional[Gf.Vec3f]:
+    """레거시 호출부 — plateau 플래그만 보고 offset 위치를 반환."""
+    return get_foup_restore_translate(prim_path, foup_proc_active_ep="")
 
 
-def ensure_port_lot_authoring_captured() -> None:
+def ensure_port_lot_authoring_captured(stage: Any = None) -> None:
     """
     매핑 prim마다 최초 1회 현재 transform을 authoring으로 저장한다.
     (이후 애니로 움직인 뒤에는 restore만으로 이 자세로 되돌린다.)
 
     중요(잘못된 baseline 캡처 방지):
-    - FOUP 공정이 진행 중인 prim 은 `+Y 320` 이동된 상태일 수 있다.
+    - FOUP 공정이 진행 중인 prim 은 +Y lift 이동된 상태일 수 있다.
       이 시점에 baseline 으로 잡히면 이후 plateau 복원 시 잘못된 기준으로 점프할 수 있다.
     - 따라서 `_FOUP_IN_PROGRESS_PATHS` 에 들어있는 prim 은 이번 캡처 호출에서는 건너뛴다.
       (시뮬 시작 직전에 강제 캡처를 미리 해두면, 공정 진행 중에는 이 분기를 거치지 않는다.)
@@ -259,14 +294,15 @@ def ensure_port_lot_authoring_captured() -> None:
         from .sequence_engine import _get_rotate_xyz, _get_translate, _get_stage
     except Exception:
         return
-    stage = _get_stage()
+    if stage is None:
+        stage = _get_stage()
     if not stage:
         return
     for path in _iter_unique_mapped_prim_paths():
         if path in _PORT_LOT_AUTHORING:
             continue
         if path in _FOUP_IN_PROGRESS_PATHS:
-            # 공정 중인 prim 의 현재 위치는 baseline 이 아니다(잘못 잡으면 +320 누적 위험).
+            # 공정 중인 prim 의 현재 위치는 baseline 이 아니다(잘못 잡으면 lift 누적 위험).
             continue
         try:
             prim = stage.GetPrimAtPath(path)
@@ -277,28 +313,31 @@ def ensure_port_lot_authoring_captured() -> None:
             continue
 
 
-def restore_port_lot_prims_to_authoring() -> None:
+def restore_port_lot_prims_to_authoring(
+    *,
+    usd_context_name: Optional[str] = None,
+    foup_proc_active_ep: str = "",
+) -> None:
     """
     포트 매핑 prim의 위치/회전을 authoring 기준으로 복원한다.
     보임/숨김은 건드리지 않는다(apply_port_lot_prim_visibility 타이밍 유지).
-    애니메이션 시작 직전(SequenceRunner.run 직전)에 호출하는 것을 전제로 한다.
 
-    공정 중 prim 처리 규칙(요청 사양 그대로):
-    - plateau(_FOUP_LIFTED_PATHS): baseline + (0, 320, 0) 자리로 강제 set
-      (진행 중인 translate 애니는 끊는다 — 어차피 위치는 명확히 +320 으로 고정).
-    - +Y/-Y 진행 중(_FOUP_IN_PROGRESS_PATHS 이고 lifted 아님): 그대로 둔다(애니가 도착까지 진행).
-    - 그 외: 기존대로 baseline 복원.
+    공정 중 prim 처리 규칙:
+    - plateau / ``foup_proc_active_ep`` 매칭 EP: baseline + (0, foup_proc_y_lift, 0)
+    - +Y/-Y 애니 진행 중(lifted 아님): 그대로 둔다.
+    - 그 외: baseline 복원.
     """
     try:
-        from .sequence_engine import _get_rotate_xyz, _get_translate, _get_stage, _set_rotate_xyz, _set_translate
+        from .sequence_engine import _get_rotate_xyz, _get_translate, _set_rotate_xyz, _set_translate
     except Exception:
         return
-    ensure_port_lot_authoring_captured()
-    stage = _get_stage()
+    stage = _get_stage_for_context(usd_context_name)
+    ensure_port_lot_authoring_captured(stage)
     if not stage:
         return
+    active_ep = str(foup_proc_active_ep or "").strip().upper()
     for path in _iter_unique_mapped_prim_paths():
-        lifted_t = get_foup_lifted_translate(path)
+        lifted_t = get_foup_restore_translate(path, foup_proc_active_ep=active_ep)
         if lifted_t is not None:
             try:
                 stop_prim_translate_animation_all_contexts(path)
@@ -334,6 +373,21 @@ def restore_port_lot_prims_to_authoring() -> None:
             _set_rotate_xyz(prim, r)
         except Exception:
             continue
+
+
+def sync_port_lot_positions_after_visibility(
+    usd_context_name: Optional[str],
+    *,
+    foup_proc_active_ep: str = "",
+) -> None:
+    """
+    다음 이벤트의 ``ports_occupancy`` 가시성 갱신 직후 호출.
+    JSON 종료·이벤트 전환 시 포트 LOT 위치를 맞추되, 공정 중 EP 는 +Y lift 를 유지한다.
+    """
+    restore_port_lot_prims_to_authoring(
+        usd_context_name=usd_context_name,
+        foup_proc_active_ep=foup_proc_active_ep,
+    )
 
 
 def _normalized_ports_occupancy(ports_occupancy: Any) -> Dict[str, str]:

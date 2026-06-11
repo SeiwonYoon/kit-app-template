@@ -1472,7 +1472,7 @@ class SequenceRunner:
         """baseline으로 transform을 되돌림. (실행을 항상 초기값부터 재현하기 위함)
 
         공정 중 prim 처리 규칙(port_lot_visibility 와 동일):
-        - plateau(_FOUP_LIFTED_PATHS): baseline 이 아니라 baseline + (0, 320, 0) 으로 set.
+        - plateau(_FOUP_LIFTED_PATHS): baseline 이 아니라 baseline + (0, foup_proc_y_lift, 0) 으로 set.
         - +Y / -Y 애니 진행 중(_FOUP_IN_PROGRESS_PATHS 이고 lifted 아님): 건드리지 않는다.
         """
         stage = self._stage()
