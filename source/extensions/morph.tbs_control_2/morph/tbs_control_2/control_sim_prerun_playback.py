@@ -66,8 +66,6 @@ def _format_timetable_proc_line_ko(proc_sec: float, anim_sec: float, *, process_
     a = max(0.0, float(anim_sec))
     if process_time_priority:
         return f"공정시간 우선: {p:.1f}s (공정 {p:.1f}s)"
-    if a > 1e-9:
-        return f"공정시간: {max(p, a):.1f}s (max(공정 {p:.1f}s, 애니 {a:.1f}s))"
     return f"공정시간: {p:.1f}s"
 
 
@@ -122,15 +120,509 @@ def format_timetable_display_line(row: Dict[str, Any]) -> str:
     return "  ".join(p for p in parts if str(p).strip())
 
 
-def _push_bar_seg(segs: List[Dict[str, Any]], empty: bool, dur: float) -> None:
+def _push_bar_seg(
+    segs: List[Dict[str, Any]],
+    empty: bool,
+    dur: float,
+    *,
+    cap_segments: Optional[int] = 220,
+) -> None:
     if dur <= 1e-9:
         return
     if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(empty):
         segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dur)
     else:
         segs.append({"empty": bool(empty), "dur": float(dur)})
-    if len(segs) > 220:
-        del segs[:-200]
+    if cap_segments is not None and len(segs) > int(cap_segments):
+        del segs[: -int(cap_segments)]
+
+
+def merge_bar_row_segments(segs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """인접 동일 상태 세그먼트 병합(렌더 갭·줄무늬 완화)."""
+    out: List[Dict[str, Any]] = []
+    for s in segs or []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            dur = float(s.get("dur", 0.0))
+        except Exception:
+            dur = 0.0
+        if dur <= 1e-9:
+            continue
+        empty = bool(s.get("empty", False))
+        if out and bool(out[-1].get("empty")) == empty:
+            out[-1]["dur"] = float(out[-1]["dur"]) + dur
+        else:
+            out.append({"empty": empty, "dur": dur})
+    return out
+
+
+_EP_BAR_KEYS = ("EP1", "EP2", "EP3")
+
+
+def _blank_ep_bar_occ(ep_list: Optional[List[str]] = None) -> Dict[str, str]:
+    keys = list(ep_list) if ep_list else list(_EP_BAR_KEYS)
+    return {str(ep).strip().upper(): "" for ep in keys if str(ep).strip().upper().startswith("EP")}
+
+
+def mask_ep_ports_for_bar(occ: Dict[str, Any]) -> Dict[str, Any]:
+    """EP 막대: 포트 패널 갱신 전 initial_full_ports 등 EP 점유를 숨긴다."""
+    out = dict(occ or {})
+    for ep in _EP_BAR_KEYS:
+        out[ep] = ""
+    return out
+
+
+_ANIM_PORT_UPDATE_SEQS = frozenset({
+    "ARRIVED",
+    "MOVE_TRANSFERING",
+    "MOVE_REQ",
+    "MOVE",
+    "REMOVED",
+})
+
+
+def _normalize_anim_event_seq(ev: str) -> str:
+    """짧은 이름 또는 EAPEIS 정식명 → 짧은 이름."""
+    e = str(ev or "").strip().upper()
+    if not e:
+        return ""
+    if e in _ANIM_PORT_UPDATE_SEQS:
+        return e
+    try:
+        from . import xml_generator
+
+        mapping = {
+            str(xml_generator.SEQ_ARRIVED).strip().upper(): "ARRIVED",
+            str(xml_generator.SEQ_MOVE_TRANSFERING).strip().upper(): "MOVE_TRANSFERING",
+            str(xml_generator.SEQ_MOVE_REQ).strip().upper(): "MOVE_REQ",
+            str(xml_generator.SEQ_MOVE).strip().upper(): "MOVE",
+            str(xml_generator.SEQ_REMOVED).strip().upper(): "REMOVED",
+        }
+        mapped = mapping.get(e)
+        if mapped:
+            return mapped
+    except Exception:
+        pass
+    return e
+
+
+def _canonical_sim_port_key(port: str) -> str:
+    o = str(port or "").strip().upper()
+    if not o:
+        return ""
+    if o in ("IN/OUT", "INOUT"):
+        return "INOUT"
+    if o.startswith("BP"):
+        try:
+            n = int(o.replace("BP", ""))
+            if 1 <= n <= 4:
+                return f"BP{n}"
+        except Exception:
+            pass
+    if o.startswith("EP"):
+        try:
+            n = int(o.replace("EP", ""))
+            if 1 <= n <= 3:
+                return f"EP{n}"
+        except Exception:
+            pass
+    return o
+
+
+def _post_anim_src_from_progress(p: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "event": _normalize_anim_event_seq(_s_val(p.get("event_seq") or p.get("sequence_name"))),
+        "lot_id": _s_val(p.get("lot_id")),
+        "from_port_id": _s_val(p.get("from_port_id")),
+        "to_port_id": _s_val(p.get("to_port_id")),
+        "port_id": _s_val(p.get("port_id") or p.get("event_port_id")),
+    }
+
+
+def predict_ports_occupancy_after_anim(occ_base: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    """JSON(이동·안착·회수) 종료 직후 기대되는 ports_occupancy."""
+    occ_pred = dict(occ_base or {})
+    ev = _normalize_anim_event_seq(_s_val(src.get("event") or src.get("event_seq") or src.get("seq")))
+    lot_id = _s_val(src.get("lot_id"))
+    fr = _canonical_sim_port_key(_s_val(src.get("from_port_id")))
+    to = _canonical_sim_port_key(_s_val(src.get("to_port_id")))
+    port = _canonical_sim_port_key(_s_val(src.get("port_id") or src.get("event_port_id")))
+    if ev in ("MOVE_TRANSFERING", "MOVE_REQ", "MOVE"):
+        if fr:
+            occ_pred[fr] = ""
+        if to and lot_id:
+            occ_pred[to] = lot_id
+    elif ev == "ARRIVED":
+        dest = port or to
+        if dest and lot_id:
+            occ_pred[dest] = lot_id
+    elif ev == "REMOVED":
+        if port:
+            occ_pred[port] = ""
+    return occ_pred
+
+
+def anim_json_end_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
+    """애니 포트 이벤트 RUNNING progress 의 JSON 종료 sim 시각."""
+    if not isinstance(progress_p, dict):
+        return None
+    if _s_val(progress_p.get("status")).upper() != "RUNNING":
+        return None
+    ev = _normalize_anim_event_seq(_s_val(progress_p.get("event_seq") or progress_p.get("sequence_name")))
+    if ev not in _ANIM_PORT_UPDATE_SEQS:
+        return None
+    t0 = _f_val(progress_p.get("event_start_sim_time"), -1.0)
+    if t0 < 0.0:
+        return None
+    return _json_end_sim_time_from_progress(progress_p, fallback_t=float(t0))
+
+
+def effective_ports_occupancy_at_t(
+    occ_base: Dict[str, Any],
+    progress_p: Optional[Dict[str, Any]],
+    at_t: float,
+) -> Dict[str, Any]:
+    """
+    EP 막대용 ports_occupancy.
+
+    엔진은 공정 종료 후에만 occ 를 바꾸므로, JSON 종료(anim_sec) 이후 구간은 post-anim 예측을 쓴다.
+    """
+    occ = dict(occ_base or {})
+    if not isinstance(progress_p, dict):
+        return occ
+    anim_end = anim_json_end_sim_time(progress_p)
+    if anim_end is None:
+        return occ
+    if float(at_t) + 1e-9 < float(anim_end):
+        return occ
+    return predict_ports_occupancy_after_anim(occ, _post_anim_src_from_progress(progress_p))
+
+
+def interval_occ_parts(
+    occ_engine: Dict[str, Any],
+    progress_p: Dict[str, Any],
+    t0: float,
+    t1: float,
+) -> List[Tuple[float, Dict[str, Any]]]:
+    """[t0,t1] 구간을 JSON 종료 시각 기준으로 나눠 (dt, occ) 목록을 반환."""
+    dt_total = max(0.0, float(t1) - float(t0))
+    if dt_total <= 1e-9:
+        return []
+    if _s_val(progress_p.get("status")).upper() == "DONE":
+        po = progress_p.get("ports_occupancy")
+        if isinstance(po, dict) and po:
+            return [(dt_total, {str(k): str(v or "") for k, v in po.items()})]
+    occ0 = dict(occ_engine or {})
+    anim_end = anim_json_end_sim_time(progress_p)
+    if anim_end is None or anim_end <= float(t0) + 1e-9 or anim_end >= float(t1) - 1e-9:
+        return [(dt_total, effective_ports_occupancy_at_t(occ0, progress_p, t1))]
+    src = _post_anim_src_from_progress(progress_p)
+    occ_after = predict_ports_occupancy_after_anim(dict(occ0), src)
+    return [
+        (float(anim_end) - float(t0), dict(occ0)),
+        (float(t1) - float(anim_end), occ_after),
+    ]
+
+
+def _progress_event_affects_ep(p: Dict[str, Any]) -> bool:
+    ev = _normalize_anim_event_seq(_s_val(p.get("event_seq") or p.get("sequence_name")))
+    if ev not in _ANIM_PORT_UPDATE_SEQS:
+        return False
+    src = _post_anim_src_from_progress(p)
+    for key in ("from_port_id", "to_port_id", "port_id"):
+        port = _canonical_sim_port_key(_s_val(src.get(key)))
+        if port.startswith("EP"):
+            return True
+    return False
+
+
+def bar_display_occ_for_ep(
+    bar_ep_occ: Dict[str, str],
+    ep_list: List[str],
+    occ_eff: Dict[str, Any],
+) -> Dict[str, Any]:
+    """EP 막대 표시용: 비-EP 이벤트 구간에서도 EP 점유를 유지한다."""
+    out = dict(occ_eff or {})
+    for ep in ep_list:
+        out[ep] = str(bar_ep_occ.get(ep, "") or "")
+    return out
+
+
+def commit_bar_ep_occ_from_interval(
+    bar_ep_occ: Dict[str, str],
+    ep_list: List[str],
+    progress_p: Dict[str, Any],
+    t_end: float,
+    occ_eff: Dict[str, Any],
+) -> None:
+    """EP 관련 이벤트(JSON 종료 또는 DONE)에서만 bar_ep_occ 를 갱신한다."""
+    if not _progress_event_affects_ep(progress_p):
+        return
+    st = _s_val(progress_p.get("status")).upper()
+    if st == "DONE":
+        for ep in ep_list:
+            bar_ep_occ[ep] = str(occ_eff.get(ep, "") or "")
+        return
+    anim_end = anim_json_end_sim_time(progress_p)
+    if anim_end is None or float(t_end) + 1e-9 < float(anim_end):
+        return
+    ev = _normalize_anim_event_seq(_s_val(progress_p.get("event_seq") or progress_p.get("sequence_name")))
+    src = _post_anim_src_from_progress(progress_p)
+    if ev == "REMOVED":
+        port = _canonical_sim_port_key(_s_val(src.get("port_id")))
+        if port in bar_ep_occ:
+            bar_ep_occ[port] = ""
+        return
+    for ep in ep_list:
+        v = str(occ_eff.get(ep, "") or "")
+        if v:
+            bar_ep_occ[ep] = v
+
+
+def allocate_bar_segment_pixels(
+    segs: List[Dict[str, Any]],
+    *,
+    total_est: float,
+    bar_w: int,
+    t_cover: Optional[float] = None,
+) -> List[Tuple[int, bool]]:
+    """
+    세그먼트 duration → 픽셀 폭(합이 정확히 target_px).
+
+    세그먼트별 round() 시 생기는 1px 틈·줄무늬를 방지한다.
+    """
+    merged = merge_bar_row_segments(segs)
+    if total_est <= 1e-9 or bar_w <= 0 or not merged:
+        return []
+    dur_sum = sum(float(s.get("dur", 0.0)) for s in merged)
+    if dur_sum <= 1e-9:
+        return []
+    if t_cover is None:
+        t_cover = dur_sum
+    target_px = int(round((float(t_cover) / float(total_est)) * float(bar_w)))
+    target_px = max(0, min(int(bar_w), target_px))
+    if target_px <= 0:
+        return []
+    weights = [float(s.get("dur", 0.0)) for s in merged]
+    wsum = sum(weights)
+    if wsum <= 1e-9:
+        return []
+    raw = [(target_px * w / wsum) for w in weights]
+    widths = [int(f) for f in raw]
+    slack = target_px - sum(widths)
+    if slack > 0:
+        order = sorted(range(len(raw)), key=lambda i: (raw[i] - widths[i]), reverse=True)
+        for i in range(slack):
+            widths[order[i % len(order)]] += 1
+    out: List[Tuple[int, bool]] = []
+    for i, s in enumerate(merged):
+        if widths[i] > 0:
+            out.append((int(widths[i]), bool(s.get("empty", False))))
+    return out
+
+
+def _resolve_ep_list_for_bar(
+    eps: List[str],
+    p: Dict[str, Any],
+    ep_occ: Dict[str, Any],
+) -> List[str]:
+    ep_list = list(eps)
+    if not ep_list:
+        ep_ports_raw = p.get("ep_ports", [])
+        if isinstance(ep_ports_raw, list) and ep_ports_raw:
+            ep_list = [str(x).strip().upper() for x in ep_ports_raw if str(x).strip().upper().startswith("EP")]
+    if not ep_list:
+        ep_list = sorted(
+            [str(k).strip().upper() for k in ep_occ.keys() if str(k).strip().upper().startswith("EP")],
+            key=lambda x: int(str(x).replace("EP", "") or "0"),
+        )
+    if not ep_list:
+        ep_list = ["EP1", "EP2"]
+    return ep_list
+
+
+def _push_bar_rows_from_occ(
+    rows: Dict[str, List[Dict[str, Any]]],
+    ep_list: List[str],
+    occ: Dict[str, Any],
+    dt: float,
+    *,
+    cap_segments: Optional[int] = 220,
+) -> None:
+    if dt <= 1e-9:
+        return
+    all_empty = True
+    for ep in ep_list:
+        if ep not in rows:
+            rows[ep] = []
+        empty = not bool(str(occ.get(ep, "") or "").strip())
+        if not empty:
+            all_empty = False
+        _push_bar_seg(rows[ep], empty=empty, dur=dt, cap_segments=cap_segments)
+    if "ALL_EP" not in rows:
+        rows["ALL_EP"] = []
+    _push_bar_seg(rows["ALL_EP"], empty=all_empty, dur=dt, cap_segments=cap_segments)
+
+
+def _json_end_sim_time_from_progress(p: Dict[str, Any], *, fallback_t: float = 0.0) -> Optional[float]:
+    """step progress 기준 JSON 종료 sim 시각."""
+    try:
+        t0 = float(str(p.get("event_start_sim_time", "")).strip() or "0.0")
+    except Exception:
+        t0 = float(fallback_t)
+    asec = _f_val(p.get("anim_sec", 0.0), 0.0)
+    psec = _f_val(p.get("proc_sec", 0.0), 0.0)
+    if asec <= 1e-9 and psec <= 1e-9:
+        return None
+    if asec <= 1e-9:
+        return float(t0)
+    eff_anim = min(max(0.0, asec), max(0.0, psec)) if psec > 1e-9 else max(0.0, asec)
+    return float(t0) + float(eff_anim)
+
+
+def _initial_bar_ep_at_t0(
+    sorted_items: Tuple[SimTimelineItem, ...],
+    eps: List[str],
+) -> Dict[str, str]:
+    """
+    막대 초기 EP 점유 — ``initial_full_ports`` 만 반영.
+
+    엔진 ``ports_occupancy`` 는 JSON 종료 전에도 EP LOT 이 들어 있을 수 있어
+    막대 초기값으로 쓰면 안 된다. t≈0 스냅샷에서 애니 이벤트 없이 차 있는 EP 만 초록 시작.
+    """
+    out = {ep: "" for ep in eps}
+    for it in sorted_items or ():
+        try:
+            t = float(getattr(it, "t", 0.0) or 0.0)
+        except Exception:
+            t = 0.0
+        if t > 1e-3:
+            break
+        if str(it.kind or "").strip().lower() != "progress":
+            continue
+        try:
+            p = dict(it.payload) if isinstance(it.payload, dict) else {}
+        except Exception:
+            p = {}
+        if _s_val(p.get("status")).upper() != "RUNNING":
+            continue
+        if abs(_f_val(p.get("elapsed"), 0.0)) > 1e-9:
+            continue
+        if _progress_event_affects_ep(p):
+            return out
+    for it in sorted_items or ():
+        try:
+            t = float(getattr(it, "t", 0.0) or 0.0)
+        except Exception:
+            t = 0.0
+        if t > 1e-3:
+            break
+        try:
+            p = dict(it.payload) if isinstance(it.payload, dict) else {}
+        except Exception:
+            p = {}
+        po = p.get("ports_occupancy")
+        if not isinstance(po, dict) or not po:
+            continue
+        for ep in eps:
+            v = str(po.get(ep, "") or "").strip()
+            if v:
+                out[ep] = v
+        break
+    return out
+
+
+def build_ep_bar_from_timeline_replay(
+    items: Tuple[SimTimelineItem, ...],
+    *,
+    final_sim_time: float,
+    ep_ports: Optional[List[str]] = None,
+) -> EpBarPrecomputed:
+    """
+    프리런 타임라인을 state-only 로 재생하며 EP 막대 rows 를 만든다.
+
+    라이브 재생과 동일하게 **JSON 종료(post-anim) 시점**에만 EP 점유를 막대에 반영한다.
+    엔진 ``ports_occupancy`` 스냅샷을 막대에 직접 쓰지 않는다.
+    """
+    total_est = max(0.0, float(final_sim_time))
+    rows: Dict[str, List[Dict[str, Any]]] = {}
+    kind_prio = {"log": 0, "event": 1, "progress": 2}
+    try:
+        sorted_items = tuple(
+            sorted(
+                (it for it in (items or ()) if isinstance(it, SimTimelineItem)),
+                key=lambda it: (float(getattr(it, "t", 0.0) or 0.0), int(kind_prio.get(str(it.kind), 9))),
+            )
+        )
+    except Exception:
+        sorted_items = ()
+
+    prog_items = [it for it in sorted_items if str(it.kind).lower() == "progress" and isinstance(it.payload, dict)]
+
+    eps: List[str] = []
+    if isinstance(ep_ports, list) and ep_ports:
+        eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
+    if not eps:
+        for it in prog_items:
+            p0 = dict(it.payload)
+            ep_ports_raw = p0.get("ep_ports", [])
+            if isinstance(ep_ports_raw, list) and ep_ports_raw:
+                eps = [str(x).strip().upper() for x in ep_ports_raw if str(x).strip().upper().startswith("EP")]
+                break
+    if not eps:
+        eps = ["EP1", "EP2"]
+
+    panel_occ: Dict[str, str] = {}
+    pending: List[Tuple[float, int, Dict[str, Any], Dict[str, str]]] = []
+    for idx, it in enumerate(sorted_items):
+        kind = str(it.kind or "").strip().lower()
+        if kind != "progress" or not isinstance(it.payload, dict):
+            continue
+        p = dict(it.payload)
+        po = p.get("ports_occupancy")
+        if isinstance(po, dict) and po:
+            panel_occ = {str(k).strip().upper(): str(v or "") for k, v in po.items()}
+        st = _s_val(p.get("status")).upper()
+        el = _f_val(p.get("elapsed"), 0.0)
+        if st != "RUNNING" or abs(el) > 1e-9:
+            continue
+        if not _progress_event_affects_ep(p):
+            continue
+        t_json_end = _json_end_sim_time_from_progress(
+            p,
+            fallback_t=_f_val(p.get("sim_time", it.t), float(getattr(it, "t", 0.0) or 0.0)),
+        )
+        if t_json_end is None:
+            continue
+        pending.append((float(t_json_end), int(idx), _post_anim_src_from_progress(p), dict(panel_occ)))
+
+    pending.sort(key=lambda x: (float(x[0]), int(x[1])))
+
+    bar_ep_occ = _initial_bar_ep_at_t0(sorted_items, eps)
+    t_cur = 0.0
+    t_final = max(0.0, float(final_sim_time))
+    for t_json_end, _idx, src, occ_snap in pending:
+        t_apply = min(float(t_json_end), float(t_final))
+        if t_apply > t_cur + 1e-9:
+            _push_bar_rows_from_occ(rows, eps, bar_ep_occ, t_apply - t_cur, cap_segments=None)
+            t_cur = t_apply
+        occ_pred = predict_ports_occupancy_after_anim(dict(occ_snap), src)
+        for ep in eps:
+            bar_ep_occ[ep] = str(occ_pred.get(ep, "") or "")
+    if t_final > t_cur + 1e-9:
+        _push_bar_rows_from_occ(rows, eps, bar_ep_occ, t_final - t_cur, cap_segments=None)
+
+    for r in list(eps) + ["ALL_EP"]:
+        if r not in rows:
+            rows[r] = []
+        else:
+            rows[r] = merge_bar_row_segments(rows[r])
+
+    if total_est <= 0.0:
+        total_est = max(30.0, t_final)
+
+    return EpBarPrecomputed(total_est=float(total_est), rows=rows, ep_ports=tuple(eps))
 
 
 def build_ep_bar_from_progress_items(
@@ -139,67 +631,12 @@ def build_ep_bar_from_progress_items(
     final_sim_time: float,
     ep_ports: Optional[List[str]] = None,
 ) -> EpBarPrecomputed:
-    """
-    프리런 ``progress`` payload의 ``ep_occ`` 를 시간순으로 누적해 완성 막대 rows 를 만든다.
-    """
-    eps: List[str] = []
-    if ep_ports:
-        eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
-    rows: Dict[str, List[Dict[str, Any]]] = {}
-    t_last: Optional[float] = None
-    total_est = max(0.0, float(final_sim_time))
-
-    prog_items = [it for it in items if str(it.kind).lower() == "progress" and isinstance(it.payload, dict)]
-    prog_items.sort(key=lambda it: float(it.t))
-
-    for it in prog_items:
-        p = dict(it.payload)
-        t_now = _f_val(p.get("sim_time", it.t), float(it.t))
-        if t_last is None:
-            t_last = t_now
-            continue
-        dt = max(0.0, t_now - float(t_last))
-        t_last = t_now
-        if dt <= 1e-9:
-            continue
-
-        ep_occ = p.get("ep_occ", {})
-        if not isinstance(ep_occ, dict):
-            ep_occ = {}
-        ep_list = list(eps)
-        if not ep_list:
-            ep_ports_raw = p.get("ep_ports", [])
-            if isinstance(ep_ports_raw, list) and ep_ports_raw:
-                ep_list = [str(x).strip().upper() for x in ep_ports_raw if str(x).strip().upper().startswith("EP")]
-        if not ep_list:
-            ep_list = sorted(
-                [str(k).strip().upper() for k in ep_occ.keys() if str(k).strip().upper().startswith("EP")],
-                key=lambda x: int(str(x).replace("EP", "") or "0"),
-            )
-        if not ep_list:
-            ep_list = ["EP1", "EP2"]
-
-        all_empty = str(p.get("all_ep_empty", "0")).strip() in ("1", "true", "True", "ON", "on")
-        for ep in ep_list:
-            if ep not in rows:
-                rows[ep] = []
-            v = str(ep_occ.get(ep, "EMPTY")).strip().upper()
-            _push_bar_seg(rows[ep], empty=(v == "EMPTY"), dur=dt)
-        if "ALL_EP" not in rows:
-            rows["ALL_EP"] = []
-        _push_bar_seg(rows["ALL_EP"], empty=bool(all_empty), dur=dt)
-        eps = ep_list
-
-    if not eps:
-        eps = ["EP1", "EP2"]
-    for r in list(eps) + ["ALL_EP"]:
-        if r not in rows:
-            rows[r] = []
-
-    if total_est <= 0.0 and t_last is not None:
-        total_est = max(30.0, float(t_last))
-
-    return EpBarPrecomputed(total_est=float(total_est), rows=rows, ep_ports=tuple(eps))
+    """하위 호환 래퍼 — 타임라인 state-only 재생으로 막대를 만든다."""
+    return build_ep_bar_from_timeline_replay(
+        items,
+        final_sim_time=float(final_sim_time),
+        ep_ports=ep_ports,
+    )
 
 
 def truncate_bar_rows_at_t(rows: Dict[str, List[Dict[str, Any]]], t_cut: float) -> Dict[str, List[Dict[str, Any]]]:

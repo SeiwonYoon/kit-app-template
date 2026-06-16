@@ -605,14 +605,17 @@ class TBSSimulationEngine:
             pass
 
     def _proc_anim_pair(self, proc_sec: float, anim_sec: float) -> Tuple[float, float, float]:
-        """반환: (anim_used, total_wait, proc_only) — 공정시간 우선이면 anim=0, total=공정."""
+        """반환: (anim_used, total_wait, proc_only)
+
+        요구사항 정책(공정시간 기준):
+        - 이벤트 진행 시간은 항상 proc_sec 로 고정한다.
+        - JSON(anim_sec)은 UI 측에서 자동 배속 처리로 proc_sec 안에 종료되도록 맞춘다.
+        """
         p = float(proc_sec)
         a = float(anim_sec)
-        if self._process_time_priority:
-            return 0.0, max(0.01, p), p
         a2 = max(0.0, a)
-        tw = max(0.01, max(p, a2))
-        return a2, tw, p
+        tw = max(0.01, float(p))
+        return a2, tw, tw
 
     def _accumulate_sim_stats(self, ds: float) -> None:
         dt = max(0.0, float(ds))
@@ -1268,12 +1271,22 @@ class TBSSimulationEngine:
         self._stage_mark(lot.lot_id, "oht_to_inout_start")
         self._log_brief_step(lot.lot_id, f"OHT→{ep_port}", oht_time, aw_u)
         # 요구사항: OHT 이동은 ARRIVED(도착/안착) 이벤트로 통일. from/to를 포함해 UI 매핑에 사용.
-        self._emit_event({"seq": "ARRIVED", "from_port_id": "OHT", "to_port_id": ep_port, "port_id": ep_port, "lot_id": lot.lot_id})
+        self._emit_event(
+            {
+                "seq": "ARRIVED",
+                "from_port_id": "OHT",
+                "to_port_id": ep_port,
+                "port_id": ep_port,
+                "lot_id": lot.lot_id,
+                # JSON 재생 속도 자동 배속(공정시간 동기화)용
+                "proc_sec": f"{float(oht_time):.3f}",
+            }
+        )
         _ep_aj = _log_anim_arrived_ep_json(ep_port)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
             if self._process_time_priority
-            else f"공정시간: {total_wait:.1f}s (max(공정 {oht_time:.1f}s, 애니 {aw_u:.1f}s))"
+            else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
         )
         self._log_event_block(
             seq="ARRIVED",
@@ -1292,6 +1305,10 @@ class TBSSimulationEngine:
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
                 linked_anim_json=_ep_aj,
+                from_port_id="OHT",
+                to_port_id=ep_port,
+                lot_id=lot.lot_id,
+                port_id=ep_port,
             )
         )
         # ARRIVED 이벤트는 위에서 이미 emit 했으므로, 여기서 _set_port가 ARRIVED를 재발행하면 중복 이벤트가 된다.
@@ -1326,11 +1343,19 @@ class TBSSimulationEngine:
         self._log_brief_step(lot.lot_id, "OHT→IN/OUT", oht_time, aw_u)
         # 요구사항 반영:
         # OHT->IN/OUT 단계는 MOVE가 아니라 ARRIVED(포트 안착 이벤트)로 애니메이션을 구동한다.
-        self._emit_event({"seq": "ARRIVED", "port_id": INOUT_PORT, "lot_id": lot.lot_id})
+        self._emit_event(
+            {
+                "seq": "ARRIVED",
+                "port_id": INOUT_PORT,
+                "lot_id": lot.lot_id,
+                # JSON 재생 속도 자동 배속(공정시간 동기화)용
+                "proc_sec": f"{float(oht_time):.3f}",
+            }
+        )
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
             if self._process_time_priority
-            else f"공정시간: {total_wait:.1f}s (max(공정 {oht_time:.1f}s, 애니 {aw_u:.1f}s))"
+            else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
         )
         self._log_event_block(
             seq="ARRIVED",
@@ -1349,6 +1374,10 @@ class TBSSimulationEngine:
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="ARRIVED",
                 linked_anim_json="arrived_inout.json",
+                from_port_id="OHT",
+                to_port_id=INOUT_PORT,
+                lot_id=lot.lot_id,
+                port_id=INOUT_PORT,
             )
         )
         self._stage_mark(lot.lot_id, "oht_to_inout_end")
@@ -1383,12 +1412,21 @@ class TBSSimulationEngine:
         aw_u, total_wait, proc_only = self._proc_anim_pair(move_time, anim_wait)
         self._stage_mark(lot.lot_id, "inout_to_bp_start")
         # 요구사항: IN/OUT->BP 이동 애니는 EAPEIS_PORT_MOVE_TRANSFERING(=MOVE_TRANSFERING)만 실행.
-        self._emit_event({"seq": "MOVE_TRANSFERING", "from_port_id": INOUT_PORT, "to_port_id": target_bp, "lot_id": lot.lot_id})
+        self._emit_event(
+            {
+                "seq": "MOVE_TRANSFERING",
+                "from_port_id": INOUT_PORT,
+                "to_port_id": target_bp,
+                "lot_id": lot.lot_id,
+                # JSON 재생 속도 자동 배속(공정시간 동기화)용
+                "proc_sec": f"{float(move_time):.3f}",
+            }
+        )
         _mv_aj = _log_anim_move_transfer_json(INOUT_PORT, target_bp)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
             if self._process_time_priority
-            else f"공정시간: {total_wait:.1f}s (max(공정 {move_time:.1f}s, 애니 {aw_u:.1f}s))"
+            else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
         )
         self._log_event_block(
             seq="MOVE_TRANSFERING",
@@ -1409,6 +1447,9 @@ class TBSSimulationEngine:
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_TRANSFERING",
                     linked_anim_json=_mv_aj,
+                    from_port_id=INOUT_PORT,
+                    to_port_id=target_bp,
+                    lot_id=lot.lot_id,
                 )
             )
         finally:
@@ -1505,12 +1546,21 @@ class TBSSimulationEngine:
         # 이동 중에는 점유를 유지하고, 다음 공정 선택에서만 제외(잠금).
         self._lock_port(bp_port)
         self._lock_port(ep_port)
-        self._emit_event({"seq": "MOVE_REQ", "from_port_id": bp_port, "to_port_id": ep_port, "lot_id": lot.lot_id})
+        self._emit_event(
+            {
+                "seq": "MOVE_REQ",
+                "from_port_id": bp_port,
+                "to_port_id": ep_port,
+                "lot_id": lot.lot_id,
+                # JSON 재생 속도 자동 배속(공정시간 동기화)용
+                "proc_sec": f"{float(move_time):.3f}",
+            }
+        )
         _req_aj = _log_anim_move_req_json(bp_port, ep_port)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
             if self._process_time_priority
-            else f"공정시간: {total_wait:.1f}s (max(공정 {move_time:.1f}s, 애니 {aw_u:.1f}s))"
+            else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
         )
         self._log_event_block(
             seq="MOVE_REQ",
@@ -1531,6 +1581,9 @@ class TBSSimulationEngine:
                     progress_interval=self._log_cfg.progress_interval(),
                     event_seq="MOVE_REQ",
                     linked_anim_json=_req_aj,
+                    from_port_id=bp_port,
+                    to_port_id=ep_port,
+                    lot_id=lot.lot_id,
                 )
             )
         finally:
@@ -1733,12 +1786,20 @@ class TBSSimulationEngine:
         self._stage_mark(lot.lot_id, "ep_to_oht_start")
         self._route_mark(lot.lot_id, "ep_to_oht_from", ep_port)
         self._route_mark(lot.lot_id, "ep_to_oht_to", "OHT")
-        self._emit_event({"seq": "REMOVED", "port_id": ep_port, "lot_id": lot.lot_id})
+        self._emit_event(
+            {
+                "seq": "REMOVED",
+                "port_id": ep_port,
+                "lot_id": lot.lot_id,
+                # JSON 재생 속도 자동 배속(공정시간 동기화)용
+                "proc_sec": f"{float(unload_time):.3f}",
+            }
+        )
         _rm_aj = _log_anim_removed_ep_json(ep_port)
         proc_txt = (
             f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
             if self._process_time_priority
-            else f"공정시간: {total_wait:.1f}s (max(공정 {unload_time:.1f}s, 애니 {aw_u:.1f}s))"
+            else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
         )
         self._log_event_block(
             seq="REMOVED",
@@ -1757,6 +1818,10 @@ class TBSSimulationEngine:
                 progress_interval=self._log_cfg.progress_interval(),
                 event_seq="REMOVED",
                 linked_anim_json=_rm_aj,
+                from_port_id=ep_port,
+                to_port_id="OHT",
+                lot_id=lot.lot_id,
+                port_id=ep_port,
             )
         )
         self._stage_mark(lot.lot_id, "ep_to_oht_end")
@@ -1884,6 +1949,12 @@ class TBSSimulationEngine:
         event_seq: str = "",
         linked_anim_json: str = "",
         port_hint: str = "",
+        # UI가 "애니 종료 직후 포트 갱신"을 이벤트 단위로 정확히 적용할 수 있도록,
+        # progress payload에도 from/to/lot/port 정보를 포함한다(엔진은 공정 종료 후에만 occ가 바뀌기 때문).
+        from_port_id: str = "",
+        to_port_id: str = "",
+        lot_id: str = "",
+        port_id: str = "",
     ):
         """
         공정 대기 시간을 simpy timeout으로 소모하고 진행률을 낸다.
@@ -1901,8 +1972,16 @@ class TBSSimulationEngine:
         ev = str(event_seq or "").strip()
         aj = str(linked_anim_json or "").strip()
         ph = str(port_hint or "").strip().upper()
+        fr = str(from_port_id or "").strip().upper()
+        to = str(to_port_id or "").strip().upper()
+        lot = str(lot_id or "").strip()
+        pid = str(port_id or "").strip().upper()
         psec = max(0.0, float(proc_sec))
         asec = max(0.0, float(anim_sec))
+        try:
+            event_start_sim_time = f"{float(self.env.now):.2f}" if self.env is not None else "0.00"
+        except Exception:
+            event_start_sim_time = "0.00"
         # UI 표시용: 공정/애니 시간을 각각 제공한다.
         # total_sec은 호출자가 (공정시간우선 ON이면 공정, OFF면 max(공정,애니)) 규칙으로 이미 결정한다.
         self._emit_progress({
@@ -1911,6 +1990,11 @@ class TBSSimulationEngine:
             "event_seq": ev,
             "linked_anim_json": aj,
             "port_id": ph,
+            "from_port_id": fr,
+            "to_port_id": to,
+            "lot_id": lot,
+            "event_port_id": pid,
+            "event_start_sim_time": event_start_sim_time,
             "proc_sec": self._progress_emit_policy.format_sec_1(psec),
             "anim_sec": self._progress_emit_policy.format_sec_1(asec),
             "process_time_priority": "1" if self._process_time_priority else "0",
@@ -1928,6 +2012,11 @@ class TBSSimulationEngine:
                 "event_seq": ev,
                 "linked_anim_json": aj,
                 "port_id": ph,
+                "from_port_id": fr,
+                "to_port_id": to,
+                "lot_id": lot,
+                "event_port_id": pid,
+                "event_start_sim_time": event_start_sim_time,
                 "proc_sec": self._progress_emit_policy.format_sec_1(psec),
                 "anim_sec": self._progress_emit_policy.format_sec_1(asec),
                 "process_time_priority": "1" if self._process_time_priority else "0",
@@ -1964,6 +2053,11 @@ class TBSSimulationEngine:
                 "event_seq": ev,
                 "linked_anim_json": aj,
                 "port_id": ph,
+                "from_port_id": fr,
+                "to_port_id": to,
+                "lot_id": lot,
+                "event_port_id": pid,
+                "event_start_sim_time": event_start_sim_time,
                 "proc_sec": self._progress_emit_policy.format_sec_1(psec),
                 "anim_sec": self._progress_emit_policy.format_sec_1(asec),
                 "process_time_priority": "1" if self._process_time_priority else "0",

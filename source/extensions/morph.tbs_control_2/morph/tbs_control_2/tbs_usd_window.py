@@ -63,13 +63,13 @@ class EpPortLayout:
 
 
 EP2_PORT_LAYOUT = EpPortLayout(
-    hide_prims=("/World/aaa_1",),
-    show_prims=("/World/aaa",),
+    hide_prims=("/World/aaa_1", "/wafer_01/_05", "/wafer_01/_08"),
+    show_prims=("/World/aaa", "/wafer_01/_01", "/wafer_01/_02", "/wafer_01/_03", "/wafer_01/_04", "/wafer_01/_06", "/wafer_01/_07"),
 )
 
 EP3_PORT_LAYOUT = EpPortLayout(
     hide_prims=("/World/aaa",),
-    show_prims=("/World/aaa_1",),
+    show_prims=("/World/aaa_1", "/wafer_01/_05", "/wafer_01/_08", "/wafer_01/_01", "/wafer_01/_02", "/wafer_01/_03", "/wafer_01/_04", "/wafer_01/_06", "/wafer_01/_07"),
 )
 
 _PRINT_PREFIX = "[TBS/USD]"

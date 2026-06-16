@@ -263,8 +263,13 @@ from .control_sim_prerun_playback import (
     PlaybackEngine,
     SimPreRunResult,
     SimTimelinePlayer,
+    _progress_event_affects_ep,
     build_ep_bar_from_progress_items,
     build_timetable_row_metas,
+    effective_ports_occupancy_at_t,
+    allocate_bar_segment_pixels,
+    interval_occ_parts,
+    merge_bar_row_segments,
     prerun_engine_to_timeline,
     resolve_seek_through_index,
     truncate_bar_rows_at_t,
@@ -955,6 +960,11 @@ def _execute_mapped_sequence_stub(
             active = dict(job)
             active["_started_wall"] = started_wall
             try:
+                _flush_pending_post_anim_port_applies(ext, scr_i)
+            except Exception:
+                pass
+            _clear_post_anim_port_applied(ext, scr_i)
+            try:
                 active_by = getattr(ext, "_sim_anim_active_by_screen", None)
                 if not isinstance(active_by, dict):
                     active_by = {}
@@ -988,63 +998,70 @@ def _execute_mapped_sequence_stub(
                     ext._sim_tick_pause_until_wall = None
 
             def _on_done():
-                # 포트상태 점(●) 감소 시점
-                # - ARRIVED(OHT->*) 애니가 "포트 도착"을 의미하므로, 완료 후 생성 토큰 1개 소모
-                # - REMOVED 애니가 "회수 진행"이므로, 완료 후 회수 토큰 1개 소모
-                # (요청으로 제거) 포트상태 좌/우 점 표시 기능 비활성화
-                # 정책:
-                # - 애니 완료 직후에는 자세를 유지한다.
-                # - 다음 JSON 시작 직전 `_reset_sim_motion_before_json_run` 에서 위치를 초기화한다.
-                # 화면별 pending 큐에서 다음 job만 이어서 실행
-                pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
-                pending = []
-                if isinstance(pending_by, dict):
-                    pending = pending_by.get(str(scr_i), []) or []
-                if isinstance(pending, list) and pending:
-                    # 우선순위 큐: _priority 낮은 job 먼저
+                # 요구사항: JSON(시퀀스) 마지막 스텝 종료 직후,
+                # 포트상태/visibility/위치초기화를 1회 반영한다(공정시간이 남아 있어도 즉시 갱신).
+                src_done = dict(job or {})
+                src_done["event"] = _normalize_anim_event_seq(str(src_done.get("event", "") or ""))
+                src_done["event_start_sim_time"] = str(src_done.get("t") or src_done.get("sim_time") or "").strip()
+                # bg thread 에서도 pending 등록은 동기(스레드 안전). USD 반영은 main 에서 수행.
+                _queue_post_anim_port_apply(ext, int(scr_i), src_done)
+
+                def _finish_on_main() -> None:
                     try:
-                        pending.sort(key=lambda j: int((j or {}).get("_priority", 10)) if isinstance(j, dict) else 10)
+                        _flush_pending_post_anim_port_applies(ext, int(scr_i))
                     except Exception:
                         pass
-                    nxt = pending.pop(0)
+                    # 화면별 pending 큐에서 다음 job만 이어서 실행
+                    pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                    pending = []
                     if isinstance(pending_by, dict):
-                        pending_by[str(scr_i)] = pending
-                    # LAM 시퀀스 완료 콜백은 background thread — 여기서 USD reset/run 하면
-                    # _dispatch_main_wait 교착·Kit freeze 가 난다. 다음 job 은 main tick 에서만 시작.
-                    def _run_pending_job_on_main() -> None:
+                        pending = pending_by.get(str(scr_i), []) or []
+                    if isinstance(pending, list) and pending:
+                        try:
+                            pending.sort(
+                                key=lambda j: int((j or {}).get("_priority", 10)) if isinstance(j, dict) else 10
+                            )
+                        except Exception:
+                            pass
+                        nxt = pending.pop(0)
+                        if isinstance(pending_by, dict):
+                            pending_by[str(scr_i)] = pending
                         _start_job(nxt)
-
+                        return
+                    if pause_evt is not None:
+                        try:
+                            pause_evt.clear()
+                        except Exception:
+                            pass
                     try:
-                        if threading.current_thread() is threading.main_thread():
-                            _run_pending_job_on_main()
-                        else:
-                            from .tbs_lam_sequence_engine import _dispatch_main
-
-                            _dispatch_main(_run_pending_job_on_main)
-                    except Exception:
-                        _run_pending_job_on_main()
-                    return
-                if pause_evt is not None:
-                    try:
-                        pause_evt.clear()
+                        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                        if isinstance(until_by, dict):
+                            until_by[str(scr_i)] = None
                     except Exception:
                         pass
+                    try:
+                        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+                        if isinstance(active_by, dict):
+                            active_by[str(scr_i)] = {}
+                    except Exception:
+                        pass
+                    try:
+                        _refresh_sim_progress_from_last(ext)
+                    except Exception:
+                        pass
+
                 try:
-                    until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
-                    if isinstance(until_by, dict):
-                        until_by[str(scr_i)] = None
+                    if threading.current_thread() is threading.main_thread():
+                        _finish_on_main()
+                    else:
+                        from .tbs_lam_sequence_engine import _dispatch_main
+
+                        _dispatch_main(_finish_on_main)
                 except Exception:
-                    pass
-                try:
-                    active_by = getattr(ext, "_sim_anim_active_by_screen", None)
-                    if isinstance(active_by, dict):
-                        active_by[str(scr_i)] = {}
-                except Exception:
-                    pass
-                try:
-                    _refresh_sim_progress_from_last(ext)
-                except Exception:
-                    pass
+                    try:
+                        _finish_on_main()
+                    except Exception:
+                        pass
 
             try:
                 if runner_obj is not None:
@@ -1059,13 +1076,51 @@ def _execute_mapped_sequence_stub(
                     sp = max(0.1, float(m.get_value_as_float()))
             except Exception:
                 sp = 1.0
+            # 요구사항: 공정시간 우선 기능은 사용하지 않음(항상 OFF 고정)
             proc_priority = False
+
+            # 요구사항(공정시간 기준):
+            # - job.proc_sec 과 job.est_total(=JSON 1배속 예상 길이)을 비교해
+            #   JSON이 더 길면 proc_sec 안에 끝나도록 speed_scale 을 자동 배속한다.
+            proc_sec_job = 0.0
             try:
-                ppm = getattr(ext, "_sim_process_time_priority_model", None)
-                if ppm is not None:
-                    proc_priority = bool(ppm.get_value_as_bool())
+                proc_sec_job = float(job.get("proc_sec", 0.0) or 0.0)
             except Exception:
-                proc_priority = False
+                proc_sec_job = 0.0
+            est_total_job = job.get("est_total", None)
+            est_total_f = 0.0
+            try:
+                if isinstance(est_total_job, (float, int)):
+                    est_total_f = float(est_total_job)
+            except Exception:
+                est_total_f = 0.0
+            eff_sp = sp
+            if proc_sec_job > 1e-9 and est_total_f > proc_sec_job + 1e-6:
+                try:
+                    ratio = float(est_total_f) / float(proc_sec_job)
+                    eff_sp = max(0.1, float(sp) * ratio)
+                except Exception:
+                    eff_sp = sp
+
+            # (fail-safe) pause_until_wall 추정은 effective speed 기준으로 재설정한다.
+            try:
+                ub_by_screen = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                if isinstance(ub_by_screen, dict):
+                    ub_by_screen[str(scr_i)] = float(started_wall) + float(est_total_f) / max(0.1, float(eff_sp))
+            except Exception:
+                pass
+            # JSON 종료 직후 포트 갱신 fail-safe: wall-clock·pending 용 이벤트 스냅샷 보관
+            try:
+                by_src = getattr(ext, "_sim_post_anim_src_by_screen", None)
+                if not isinstance(by_src, dict):
+                    by_src = {}
+                    ext._sim_post_anim_src_by_screen = by_src
+                snap = _normalize_post_anim_port_src(dict(job))
+                if est_total_f > 0.0:
+                    snap["_json_end_wall"] = float(started_wall) + float(est_total_f) / max(0.1, float(eff_sp))
+                by_src[str(scr_i)] = snap
+            except Exception:
+                pass
 
             # 배속>1일 때: 단일 화면에서만 애니·sim tick 동기를 위해 pause 사용.
             # 분할 N>1에서는 한 화면 애니가 다른 화면 엔진 틱까지 멈추어 공정시간·막대가 끊겨 보이므로 적용하지 않는다.
@@ -1089,7 +1144,7 @@ def _execute_mapped_sequence_stub(
             except Exception as exc:
                 print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
             if runner_obj is not None:
-                runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run, speed_scale=sp)
+                runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run, speed_scale=eff_sp)
             try:
                 _refresh_sim_progress_from_last(ext)
             except Exception:
@@ -1108,6 +1163,8 @@ def _execute_mapped_sequence_stub(
             "action": action_text,
             "est": est_text,
             "est_total": float(est_total) if isinstance(est_total, (float, int)) else None,
+            # simulation_engine 이벤트 payload의 공정시간(=proc_sec) — JSON이 더 길면 여기 기반으로 배속 처리한다.
+            "proc_sec": str(payload.get("proc_sec", "") or "").strip(),
             "runner": runner,
             "rule": rule_name or "-",
             "lot_id": lot_id,
@@ -1575,13 +1632,8 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
         lot_count = max(1, int(snap.get("lot_count", _SIM_DEF.lot_count) or _SIM_DEF.lot_count))
     except Exception:
         lot_count = int(_SIM_DEF.lot_count)
+    # 요구사항: 공정시간 우선(process_time_priority) 기능은 사용하지 않음
     proc_pri = False
-    try:
-        ppm = getattr(ext, "_sim_process_time_priority_model", None)
-        if ppm is not None:
-            proc_pri = bool(ppm.get_value_as_bool())
-    except Exception:
-        proc_pri = False
     init = SimulationInitConfig(
         ep_count=ep_count,
         initial_full_ports=initial_full_ports,
@@ -3055,8 +3107,15 @@ def build_control_window(ext: Any) -> None:
                             ui.Label("로그주기(s)", width=70)
                             ui.FloatField(model=ext._sim_log_interval_model, width=70)
                         with ui.HStack(spacing=8, height=28):
-                            ui.CheckBox(model=ext._sim_process_time_priority_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("공정설정 시간 우선", width=120)
+                            # 요구사항: 공정시간 우선(process_time_priority) 기능은 사용하지 않음
+                            # - UI 노출 제거(실제 로직에서도 항상 OFF 고정)
+                            ui.CheckBox(
+                                model=ext._sim_process_time_priority_model,
+                                width=30,
+                                style=CHECKBOX_WHITE_STYLE,
+                                visible=False,
+                            )
+                            ui.Label("공정설정 시간 우선", width=120, visible=False)
                             ui.CheckBox(model=ext._sim_bar_preview_model, width=30, style=CHECKBOX_WHITE_STYLE)
                             ui.Label("결과 미리보기", width=90)
                             # 각 공정 확인 — 당분간 UI 비표시(모델·on_gate 로직은 유지)
@@ -3635,6 +3694,158 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
         pass
 
 
+_PANEL_PORT_KEYS = ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")
+
+
+def _merge_ports_occupancy_with_last(
+    ext: Any, screen: int, occ: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """부분/빈 ports_occupancy 를 화면별 마지막 스냅샷과 merge."""
+    scr = max(1, int(screen))
+    occ_in = dict(occ) if isinstance(occ, dict) else {}
+    try:
+        by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if not isinstance(by_prev, dict):
+            by_prev = {}
+            ext._sim_last_ports_occupancy_by_screen = by_prev
+        occ_prev = by_prev.get(str(scr))
+    except Exception:
+        by_prev = {}
+        occ_prev = None
+    occ_out = dict(occ_in)
+    if isinstance(occ_prev, dict) and occ_prev:
+        if occ_out and any((k not in occ_out) for k in _PANEL_PORT_KEYS):
+            merged = dict(occ_prev)
+            merged.update(dict(occ_out))
+            occ_out = merged
+    if not occ_out:
+        if isinstance(occ_prev, dict) and occ_prev:
+            occ_out = dict(occ_prev)
+    try:
+        if occ_out and (not any(bool(str(v or "").strip()) for v in occ_out.values())):
+            if isinstance(occ_prev, dict) and occ_prev and any(
+                bool(str(v or "").strip()) for v in occ_prev.values()
+            ):
+                occ_out = dict(occ_prev)
+    except Exception:
+        pass
+    return occ_out, by_prev
+
+
+def _sync_port_panel_from_engine_occ(
+    ext: Any,
+    screen: int,
+    occ: Dict[str, Any],
+    sim_time: str = "",
+    *,
+    allow_post_anim_block: bool = True,
+) -> None:
+    """
+    엔진 ports_occupancy → 포트 패널(텍스트) 동기화.
+
+    visibility/prim 위치 스냅은 JSON 종료(post-anim) 또는 PORT_OCC_REFRESH 에서만 수행한다.
+    """
+    scr = max(1, int(screen))
+    if allow_post_anim_block:
+        try:
+            applied_by = getattr(ext, "_sim_post_anim_port_applied_by_screen", None)
+            if isinstance(applied_by, dict) and applied_by.get(str(scr)):
+                return
+        except Exception:
+            pass
+    occ_m, by_prev = _merge_ports_occupancy_with_last(ext, scr, occ if isinstance(occ, dict) else {})
+    if not occ_m or not any((k in occ_m) for k in _PANEL_PORT_KEYS):
+        return
+    try:
+        if isinstance(by_prev, dict):
+            by_prev[str(scr)] = dict(occ_m)
+    except Exception:
+        pass
+    try:
+        _update_port_occupancy_panel(ext, occ_m, str(sim_time or ""), screen=scr)
+    except Exception:
+        pass
+
+
+def _bar_segment_rect_widths(
+    segs: List[Dict[str, Any]],
+    *,
+    total_est: float,
+    bar_w: int,
+    t_cover: Optional[float] = None,
+) -> List[Tuple[int, bool]]:
+    return allocate_bar_segment_pixels(
+        segs,
+        total_est=float(total_est),
+        bar_w=int(bar_w),
+        t_cover=t_cover,
+    )
+
+
+def _post_anim_affects_ep_port(src: Dict[str, Any]) -> bool:
+    fr = _canonical_sim_port_key(str(src.get("from_port_id") or ""))
+    to = _canonical_sim_port_key(str(src.get("to_port_id") or ""))
+    port = _canonical_sim_port_key(str(src.get("port_id") or src.get("event_port_id") or ""))
+    return any(str(p).startswith("EP") for p in (fr, to, port) if p)
+
+
+def _occ_for_ep_timeline(
+    ext: Any,
+    screen: int,
+    occ: Dict[str, Any],
+    sim_time_text: str = "",
+    *,
+    progress_p: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    EP 막대용 ports_occupancy.
+
+    포트 패널 스냅샷의 EP 점유를 유지하고, JSON 종료(post-anim) 예측만 덮어쓴다.
+    """
+    scr = max(1, int(screen))
+    occ_in = dict(occ) if isinstance(occ, dict) else {}
+    last_snap: Dict[str, Any] = {}
+    try:
+        last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if isinstance(last_by, dict) and isinstance(last_by.get(str(scr)), dict):
+            last_snap = dict(last_by.get(str(scr)) or {})
+    except Exception:
+        last_snap = {}
+    occ_base = dict(occ_in)
+    if last_snap:
+        occ_base.update(last_snap)
+    try:
+        applied_by = getattr(ext, "_sim_post_anim_port_applied_by_screen", None)
+        if isinstance(applied_by, dict) and applied_by.get(str(scr)) and last_snap:
+            return dict(last_snap)
+    except Exception:
+        pass
+    if progress_p is None:
+        try:
+            by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+            if isinstance(by_lp, dict) and isinstance(by_lp.get(str(scr)), dict):
+                progress_p = by_lp.get(str(scr))
+        except Exception:
+            progress_p = None
+    try:
+        t_f = float(str(sim_time_text or "").strip() or "0.0")
+    except Exception:
+        t_f = 0.0
+    occ_pred = effective_ports_occupancy_at_t(
+        occ_base,
+        progress_p if isinstance(progress_p, dict) else None,
+        t_f,
+    )
+    # 비-EP 이동 구간: EP 키는 패널 스냅샷 유지(빨간색으로 덮어쓰지 않음)
+    out = dict(occ_pred)
+    if last_snap and isinstance(progress_p, dict):
+        if not _progress_event_affects_ep(progress_p):
+            for ep in ("EP1", "EP2", "EP3"):
+                if ep in last_snap:
+                    out[ep] = last_snap[ep]
+    return out
+
+
 def _resolve_ep_timeline_sim_time(ext: Any, screen: int, sim_time_text: str) -> float:
     """
     EP 막대·진행현황이 같은 시계를 쓰도록 sim 시각을 통일한다.
@@ -3681,6 +3892,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     except Exception:
         screen = 1
     scr_key = str(screen)
+    occ = _occ_for_ep_timeline(ext, screen, occ if isinstance(occ, dict) else {}, sim_time_text)
     t_now = _resolve_ep_timeline_sim_time(ext, screen, sim_time_text)
 
     # 프리런 막대·재생 중: 진행현황 t(sim) 과 동일 축 — virtual time 보간 사용 안 함
@@ -3823,8 +4035,12 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                 segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dt)
             else:
                 segs.append({"empty": bool(empty), "dur": float(dt)})
-            if len(segs) > 220:
-                del segs[:-200]
+            if len(segs) > 4096:
+                merged = merge_bar_row_segments(segs)
+                if len(merged) > 220:
+                    merged = merged[-220:]
+                rows_state[ep] = merged
+                segs = rows_state[ep]
         # 현재까지 "EMPTY" 누적(세그먼트 합)
         try:
             empty_acc[ep] = sum(float(s.get("dur", 0.0)) for s in rows_state.get(ep, []) if isinstance(s, dict) and bool(s.get("empty", False)))
@@ -3836,8 +4052,11 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
             segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dt)
         else:
             segs.append({"empty": bool(all_empty), "dur": float(dt)})
-        if len(segs) > 220:
-            del segs[:-200]
+        if len(segs) > 4096:
+            merged = merge_bar_row_segments(segs)
+            if len(merged) > 220:
+                merged = merged[-220:]
+            rows_state["ALL_EP"] = merged
     try:
         empty_acc["ALL_EP"] = sum(float(s.get("dur", 0.0)) for s in rows_state.get("ALL_EP", []) if isinstance(s, dict) and bool(s.get("empty", False)))
     except Exception:
@@ -4004,27 +4223,36 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                         with ui.ZStack(width=BAR_W, height=BAR_H):
                             ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
                             segs = rows_state.get(r, []) or []
+                            seg_list = segs if isinstance(segs, list) else []
+                            try:
+                                t_cover = sum(
+                                    float(s.get("dur", 0.0))
+                                    for s in seg_list
+                                    if isinstance(s, dict)
+                                )
+                            except Exception:
+                                t_cover = float(t_bar)
+                            # 프리런 "결과 미리보기" ON: 완성 막대를 전체 폭으로 그려야 한다.
+                            # (t_bar 로 제한하면 미리보기인데도 진행에 따라 채워지는 것처럼 보인다.)
+                            if use_precomputed and bool(preview_full):
+                                t_cover = float(total_est)
+                            elif use_precomputed or playback_lock:
+                                t_cover = min(float(t_bar), float(t_cover))
+                            rects = _bar_segment_rect_widths(
+                                seg_list,
+                                total_est=float(total_est),
+                                bar_w=int(BAR_W),
+                                t_cover=float(t_cover),
+                            )
                             with ui.HStack(height=BAR_H, spacing=0):
                                 used = 0
-                                for s in segs:
-                                    try:
-                                        dur = float((s or {}).get("dur", 0.0))
-                                    except Exception:
-                                        dur = 0.0
-                                    if dur <= 1e-9:
-                                        continue
-                                    w = int(round((dur / float(total_est)) * BAR_W))
-                                    w = max(1, w)
-                                    if used + w > BAR_W:
-                                        w = max(1, BAR_W - used)
-                                    used += w
+                                for w, empty in rects:
+                                    used += int(w)
                                     ui.Rectangle(
-                                        width=w,
+                                        width=int(w),
                                         height=BAR_H,
-                                        style={"background_color": _color(bool((s or {}).get("empty", False)))},
+                                        style={"background_color": _color(bool(empty))},
                                     )
-                                    if used >= BAR_W:
-                                        break
                                 if used < BAR_W:
                                     ui.Spacer(width=(BAR_W - used))
                         # 우측: 누적 EMPTY 시간(초) 표시
@@ -4083,6 +4311,12 @@ def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
         occ = last_by.get(sk) if isinstance(last_by.get(sk), dict) else None
         if occ is None:
             occ = dict(empty_occ)
+        try:
+            lp_by = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+            lp = lp_by.get(sk) if isinstance(lp_by, dict) else None
+            occ = _occ_for_ep_timeline(ext, si, occ, f"{t_now:.2f}", progress_p=lp if isinstance(lp, dict) else None)
+        except Exception:
+            pass
         try:
             _update_ep_timeline_under_port_state(ext, ch, occ, f"{t_now:.2f}")
         except Exception:
@@ -4246,7 +4480,52 @@ def post_sim_progress_update(ext: Any, payload: Dict[str, str]) -> None:
 
 
 def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
-    _update_sim_progress(ext, payload if isinstance(payload, dict) else {})
+    p = payload if isinstance(payload, dict) else {}
+    try:
+        scr = int(str(p.get("tbs_sim_screen", "1") or "1").strip() or "1")
+    except Exception:
+        scr = 1
+    scr = max(1, scr)
+    try:
+        _flush_pending_post_anim_port_applies(ext, scr)
+    except Exception:
+        pass
+    # fail-safe: anim_sec 경과 후에도 JSON 완료 콜백이 늦거나 누락되면 progress 틱에서 1회 갱신
+    try:
+        if str(p.get("status", "")).strip().upper() == "RUNNING":
+            ev = _normalize_anim_event_seq(str(p.get("event_seq") or p.get("sequence_name") or ""))
+            if ev in _ANIM_PORT_UPDATE_SEQS:
+                anim_sec = float(str(p.get("anim_sec") or "0").strip() or "0")
+                elapsed = float(str(p.get("elapsed") or "0").strip() or "0")
+                if anim_sec > 1e-6 and elapsed + 1e-6 >= anim_sec:
+                    src: Dict[str, Any] = dict(p)
+                    src["event"] = ev
+                    src["event_start_sim_time"] = str(
+                        p.get("event_start_sim_time") or p.get("t") or ""
+                    ).strip()
+                    _queue_post_anim_port_apply(ext, scr, src)
+                    _flush_pending_post_anim_port_applies(ext, scr)
+    except Exception:
+        pass
+    _update_sim_progress(ext, p)
+    # progress payload의 ports_occupancy — JSON 종료 후 예측 적용 중이면 엔진 구값으로 덮어쓰지 않는다.
+    occ = p.get("ports_occupancy", {})
+    if isinstance(occ, dict) and occ and any((k in occ) for k in _PANEL_PORT_KEYS):
+        try:
+            _sync_port_panel_from_engine_occ(
+                ext,
+                scr,
+                occ,
+                str(p.get("sim_time", "") or ""),
+                allow_post_anim_block=True,
+            )
+        except Exception:
+            pass
+    # FOUP 공정중 EP도 progress에서 최신값을 기억(위치 초기화에서 plateau 유지에 사용)
+    try:
+        _remember_foup_active_ep(ext, scr, p)
+    except Exception:
+        pass
 
 
 def _build_sim_gate_request_payload(ext: Any, p: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -4459,32 +4738,51 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
                 occ = dict(occ_prev)
     except Exception:
         pass
+    seq_u = str(p.get("seq", "") or "").strip().upper()
+    # 애니 이벤트 시작: 엔진 점유를 포트 패널에 즉시 반영(IN/OUT 안착 직후·이동 시작 시 등).
+    if _is_anim_port_event(seq_u):
+        try:
+            _sync_port_panel_from_engine_occ(
+                ext,
+                scr,
+                occ,
+                str(p.get("sim_time", "") or ""),
+                allow_post_anim_block=False,
+            )
+        except Exception:
+            pass
     # 마지막 점유 스냅샷 저장(빈/무의미한 스냅샷은 저장하지 않음)
+    # 요구사항: 포트 상태/visibility/위치 초기화는 PORT_OCC_REFRESH(=JSON 종료 후 1회)에서만 수행한다.
     try:
-        if isinstance(by_prev, dict) and occ and any((k in occ) for k in _REQ_PORT_KEYS):
+        if (
+            seq_u == "PORT_OCC_REFRESH"
+            and isinstance(by_prev, dict)
+            and occ
+            and any((k in occ) for k in _REQ_PORT_KEYS)
+        ):
             by_prev[str(scr)] = dict(occ)
     except Exception:
         pass
-    ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
-    active_ep = _remember_foup_active_ep(ext, scr, p)
-    try:
-        apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
-    except Exception:
+
+    # PORT_OCC_REFRESH 전용: JSON 종료 후 1회만 포트상태/visibility/위치 초기화를 반영한다.
+    if seq_u == "PORT_OCC_REFRESH":
+        _clear_post_anim_port_applied(ext, scr)
+        ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
+        active_ep = _remember_foup_active_ep(ext, scr, p)
         try:
-            apply_port_lot_prim_visibility(occ)
+            apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
+        except Exception:
+            try:
+                apply_port_lot_prim_visibility(occ)
+            except Exception:
+                pass
+        try:
+            sync_port_lot_positions_after_visibility(ctx_nm, foup_proc_active_ep=active_ep)
         except Exception:
             pass
-    try:
-        sync_port_lot_positions_after_visibility(ctx_nm, foup_proc_active_ep=active_ep)
-    except Exception:
-        pass
-    _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")), screen=scr)
-    # 포트상태 갱신 전용 이벤트: 목록에 없는 내부 이벤트이므로 애니/공정확인창을 띄우지 않는다.
-    try:
-        if str(p.get("seq", "") or "").strip().upper() == "PORT_OCC_REFRESH":
-            return
-    except Exception:
-        pass
+        _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")), screen=scr)
+        return
+
     # 포트상태 좌/우 점(●) 카운터:
     # - READYTOLOAD 발생 시(생성 이벤트) 좌측 초록 ● +1
     # - READYTOUNLOAD 발생 시(회수 요청) 우측 빨강 ● +1
@@ -4779,6 +5077,283 @@ def _set_sim_prerun_ui_busy(ext: Any, busy: bool) -> None:
             set_timetable_busy_label(ch, True, screen=si, ext=ext)
         except Exception:
             pass
+
+
+_SIM_REQ_PORT_KEYS = ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")
+
+_ANIM_PORT_UPDATE_SEQS = frozenset({
+    "ARRIVED",
+    "MOVE_TRANSFERING",
+    "MOVE_REQ",
+    "MOVE",
+    "REMOVED",
+})
+
+_CANONICAL_TO_SHORT_ANIM_EVENT: Dict[str, str] = {
+    str(xml_generator.SEQ_ARRIVED).strip().upper(): "ARRIVED",
+    str(xml_generator.SEQ_MOVE_TRANSFERING).strip().upper(): "MOVE_TRANSFERING",
+    str(xml_generator.SEQ_MOVE_REQ).strip().upper(): "MOVE_REQ",
+    str(xml_generator.SEQ_MOVE).strip().upper(): "MOVE",
+    str(xml_generator.SEQ_REMOVED).strip().upper(): "REMOVED",
+}
+
+
+def _normalize_anim_event_seq(ev: str) -> str:
+    """짧은 이름(ARRIVED) 또는 정식명(EAPEIS_PORT_ARRIVED) → 짧은 이름으로 통일."""
+    e = str(ev or "").strip().upper()
+    if not e:
+        return ""
+    if e in _ANIM_PORT_UPDATE_SEQS:
+        return e
+    mapped = _CANONICAL_TO_SHORT_ANIM_EVENT.get(e)
+    if mapped:
+        return mapped
+    if e in SIM_SEQ_ALIAS:
+        return str(e).strip().upper()
+    return e
+
+
+def _is_anim_port_event(ev: str) -> bool:
+    return _normalize_anim_event_seq(ev) in _ANIM_PORT_UPDATE_SEQS
+
+
+def _canonical_sim_port_key(port: str) -> str:
+    """엔진·UI 공통 포트 키(INOUT, BP1, EP1 …)로 정규화."""
+    o = str(port or "").strip().upper()
+    if not o:
+        return ""
+    if o in ("IN/OUT", "INOUT"):
+        return "INOUT"
+    if o.startswith("BP"):
+        try:
+            n = int(o.replace("BP", ""))
+            if 1 <= n <= 4:
+                return f"BP{n}"
+        except Exception:
+            pass
+    if o.startswith("EP"):
+        try:
+            n = int(o.replace("EP", ""))
+            if 1 <= n <= 3:
+                return f"EP{n}"
+        except Exception:
+            pass
+    return o
+
+
+def _post_anim_port_dedupe_key(src: Dict[str, Any]) -> str:
+    ev = _normalize_anim_event_seq(
+        str(src.get("event") or src.get("event_seq") or src.get("seq") or "")
+    )
+    lot = str(src.get("lot_id") or "").strip()
+    fr = _canonical_sim_port_key(str(src.get("from_port_id") or ""))
+    to = _canonical_sim_port_key(str(src.get("to_port_id") or ""))
+    port = _canonical_sim_port_key(str(src.get("port_id") or src.get("event_port_id") or ""))
+    # sim_time 은 progress 중 계속 변하므로 dedupe 키에 쓰지 않는다.
+    t = str(src.get("event_start_sim_time") or src.get("t") or "").strip()
+    if not t:
+        t = str(src.get("label") or "").strip()
+    return f"{ev}|{fr}|{to}|{port}|{lot}|{t}"
+
+
+def _predict_ports_occupancy_after_anim(occ_base: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
+    """JSON(이동·안착·회수) 종료 직후 기대되는 ports_occupancy 를 예측한다."""
+    occ_pred = dict(occ_base or {})
+    ev = _normalize_anim_event_seq(
+        str(src.get("event") or src.get("event_seq") or src.get("seq") or "")
+    )
+    lot_id = str(src.get("lot_id") or "").strip()
+    fr = _canonical_sim_port_key(str(src.get("from_port_id") or ""))
+    to = _canonical_sim_port_key(str(src.get("to_port_id") or ""))
+    # progress payload에서는 event_port_id로 들어올 수 있다(진행현황 라우팅용 port_id와 구분).
+    port = _canonical_sim_port_key(str(src.get("port_id") or src.get("event_port_id") or ""))
+    if ev in ("MOVE_TRANSFERING", "MOVE_REQ", "MOVE"):
+        if fr:
+            occ_pred[fr] = ""
+        if to and lot_id:
+            occ_pred[to] = lot_id
+    elif ev == "ARRIVED":
+        dest = port or to
+        if dest and lot_id:
+            occ_pred[dest] = lot_id
+    elif ev == "REMOVED":
+        if port:
+            occ_pred[port] = ""
+    return occ_pred
+
+
+def _clear_post_anim_port_applied(ext: Any, screen: int) -> None:
+    try:
+        by_ap = getattr(ext, "_sim_post_anim_port_applied_by_screen", None)
+        if isinstance(by_ap, dict):
+            by_ap.pop(str(int(screen)), None)
+    except Exception:
+        pass
+
+
+def _normalize_post_anim_port_src(src: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(src or {})
+    out["event"] = _normalize_anim_event_seq(
+        str(out.get("event") or out.get("event_seq") or out.get("seq") or "")
+    )
+    if not str(out.get("event_start_sim_time") or "").strip():
+        out["event_start_sim_time"] = str(out.get("t") or "").strip()
+    return out
+
+
+def _queue_post_anim_port_apply(ext: Any, screen: int, src: Dict[str, Any]) -> None:
+    """JSON 종료 직후 포트 갱신 요청을 화면별 pending 에 적재(bg thread 안전)."""
+    try:
+        pending_by = getattr(ext, "_sim_pending_post_anim_port_by_screen", None)
+        if not isinstance(pending_by, dict):
+            pending_by = {}
+            ext._sim_pending_post_anim_port_by_screen = pending_by
+        pending_by[str(int(screen))] = _normalize_post_anim_port_src(src)
+    except Exception:
+        pass
+
+
+def _flush_pending_post_anim_port_applies(ext: Any, screen: Optional[int] = None) -> None:
+    """main thread 에서 pending 포트 갱신을 실제로 반영한다."""
+    try:
+        pending_by = getattr(ext, "_sim_pending_post_anim_port_by_screen", None)
+        if not isinstance(pending_by, dict) or not pending_by:
+            return
+        keys = [str(int(screen))] if screen is not None else list(pending_by.keys())
+        for k in keys:
+            src = pending_by.get(str(k))
+            if not isinstance(src, dict):
+                pending_by.pop(str(k), None)
+                continue
+            if _try_apply_port_state_after_json_anim(ext, int(k), src, force=True):
+                pending_by.pop(str(k), None)
+                try:
+                    src_by = getattr(ext, "_sim_post_anim_src_by_screen", None)
+                    if isinstance(src_by, dict):
+                        src_by.pop(str(k), None)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _maybe_queue_post_anim_port_by_wall_clock(ext: Any) -> None:
+    """JSON wall-clock 종료 시점 fail-safe: active/저장 스냅샷 기준으로 pending 등록."""
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+        src_by = getattr(ext, "_sim_post_anim_src_by_screen", None)
+        now = time.monotonic()
+        scr_keys: Set[str] = set()
+        if isinstance(active_by, dict):
+            scr_keys.update(str(k) for k in active_by.keys())
+        if isinstance(src_by, dict):
+            scr_keys.update(str(k) for k in src_by.keys())
+        for scr_s in scr_keys:
+            active = active_by.get(scr_s) if isinstance(active_by, dict) else None
+            stored = src_by.get(scr_s) if isinstance(src_by, dict) else None
+            src: Optional[Dict[str, Any]] = None
+            end_wall: Optional[float] = None
+            if isinstance(active, dict) and active:
+                src = _normalize_post_anim_port_src(active)
+                if not _is_anim_port_event(str(src.get("event") or "")):
+                    continue
+                if isinstance(until_by, dict) and until_by.get(str(scr_s)) is not None:
+                    end_wall = float(until_by.get(str(scr_s)))
+                elif isinstance(stored, dict):
+                    try:
+                        end_wall = float(stored.get("_json_end_wall") or 0.0)
+                    except Exception:
+                        end_wall = None
+            elif isinstance(stored, dict) and stored:
+                src = _normalize_post_anim_port_src(dict(stored))
+                try:
+                    end_wall = float(stored.get("_json_end_wall") or 0.0)
+                except Exception:
+                    end_wall = None
+            if not isinstance(src, dict) or not src:
+                continue
+            if not _is_anim_port_event(str(src.get("event") or "")):
+                continue
+            if end_wall is None or end_wall <= 0.0:
+                started = float((active or stored or {}).get("_started_wall") or 0.0)
+                est = (active or stored or {}).get("est_total")
+                try:
+                    est_f = float(est) if est is not None else 0.0
+                except Exception:
+                    est_f = 0.0
+                if started > 0.0 and est_f > 0.0:
+                    end_wall = float(started) + float(est_f)
+            if end_wall is None or now + 0.02 < float(end_wall):
+                continue
+            dedupe = _post_anim_port_dedupe_key(src)
+            applied_by = getattr(ext, "_sim_post_anim_port_applied_by_screen", None)
+            if isinstance(applied_by, dict) and applied_by.get(str(scr_s)) == dedupe:
+                continue
+            _queue_post_anim_port_apply(ext, int(scr_s), src)
+    except Exception:
+        pass
+
+
+def _try_apply_port_state_after_json_anim(
+    ext: Any,
+    screen: int,
+    src: Dict[str, Any],
+    *,
+    force: bool = False,
+) -> bool:
+    """
+    JSON 시퀀스 종료 직후 포트상태/visibility/위치를 1회 반영한다.
+    공정시간(proc)이 남아 있어도 anim_sec 경과 또는 시퀀스 완료 시점에 호출한다.
+    """
+    if not isinstance(src, dict):
+        return False
+    scr = max(1, int(screen))
+    ev = _normalize_anim_event_seq(
+        str(src.get("event") or src.get("event_seq") or src.get("seq") or "")
+    )
+    if ev not in _ANIM_PORT_UPDATE_SEQS:
+        return False
+    dedupe = _post_anim_port_dedupe_key(src)
+    applied_by = getattr(ext, "_sim_post_anim_port_applied_by_screen", None)
+    if not isinstance(applied_by, dict):
+        applied_by = {}
+        ext._sim_post_anim_port_applied_by_screen = applied_by
+    if (not force) and applied_by.get(str(scr)) == dedupe:
+        return False
+
+    last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+    occ_now: Dict[str, Any] = {}
+    if isinstance(last_by, dict) and isinstance(last_by.get(str(scr)), dict):
+        occ_now = dict(last_by.get(str(scr)) or {})
+
+    by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+    lp = by_lp.get(str(scr)) if isinstance(by_lp, dict) else None
+    sim_t = str((lp or {}).get("sim_time", "") or "") if isinstance(lp, dict) else str(src.get("sim_time", "") or "")
+    active_ep = _remember_foup_active_ep(ext, scr, lp if isinstance(lp, dict) else src)
+    occ_pred = _predict_ports_occupancy_after_anim(occ_now, src)
+
+    try:
+        if isinstance(last_by, dict):
+            last_by[str(scr)] = dict(occ_pred)
+    except Exception:
+        pass
+
+    try:
+        _apply_sim_event_state_only(
+            ext,
+            {
+                "ports_occupancy": dict(occ_pred),
+                "sim_time": sim_t,
+                "foup_proc_active_ep": active_ep,
+            },
+            screen=scr,
+        )
+    except Exception:
+        return False
+
+    applied_by[str(scr)] = dedupe
+    return True
 
 
 def _remember_foup_active_ep(ext: Any, screen: int, payload: Dict[str, Any]) -> str:
@@ -5823,6 +6398,11 @@ def _drain_sim_log_queue(ext: Any) -> None:
 
         # 표시모드 제거: 항상 둘다(진행현황+이력로그)
         panel_mode = SimLogPanelMode.ALL
+        try:
+            _maybe_queue_post_anim_port_by_wall_clock(ext)
+            _flush_pending_post_anim_port_applies(ext)
+        except Exception:
+            pass
         count = 0
         # 중요: UI 프레임 1회당 처리량 상한.
         # 큐가 많아도 렌더링 starvation을 막기 위해 200개까지만 드레인한다.
@@ -6348,6 +6928,17 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                     last_by[sk_occ] = dict(last_occ)
             except Exception:
                 last_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+            try:
+                sim_t = str(payload.get("sim_time", ""))
+                last_occ = _occ_for_ep_timeline(
+                    ext,
+                    int(str(panel_slot or "1").strip() or "1"),
+                    last_occ if isinstance(last_occ, dict) else {},
+                    sim_t,
+                    progress_p=payload if isinstance(payload, dict) else None,
+                )
+            except Exception:
+                pass
             if isinstance(chans2, list) and len(chans2) > 1:
                 try:
                     pslot_i = int(str(panel_slot or "1").strip() or "1")
@@ -6671,20 +7262,16 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
     if dt <= 1e-9:
         return
 
-    ep_occ = payload.get("ep_occ", {})
-    # 일부 경로에서 dict가 문자열로 들어올 수 있어(예: "{'EP1': 'EMPTY'}") 보정한다.
-    if not isinstance(ep_occ, dict):
-        if isinstance(ep_occ, str) and ep_occ.strip().startswith("{"):
-            try:
-                import ast
-
-                v = ast.literal_eval(ep_occ)
-                ep_occ = v if isinstance(v, dict) else {}
-            except Exception:
-                ep_occ = {}
-        else:
-            ep_occ = {}
-    all_ep_empty = str(payload.get("all_ep_empty", "0")).strip() in ("1", "true", "True", "ON", "on")
+    occ_raw = payload.get("ports_occupancy", {})
+    if not isinstance(occ_raw, dict):
+        occ_raw = {}
+    occ_eff = _occ_for_ep_timeline(
+        ext,
+        screen,
+        occ_raw,
+        f"{sim_time:.2f}",
+        progress_p=payload if isinstance(payload, dict) else None,
+    )
 
     # EP 라인 결정: 엔진이 보낸 ep_ports를 최우선으로 사용한다(가장 안정적).
     eps: List[str] = []
@@ -6692,11 +7279,9 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
     if isinstance(ep_ports, list) and ep_ports:
         eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
     if not eps:
-        # 폴백: occ 키
-        eps = [str(k).strip().upper() for k in ep_occ.keys() if str(k).strip().upper().startswith("EP")]
+        eps = [str(k).strip().upper() for k in occ_eff.keys() if str(k).strip().upper().startswith("EP")]
     eps = sorted(eps, key=lambda x: int(str(x).upper().replace("EP", "") or "0"))
     if not eps:
-        # 최후 폴백: 최소 2포트는 항상 보여준다(요구사항)
         eps = ["EP1", "EP2"]
     rows = list(eps) + ["ALL_EP"]
 
@@ -6714,19 +7299,32 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
             segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dur)
         else:
             segs.append({"empty": bool(empty), "dur": float(dur)})
-        # 너무 길어지면 앞부분을 잘라 메모리/렌더 부담 완화(최근 200세그먼트 유지)
         if len(segs) > 220:
             del segs[:-200]
 
-    # rows_state에 키를 미리 만들어, 렌더 시 줄이 항상 나오게 한다.
     for r in rows:
         if r not in rows_state or not isinstance(rows_state.get(r), list):
             rows_state[r] = []
 
-    for ep in eps:
-        v = str(ep_occ.get(ep, "EMPTY")).strip().upper()
-        _push(ep, empty=(v == "EMPTY"), dur=dt)
-    _push("ALL_EP", empty=bool(all_ep_empty), dur=dt)
+    t_cursor = float(t_last)
+    for dt_part, occ_part in interval_occ_parts(occ_raw, payload, float(t_last), float(sim_time)):
+        if dt_part <= 1e-9:
+            continue
+        t_cursor += float(dt_part)
+        occ_disp = _occ_for_ep_timeline(
+            ext,
+            screen,
+            occ_part if isinstance(occ_part, dict) else {},
+            f"{t_cursor:.6f}",
+            progress_p=payload if isinstance(payload, dict) else None,
+        )
+        all_ep_empty = True
+        for ep in eps:
+            empty = not bool(str(occ_disp.get(ep, "") or "").strip())
+            if not empty:
+                all_ep_empty = False
+            _push(ep, empty=empty, dur=dt_part)
+        _push("ALL_EP", empty=all_ep_empty, dur=dt_part)
 
     old = ch.get("progress_ep_timeline_widget", None)
     if old is not None:
@@ -6848,20 +7446,21 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
                     segs = rows_state.get(row, [])
                     if not isinstance(segs, list):
                         segs = []
+                    rects = _bar_segment_rect_widths(
+                        segs,
+                        total_est=float(total_est),
+                        bar_w=int(BAR_W),
+                        t_cover=float(sim_time),
+                    )
                     with ui.HStack(height=BAR_H, spacing=0):
                         used = 0
-                        for s in (segs or []):
-                            dur = float((s or {}).get("dur", 0.0))
-                            if dur <= 1e-9:
-                                continue
-                            # total_est가 큰 경우 w가 0으로 반올림되어 막대가 안 보일 수 있어 최소 1px 보장
-                            w = int(round((dur / total_est) * BAR_W))
-                            w = max(1, w)
-                            if w <= 0:
-                                continue
-                            used += w
-                            ui.Rectangle(width=w, height=BAR_H, style={"background_color": _color(bool(s.get("empty", False)))})
-                        # 남은 폭 채우기(빈 공간)
+                        for w, empty in rects:
+                            used += int(w)
+                            ui.Rectangle(
+                                width=int(w),
+                                height=BAR_H,
+                                style={"background_color": _color(bool(empty))},
+                            )
                         if used < BAR_W:
                             ui.Spacer(width=(BAR_W - used))
 
@@ -7788,6 +8387,18 @@ def on_sim_start_clicked(ext: Any) -> None:
         ext._sim_last_ports_occupancy_by_screen = {}
     except Exception:
         pass
+    try:
+        ext._sim_post_anim_port_applied_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_pending_post_anim_port_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_post_anim_src_by_screen = {}
+    except Exception:
+        pass
     # 종료 시점(env.now)과의 정합을 위해 유지(엔진 timeline_only 경로와는 별개)
     try:
         ext._sim_ep_timeline_virtual_time_by_screen = {}
@@ -7948,6 +8559,20 @@ def on_sim_start_clicked(ext: Any) -> None:
             pass
         try:
             _update_port_occupancy_panel(ext, occ_init, sim_time="0.0", screen=int(scr0))
+        except Exception:
+            pass
+        # 요구사항: 시뮬 시작 직후에도 포트 점유 상태를 바탕으로
+        # visibility/위치 초기화를 함께 반영한 상태에서 시작해야 한다.
+        try:
+            _apply_sim_event_state_only(
+                ext,
+                {
+                    "ports_occupancy": dict(occ_init),
+                    "sim_time": "0.00",
+                    "foup_proc_active_ep": "",
+                },
+                screen=int(scr0),
+            )
         except Exception:
             pass
     ext._sim_progress_rows = {}
@@ -9025,6 +9650,18 @@ def on_sim_stop_clicked(ext: Any) -> None:
         pass
     try:
         ext._sim_last_ports_occupancy_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_post_anim_port_applied_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_pending_post_anim_port_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_post_anim_src_by_screen = {}
     except Exception:
         pass
     try:
