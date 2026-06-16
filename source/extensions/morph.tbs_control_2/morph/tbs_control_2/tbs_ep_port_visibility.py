@@ -226,9 +226,14 @@ def schedule_apply_ep_port_layout(
 def on_sim_ep_count_combo_changed(ext: Any) -> None:
     """``on_sim_ep_count_changed`` 마지막 — EP 콤보 변경 시 visibility 전환 (USD 재오픈 없음)."""
     try:
-        idx = int(ext._sim_ep_count_combo.model.get_item_value_model().as_int)
+        from .ebs_control_panel_ui import get_sim_ep_count_idx
+
+        idx = int(get_sim_ep_count_idx(ext))
     except Exception:
-        idx = 0
+        try:
+            idx = int(ext._sim_ep_count_combo.model.get_item_value_model().as_int)
+        except Exception:
+            idx = 0
     last_idx = getattr(ext, "_ep_port_visibility_combo_idx", None)
     if last_idx is not None and int(last_idx) == int(idx):
         return

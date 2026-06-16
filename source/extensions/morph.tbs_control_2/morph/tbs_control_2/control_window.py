@@ -274,6 +274,7 @@ from .control_sim_prerun_playback import (
     resolve_seek_through_index,
     truncate_bar_rows_at_t,
 )
+from .ebs_control_panel_ui import build_ebs_control_panel_content, get_sim_ep_count_idx, init_ebs_control_models
 from .control_sim_timetable_ui import (
     build_timetable_column_ui,
     mount_interactive_timetable,
@@ -1316,7 +1317,7 @@ def _capture_per_screen_sim_settings(ext: Any) -> Dict[str, Any]:
     """
     d: Dict[str, Any] = {}
     try:
-        d["ep_count_idx"] = int(ext._sim_ep_count_combo.model.get_item_value_model().as_int)
+        d["ep_count_idx"] = int(get_sim_ep_count_idx(ext))
     except Exception:
         d["ep_count_idx"] = int(_SIM_DEF.ep_count_idx)
     try:
@@ -2103,7 +2104,7 @@ def _sim_channel_upper_height(ext: Any) -> int:
 def _ep_timeline_host_height(ext: Any) -> int:
     """EP 막대 줄 수(EP1/EP2[/EP3]/ALL_EP)에 맞춘 ScrollingFrame 높이."""
     try:
-        idx = int(ext._sim_ep_count_combo.model.get_item_value_model().as_int)
+        idx = int(get_sim_ep_count_idx(ext))
     except Exception:
         idx = 0
     n_bars = 4 if idx == 1 else 3
@@ -2713,148 +2714,7 @@ def build_control_window(ext: Any) -> None:
     except Exception:
         pass
 
-    ext._xml_from_port_model = ui.SimpleIntModel(1)
-    ext._xml_to_port_model = ui.SimpleIntModel(6)
-    ext._xml_port_id_model = ui.SimpleIntModel(1)
-    ext._last_generated_xml = ""
-    ext._priority_prefix_model = ui.SimpleStringModel(DEFAULT_PRIORITY_NAME_PREFIX)
-    ext._sim_lot_count_model = ui.SimpleIntModel(int(_SIM_DEF.lot_count))
-    ext._sim_lot_spawn_min_model = ui.SimpleFloatModel(float(_SIM_DEF.lot_spawn_min))
-    ext._sim_lot_spawn_max_model = ui.SimpleFloatModel(float(_SIM_DEF.lot_spawn_max))
-    ext._sim_pickup_evt_min_model = ui.SimpleFloatModel(float(_SIM_DEF.pickup_min))
-    ext._sim_pickup_evt_max_model = ui.SimpleFloatModel(float(_SIM_DEF.pickup_max))
-    ext._sim_speed_model = ui.SimpleFloatModel(float(_SIM_DEF.sim_speed))
-    ext._sim_log_interval_model = ui.SimpleFloatModel(float(_SIM_DEF.log_interval_sec))
-    ext._sim_confirm_each_step_model = ui.SimpleBoolModel(False)
-    ext._sim_bar_preview_model = ui.SimpleBoolModel(False)
-    try:
-        ext._sim_bar_preview_model.add_value_changed_fn(lambda *_a: _on_sim_bar_preview_toggled(ext))
-    except Exception:
-        pass
-    # 공정설정 시간 우선(기본 OFF)
-    ext._sim_process_time_priority_model = ui.SimpleBoolModel(False)
-    ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_min))
-    ext._sim_oht_bp1_max_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_max))
-    ext._sim_bp1_bp_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_min))
-    ext._sim_bp1_bp_max_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_max))
-    ext._sim_bp_ep_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp_to_ep_min))
-    ext._sim_bp_ep_max_model = ui.SimpleFloatModel(float(_SIM_DEF.bp_to_ep_max))
-    ext._sim_ep_oht_min_model = ui.SimpleFloatModel(float(_SIM_DEF.ep_to_oht_min))
-    ext._sim_ep_oht_max_model = ui.SimpleFloatModel(float(_SIM_DEF.ep_to_oht_max))
-    ext._sim_foup_proc_min_model = ui.SimpleFloatModel(float(_SIM_DEF.foup_process_min))
-    ext._sim_foup_proc_max_model = ui.SimpleFloatModel(float(_SIM_DEF.foup_process_max))
-    ext._sim_ep_count_combo = None
-    # 초기 적재 포트: IN/OUT + BP1~BP4 + EP1~EP3
-    # (EP 개수=2이면 BP4/EP3은 UI에서 숨기며 값도 강제로 False로 유지)
-    ext._sim_init_inout_model = ui.SimpleBoolModel(False)
-    ext._sim_init_bp1_model = ui.SimpleBoolModel(False)
-    ext._sim_init_bp2_model = ui.SimpleBoolModel(False)
-    ext._sim_init_bp3_model = ui.SimpleBoolModel(False)
-    ext._sim_init_bp4_model = ui.SimpleBoolModel(False)
-    ext._sim_init_ep1_model = ui.SimpleBoolModel(False)
-    ext._sim_init_ep2_model = ui.SimpleBoolModel(False)
-    ext._sim_init_ep3_model = ui.SimpleBoolModel(False)
-    ext._sim_init_bp4_row = None
-    ext._sim_init_ep3_row = None
-    # 고장(비가동) 포트 체크박스 모델(런타임 변경 가능)
-    ext._sim_fault_inout_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_bp1_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_bp2_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_bp3_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_bp4_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_ep1_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_ep2_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_ep3_model = ui.SimpleBoolModel(False)
-    ext._sim_fault_bp4_row = None
-    ext._sim_fault_ep3_row = None
-    ext._sim_log_text = ui.SimpleStringModel("[SIM] 대기 중")
-    ext._sim_history_text = ui.SimpleStringModel("[SIM] 대기 중")
-    ext._sim_progress_text = ui.SimpleStringModel("[진행현황] 없음")
-    ext._sim_port_state_text = ui.SimpleStringModel("[포트상태] 대기 중")
-    # 요약(애니 실행이력 창): "스토리 1개 + 그 이후 연결된 JSON 목록" 블록을 유지
-    # block: {"story": str, "anims": List[str]}
-    ext._sim_recent_story_blocks = []
-    # (요청으로 제거) 생성/회수 대기 토큰 표시 기능 비활성화
-    # (요청으로 제거) 포트상태 좌/우 점 표시 기능은 비활성화
-    ext._sim_progress_rows = {}
-    ext._sim_progress_history = []
-    ext._sim_progress_start_times = {}
-    # 진행현황 RUNNING 라인 디듀프: percent/elapsed/total이 같으면 UI 갱신 스킵
-    ext._sim_progress_last_key = {}
-    ext._sim_engine = None
-    ext._sim_engines = []
-    ext._sim_viewport_split_count = 1
-    ext._sync_sim_multi_split_ui_fn = None
-    ext._tbs_multi_split_usd_ready = False
-    ext._tbs_last_loaded_usd_path = ""
-    ext._sim_multi_view_apply_token = 0
-    ext._sim_multi_viewport_entries = []
-    ext._tbs_sim_snapshot_hud_windows = []
-    ext._tbs_sim_snapshot_hud_roots = {}
-    ext._tbs_split_main_viewport_window = None
-    ext._tbs_sim_hud_screen1_label = None
-    ext._tbs_sim_hud_screen1_live_sub = None
-    ext._tbs_sim_hud_live_ctr = 0
-    ext._capture_sim_settings_dict_for_hud_fn = lambda: _capture_per_screen_sim_settings(ext)
-    ext._sim_multi_context_names = []
-    ext._tbs_split_session_layer_paths = []
-    ext._tbs_mdl_https_texture_hint_done = False
-    ext._sim_split_mutate_guard = False
-    ext._sim_split_cb_models = []
-    ext._sim_split_stage_sub = None
-    ext._sim_multi_split_row = None
-    ext._sim_per_screen_snapshots = [None, None, None, None]
-    ext._sim_snapshot_sync_guard = False
-    ext._sim_per_screen_block = None
-    ext._sim_per_screen_row_hstacks = []
-    ext._sim_per_screen_status_labels = []
-    ext._sync_sim_per_screen_rows_fn = None
-    ext._sim_update_sub = None
-    ext._sim_thread = None
-    ext._sim_tick_threads = []
-    ext._sim_thread_stop = None
-    ext._sim_log_queue = None
-    ext._sim_log_ui_sub = None
-    ext._sim_log_view_combo = None
-    ext._sim_progress_frame = None
-    ext._sim_history_frame = None
-    ext._sim_anim_history_frame = None
-    ext._sim_monitor_window = None
-    ext._sim_monitor_split_host = None
-    ext._sim_monitor_split_inner = None
-    ext._sim_timetable_window = None
-    ext._sim_timetable_split_host = None
-    ext._sim_timetable_split_inner = None
-    ext._sim_timetable_layout_n = 1
-    ext._sim_monitor_channels = []
-    ext._sim_monitor_layout_n = 1
-    ext._rebuild_sim_monitor_split_ui_fn = None
-    ext._rebuild_sim_timetable_split_ui_fn = None
-    ext._sim_port_state_frame = None
-    ext._sim_port_state_header_label = None
-    ext._sim_port_cells = {}
-    ext._sim_port_cell_boxes = {}
-    ext._sim_port_bp4_cell_container = None
-    ext._sim_port_ep3_cell = None
-    ext._sim_port_ep3_cell_container = None
-    ext._sim_progress_label = None
-    ext._sim_history_label = None
-    ext._sim_anim_history_label = None
-    ext._sim_port_state_label = None
-    ext._sim_runner = SequenceRunner(
-        registry=getattr(ext, "_tbs_registry", None),
-        scheduler=getattr(ext, "_tbs_scheduler", None),
-        evaluator=getattr(ext, "_tbs_evaluator", None),
-    )
-    ext._sim_anim_active = {}
-    ext._sim_anim_pending = []
-    # 애니메이션 재생 중 sim tick을 잠시 멈추기 위한 플래그
-    ext._sim_tick_pause_event = threading.Event()
-    # 이벤트 확인창(공정확인) 표시 중 sim tick을 잠시 멈추기 위한 플래그
-    ext._sim_gate_pause_event = threading.Event()
-    # fail-safe: 예상 애니 길이만큼은 최소 pause 유지 (monotonic timestamp)
-    ext._sim_tick_pause_until_wall = None
-    ext._sim_gate_dialog = None
+    init_ebs_control_models(ext)
 
     ext._control_window = ui.Window("EBS 제어창", width=520, height=500)
     with ext._control_window.frame:
@@ -2863,307 +2723,7 @@ def build_control_window(ext: Any) -> None:
             style={"ScrollingFrame": {"padding": 4, "margin": 0}},
         ):
             with ui.VStack(spacing=0):
-                ext._kit_chrome_hide_model = ui.SimpleBoolModel(KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH)
-
-                def _on_kit_chrome_toggle(model):
-                    try:
-                        apply_kit_chrome_hidden(ext, bool(model.as_bool))
-                    except Exception:
-                        pass
-
-                ext._kit_chrome_hide_model.add_value_changed_fn(_on_kit_chrome_toggle)
-
-                # with ui.Frame(style={"background_color": 0xFF23262B}):
-                #     with ui.VStack(padding=8, spacing=8):
-                #         ui.Label("화면", height=24, style={"color": 0xFFDDDDDD})
-                #         with ui.HStack(spacing=8, height=28):
-                #             ui.Label(
-                #                 "기본 메뉴·패널 숨기기 (3D 뷰·TBS·시퀀스 편집기 유지)",
-                #                 width=0,
-                #                 style={"color": 0xFFCCCCCC},
-                #             )
-                #             ui.CheckBox(
-                #                 model=ext._kit_chrome_hide_model,
-                #                 width=28,
-                #                 style=CHECKBOX_WHITE_STYLE,
-                #             )
-                # ui.Spacer(height=6)
-                # USD Load → 별도 창 ``TbsUsdWindow`` (extension.py)
-                # with ui.Frame(style={"background_color": 0xFF23262B}):
-                #     # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
-                #     with ui.VStack(padding=8, spacing=8):
-                #         ui.Label("XML 제너레이터 생성기", height=24, style={"color": 0xFFDDDDDD})
-                #         ext._xml_seq_combo = ui.ComboBox(
-                #             0,
-                #             xml_generator.SEQ_READYTOLOAD,
-                #             xml_generator.SEQ_ARRIVED,
-                #             xml_generator.SEQ_MOVE_TRANSFERING,
-                #             xml_generator.SEQ_MOVE,
-                #             xml_generator.SEQ_MOVE_REQ,
-                #             xml_generator.SEQ_READYTOUNLOAD,
-                #             xml_generator.SEQ_REMOVED,
-                #         )
-                #         ext._xml_seq_combo.model.add_item_changed_fn(lambda m, *a: on_xml_seq_changed(ext))
-                #         with ui.HStack(spacing=8, height=28):
-                #             ui.Button("OK", width=72, height=28, clicked_fn=lambda: on_xml_ok_clicked(ext))
-                #             ui.Button("제너레이터 실행(역파싱)", height=28, clicked_fn=lambda: on_xml_run_clicked(ext))
-                #         ext._xml_ab_inputs_frame = ui.HStack(spacing=8, height=28)
-                #         with ext._xml_ab_inputs_frame:
-                #             ui.Label("FROM_PORT_ID", width=110, height=28)
-                #             ui.IntField(model=ext._xml_from_port_model, width=60, height=28)
-                #             ui.Label("TO_PORT_ID", width=90, height=28)
-                #             ui.IntField(model=ext._xml_to_port_model, width=60, height=28)
-                #         ext._xml_ab_inputs_frame.visible = True
-
-                #         ext._xml_port_inputs_frame = ui.HStack(spacing=8, height=28)
-                #         with ext._xml_port_inputs_frame:
-                #             ui.Label("PORT_ID", width=110, height=28)
-                #             ui.IntField(model=ext._xml_port_id_model, width=60, height=28)
-                #         ext._xml_port_inputs_frame.visible = False
-                #         ui.Label(
-                #             "포트 ID 표: EP1~3=1~3, IN/OUT=5, BP1~4=6~9, OHT=10",
-                #             height=18,
-                #             style={"color": 0xFF9AA4B2},
-                #         )
-                #         # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
-                #         on_xml_seq_changed(ext)
-                # ui.Spacer(height=6)
-                # ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-                # ui.Spacer(height=6)
-                with ui.Frame(style={"background_color": 0xFF1E2530}):
-                    with ui.VStack(padding=8, spacing=6):
-                        with ui.HStack(spacing=10, height=28):
-                            ui.Label(
-                                "시뮬레이션 (simpy)",
-                                width=150,
-                                height=24,
-                                style={"color": 0xFFDDDDDD},
-                            )
-                            ext._sim_multi_split_row = ui.HStack(spacing=8, height=26)
-                            ext._sim_multi_split_row.visible = False
-                            with ext._sim_multi_split_row:
-                                ui.Label(
-                                    "시뮬 화면(USD 로드 시)",
-                                    width=130,
-                                    height=22,
-                                    style={"color": 0xFF9AA4B2},
-                                )
-                                ext._sim_split_cb_models = []
-                                for i in range(1, 5):
-                                    m = ui.SimpleBoolModel(i == 1)
-                                    ext._sim_split_cb_models.append(m)
-                                    ui.Label(f"{i}화면", width=40, height=22, style={"color": 0xFFDDDDDD})
-                                    ui.CheckBox(model=m, width=22, style=CHECKBOX_WHITE_STYLE)
-                                    try:
-                                        m.add_value_changed_fn(lambda md, ii=i: _on_sim_split_choice_changed(ext, ii, md))
-                                    except Exception:
-                                        pass
-                                ext._sync_sim_multi_split_ui_fn = lambda: _sync_sim_split_checkboxes_from_ext_count(ext)
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Label("LOT 수", width=80)
-                            ui.IntField(model=ext._sim_lot_count_model, width=80)
-                            ui.Label("EP 개수", width=55)
-                            ext._sim_ep_count_combo = ui.ComboBox(int(_SIM_DEF.ep_count_idx), "2", "3")
-                            ext._sim_ep_count_combo.model.add_item_changed_fn(lambda m, *a: on_sim_ep_count_changed(ext))
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Label("LOT생성간격", width=100)
-                            ui.FloatField(model=ext._sim_lot_spawn_min_model, width=65)
-                            ui.Label("~", width=10)
-                            ui.FloatField(model=ext._sim_lot_spawn_max_model, width=65)
-                            ui.Label("회수간격", width=60)
-                            ui.FloatField(model=ext._sim_pickup_evt_min_model, width=55)
-                            ui.Label("~", width=10)
-                            ui.FloatField(model=ext._sim_pickup_evt_max_model, width=55)
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Label("FOUP공정(EP)", width=100)
-                            ui.FloatField(model=ext._sim_foup_proc_min_model, width=65)
-                            ui.Label("~", width=10)
-                            ui.FloatField(model=ext._sim_foup_proc_max_model, width=65)
-                            ui.Label("초", width=20, style={"color": 0xFF9AA4B2})
-                        ui.Label("초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)", height=20)
-                        with ui.HStack(spacing=8, height=26):
-                            ui.Label("IN/OUT", width=55); ui.CheckBox(model=ext._sim_init_inout_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("BP1", width=30); ui.CheckBox(model=ext._sim_init_bp1_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("BP2", width=30); ui.CheckBox(model=ext._sim_init_bp2_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("BP3", width=30); ui.CheckBox(model=ext._sim_init_bp3_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ext._sim_init_bp4_row = ui.HStack(spacing=8, height=26)
-                            with ext._sim_init_bp4_row:
-                                ui.Label("BP4", width=30); ui.CheckBox(model=ext._sim_init_bp4_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        with ui.HStack(spacing=8, height=26):
-                            ui.Label("EP1", width=30); ui.CheckBox(model=ext._sim_init_ep1_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("EP2", width=30); ui.CheckBox(model=ext._sim_init_ep2_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ext._sim_init_ep3_row = ui.HStack(spacing=8, height=26)
-                            with ext._sim_init_ep3_row:
-                                ui.Label("EP3", width=30); ui.CheckBox(model=ext._sim_init_ep3_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        try:
-                            ext._sim_init_ep3_model.add_value_changed_fn(lambda m: on_sim_ep_count_changed(ext))
-                        except Exception:
-                            pass
-                        for mdl in (
-                            ext._sim_init_inout_model,
-                            ext._sim_init_bp1_model,
-                            ext._sim_init_bp2_model,
-                            ext._sim_init_bp3_model,
-                            ext._sim_init_bp4_model,
-                            ext._sim_init_ep1_model,
-                            ext._sim_init_ep2_model,
-                            ext._sim_init_ep3_model,
-                        ):
-                            try:
-                                mdl.add_value_changed_fn(lambda m: _sync_ep3_port_cell_visibility(ext))
-                            except Exception:
-                                pass
-                        on_sim_ep_count_changed(ext)
-                        ui.Spacer(height=2)
-                        ui.Label("고장(비가동) 포트 (체크 시 해당 포트는 라우팅에서 제외, 실행 중에도 즉시 반영)", height=20)
-
-                        def _collect_faulty_ports() -> Set[str]:
-                            out: Set[str] = set()
-                            try:
-                                if ext._sim_fault_inout_model.get_value_as_bool():
-                                    out.add("INOUT")
-                                if ext._sim_fault_bp1_model.get_value_as_bool():
-                                    out.add("BP1")
-                                if ext._sim_fault_bp2_model.get_value_as_bool():
-                                    out.add("BP2")
-                                if ext._sim_fault_bp3_model.get_value_as_bool():
-                                    out.add("BP3")
-                                if ext._sim_fault_bp4_model.get_value_as_bool():
-                                    out.add("BP4")
-                                if ext._sim_fault_ep1_model.get_value_as_bool():
-                                    out.add("EP1")
-                                if ext._sim_fault_ep2_model.get_value_as_bool():
-                                    out.add("EP2")
-                                if ext._sim_fault_ep3_model.get_value_as_bool():
-                                    out.add("EP3")
-                            except Exception:
-                                pass
-                            return out
-
-                        def _on_faulty_changed(_m=None):
-                            # 엔진이 동작 중이면 즉시 반영: 다음 선택부터 고장포트 회피
-                            for eng in list(getattr(ext, "_sim_engines", None) or []):
-                                if eng is not None:
-                                    try:
-                                        eng.kick_serial_flow()
-                                    except Exception:
-                                        pass
-                            sim = getattr(ext, "_sim_engine", None)
-                            if sim is not None:
-                                try:
-                                    sim.kick_serial_flow()
-                                except Exception:
-                                    pass
-
-                        with ui.HStack(spacing=8, height=26):
-                            ui.Label("IN/OUT", width=55); ui.CheckBox(model=ext._sim_fault_inout_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("BP1", width=30); ui.CheckBox(model=ext._sim_fault_bp1_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("BP2", width=30); ui.CheckBox(model=ext._sim_fault_bp2_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("BP3", width=30); ui.CheckBox(model=ext._sim_fault_bp3_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ext._sim_fault_bp4_row = ui.HStack(spacing=8, height=26)
-                            with ext._sim_fault_bp4_row:
-                                ui.Label("BP4", width=30); ui.CheckBox(model=ext._sim_fault_bp4_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        with ui.HStack(spacing=8, height=26):
-                            ui.Label("EP1", width=30); ui.CheckBox(model=ext._sim_fault_ep1_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("EP2", width=30); ui.CheckBox(model=ext._sim_fault_ep2_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ext._sim_fault_ep3_row = ui.HStack(spacing=8, height=26)
-                            with ext._sim_fault_ep3_row:
-                                ui.Label("EP3", width=30); ui.CheckBox(model=ext._sim_fault_ep3_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                        for mdl in (
-                            ext._sim_fault_inout_model,
-                            ext._sim_fault_bp1_model,
-                            ext._sim_fault_bp2_model,
-                            ext._sim_fault_bp3_model,
-                            ext._sim_fault_bp4_model,
-                            ext._sim_fault_ep1_model,
-                            ext._sim_fault_ep2_model,
-                            ext._sim_fault_ep3_model,
-                        ):
-                            try:
-                                mdl.add_value_changed_fn(lambda m: _on_faulty_changed(m))
-                            except Exception:
-                                pass
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Label("OHT→IN/OUT/EP", width=100)
-                            ui.FloatField(model=ext._sim_oht_bp1_min_model, width=70)
-                            ui.Label("~", width=10)
-                            ui.FloatField(model=ext._sim_oht_bp1_max_model, width=70)
-                            ui.Label("IN/OUT->BP", width=60)
-                            ui.FloatField(model=ext._sim_bp1_bp_min_model, width=55)
-                            ui.Label("~", width=10)
-                            ui.FloatField(model=ext._sim_bp1_bp_max_model, width=55)
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Label("BP->EP", width=80)
-                            ui.FloatField(model=ext._sim_bp_ep_min_model, width=70)
-                            ui.Label("~", width=10)
-                            ui.FloatField(model=ext._sim_bp_ep_max_model, width=70)
-                            ui.Label("EP->OHT", width=60)
-                            ui.FloatField(model=ext._sim_ep_oht_min_model, width=55)
-                            ui.Label("~", width=10)
-                            ui.FloatField(model=ext._sim_ep_oht_max_model, width=55)
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Label("시뮬 속도배율", width=100)
-                            ui.FloatField(model=ext._sim_speed_model, width=80)
-                            ui.Label("로그주기(s)", width=70)
-                            ui.FloatField(model=ext._sim_log_interval_model, width=70)
-                        with ui.HStack(spacing=8, height=28):
-                            # 요구사항: 공정시간 우선(process_time_priority) 기능은 사용하지 않음
-                            # - UI 노출 제거(실제 로직에서도 항상 OFF 고정)
-                            ui.CheckBox(
-                                model=ext._sim_process_time_priority_model,
-                                width=30,
-                                style=CHECKBOX_WHITE_STYLE,
-                                visible=False,
-                            )
-                            ui.Label("공정설정 시간 우선", width=120, visible=False)
-                            ui.CheckBox(model=ext._sim_bar_preview_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            ui.Label("결과 미리보기", width=90)
-                            # 각 공정 확인 — 당분간 UI 비표시(모델·on_gate 로직은 유지)
-                            # ui.CheckBox(model=ext._sim_confirm_each_step_model, width=30, style=CHECKBOX_WHITE_STYLE)
-                            # ui.Label("각 공정 확인", width=80)
-                            ui.Spacer(width=8)
-                            ext._sim_start_button = ui.Button(
-                                "시작", width=72, clicked_fn=lambda: on_sim_start_clicked(ext)
-                            )
-                            ui.Button("정지", width=72, clicked_fn=lambda: on_sim_stop_clicked(ext))
-                            ui.Button("리셋", width=72, clicked_fn=lambda: on_sim_reset_clicked(ext))
-                        ext._sim_per_screen_block = ui.VStack(spacing=4, visible=False)
-                        with ext._sim_per_screen_block:
-                            ui.Label(
-                                "2~4분할 시: 화면별로 아래에서 「현재 설정 저장」을 누르면 LOT·간격·적재/고장·시간 값이 "
-                                "해당 화면에 고정됩니다. 저장 안 한 화면은 시뮬 시작 시 제어창 값으로 자동 채웁니다.",
-                                word_wrap=True,
-                                width=0,
-                                style={"color": 0xFF9AA4B2},
-                            )
-                            ext._sim_per_screen_row_hstacks = []
-                            ext._sim_per_screen_status_labels = []
-                            for si in range(1, 5):
-                                row = ui.HStack(spacing=8, height=26, visible=False)
-                                ext._sim_per_screen_row_hstacks.append(row)
-                                with row:
-                                    ui.Label(f"화면{si}", width=44, height=22, style={"color": 0xFFDDDDDD})
-                                    st = ui.Label("(미저장)", width=64, height=22, style={"color": 0xFF9AA4B2})
-                                    ext._sim_per_screen_status_labels.append(st)
-                                    ui.Button(
-                                        "현재 설정 저장",
-                                        width=110,
-                                        height=24,
-                                        clicked_fn=lambda e=ext, k=si: _on_save_sim_settings_to_screen(e, k),
-                                    )
-                        ext._sync_sim_per_screen_rows_fn = lambda: _refresh_sim_per_screen_rows(ext)
-                # 우선 표시 이름 규칙·USD prim 목록 등 하단 UI는 당분간 비표시 (모델은 유지).
-                # ui.Spacer(height=6)
-                # ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-                # ui.Spacer(height=8)
-                # ui.Label("우선 표시 이름 규칙 (접두사, 비우면 순서대로 표시)", height=20)
-                # ui.StringField(model=ext._priority_prefix_model, height=22)
-                # ui.Spacer(height=4)
-                # ui.Label("로드된 USD 내 장비 prim (드롭다운)", height=20)
-                # ui.Button("목록 새로고침", height=28, clicked_fn=lambda: on_refresh_prim_list(ext))
-                # ui.Spacer(height=4)
-                # with ui.ScrollingFrame(height=280, style={"ScrollingFrame": {"padding": 0, "margin": 0}}):
-                #     ext._object_list_frame = ui.VStack(spacing=4, alignment=ui.Alignment.LEFT_TOP)
+                build_ebs_control_panel_content(ext, compact=False)
     build_sim_monitor_window(ext)
     build_sim_timetable_window(ext)
     try:
@@ -3540,7 +3100,7 @@ def _ep_count_idx_for_port_panel(ext: Any, screen_1based: int) -> int:
     except Exception:
         pass
     try:
-        return int(ext._sim_ep_count_combo.model.get_item_value_model().as_int)
+        return int(get_sim_ep_count_idx(ext))
     except Exception:
         return 0
 
@@ -5023,6 +4583,16 @@ def _on_sim_bar_preview_toggled(ext: Any) -> None:
 
 
 def _set_sim_start_enabled(ext: Any, enabled: bool) -> None:
+    btns = getattr(ext, "_sim_start_buttons", None)
+    if isinstance(btns, list) and btns:
+        for btn in btns:
+            if btn is None:
+                continue
+            try:
+                btn.enabled = bool(enabled)
+            except Exception:
+                pass
+        return
     btn = getattr(ext, "_sim_start_button", None)
     if btn is None:
         return
@@ -10009,7 +9579,7 @@ def on_copy_sim_progress(ext: Any) -> None:
 
 def on_sim_ep_count_changed(ext: Any) -> None:
     try:
-        idx = ext._sim_ep_count_combo.model.get_item_value_model().as_int
+        idx = int(get_sim_ep_count_idx(ext))
     except Exception:
         idx = 0
     is_ep3 = idx == 1
@@ -10039,19 +9609,39 @@ def on_sim_ep_count_changed(ext: Any) -> None:
 
     if getattr(ext, "_sim_init_bp4_row", None) is not None:
         ext._sim_init_bp4_row.visible = is_ep3
+    for row in list(getattr(ext, "_sim_init_bp4_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
     if not is_ep3 and getattr(ext, "_sim_init_bp4_model", None) is not None:
         ext._sim_init_bp4_model.set_value(False)
     if getattr(ext, "_sim_init_ep3_row", None) is not None:
         ext._sim_init_ep3_row.visible = is_ep3
+    for row in list(getattr(ext, "_sim_init_ep3_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
     if not is_ep3 and getattr(ext, "_sim_init_ep3_model", None) is not None:
         ext._sim_init_ep3_model.set_value(False)
     # 고장 포트 행도 동일 규칙 적용
     if getattr(ext, "_sim_fault_bp4_row", None) is not None:
         ext._sim_fault_bp4_row.visible = is_ep3
+    for row in list(getattr(ext, "_sim_fault_bp4_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
     if not is_ep3 and getattr(ext, "_sim_fault_bp4_model", None) is not None:
         ext._sim_fault_bp4_model.set_value(False)
     if getattr(ext, "_sim_fault_ep3_row", None) is not None:
         ext._sim_fault_ep3_row.visible = is_ep3
+    for row in list(getattr(ext, "_sim_fault_ep3_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
     if not is_ep3 and getattr(ext, "_sim_fault_ep3_model", None) is not None:
         ext._sim_fault_ep3_model.set_value(False)
     _sync_ep3_port_cell_visibility(ext)

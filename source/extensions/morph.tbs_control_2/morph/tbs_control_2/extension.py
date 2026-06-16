@@ -212,6 +212,13 @@ class Extension(omni.ext.IExt):
         self._tbs_scheduler = PlaybackScheduler(registry=self._tbs_registry, evaluator=self._tbs_evaluator)
 
         build_control_window(self)
+        try:
+            from .tbs_viewport_control_hud import attach_tbs_viewport_control_hud
+
+            attach_tbs_viewport_control_hud(self)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} viewport control HUD attach failed: {exc}", flush=True)
+        from .ebs_control_panel_ui import get_sim_ep_count_idx
         from .tbs_ep_port_visibility import (
             ep_count_from_combo_idx,
             schedule_apply_ep_port_layout,
@@ -229,11 +236,7 @@ class Extension(omni.ext.IExt):
             except Exception:
                 pass
             try:
-                idx = 0
-                if getattr(self, "_sim_ep_count_combo", None) is not None:
-                    idx = int(
-                        self._sim_ep_count_combo.model.get_item_value_model().as_int
-                    )
+                idx = int(get_sim_ep_count_idx(self))
             except Exception:
                 idx = 0
             schedule_apply_ep_port_layout(
@@ -242,6 +245,12 @@ class Extension(omni.ext.IExt):
                 delay_frames=12,
                 reason="master_opened",
             )
+            try:
+                hud = getattr(self, "_tbs_viewport_control_hud", None)
+                if hud is not None and hasattr(hud, "sync_layers"):
+                    hud.sync_layers(delay_frames=12)
+            except Exception:
+                pass
 
         self._tbs_usd_window = TbsUsdWindow(
             self._tbs_registry,
@@ -402,6 +411,12 @@ class Extension(omni.ext.IExt):
             pass
         try:
             detach_stage_visibility_subscription(self)
+        except Exception:
+            pass
+        try:
+            from .tbs_viewport_control_hud import destroy_tbs_viewport_control_hud
+
+            destroy_tbs_viewport_control_hud(self)
         except Exception:
             pass
         if self._control_window is not None:
