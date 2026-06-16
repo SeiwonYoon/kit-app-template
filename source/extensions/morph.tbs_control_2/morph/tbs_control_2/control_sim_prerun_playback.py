@@ -47,6 +47,109 @@ class TimetableRowMeta:
     through_item_index: int  # Fast-apply 시 items[0..through_item_index] 포함
 
 
+@dataclass
+class SeekSnapshot:
+    """
+    프리런 타임라인 ``items[0 .. item_index-1]`` 적용 후 상태.
+
+    ``play_cursor == item_index`` 일 때 seek 가 이 스냅샷을 사용한다.
+    """
+
+    item_index: int
+    apply_payload: Dict[str, Any]
+    progress_last_payload: Optional[Dict[str, Any]] = None
+    foup_by_ep: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    needs_state_apply: bool = False
+
+
+def _merge_foup_active_ep_from_payload(current: str, payload: Dict[str, Any]) -> str:
+    """``_remember_foup_active_ep`` 와 동일 규칙(확장 상태 없이 순수 병합)."""
+    ep = str(payload.get("foup_proc_active_ep", "") or "").strip().upper()
+    if ep:
+        return ep
+    if "foup_proc_active_ep" in payload:
+        return ""
+    return str(current or "").strip().upper()
+
+
+def _extract_ep_id_from_foup_payload(payload: Dict[str, Any]) -> str:
+    ep_id = str(payload.get("port_id", "") or "").strip().upper()
+    if ep_id:
+        return ep_id
+    try:
+        import re as _re
+
+        src_txt = (str(payload.get("label", "") or "") + " " + str(payload.get("detail", "") or "")).upper()
+        m = _re.search(r"\bEP(\d+)\b", src_txt)
+        if m:
+            n = int(m.group(1))
+            if 1 <= n <= 3:
+                return f"EP{n}"
+    except Exception:
+        pass
+    return ""
+
+
+def build_seek_snapshots_by_item_index(items: Tuple[SimTimelineItem, ...]) -> List[SeekSnapshot]:
+    """
+    프리런 ``items`` 를 한 번 훑어 item_index 별 seek 스냅샷을 만든다.
+
+    반환 길이 ``len(items)+1`` — ``snapshots[play_cursor]`` 가
+    ``_fast_apply_prerun_seek`` 의 ``range(play_cursor)`` 루프 결과와 동일해야 한다.
+    """
+    snapshots: List[SeekSnapshot] = []
+    occ: Dict[str, str] = {}
+    foup_active = ""
+    last_progress: Optional[Dict[str, Any]] = None
+    foup_by_ep: Dict[str, Dict[str, Any]] = {}
+    needs_apply = False
+
+    def _append_snapshot(item_index: int) -> None:
+        sim_t = "0.00"
+        if isinstance(last_progress, dict):
+            sim_t = str(last_progress.get("sim_time", "") or "0.00")
+        snapshots.append(
+            SeekSnapshot(
+                item_index=int(item_index),
+                apply_payload={
+                    "ports_occupancy": dict(occ),
+                    "sim_time": sim_t,
+                    "foup_proc_active_ep": str(foup_active or ""),
+                },
+                progress_last_payload=dict(last_progress) if isinstance(last_progress, dict) else None,
+                foup_by_ep={k: dict(v) for k, v in foup_by_ep.items()},
+                needs_state_apply=bool(needs_apply),
+            )
+        )
+
+    _append_snapshot(0)
+    for it in items:
+        kind = str(it.kind or "").strip().lower()
+        p = it.payload
+        if kind == "event" and isinstance(p, dict):
+            pd = dict(p)
+            o = pd.get("ports_occupancy", {})
+            if isinstance(o, dict) and o:
+                occ = {str(k).strip().upper(): str(v or "") for k, v in o.items()}
+            foup_active = _merge_foup_active_ep_from_payload(foup_active, pd)
+            needs_apply = True
+        elif kind == "progress" and isinstance(p, dict):
+            pd = dict(p)
+            last_progress = pd
+            o = pd.get("ports_occupancy", {})
+            if isinstance(o, dict) and o:
+                occ = {str(k).strip().upper(): str(v or "") for k, v in o.items()}
+                needs_apply = True
+            foup_active = _merge_foup_active_ep_from_payload(foup_active, pd)
+            ev_seq = str(pd.get("event_seq") or pd.get("sequence_name") or "").strip().upper()
+            if ev_seq == "FOUP_PROCESS":
+                ep_id = _extract_ep_id_from_foup_payload(pd)
+                if ep_id:
+                    foup_by_ep[ep_id] = dict(pd)
+        _append_snapshot(len(snapshots))
+    return snapshots
+
+
 def _f_val(x: Any, default: float = 0.0) -> float:
     try:
         return float(str(x).strip() or default)

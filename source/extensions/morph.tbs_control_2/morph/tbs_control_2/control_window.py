@@ -265,6 +265,7 @@ from .control_sim_prerun_playback import (
     SimTimelinePlayer,
     _progress_event_affects_ep,
     build_ep_bar_from_progress_items,
+    build_seek_snapshots_by_item_index,
     build_timetable_row_metas,
     effective_ports_occupancy_at_t,
     allocate_bar_segment_pixels,
@@ -2423,6 +2424,7 @@ def _clear_sim_timetable_storage(ext: Any) -> None:
         ext._sim_timetable_row_metas_by_screen = {}
         ext._sim_timetable_display_by_screen = {}
         ext._sim_timetable_channels = {}
+        ext._sim_seek_snapshots_by_screen = {}
     except Exception:
         pass
 
@@ -5024,7 +5026,14 @@ def _cancel_foup_label_reset_subs(ext: Any) -> None:
         pass
 
 
-def _sync_foup_labels_at_seek(ext: Any, *, screen: int, items: List[Any], play_cursor: int) -> None:
+def _sync_foup_labels_at_seek(
+    ext: Any,
+    *,
+    screen: int,
+    items: List[Any],
+    play_cursor: int,
+    foup_by_ep: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> None:
     """Seek 시점까지 누적된 FOUP_PROCESS progress 로 FOUP 공정 라벨을 동기화."""
     _cancel_foup_label_reset_subs(ext)
     try:
@@ -5053,20 +5062,23 @@ def _sync_foup_labels_at_seek(ext: Any, *, screen: int, items: List[Any], play_c
                 {"color": 0xFF888888},
             )
         last_foup_by_ep: Dict[str, Dict[str, Any]] = {}
-        for i in range(max(0, int(play_cursor))):
-            if i >= len(items):
-                break
-            it = items[i]
-            kind = str(getattr(it, "kind", "") or "").strip().lower()
-            p = getattr(it, "payload", None)
-            if kind != "progress" or not isinstance(p, dict):
-                continue
-            ev_seq = str(p.get("event_seq") or p.get("sequence_name") or "").strip().upper()
-            if ev_seq != "FOUP_PROCESS":
-                continue
-            ep_id = _extract_ep_id_from_foup_payload(p)
-            if ep_id:
-                last_foup_by_ep[ep_id] = dict(p)
+        if isinstance(foup_by_ep, dict) and foup_by_ep:
+            last_foup_by_ep = {str(k): dict(v) for k, v in foup_by_ep.items() if isinstance(v, dict)}
+        else:
+            for i in range(max(0, int(play_cursor))):
+                if i >= len(items):
+                    break
+                it = items[i]
+                kind = str(getattr(it, "kind", "") or "").strip().lower()
+                p = getattr(it, "payload", None)
+                if kind != "progress" or not isinstance(p, dict):
+                    continue
+                ev_seq = str(p.get("event_seq") or p.get("sequence_name") or "").strip().upper()
+                if ev_seq != "FOUP_PROCESS":
+                    continue
+                ep_id = _extract_ep_id_from_foup_payload(p)
+                if ep_id:
+                    last_foup_by_ep[ep_id] = dict(p)
         for _ep_id, p in last_foup_by_ep.items():
             st = str(p.get("status", "")).strip().upper()
             lab_u = str(p.get("label", "") or "").upper()
@@ -5267,29 +5279,53 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
         pass
 
     items = res.items
-    for i in range(play_cursor):
-        if i >= len(items):
-            break
-        it = items[i]
-        kind = str(it.kind or "").strip().lower()
-        if kind == "event" and isinstance(it.payload, dict):
-            _apply_sim_event_state_only(ext, dict(it.payload), screen=int(screen))
-        elif kind == "progress" and isinstance(it.payload, dict):
-            p = dict(it.payload)
-            occ = p.get("ports_occupancy", {})
-            if isinstance(occ, dict) and occ:
-                _apply_sim_event_state_only(ext, p, screen=int(screen))
+    sk = str(int(screen))
+    snap_list = None
+    snap_by = getattr(ext, "_sim_seek_snapshots_by_screen", None)
+    if isinstance(snap_by, dict):
+        snap_list = snap_by.get(sk)
+    used_snapshot = (
+        isinstance(snap_list, list) and len(snap_list) > int(play_cursor) and snap_list[int(play_cursor)] is not None
+    )
+    if used_snapshot:
+        snap = snap_list[int(play_cursor)]
+        if bool(getattr(snap, "needs_state_apply", False)):
+            try:
+                _apply_sim_event_state_only(ext, dict(snap.apply_payload), screen=int(screen))
+            except Exception:
+                pass
+        if isinstance(getattr(snap, "progress_last_payload", None), dict):
             try:
                 by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
                 if not isinstance(by_lp, dict):
                     by_lp = {}
                     ext._sim_progress_last_payload_by_screen = by_lp
-                by_lp[str(int(screen))] = dict(p)
+                by_lp[sk] = dict(snap.progress_last_payload)
             except Exception:
                 pass
+    else:
+        for i in range(play_cursor):
+            if i >= len(items):
+                break
+            it = items[i]
+            kind = str(it.kind or "").strip().lower()
+            if kind == "event" and isinstance(it.payload, dict):
+                _apply_sim_event_state_only(ext, dict(it.payload), screen=int(screen))
+            elif kind == "progress" and isinstance(it.payload, dict):
+                p = dict(it.payload)
+                occ = p.get("ports_occupancy", {})
+                if isinstance(occ, dict) and occ:
+                    _apply_sim_event_state_only(ext, p, screen=int(screen))
+                try:
+                    by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+                    if not isinstance(by_lp, dict):
+                        by_lp = {}
+                        ext._sim_progress_last_payload_by_screen = by_lp
+                    by_lp[sk] = dict(p)
+                except Exception:
+                    pass
 
     # 막대 virtual time / 슬라이스 기준 시각
-    sk = str(int(screen))
     _sync_ep_bar_virtual_time_to_sim(ext, int(screen), float(t_target))
     try:
         st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
@@ -5337,7 +5373,18 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
         pass
 
     try:
-        _sync_foup_labels_at_seek(ext, screen=int(screen), items=items, play_cursor=int(play_cursor))
+        foup_prefill = None
+        if used_snapshot and isinstance(snap_list, list) and len(snap_list) > int(play_cursor):
+            cand = snap_list[int(play_cursor)]
+            if isinstance(getattr(cand, "foup_by_ep", None), dict):
+                foup_prefill = dict(cand.foup_by_ep)
+        _sync_foup_labels_at_seek(
+            ext,
+            screen=int(screen),
+            items=list(items),
+            play_cursor=int(play_cursor),
+            foup_by_ep=foup_prefill,
+        )
     except Exception:
         pass
     try:
@@ -5586,6 +5633,7 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
     _clear_ep_prerun_busy_labels(ext)
     bar_by: Dict[str, EpBarPrecomputed] = {}
     meta_by: Dict[str, List[Any]] = {}
+    seek_by: Dict[str, List[Any]] = {}
     for scr, res in results.items():
         try:
             si = int(scr)
@@ -5598,6 +5646,10 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
         bar_by[str(si)] = bar
         metas = build_timetable_row_metas(res)
         meta_by[str(si)] = metas
+        try:
+            seek_by[str(si)] = build_seek_snapshots_by_item_index(res.items)
+        except Exception:
+            seek_by[str(si)] = []
         header = f"[SIM] 타임테이블(프리런) — 화면{si}"
         ch = _resolve_timetable_channel_for_screen(ext, si)
         if ch is None:
@@ -5649,6 +5701,7 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
     try:
         ext._sim_ep_bar_prerun_by_screen = bar_by
         ext._sim_timetable_row_metas_by_screen = meta_by
+        ext._sim_seek_snapshots_by_screen = seek_by
     except Exception:
         pass
     try:
