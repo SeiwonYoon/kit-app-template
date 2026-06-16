@@ -151,7 +151,8 @@ def planned_play_prim_hide_duration_sec() -> float:
 def kickoff_play_prim_hide_play_start(done: threading.Event) -> bool:
     """play_start 숨김 — main 에 시작만 걸고 worker 는 ``done`` 으로 완료 대기."""
     specs = _load_specs()
-    if not specs:
+    show_specs = _load_show_specs()
+    if not specs and not show_specs:
         done.set()
         return False
 
@@ -159,7 +160,7 @@ def kickoff_play_prim_hide_play_start(done: threading.Event) -> bool:
 
     def _kickoff() -> None:
         try:
-            if _any_spec_fade_for_hide():
+            if specs and _any_spec_fade_for_hide():
                 _start_play_hide_fade_chain(lambda: done.set())
             else:
                 _apply_phase_instant("play_start")
@@ -227,6 +228,15 @@ def _load_specs():
         from .lam_viewport_overlay_config import PLAY_HIDE_PRIM_SPECS
 
         return list(PLAY_HIDE_PRIM_SPECS or [])
+    except Exception:
+        return []
+
+
+def _load_show_specs():
+    try:
+        from .lam_viewport_overlay_config import PLAY_SHOW_PRIM_SPECS
+
+        return list(PLAY_SHOW_PRIM_SPECS or [])
     except Exception:
         return []
 
@@ -846,6 +856,8 @@ def _start_play_hide_fade_chain(on_all_done: Callable[[], None]) -> None:
 
         def _done_empty() -> None:
             print(f"{_PRINT_PREFIX} play_start: no fade queue", flush=True)
+            # hide 적용이 없어도 show 목록은 항상 보이게 유지
+            _force_show_all_show_specs()
             on_all_done()
 
         _done_empty()
@@ -860,6 +872,7 @@ def _start_play_hide_fade_chain(on_all_done: Callable[[], None]) -> None:
                 f"{_PRINT_PREFIX} play_start: fade done ({len(queue)} prim)",
                 flush=True,
             )
+            _force_show_all_show_specs()
             on_all_done()
             return
         path, dur = queue[i]
@@ -930,6 +943,54 @@ def _force_show_all_specs() -> None:
         _reset_mdl_opacity_for_show(targets)
 
 
+def _force_show_all_show_specs() -> None:
+    """재생/체크 ON 시 show 목록 prim 은 항상 보이게."""
+    specs = _load_show_specs()
+    paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
+    paths = [p for p in paths if p]
+    for path in paths:
+        targets = _build_fade_targets(path)
+        _set_visible_immediate(path, True)
+        _show_all_gprims_under(targets)
+        if targets.shader_slots:
+            _apply_mdl_fade_opacity(targets, 1.0)
+        _reset_mdl_opacity_for_show(targets)
+
+
+def _hide_all_show_specs_instant(*, snapshot_restore: Optional[str] = None) -> None:
+    """체크 OFF 시 show 목록은 반대로 숨김."""
+    for spec in _load_show_specs():
+        path = str(getattr(spec, "prim_path", "") or "").strip()
+        if not path:
+            continue
+        if snapshot_restore is not None:
+            with _lock:
+                _visibility_snapshot[path] = str(snapshot_restore)
+        else:
+            _capture_snapshot(path)
+        targets = _build_fade_targets(path)
+        _clear_mdl_fade_opacity(targets)
+        _set_visible_immediate(path, False)
+
+
+def _restore_all_show_specs() -> None:
+    """stop_reset 복원: show 목록도 원래 visibility 로 돌림."""
+    specs = _load_show_specs()
+    paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
+    paths = [p for p in paths if p]
+    with _lock:
+        snap = {p: _visibility_snapshot.pop(p, None) for p in paths}
+    for path in paths:
+        targets = _build_fade_targets(path)
+        _clear_mdl_fade_opacity(targets)
+        _show_all_gprims_under(targets)
+        tok = snap.get(path)
+        if tok is None:
+            _set_visible_immediate(path, True)
+        else:
+            _apply_visibility_token(path, tok)
+
+
 def _show_all_instant() -> None:
     for spec in _load_specs():
         path = str(getattr(spec, "prim_path", "") or "").strip()
@@ -948,14 +1009,22 @@ def _show_all_instant() -> None:
 
 def _apply_phase_instant(phase: str) -> None:
     specs = _load_specs()
-    if not specs:
+    show_specs = _load_show_specs()
+    if not specs and not show_specs:
         return
 
     if phase == "play_start":
-        if _any_spec_fade_for_hide():
+        # hide fade 는 apply_play_prim_hide_phase() 경로에서 처리됨.
+        if specs and _any_spec_fade_for_hide():
             return
-        _hide_all_instant()
-        print(f"{_PRINT_PREFIX} play_start: hid {len(specs)} prim(s)", flush=True)
+        if specs:
+            _hide_all_instant()
+            print(
+                f"{_PRINT_PREFIX} play_start: hid {len(specs)} prim(s)",
+                flush=True,
+            )
+        if show_specs:
+            _force_show_all_show_specs()
         return
 
     if phase == "play_stop_reset":
@@ -977,13 +1046,21 @@ def _apply_phase_instant(phase: str) -> None:
         restore = bool(restore_cfg) and not hide_checked
         if restore:
             _restore_all_specs()
+            if show_specs:
+                _restore_all_show_specs()
             print(f"{_PRINT_PREFIX} play_stop_reset: restored visibility", flush=True)
         elif hide_checked:
+            # 체크 ON: show 목록은 항상 보이게 유지
+            if show_specs:
+                _force_show_all_show_specs()
             print(
                 f"{_PRINT_PREFIX} play_stop_reset: keep hidden (prim숨김 checked)",
                 flush=True,
             )
         else:
+            # 체크 OFF + restore 비활성: UI 정책대로 show 목록은 숨김
+            if show_specs:
+                _hide_all_show_specs_instant(snapshot_restore="inherited")
             print(
                 f"{_PRINT_PREFIX} play_stop_reset: keep hidden (restore disabled)",
                 flush=True,
@@ -993,6 +1070,8 @@ def _apply_phase_instant(phase: str) -> None:
     if phase == "ui_hide":
         # 해제 시 항상 보이게 — 이미 invisible 인 상태를 snapshot 에 남기지 않음
         _hide_all_instant(snapshot_restore="inherited")
+        if show_specs:
+            _force_show_all_show_specs()
         found, total = prim_hide_specs_stage_status()
         if total > 0:
             print(
@@ -1003,6 +1082,8 @@ def _apply_phase_instant(phase: str) -> None:
 
     if phase == "ui_show":
         _force_show_all_specs()
+        if show_specs:
+            _hide_all_show_specs_instant(snapshot_restore="inherited")
         found, total = prim_hide_specs_stage_status()
         if total > 0:
             print(

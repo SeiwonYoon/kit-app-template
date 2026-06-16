@@ -110,6 +110,15 @@ PLAY_HIDE_PRIM_SPECS: List[PlayHidePrimSpec] = [
     ),
 ]
 
+# 재생/체크박스에서 "무조건 보이게" 유지할 prim 목록.
+# - PLAY_HIDE_PRIM_SPECS 와 동시에 적용된다.
+# - 동일 prim 이 둘 다에 들어가면, 최종 결과는 "보임(Show 우선)"으로 처리된다.
+# - fade 는 사용하지 않고 즉시 visible 만 강제한다. (lam_play_prim_hide.py)
+PLAY_SHOW_PRIM_SPECS: List[PlayHidePrimSpec] = [
+    # 예시:
+    PlayHidePrimSpec(prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r06___________1085"),
+]
+
 
 # ---------------------------------------------------------------------------
 # CSV 컬럼명 매핑 (향후 컬럼 변경 대비)
