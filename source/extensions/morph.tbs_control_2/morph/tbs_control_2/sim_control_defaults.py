@@ -36,16 +36,16 @@ class SimControlDefaults:
     oht_to_bp1_max: float = 10.0
 
     # IN/OUT → BP(버퍼)
-    bp1_to_bp_min: float = 5.0
-    bp1_to_bp_max: float = 10.0
+    bp1_to_bp_min: float = 30.0
+    bp1_to_bp_max: float = 35.0
 
     # BP → EP
-    bp_to_ep_min: float = 5.0
-    bp_to_ep_max: float = 10.0
+    bp_to_ep_min: float = 30.0
+    bp_to_ep_max: float = 35.0
 
     # EP → OHT(회수)
-    ep_to_oht_min: float = 5.0
-    ep_to_oht_max: float = 10.0
+    ep_to_oht_min: float = 30.0
+    ep_to_oht_max: float = 35.0
 
     # 전역(화면별 스냅샷에 포함하지 않음)
     sim_speed: float = 1.0

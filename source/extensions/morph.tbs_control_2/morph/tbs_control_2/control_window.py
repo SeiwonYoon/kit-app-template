@@ -2804,7 +2804,7 @@ def build_control_window(ext: Any) -> None:
     ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
 
-    ext._control_window = ui.Window("EBS 제어창", width=800, height=560)
+    ext._control_window = ui.Window("EBS 제어창", width=520, height=500)
     with ext._control_window.frame:
         with ui.ScrollingFrame(
             height=ui.Fraction(1.0),
@@ -2821,21 +2821,21 @@ def build_control_window(ext: Any) -> None:
 
                 ext._kit_chrome_hide_model.add_value_changed_fn(_on_kit_chrome_toggle)
 
-                with ui.Frame(style={"background_color": 0xFF23262B}):
-                    with ui.VStack(padding=8, spacing=8):
-                        ui.Label("화면", height=24, style={"color": 0xFFDDDDDD})
-                        with ui.HStack(spacing=8, height=28):
-                            ui.Label(
-                                "기본 메뉴·패널 숨기기 (3D 뷰·TBS·시퀀스 편집기 유지)",
-                                width=0,
-                                style={"color": 0xFFCCCCCC},
-                            )
-                            ui.CheckBox(
-                                model=ext._kit_chrome_hide_model,
-                                width=28,
-                                style=CHECKBOX_WHITE_STYLE,
-                            )
-                ui.Spacer(height=6)
+                # with ui.Frame(style={"background_color": 0xFF23262B}):
+                #     with ui.VStack(padding=8, spacing=8):
+                #         ui.Label("화면", height=24, style={"color": 0xFFDDDDDD})
+                #         with ui.HStack(spacing=8, height=28):
+                #             ui.Label(
+                #                 "기본 메뉴·패널 숨기기 (3D 뷰·TBS·시퀀스 편집기 유지)",
+                #                 width=0,
+                #                 style={"color": 0xFFCCCCCC},
+                #             )
+                #             ui.CheckBox(
+                #                 model=ext._kit_chrome_hide_model,
+                #                 width=28,
+                #                 style=CHECKBOX_WHITE_STYLE,
+                #             )
+                # ui.Spacer(height=6)
                 # USD Load → 별도 창 ``TbsUsdWindow`` (extension.py)
                 # with ui.Frame(style={"background_color": 0xFF23262B}):
                 #     # 콤보에 과도한 width 지정 시 Kit에서 다음 구역과 겹침이 발생할 수 있어 세로 스택만 사용
@@ -2875,9 +2875,9 @@ def build_control_window(ext: Any) -> None:
                 #         )
                 #         # 콤보 초기 선택값 기준으로 입력 필드 표시 상태 동기화
                 #         on_xml_seq_changed(ext)
-                ui.Spacer(height=6)
-                ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
-                ui.Spacer(height=6)
+                # ui.Spacer(height=6)
+                # ui.Rectangle(height=2, style={"background_color": 0xFF3A3A3A})
+                # ui.Spacer(height=6)
                 with ui.Frame(style={"background_color": 0xFF1E2530}):
                     with ui.VStack(padding=8, spacing=6):
                         with ui.HStack(spacing=10, height=28):
