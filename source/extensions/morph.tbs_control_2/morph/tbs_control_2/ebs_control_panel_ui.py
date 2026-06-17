@@ -9,6 +9,73 @@ import omni.ui as ui
 from .kit_chrome_visibility import KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH, apply_kit_chrome_hidden
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 
+# Viewport HUD 체크박스 ↔ Kit 보조 창 (model_attr, 라벨, resolver key)
+_AUX_KIT_WINDOW_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("_ui_show_tbs_usd_model", "USD Load", "usd"),
+    ("_ui_show_tbs_sequence_model", "시퀀스", "sequence"),
+    ("_ui_show_tbs_timetable_model", "타임테이블", "timetable"),
+    ("_ui_show_tbs_sim_monitor_model", "시뮬 모니터", "monitor"),
+    ("_ui_show_ebs_control_model", "EBS 제어창", "ebs"),
+)
+
+
+def _set_kit_window_visible(win: Any, visible: bool) -> None:
+    if win is None:
+        return
+    try:
+        win.visible = bool(visible)
+        return
+    except Exception:
+        pass
+    try:
+        if hasattr(win, "set_visible"):
+            win.set_visible(bool(visible))
+    except Exception:
+        pass
+
+
+def _resolve_aux_kit_window(ext: Any, which: str) -> Any:
+    if which == "usd":
+        return getattr(getattr(ext, "_tbs_usd_window", None), "_window", None)
+    if which == "sequence":
+        editor = getattr(getattr(ext, "_sequence_window", None), "_editor", None)
+        return getattr(editor, "_window", None)
+    if which == "timetable":
+        return getattr(ext, "_sim_timetable_window", None)
+    if which == "monitor":
+        return getattr(ext, "_sim_monitor_window", None)
+    if which == "ebs":
+        return getattr(ext, "_control_window", None)
+    return None
+
+
+def sync_aux_kit_window_visibility(ext: Any) -> None:
+    """HUD 체크박스 모델 상태를 각 Kit 보조 창 visible 에 반영."""
+    for model_attr, _label, which in _AUX_KIT_WINDOW_SPECS:
+        mdl = getattr(ext, model_attr, None)
+        if mdl is None:
+            continue
+        try:
+            visible = bool(mdl.as_bool)
+        except Exception:
+            visible = True
+        _set_kit_window_visible(_resolve_aux_kit_window(ext, which), visible)
+
+
+def _on_aux_kit_window_visibility_changed(ext: Any, which: str, _model: Any = None) -> None:
+    for model_attr, _label, key in _AUX_KIT_WINDOW_SPECS:
+        if key != which:
+            continue
+        mdl = getattr(ext, model_attr, None)
+        if mdl is None:
+            return
+        try:
+            visible = bool(mdl.as_bool)
+        except Exception:
+            visible = True
+        _set_kit_window_visible(_resolve_aux_kit_window(ext, which), visible)
+        return
+
 
 def get_sim_ep_count_idx(ext: Any) -> int:
     try:
@@ -209,6 +276,14 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_tick_pause_until_wall = None
     ext._sim_gate_dialog = None
     ext._kit_chrome_hide_model = ui.SimpleBoolModel(KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH)
+    for model_attr, _label, which in _AUX_KIT_WINDOW_SPECS:
+        setattr(ext, model_attr, ui.SimpleBoolModel(True))
+        try:
+            getattr(ext, model_attr).add_value_changed_fn(
+                lambda m, w=which: _on_aux_kit_window_visibility_changed(ext, w, m)
+            )
+        except Exception:
+            pass
 
     def _on_kit_chrome_toggle(model: Any) -> None:
         try:
@@ -645,3 +720,8 @@ def _build_ebs_control_panel_compact(
             )
             ui.Button("정지", width=60, clicked_fn=lambda: on_sim_stop_clicked(ext))
             ui.Button("리셋", width=60, clicked_fn=lambda: on_sim_reset_clicked(ext))
+        ui.Label("창 표시", height=16, style={"color": 0xFF9AA4B2, "font_size": 11})
+        for model_attr, label, _which in _AUX_KIT_WINDOW_SPECS:
+            with ui.HStack(spacing=4, height=22):
+                ui.CheckBox(model=getattr(ext, model_attr), width=24, style=cb_style)
+                ui.Label(label, width=0)

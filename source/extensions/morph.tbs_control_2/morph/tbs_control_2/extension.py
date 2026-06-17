@@ -270,6 +270,12 @@ class Extension(omni.ext.IExt):
             evaluator=self._tbs_evaluator,
         )
         self._sequence_window.show()
+        try:
+            from .ebs_control_panel_ui import sync_aux_kit_window_visibility
+
+            sync_aux_kit_window_visibility(self)
+        except Exception:
+            pass
 
         if KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH:
             self._kit_chrome_startup_task = asyncio.ensure_future(_deferred_apply_kit_chrome_hide(self))
