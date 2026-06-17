@@ -847,6 +847,170 @@ class RuntimeEvaluator:
         else:
             self._reauthor.invalidate(prim_path)
 
+    def evaluate_instance_now(self, prim_path: str) -> int:
+        """TIMESAMPLES_REPLAY step 시작 직후 start pose 를 즉시 viewport 에 반영한다.
+
+        ``scheduler.start()`` 가 ``virtual_time`` 만 갱신하고 다음 update 틱까지
+        ``evaluate_and_write`` 를 기다리면, 직전 스텝의 끝 프레임 default 가 잠깐 보일
+        수 있다. 본 함수는 동일 메인 프레임에서 1회 스냅샷 write 를 수행한다.
+        """
+        pp = str(prim_path or "").strip()
+        if not pp:
+            return 0
+        inst = self._registry.get_by_prim_path(pp)
+        if inst is None:
+            return 0
+        stage = None
+        if self._master is not None:
+            try:
+                self._master.set_root_layer_edit_target()
+                stage = self._master.get_stage()
+            except Exception:
+                stage = None
+        if not self._RUNTIME_USE_OPTION_E:
+            if stage is None:
+                return 0
+            try:
+                return int(
+                    self._reauthor.reauthor_at(
+                        stage,
+                        inst,
+                        eval_seconds=inst.virtual_time + float(inst.offset_sec),
+                        snap_timecode_to_frame=self._snap_timecode_to_frame,
+                    )
+                )
+            except Exception:
+                return 0
+        self._option_e_ensure_runtime_for_instance(inst, stage)
+        return int(self._option_e_evaluate_instance(inst, stage))
+
+    def _option_e_ensure_runtime_for_instance(self, inst: AnimationInstance, stage) -> None:
+        """Option E — 단일 인스턴스 offscreen runtime 준비(``_on_update_option_e`` 와 동일)."""
+        rt = self._runtime_by_path.get(inst.prim_path)
+        if rt is None:
+            rt = AnimationInstanceRuntime(inst, master_stage=stage)
+            self._runtime_by_path[inst.prim_path] = rt
+            resolved = self._resolve_instance_asset_path(inst)
+            if resolved:
+                ok_open = rt.setup_offscreen_stage(resolved)
+                if not ok_open and not rt._lam_option_e_setup_fail_logged:
+                    rt._lam_option_e_setup_fail_logged = True
+                    print(
+                        f"{_PRINT_PREFIX} OPTION_E setup_offscreen_stage FAIL "
+                        f"prim={inst.prim_path} resolved={resolved}",
+                        flush=True,
+                    )
+            else:
+                print(
+                    f"{_PRINT_PREFIX} OPTION_E source_asset EMPTY prim={inst.prim_path} "
+                    f"raw={getattr(inst, 'source_asset', '')!r} master_path="
+                    f"{getattr(self._master, 'master_path', '')!r}",
+                    flush=True,
+                )
+            rt.setup_master_mirror_prim()
+        else:
+            rt.set_master_stage(stage)
+            if not rt.offscreen_asset_path and getattr(inst, "source_asset", ""):
+                resolved2 = self._resolve_instance_asset_path(inst)
+                if resolved2:
+                    ok2 = rt.setup_offscreen_stage(resolved2)
+                    if not ok2 and not rt._lam_option_e_setup_fail_logged:
+                        rt._lam_option_e_setup_fail_logged = True
+                        print(
+                            f"{_PRINT_PREFIX} OPTION_E setup_offscreen_stage FAIL "
+                            f"prim={inst.prim_path} resolved={resolved2}",
+                            flush=True,
+                        )
+        self._ensure_option_e_freeze(inst, stage)
+        self._ensure_option_e_omnigraph_deactivated(inst.prim_path, stage)
+
+    def _option_e_evaluate_instance(self, inst: AnimationInstance, stage) -> int:
+        """Option E — 단일 인스턴스 ``evaluate_and_write`` (EditTarget 전환 포함)."""
+        rt = self._runtime_by_path.get(inst.prim_path)
+        if rt is None:
+            return 0
+        if inst.prim_path in self._master_timeline_prims:
+            return 0
+        if inst.prim_path not in self._evaluator_active_prims:
+            return 0
+        if not rt.is_ready:
+            if not getattr(rt, "_diag_not_ready_logged", False):
+                try:
+                    rt._diag_not_ready_logged = True  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                print(
+                    f"{_PRINT_PREFIX} OPTION_E runtime NOT_READY prim={inst.prim_path} "
+                    f"offscreen={bool(rt.offscreen_asset_path)} master={'set' if stage else 'None'}",
+                    flush=True,
+                )
+            return 0
+        if not getattr(rt, "_diag_first_call_logged", False):
+            try:
+                rt._diag_first_call_logged = True  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            print(
+                f"{_PRINT_PREFIX} OPTION_E first evaluate prim={inst.prim_path} "
+                f"state={inst.state} vt={inst.virtual_time:.3f}s "
+                f"offscreen_asset={rt.offscreen_asset_path!r}",
+                flush=True,
+            )
+        inst_sublayer = None
+        try:
+            if self._master is not None:
+                inst_sublayer = self._master.get_inst_sublayer(inst.prim_path)
+                if inst_sublayer is None:
+                    try:
+                        inst_sublayer = self._master.ensure_inst_sublayer(
+                            inst.prim_path,
+                            tag_hint=inst.instance_id or inst.prim_path,
+                        )
+                    except Exception:
+                        inst_sublayer = None
+        except Exception:
+            inst_sublayer = None
+
+        edit_target_switched = False
+        if inst_sublayer is not None and stage is not None and _Usd is not None:
+            try:
+                stage.SetEditTarget(_Usd.EditTarget(inst_sublayer))
+                edit_target_switched = True
+            except Exception as exc:
+                if not getattr(rt, "_diag_edit_target_warned", False):
+                    try:
+                        rt._diag_edit_target_warned = True  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    print(
+                        f"{_PRINT_PREFIX} OPTION_E EditTarget switch FAIL "
+                        f"prim={inst.prim_path} sublayer="
+                        f"{getattr(inst_sublayer, 'identifier', '?')!r}: {exc}",
+                        flush=True,
+                    )
+
+        wrote = 0
+        try:
+            wrote = int(
+                rt.evaluate_and_write(
+                    inst.virtual_time,
+                    snap_timecode_to_frame=self._snap_timecode_to_frame,
+                )
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} runtime.evaluate_and_write FAIL "
+                f"prim={inst.prim_path}: {exc}",
+                flush=True,
+            )
+        finally:
+            if edit_target_switched:
+                try:
+                    self._master.set_root_layer_edit_target()
+                except Exception:
+                    pass
+        return wrote
+
     def invalidate_mapping(self, prim_path: Optional[str] = None) -> None:
         """Hotfix6 — 외부에서 inst.virtual_time 을 직접 seek 한 경우 호출.
 
@@ -1667,164 +1831,14 @@ class RuntimeEvaluator:
 
         # Per-instance setup 결과를 명확히 출력 (B-3 진단).
         for inst in self._registry.all_instances():
-            rt = self._runtime_by_path.get(inst.prim_path)
-            if rt is None:
-                rt = AnimationInstanceRuntime(inst, master_stage=stage)
-                self._runtime_by_path[inst.prim_path] = rt
-                resolved = self._resolve_instance_asset_path(inst)
-                if resolved:
-                    ok_open = rt.setup_offscreen_stage(resolved)
-                    if not ok_open and not rt._lam_option_e_setup_fail_logged:
-                        rt._lam_option_e_setup_fail_logged = True
-                        print(
-                            f"{_PRINT_PREFIX} OPTION_E setup_offscreen_stage FAIL "
-                            f"prim={inst.prim_path} resolved={resolved}",
-                            flush=True,
-                        )
-                else:
-                    print(
-                        f"{_PRINT_PREFIX} OPTION_E source_asset EMPTY prim={inst.prim_path} "
-                        f"raw={getattr(inst, 'source_asset', '')!r} master_path="
-                        f"{getattr(self._master, 'master_path', '')!r}",
-                        flush=True,
-                    )
-                rt.setup_master_mirror_prim()
-            else:
-                rt.set_master_stage(stage)
-                if not rt.offscreen_asset_path and getattr(inst, "source_asset", ""):
-                    resolved2 = self._resolve_instance_asset_path(inst)
-                    if resolved2:
-                        ok2 = rt.setup_offscreen_stage(resolved2)
-                        if not ok2 and not rt._lam_option_e_setup_fail_logged:
-                            rt._lam_option_e_setup_fail_logged = True
-                            print(
-                                f"{_PRINT_PREFIX} OPTION_E setup_offscreen_stage FAIL "
-                                f"prim={inst.prim_path} resolved={resolved2}",
-                                flush=True,
-                            )
-            # 2026-05-13: 자동 freeze / OmniGraph deactivate 는 비활성 — 두 함수 모두 no-op.
-            # 호출만 남겨 두어 미래에 정책이 바뀌었을 때 한 군데(함수 본문)만 손대면 되도록 한다.
-            self._ensure_option_e_freeze(inst, stage)
-            self._ensure_option_e_omnigraph_deactivated(inst.prim_path, stage)
+            self._option_e_ensure_runtime_for_instance(inst, stage)
 
         # 2) playing instance 의 virtual_time 진행. 모든 instance (state 무관) 에 대해
         #    evaluate_and_write 를 호출하여 stopped/paused 도 마지막 vt 의 결과를 유지.
         for inst in self._registry.all_instances():
             if inst.state == "playing":
                 self._advance_virtual_time(inst, dt)
-            rt = self._runtime_by_path.get(inst.prim_path)
-            if rt is None:
-                continue
-            if inst.prim_path in self._master_timeline_prims:
-                # USD_TIMELINE (TBS) — omni.timeline 이 master stage 시간을 진행.
-                # Option E offscreen 평가는 하지 않는다 (reference + OmniGraph 가 전역 시각으로 평가).
-                continue
-            if inst.prim_path not in self._evaluator_active_prims:
-                # 2026-05-13 — TIMESAMPLES_REPLAY 가 한 번이라도 시작된 인스턴스만
-                # default 를 author. 평상시(USD 로드 직후 / Reset 직후) 에는 reference
-                # 의 timeSamples 가 master 타임라인을 따라 자유 재생되도록 evaluator 가
-                # 손을 떼는 게 정책. ``begin_replay_mode`` 가 set 에 추가하고
-                # ``end_replay_mode`` (Reset 시) 가 제거하며, 제거 시에는 inst sublayer
-                # 에 박혀 있던 default opinion 도 함께 청소된다.
-                continue
-            if not rt.is_ready:
-                # 첫 frame 한 번만 진단 출력 — setup 이 실패한 이유를 추적.
-                if not getattr(rt, "_diag_not_ready_logged", False):
-                    try:
-                        rt._diag_not_ready_logged = True  # type: ignore[attr-defined]
-                    except Exception:
-                        pass
-                    print(
-                        f"{_PRINT_PREFIX} OPTION_E runtime NOT_READY prim={inst.prim_path} "
-                        f"offscreen={bool(rt.offscreen_asset_path)} master={'set' if stage else 'None'}",
-                        flush=True,
-                    )
-                continue
-            # 첫 호출 시점 명시 — H1/H2 가설 분기를 즉시 식별.
-            if not getattr(rt, "_diag_first_call_logged", False):
-                try:
-                    rt._diag_first_call_logged = True  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-                print(
-                    f"{_PRINT_PREFIX} OPTION_E first evaluate prim={inst.prim_path} "
-                    f"state={inst.state} vt={inst.virtual_time:.3f}s "
-                    f"offscreen_asset={rt.offscreen_asset_path!r}",
-                    flush=True,
-                )
-            # ----------------------------------------------------------------
-            # Option E core fix (2026-05-12) — reauthor 를 stronger sublayer 로.
-            #
-            # `evaluate_and_write` 가 `mirror_attr.Set(val)` 로 default 를 박는데,
-            # 매 frame _on_update 첫 부분에서 EditTarget 이 root layer 로 강제되어
-            # default 가 root layer 에 박힌다. 그러나 LAM session layer 의 strongest
-            # 슬롯에 끼운 `lam_inst_<tag>` sublayer 안에 freeze 용 explicit reference
-            # (`LayerOffset(0, 1e-9)`) 가 박혀 있어 — USD value resolution 상 sublayer
-            # 가 root layer 보다 stronger 라 reference 가 가져오는 timeSamples 가
-            # winner 가 되고 root 의 default 는 마스킹된다 (=viewport 변화 없음).
-            #
-            # 해결: 매 frame `evaluate_and_write` 직전에 master stage 의 EditTarget 을
-            # 해당 인스턴스의 sublayer 로 잠깐 옮긴다. 그러면 default 가 sublayer 의
-            # prim spec 위에 박히고, 같은 sublayer 안에서 reference 는 weaker
-            # composition arc (= referenced layer 의 opinion) 이라 default 가 winner
-            # 가 된다. omni.timeline 진행 / master stage 시각 진행 없이 인스턴스마다
-            # 자기 virtual_time 으로 평가된 값이 독립적으로 viewport 에 반영된다 —
-            # 즉 멀티 USD / 멀티 인스턴스 timeSamples replay 의 핵심 메커니즘.
-            # ----------------------------------------------------------------
-            inst_sublayer = None
-            try:
-                if self._master is not None:
-                    inst_sublayer = self._master.get_inst_sublayer(inst.prim_path)
-                    if inst_sublayer is None:
-                        try:
-                            inst_sublayer = self._master.ensure_inst_sublayer(
-                                inst.prim_path,
-                                tag_hint=inst.instance_id or inst.prim_path,
-                            )
-                        except Exception:
-                            inst_sublayer = None
-            except Exception:
-                inst_sublayer = None
-
-            edit_target_switched = False
-            if (
-                inst_sublayer is not None
-                and stage is not None
-                and _Usd is not None
-            ):
-                try:
-                    stage.SetEditTarget(_Usd.EditTarget(inst_sublayer))
-                    edit_target_switched = True
-                except Exception as exc:
-                    if not getattr(rt, "_diag_edit_target_warned", False):
-                        try:
-                            rt._diag_edit_target_warned = True  # type: ignore[attr-defined]
-                        except Exception:
-                            pass
-                        print(
-                            f"{_PRINT_PREFIX} OPTION_E EditTarget switch FAIL "
-                            f"prim={inst.prim_path} sublayer="
-                            f"{getattr(inst_sublayer, 'identifier', '?')!r}: {exc}",
-                            flush=True,
-                        )
-
-            try:
-                rt.evaluate_and_write(
-                    inst.virtual_time,
-                    snap_timecode_to_frame=self._snap_timecode_to_frame,
-                )
-            except Exception as exc:
-                print(
-                    f"{_PRINT_PREFIX} runtime.evaluate_and_write FAIL "
-                    f"prim={inst.prim_path}: {exc}",
-                    flush=True,
-                )
-            finally:
-                if edit_target_switched:
-                    try:
-                        self._master.set_root_layer_edit_target()
-                    except Exception:
-                        pass
+            self._option_e_evaluate_instance(inst, stage)
 
     def _advance_virtual_time(self, inst: AnimationInstance, dt: float) -> None:
         """Option E 경로용 — 인스턴스의 `virtual_time` 만 1 frame 진행한다.

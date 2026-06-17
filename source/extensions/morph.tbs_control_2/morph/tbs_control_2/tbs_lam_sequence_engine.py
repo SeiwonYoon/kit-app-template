@@ -1083,7 +1083,9 @@ class TbsLamSequenceRunner:
         # scheduler.start 도 main thread 에서 실행 (USD attribute 평가 lock 보호).
         replay_prim = result.instance.prim_path
 
-        def _do_begin_replay_in_main() -> None:
+        start_ok_holder: Dict[str, bool] = {"ok": False}
+
+        def _do_replay_begin_and_start_in_main() -> None:
             try:
                 self._scheduler.begin_replay_mode(replay_prim)
             except Exception as exc:
@@ -1091,18 +1093,6 @@ class TbsLamSequenceRunner:
                     f"{_PRINT_PREFIX} step[{idx}] begin_replay_mode failed prim={replay_prim}: {exc}",
                     flush=True,
                 )
-
-        try:
-            _dispatch_main_wait(_do_begin_replay_in_main, timeout=10.0)
-        except Exception as exc:
-            _seq_log(
-                f"{_PRINT_PREFIX} step[{idx}] begin_replay dispatch failed: {exc}",
-                flush=True,
-            )
-
-        start_ok_holder: Dict[str, bool] = {"ok": False}
-
-        def _do_start_in_main() -> None:
             start_ok_holder["ok"] = bool(
                 self._scheduler.start(
                     replay_prim,
@@ -1116,9 +1106,12 @@ class TbsLamSequenceRunner:
             )
 
         try:
-            _dispatch_main_wait(_do_start_in_main, timeout=10.0)
+            _dispatch_main_wait(_do_replay_begin_and_start_in_main, timeout=10.0)
         except Exception as exc:
-            _seq_log(f"{_PRINT_PREFIX} step[{idx}] scheduler.start failed: {exc}", flush=True)
+            _seq_log(
+                f"{_PRINT_PREFIX} step[{idx}] replay begin/start dispatch failed: {exc}",
+                flush=True,
+            )
         ok = start_ok_holder["ok"]
 
         _seq_log(

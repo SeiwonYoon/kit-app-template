@@ -103,6 +103,19 @@ class PlaybackScheduler:
             f"v_t={inst.virtual_time:.3f}s sp={inst.speed} loop={inst.loop}",
             flush=True,
         )
+        try:
+            wrote = int(self._evaluator.evaluate_instance_now(prim_path))
+            if wrote > 0:
+                print(
+                    f"{_PRINT_PREFIX} start snap prim={prim_path} "
+                    f"v_t={inst.virtual_time:.3f}s wrote={wrote}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} start snap EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
         return True
 
     def begin_master_timeline_mode(self, prim_path: str) -> bool:
