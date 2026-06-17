@@ -2596,9 +2596,39 @@ def _rebuild_all_sim_ui_panels(ext: Any) -> None:
         pass
 
 
+def _sim_timetable_user_dismissed(ext: Any) -> bool:
+    """사용자가 타임테이블 전용 창을 닫아 자동 표시를 원하지 않는 상태."""
+    return bool(getattr(ext, "_sim_timetable_user_dismissed", False))
+
+
+def _set_sim_timetable_user_dismissed(ext: Any, dismissed: bool) -> None:
+    try:
+        ext._sim_timetable_user_dismissed = bool(dismissed)
+    except Exception:
+        pass
+
+
+def _on_sim_timetable_window_visibility_changed(ext: Any, visible: bool) -> None:
+    """창 X/메뉴 토글 시 사용자 닫기 의도를 기억한다(프리런 후 자동 재오픈 방지)."""
+    if bool(getattr(ext, "_sim_timetable_visibility_track_suppress", False)):
+        return
+    _set_sim_timetable_user_dismissed(ext, not bool(visible))
+
+
+def _bind_sim_timetable_window_visibility(ext: Any, win: Any) -> None:
+    if win is None:
+        return
+    try:
+        win.set_visibility_changed_fn(lambda visible: _on_sim_timetable_window_visibility_changed(ext, bool(visible)))
+    except Exception:
+        pass
+
+
 def build_sim_timetable_window(ext: Any) -> None:
     """프리런 타임테이블 전용 창 — 모니터 창과 분리해 스크롤·하이라이트 안정화."""
-    if getattr(ext, "_sim_timetable_window", None) is not None:
+    existing = getattr(ext, "_sim_timetable_window", None)
+    if existing is not None:
+        _bind_sim_timetable_window_visibility(ext, existing)
         return
     try:
         ws = getattr(ui, "Workspace", None)
@@ -2629,6 +2659,7 @@ def build_sim_timetable_window(ext: Any) -> None:
                         height=ui.Fraction(1.0),
                         style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
                     )
+    _bind_sim_timetable_window_visibility(ext, ext._sim_timetable_window)
 
 
 def build_sim_monitor_window(ext: Any) -> None:
@@ -5520,7 +5551,9 @@ def _set_channel_history_text(ch: Dict[str, Any], text: str, *, ext: Any = None)
 
 
 def _scroll_sim_monitor_to_timetable(ext: Any) -> None:
-    """프리런 직후 타임테이블 전용 창을 앞으로 가져온다."""
+    """프리런 직후 타임테이블 전용 창을 앞으로 가져온다(사용자가 닫아 둔 경우 생략)."""
+    if _sim_timetable_user_dismissed(ext):
+        return
     tw = getattr(ext, "_sim_timetable_window", None)
     if tw is not None:
         try:

@@ -178,6 +178,7 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_monitor_split_host = None
     ext._sim_monitor_split_inner = None
     ext._sim_timetable_window = None
+    ext._sim_timetable_user_dismissed = False
     ext._sim_timetable_split_host = None
     ext._sim_timetable_split_inner = None
     ext._sim_timetable_layout_n = 1
