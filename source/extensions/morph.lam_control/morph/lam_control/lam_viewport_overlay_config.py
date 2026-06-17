@@ -308,6 +308,14 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
 
 
 # ---------------------------------------------------------------------------
+# Kit 시작 시 Viewport F(오빗 pivot) — prim 선택 + frame (구현: lam_viewport_startup_focus.py)
+# enabled=False 이거나 prim_path 가 비어 있으면 적용하지 않음 (기존 Kit 동작 유지).
+# ---------------------------------------------------------------------------
+STARTUP_VIEWPORT_FOCUS_PRIM_ENABLED: bool = True
+STARTUP_VIEWPORT_FOCUS_PRIM_PATH: str = "/World/aaa"
+
+
+# ---------------------------------------------------------------------------
 # 기능 #4: Viewport 선택 제한(화이트리스트)
 # ---------------------------------------------------------------------------
 
@@ -378,4 +386,6 @@ __all__ = [
     "DeviceLabelSpec",
     "DEVICE_LABEL_SPECS",
     "VIEWPORT_PICK_WHITELIST_ROOTS",
+    "STARTUP_VIEWPORT_FOCUS_PRIM_ENABLED",
+    "STARTUP_VIEWPORT_FOCUS_PRIM_PATH",
 ]

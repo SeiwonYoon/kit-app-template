@@ -46,6 +46,7 @@ from .lam_viewport_overlay_state import (
     register_toggle_listener,
     schedule_play_prim_hide_sync_after_stage_ready,
 )
+from .lam_viewport_startup_focus import schedule_startup_viewport_focus_after_stage_ready
 from .lam_wafer_viewport_labels import (
     LamWaferFoupViewportLabels,
     wafer_viewport_labels_enabled,
@@ -375,6 +376,10 @@ class LamWindow:
         self._sync_csv_viewport_hud()
         self._sync_wafer_foup_viewport_labels_only()
         schedule_play_prim_hide_sync_after_stage_ready(delay_frames=48)
+        try:
+            schedule_startup_viewport_focus_after_stage_ready(delay_frames=48)
+        except Exception:
+            pass
 
     def _sync_wafer_foup_viewport_labels_only(self, *, delay_frames: int = 12) -> None:
         """Viewport 3D 라벨 SceneView 마운트/해제 (체크 상태는 ``apply_wafer_label_visibility_from_ui``)."""
@@ -650,7 +655,18 @@ class LamWindow:
             self._auto_extract_after_master_open(log_prefix=extract_prefix)
             self._refresh_wafer_labels_after_master_open(delay_frames=24)
             self._refresh_play_prim_hide_after_master_open(delay_frames=24)
+            self._refresh_viewport_focus_after_master_open(delay_frames=24)
         return ok
+
+    def _refresh_viewport_focus_after_master_open(self, *, delay_frames: int = 24) -> None:
+        """Open Master 후 startup Viewport F(오빗 pivot) 설정이 켜져 있으면 적용."""
+        try:
+            schedule_startup_viewport_focus_after_stage_ready(delay_frames=delay_frames)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} viewport startup focus after master open failed: {exc}",
+                flush=True,
+            )
 
     def _refresh_play_prim_hide_after_master_open(self, *, delay_frames: int = 24) -> None:
         """Open Master 후 「prim숨김」 체크 ON 이면 PLAY_HIDE_PRIM_SPECS 를 stage 에 맞게 숨김."""

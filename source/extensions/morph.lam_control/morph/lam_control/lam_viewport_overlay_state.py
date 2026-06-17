@@ -415,6 +415,12 @@ def apply_startup_checkbox_side_effects() -> None:
     except Exception:
         pass
     schedule_play_prim_hide_sync_after_stage_ready(delay_frames=4)
+    try:
+        from .lam_viewport_startup_focus import schedule_startup_viewport_focus_after_stage_ready
+
+        schedule_startup_viewport_focus_after_stage_ready(delay_frames=8)
+    except Exception:
+        pass
 
 
 def register_toggle_listener(fn) -> None:
@@ -806,6 +812,7 @@ __all__ = [
     "apply_startup_checkbox_side_effects",
     "sync_play_prim_hide_side_effect",
     "schedule_play_prim_hide_sync_after_stage_ready",
+    "schedule_startup_viewport_focus_after_stage_ready",
     "set_toggle_pick_whitelist",
     "get_toggle_pick_whitelist",
     "register_toggle_listener",
