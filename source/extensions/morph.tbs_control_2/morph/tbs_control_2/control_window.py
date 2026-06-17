@@ -4041,6 +4041,54 @@ def post_sim_progress_update(ext: Any, payload: Dict[str, str]) -> None:
     _enqueue_sim_progress(ext, payload)
 
 
+def _is_playback_time_tick_payload(payload: Dict[str, Any]) -> bool:
+    """프리런 재생 heartbeat — 진행현황 sim_time 만 갱신하고 포트/애니 상태는 재전송하지 않는다."""
+    return str(payload.get("playback_time_tick", "")).strip() in ("1", "true", "True", "ON", "on")
+
+
+_PLAYBACK_TIME_TICK_STRIP_KEYS = (
+    "ports_occupancy",
+    "ep_occ",
+    "all_ep_empty",
+    "foup_proc_active_ep",
+)
+
+
+def _build_playback_time_tick_payload(
+    scr: int,
+    tnow: float,
+    lp: Optional[Dict[str, Any]],
+    *,
+    final_sim_time: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    프리런 재생 0.2s heartbeat 용 payload.
+
+    타임라인 아이템 사이 대기 구간에서 진행현황 ``sim_time`` 표시만 흐르게 하고,
+    포트 점유·FOUP 등 상태 필드는 타임라인 emit 경로에서만 반영한다.
+    """
+    if isinstance(lp, dict) and str(lp.get("label", "") or "").strip():
+        p3: Dict[str, Any] = dict(lp)
+    else:
+        p3 = {
+            "tbs_sim_screen": str(scr),
+            "label": "대기",
+            "detail": "",
+            "status": "RUNNING",
+            "elapsed": "0.0",
+            "total": "0.0",
+            "percent": "0",
+        }
+    p3["tbs_sim_screen"] = str(scr)
+    p3["sim_time"] = f"{float(tnow):.2f}"
+    p3["playback_time_tick"] = "1"
+    if isinstance(final_sim_time, (float, int)) and float(final_sim_time) > 0.0:
+        p3["sim_total_est_sec"] = f"{float(final_sim_time):.2f}"
+    for k in _PLAYBACK_TIME_TICK_STRIP_KEYS:
+        p3.pop(k, None)
+    return p3
+
+
 def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
     p = payload if isinstance(payload, dict) else {}
     try:
@@ -4048,28 +4096,32 @@ def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
     except Exception:
         scr = 1
     scr = max(1, scr)
-    try:
-        _flush_pending_post_anim_port_applies(ext, scr)
-    except Exception:
-        pass
-    # fail-safe: anim_sec 경과 후에도 JSON 완료 콜백이 늦거나 누락되면 progress 틱에서 1회 갱신
-    try:
-        if str(p.get("status", "")).strip().upper() == "RUNNING":
-            ev = _normalize_anim_event_seq(str(p.get("event_seq") or p.get("sequence_name") or ""))
-            if ev in _ANIM_PORT_UPDATE_SEQS:
-                anim_sec = float(str(p.get("anim_sec") or "0").strip() or "0")
-                elapsed = float(str(p.get("elapsed") or "0").strip() or "0")
-                if anim_sec > 1e-6 and elapsed + 1e-6 >= anim_sec:
-                    src: Dict[str, Any] = dict(p)
-                    src["event"] = ev
-                    src["event_start_sim_time"] = str(
-                        p.get("event_start_sim_time") or p.get("t") or ""
-                    ).strip()
-                    _queue_post_anim_port_apply(ext, scr, src)
-                    _flush_pending_post_anim_port_applies(ext, scr)
-    except Exception:
-        pass
+    playback_tick = _is_playback_time_tick_payload(p)
+    if not playback_tick:
+        try:
+            _flush_pending_post_anim_port_applies(ext, scr)
+        except Exception:
+            pass
+        # fail-safe: anim_sec 경과 후에도 JSON 완료 콜백이 늦거나 누락되면 progress 틱에서 1회 갱신
+        try:
+            if str(p.get("status", "")).strip().upper() == "RUNNING":
+                ev = _normalize_anim_event_seq(str(p.get("event_seq") or p.get("sequence_name") or ""))
+                if ev in _ANIM_PORT_UPDATE_SEQS:
+                    anim_sec = float(str(p.get("anim_sec") or "0").strip() or "0")
+                    elapsed = float(str(p.get("elapsed") or "0").strip() or "0")
+                    if anim_sec > 1e-6 and elapsed + 1e-6 >= anim_sec:
+                        src: Dict[str, Any] = dict(p)
+                        src["event"] = ev
+                        src["event_start_sim_time"] = str(
+                            p.get("event_start_sim_time") or p.get("t") or ""
+                        ).strip()
+                        _queue_post_anim_port_apply(ext, scr, src)
+                        _flush_pending_post_anim_port_applies(ext, scr)
+        except Exception:
+            pass
     _update_sim_progress(ext, p)
+    if playback_tick:
+        return
     # progress payload의 ports_occupancy — JSON 종료 후 예측 적용 중이면 엔진 구값으로 덮어쓰지 않는다.
     occ = p.get("ports_occupancy", {})
     if isinstance(occ, dict) and occ and any((k in occ) for k in _PANEL_PORT_KEYS):
@@ -6136,7 +6188,7 @@ def _tick_playback(ext: Any) -> None:
                         pass
 
                 # 단계완료(DONE) 상태에서도 t(sim)이 끊기지 않도록,
-                # 마지막 진행현황 payload를 복제해 sim_time만 주기적으로 갱신한다(텍스트 업데이트).
+                # 진행현황 sim_time 만 주기적으로 갱신한다(포트/애니 상태는 타임라인 emit 전용).
                 try:
                     last2 = float(hb.get(f"prog_{scr}", 0.0) or 0.0)
                 except Exception:
@@ -6149,28 +6201,18 @@ def _tick_playback(ext: Any) -> None:
                     try:
                         by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
                         lp = by_lp.get(str(scr)) if isinstance(by_lp, dict) else None
-                        # 첫 공정(첫 progress) 전에도 t(sim)이 계속 증가해야 한다.
-                        # lp(마지막 progress payload)가 없으면 "대기" 기본 payload를 합성한다.
-                        if isinstance(lp, dict) and str(lp.get("label", "") or "").strip():
-                            p3 = dict(lp)
-                        else:
-                            p3 = {
-                                "tbs_sim_screen": str(scr),
-                                "label": "대기",
-                                "detail": "",
-                                "status": "RUNNING",
-                                "elapsed": "0.0",
-                                "total": "0.0",
-                                "percent": "0",
-                            }
-                        p3["tbs_sim_screen"] = str(scr)
-                        p3["sim_time"] = f"{float(tnow):.2f}"
-                        # 총시간은 유지/확정
+                        te_val = None
                         try:
                             if isinstance(results, dict) and results.get(int(scr)) is not None:
-                                p3["sim_total_est_sec"] = f"{float(results[int(scr)].final_sim_time):.2f}"
+                                te_val = float(results[int(scr)].final_sim_time)
                         except Exception:
-                            pass
+                            te_val = None
+                        p3 = _build_playback_time_tick_payload(
+                            scr,
+                            float(tnow),
+                            lp if isinstance(lp, dict) else None,
+                            final_sim_time=te_val,
+                        )
                         post_sim_progress_update(ext, p3)
                     except Exception:
                         pass
@@ -6719,14 +6761,16 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     except Exception:
         pass
     # 화면별 마지막 진행현황 payload 저장(플레이백에서 DONE 상태에도 t(sim)을 부드럽게 갱신하기 위함)
-    try:
-        by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
-        if not isinstance(by_lp, dict):
-            by_lp = {}
-            ext._sim_progress_last_payload_by_screen = by_lp
-        by_lp[str(panel_slot)] = dict(payload)
-    except Exception:
-        pass
+    # playback_time_tick 은 표시용 sim_time 만 바꾸므로 lp 스냅샷을 덮어쓰지 않는다.
+    if not _is_playback_time_tick_payload(payload if isinstance(payload, dict) else {}):
+        try:
+            by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
+            if not isinstance(by_lp, dict):
+                by_lp = {}
+                ext._sim_progress_last_payload_by_screen = by_lp
+            by_lp[str(panel_slot)] = dict(payload)
+        except Exception:
+            pass
     dedupe_key = f"_panel_{panel_slot}"
     # total_est는 포트상태 아래 전용 그래프에서도 사용하므로 화면별로 저장
     try:
