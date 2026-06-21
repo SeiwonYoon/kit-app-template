@@ -308,7 +308,8 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
 
 
 # ---------------------------------------------------------------------------
-# Kit 시작 시 Viewport F(오빗 pivot) — prim 선택 + frame (구현: lam_viewport_startup_focus.py)
+# Kit 시작 시 Viewport 오빗 pivot — prim 선택 없이 COI(회전 중심)만 설정
+# 카메라 eye/줌은 유지. 구현: lam_viewport_startup_focus.py
 # enabled=False 이거나 prim_path 가 비어 있으면 적용하지 않음 (기존 Kit 동작 유지).
 # ---------------------------------------------------------------------------
 STARTUP_VIEWPORT_FOCUS_PRIM_ENABLED: bool = True
