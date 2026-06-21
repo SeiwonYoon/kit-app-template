@@ -46,9 +46,11 @@ class MasterStage:
     실제 author 동작은 USD 가 사용 가능할 때만 실행된다.
     """
 
-    def __init__(self) -> None:
-        self._context_name: str = LAM_MASTER_CONTEXT_NAME
-        self._master_path: str = ""    # 저장된 master.usd 파일 경로(없으면 빈 문자열)
+    def __init__(self, context_name: Optional[str] = None) -> None:
+        self._context_name: str = (
+            str(context_name).strip() if context_name is not None else LAM_MASTER_CONTEXT_NAME
+        )
+        self._master_path: str = ""
         self._anonymous: bool = True   # in-memory 익명 layer 사용 여부
         # 핫픽스 7 (Opt-1) — 인스턴스 prim_path → 그 인스턴스 전용 anonymous Sdf.Layer.
         # root layer 의 subLayerPaths 의 가장 앞쪽(=stronger 슬롯) 에 삽입되어,
@@ -204,6 +206,15 @@ class MasterStage:
         if ctx is None:
             return None
         return ctx.get_stage()
+
+    def bind_to_existing_context(self, context_name: str) -> bool:
+        """이미 ``open_stage`` 된 이름 있는 컨텍스트(분할 보조 타일)에 바인딩."""
+        cn = str(context_name or "").strip()
+        if not cn:
+            return False
+        self._context_name = cn
+        self._anonymous = False
+        return self.get_stage() is not None
 
     def set_root_layer_edit_target(self) -> bool:
         """REQ-005 P-3 — author 는 항상 root layer 로 향한다."""

@@ -37,20 +37,27 @@ _update_sub = None
 # ----------------------------------------------------------------- helpers
 
 def _stage():
-    try:
-        ctx = ou.get_context()
-        return ctx.get_stage() if ctx else None
-    except Exception:
-        return None
+    from .tbs_usd_stage_context import get_stage_for_thread_context
+
+    return get_stage_for_thread_context()
 
 
 def is_rotate_animation_running() -> bool:
     return bool(_rot_animations)
 
 
-def is_prim_rotate_animation_running(prim_path: str) -> bool:
+def is_prim_rotate_animation_running(prim_path: str, usd_context_name: Optional[str] = None) -> bool:
     """지정 prim 에 대한 TBS_OFFSET rotate 보간이 진행 중인지."""
-    return bool(prim_path) and prim_path in _rot_animations
+    from .tbs_usd_stage_context import anim_key
+
+    if not prim_path:
+        return False
+    if usd_context_name is not None:
+        return anim_key(prim_path, usd_context_name) in _rot_animations
+    if prim_path in _rot_animations:
+        return True
+    suffix = f"\x00{prim_path}"
+    return any(str(k).endswith(suffix) for k in _rot_animations)
 
 
 def _get_or_create_offset_rotate_op(prim):
@@ -158,14 +165,17 @@ def run_prim_rotate_animation(
 ) -> None:
     """simple 모드 — TBS_OFFSET RotateXYZ 에 (rx,ry,rz) 누적 보간."""
     global _rot_animations
+    from .tbs_usd_stage_context import anim_key, get_current_usd_context_name
+
     if not segments:
         return
+    ctx_nm = get_current_usd_context_name()
     stage = _stage()
     if not stage:
         return
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
-        print(f"{_PRINT_PREFIX} prim not found: {prim_path}", flush=True)
+        print(f"{_PRINT_PREFIX} prim not found: {prim_path} ctx={ctx_nm!r}", flush=True)
         return
 
     start_rot = _get_prim_local_rotate_xyz(prim)
@@ -188,8 +198,11 @@ def run_prim_rotate_animation(
                 pass
         return
 
-    _rot_animations[prim_path] = {
+    key = anim_key(prim_path, ctx_nm)
+    _rot_animations[key] = {
         "kind": "simple",
+        "prim_path": prim_path,
+        "usd_context_name": ctx_nm,
         "start_rot": Gf.Vec3f(start_rot[0], start_rot[1], start_rot[2]),
         "segments": normalized,
         "segment_index": 0,
@@ -206,12 +219,24 @@ def stop_world_pivot_rotate_animation() -> None:
     return None
 
 
-def stop_prim_rotate_animation(prim_path: str) -> bool:
+def stop_prim_rotate_animation(prim_path: str, usd_context_name: Optional[str] = None) -> bool:
     global _rot_animations
-    if prim_path in _rot_animations:
-        _rot_animations.pop(prim_path, None)
+    from .tbs_usd_stage_context import anim_key
+
+    key = anim_key(prim_path, usd_context_name)
+    if key in _rot_animations:
+        _rot_animations.pop(key, None)
         _maybe_release_update_sub()
         return True
+    if usd_context_name is None:
+        removed = False
+        for k in list(_rot_animations.keys()):
+            if k.endswith(f"\x00{prim_path}"):
+                _rot_animations.pop(k, None)
+                removed = True
+        if removed:
+            _maybe_release_update_sub()
+        return removed
     return False
 
 
@@ -252,6 +277,8 @@ def _maybe_release_update_sub() -> None:
 
 
 def _on_update(e) -> None:
+    from .tbs_usd_stage_context import pop_usd_context_name, prim_path_from_anim_key, push_usd_context_name
+
     payload = getattr(e, "payload", None) or {}
     dt = float(payload.get("dt", 0.0) or 0.0)
     if dt <= 0:
@@ -262,16 +289,20 @@ def _on_update(e) -> None:
         get_csv_play_anim_dt_scale = None  # type: ignore
     if not _rot_animations:
         return
-    stage = _stage()
-    if not stage:
-        return
 
     to_remove: List[str] = []
-    for prim_path, state in list(_rot_animations.items()):
+    for anim_key, state in list(_rot_animations.items()):
+        ctx_nm = state.get("usd_context_name")
+        prim_path = str(state.get("prim_path") or prim_path_from_anim_key(anim_key))
+        prev_ctx = push_usd_context_name(ctx_nm)
         try:
+            stage = _stage()
+            if not stage:
+                to_remove.append(anim_key)
+                continue
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
-                to_remove.append(prim_path)
+                to_remove.append(anim_key)
                 continue
 
             frame_dt = dt
@@ -310,7 +341,7 @@ def _on_update(e) -> None:
                                 cb()
                             except Exception:
                                 pass
-                        to_remove.append(prim_path)
+                        to_remove.append(anim_key)
                 else:
                     remainder = elapsed - duration
                     state["elapsed_in_segment"] = remainder
@@ -335,7 +366,9 @@ def _on_update(e) -> None:
             _set_prim_rotate_xyz(prim, current_rot)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} update error path={prim_path}: {exc}", flush=True)
-            to_remove.append(prim_path)
+            to_remove.append(anim_key)
+        finally:
+            pop_usd_context_name(prev_ctx)
     for k in to_remove:
         _rot_animations.pop(k, None)
     _maybe_release_update_sub()

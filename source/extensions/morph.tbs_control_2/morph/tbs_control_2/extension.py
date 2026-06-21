@@ -225,14 +225,19 @@ class Extension(omni.ext.IExt):
         )
 
         def _on_master_opened_for_ep() -> None:
+            master_path = ""
             try:
                 win = getattr(self, "_tbs_usd_window", None)
                 if win is not None:
                     master = getattr(win, "_master", None)
                     if master is not None:
-                        self._tbs_last_loaded_usd_path = str(
-                            getattr(master, "master_path", "") or ""
-                        )
+                        master_path = str(getattr(master, "master_path", "") or "")
+            except Exception:
+                pass
+            try:
+                from .control_window import notify_tbs_composed_usd_ready_for_split
+
+                notify_tbs_composed_usd_ready_for_split(self, master_path)
             except Exception:
                 pass
             try:

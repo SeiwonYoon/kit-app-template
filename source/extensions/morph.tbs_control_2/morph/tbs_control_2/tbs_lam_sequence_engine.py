@@ -165,11 +165,21 @@ def _resolve_prim_paths(stage, prim_id: str) -> List[str]:
 
 
 def _stage():
-    try:
-        ctx = ou.get_context()
-        return ctx.get_stage() if ctx else None
-    except Exception:
-        return None
+    from .tbs_usd_stage_context import get_stage_for_thread_context
+
+    return get_stage_for_thread_context()
+
+
+def _push_lam_stage_context(usd_context_name: Optional[str]) -> Optional[str]:
+    from .tbs_usd_stage_context import push_usd_context_name
+
+    return push_usd_context_name(usd_context_name)
+
+
+def _pop_lam_stage_context(prev: Optional[str]) -> None:
+    from .tbs_usd_stage_context import pop_usd_context_name
+
+    pop_usd_context_name(prev)
 
 
 # --------------------------------------------------------- main-thread dispatch
@@ -195,14 +205,23 @@ def _dispatch_main(fn: Callable[[], None]) -> None:
     하다고 가정. 실제 fn() 은 main thread 의 update 콜백 안에서 실행되므로 USD write 가
     stage write lock 과 충돌하지 않는다.
     """
+    from .tbs_usd_stage_context import (
+        get_current_usd_context_name,
+        pop_usd_context_name,
+        push_usd_context_name,
+    )
+
+    captured_ctx = get_current_usd_context_name()
     box: Dict[str, Any] = {"sub": None}
 
     def _do(_e=None) -> None:
+        prev = push_usd_context_name(captured_ctx)
         try:
             fn()
         except Exception as exc:
             _seq_log(f"{_PRINT_PREFIX} dispatch_main fn failed: {exc}", flush=True)
         finally:
+            pop_usd_context_name(prev)
             try:
                 if box["sub"] is not None:
                     box["sub"].unsubscribe()
@@ -463,10 +482,15 @@ class TbsLamSequenceRunner:
         registry: AnimationInstanceRegistry,
         scheduler: PlaybackScheduler,
         on_step_resolved: Optional[Callable[[int, dict, ResolveResult], None]] = None,
+        *,
+        usd_context_name: Optional[str] = None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
         self._on_step_resolved = on_step_resolved
+        self._usd_context_name: Optional[str] = (
+            str(usd_context_name).strip() if usd_context_name else None
+        ) or None
         self._stop_flag = threading.Event()
         self._hide = TbsHideController()
         # 첫 step 메타 (TBS 와 동일 schema 호환)
@@ -515,6 +539,7 @@ class TbsLamSequenceRunner:
         global _runner_quiet_log
         prev_quiet = _runner_quiet_log
         _runner_quiet_log = _runner_quiet_log or bool(quiet)
+        prev_ctx = _push_lam_stage_context(self._usd_context_name)
         try:
             self._stop_flag.clear()
             steps = list(steps or [])
@@ -586,6 +611,7 @@ class TbsLamSequenceRunner:
                 except Exception:
                     pass
         finally:
+            _pop_lam_stage_context(prev_ctx)
             _runner_quiet_log = prev_quiet
 
     # ------------------------------------------------------------------ group
@@ -626,20 +652,24 @@ class TbsLamSequenceRunner:
                 step_i = steps[i] or {}
 
                 def _runner_for(idx: int = i, step: dict = step_i) -> None:
-                    sp_follow = _playback_speed_scale(sp)
-                    delay = max(
-                        0.0,
-                        (int(step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_follow,
-                    )
-                    if delay > 0:
-                        self._sleep(delay, allow_stop=True)
-                    if self._stop_flag.is_set():
-                        return
-                    start_at = time.monotonic()
-                    sp_step = _playback_speed_scale(sp)
-                    dur = self._start_step(idx, step, sp_step, reset_each_start)
-                    if idx == anchor_idx:
-                        anchor_finish_at_holder["t"] = start_at + dur
+                    prev_tctx = _push_lam_stage_context(self._usd_context_name)
+                    try:
+                        sp_follow = _playback_speed_scale(sp)
+                        delay = max(
+                            0.0,
+                            (int(step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_follow,
+                        )
+                        if delay > 0:
+                            self._sleep(delay, allow_stop=True)
+                        if self._stop_flag.is_set():
+                            return
+                        start_at = time.monotonic()
+                        sp_step = _playback_speed_scale(sp)
+                        dur = self._start_step(idx, step, sp_step, reset_each_start)
+                        if idx == anchor_idx:
+                            anchor_finish_at_holder["t"] = start_at + dur
+                    finally:
+                        _pop_lam_stage_context(prev_tctx)
 
                 t = threading.Thread(
                     target=_runner_for, name=f"lam_seq_follower_{i}", daemon=True

@@ -11,10 +11,9 @@ sim_multi_view.py — 멀티 시뮼 화면 분할
   창 위치·카메라 지정은 **한 코루틴에서 순차 ``await next_update``** 로만 적용한다(이중 비동기 레이아웃 없음).
   분할 수를 **4→3** 처럼 바꿀 때는 보조 뷰를 먼저 제거한 뒤 **짧은 유휴·프레임**을 두고 재빌드해 GPU ``device lost`` 를 줄인다.
   그래도 크래시면 **`TBS_SIM_VIEWPORT_SPLIT_3D=0`** 으로 보조 뷰만 끈다.
-- **레이아웃**: 기본은 보조 Workspace 창의 ``dock_in(기준_Window, DockPosition, ratio)`` 만 사용한다.
-  ``dock_in_window`` / 모듈 ``dock_window_in_window`` 는 deprecated·불안정해 **호출하지 않는다**.
-  ``docked`` 플래그가 일정 프레임 안에 True 가 되지 않으면 **좌표 격자**로 폴백한다(멈춤·반쪽 레이아웃 방지).
-  ``TBS_SIM_VIEWPORT_SPLIT_DOCK=0`` 이면 Dock 시도 없이 격자만 쓴다.
+- **레이아웃**: **기본은 Viewport Dock 안 ``dock_in`` 분할**(메인 Viewport 는 undock 하지 않음).
+  ``docked`` 미확인 시에만 좌표 격자 폴백(undock 없이 크기·위치만 조정).
+  ``TBS_SIM_VIEWPORT_SPLIT_DOCK=0`` 이면 Dock 없이 격자만.
 - **보조 타일 스테이지 분리**: 동일 URL/경로를 ``subLayers`` 로만 묶으면 USD 가 **같은 ``Sdf.Layer``** 를 공유해
   한쪽 편집이 다른 타일에도 보일 수 있다. 기본은 타일마다 **원본 USD 를 임시 경로로 ``omni.client.copy_async`` 복제**한 뒤
   그 **서로 다른 파일**을 연다(``TBS_MULTI_SPLIT_FILE_CLONE=0`` 이면 복제 없이 래퍼 ``.usda`` 만 사용).
@@ -158,11 +157,68 @@ def _use_multi_split_session_layer() -> bool:
     return True
 
 
+def _use_split_composed_export(ext: Any = None) -> bool:
+    """
+    보조 타일 USD — Flatten 스냅샷 사용 여부.
+
+    분할 **체크 직후** 동기 Flatten 은 수 초 걸린다. TBS Load 시 백그라운드 prewarm 된
+    스냅샷이 있을 때만 True (``copy_async`` 만으로 빠르게 복제).
+    """
+    try:
+        v = str(os.environ.get("TBS_MULTI_SPLIT_COMPOSED_EXPORT", "") or "").strip().lower()
+    except Exception:
+        v = ""
+    if v in ("0", "false", "no", "off", "disable", "disabled"):
+        return False
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if ext is not None:
+        try:
+            from .tbs_split_composed_loader import composed_split_snapshot_ready
+
+            if composed_split_snapshot_ready(ext):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _split_layout_usd_key(ext: Any) -> str:
+    """분할 레이아웃이 유효한지 판별할 메인 스테이지 지문."""
+    try:
+        from .tbs_split_composed_loader import _main_stage_cache_key
+
+        key = str(_main_stage_cache_key(ext) or "").strip()
+        if key:
+            return key
+    except Exception:
+        pass
+    try:
+        return str(getattr(ext, "_tbs_last_loaded_usd_path", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def invalidate_split_layout_cache(ext: Any) -> None:
+    """Master USD 재로드 등으로 기존 분할 타일을 무효화."""
+    try:
+        ext._tbs_split_layout_usd_key = None
+    except Exception:
+        pass
+    try:
+        from .tbs_split_composed_loader import clear_split_composed_export_cache
+
+        clear_split_composed_export_cache(ext)
+    except Exception:
+        pass
+
+
 def sim_viewport_split_dock_enabled() -> bool:
     """
     보조 뷰포트를 메인 ``Viewport`` Dock 안에 넣을지(기본 True).
 
-    ``TBS_SIM_VIEWPORT_SPLIT_DOCK=0`` / ``false`` / ``off`` 등이면 좌표 격자만 사용(별도 창에 가깝게 보일 수 있음).
+    ``dock_in`` 성공 시 **메인 Viewport 절대 좌표는 건드리지 않아** Console/Content 가 유지된다.
+    ``TBS_SIM_VIEWPORT_SPLIT_DOCK=0`` 이면 좌표 격자(보조 창만 이동, Viewport Dock 유지)로 폴백.
     """
     try:
         v = str(os.environ.get("TBS_SIM_VIEWPORT_SPLIT_DOCK", "") or "").strip().lower()
@@ -207,10 +263,10 @@ def split_layout_description(split_n: int) -> str:
     if n <= 1:
         return "단일 화면(기본)"
     if n == 2:
-        return "2분할: 메인 Viewport Dock 안 좌/우(기본) — 보조는 독립 스테이지(동일 USD 경로)"
+        return "2분할: Viewport Dock — TBS_SimSplit_1(우 50%)"
     if n == 3:
-        return "3분할: Dock 안 상=메인, 하=보조 2칸(독립 스테이지)"
-    return "4분할: Dock 안 2×2(좌상=메인, 나머지=독립 스테이지)"
+        return "3분할: Viewport Dock — 보조 2칸(독립 스테이지)"
+    return "4분할: Viewport Dock 2×2(독립 스테이지)"
 
 
 def _split_window_name(aux_index_1based: int) -> str:
@@ -232,6 +288,158 @@ def _split_cell_layout_fracs(n: int) -> List[Tuple[float, float, float, float]]:
             (0.5, 0.5, 1.0, 1.0),
         ]
     return [(0.0, 0.0, 1.0, 1.0)]
+
+
+def _read_viewport_split_area() -> Tuple[int, int, int, int]:
+    """
+    분할 격자 — **현재 Viewport 창** 영역만 사용(Console 상단에서 자름).
+
+    DockSpace 전체·메인 창 크기를 쓰면 Console/Content 를 덮는다.
+    """
+    vx, vy, vw, vh = _read_viewport_rect()
+    for panel_name in ("Console", "Content"):
+        pr = _read_window_rect(panel_name)
+        if pr is None:
+            continue
+        panel_top = int(pr[1])
+        if panel_top > int(vy) + _VP_TILE_MIN_PX and int(vy) + int(vh) > panel_top:
+            vh = max(_VP_TILE_MIN_PX, panel_top - int(vy))
+    return (int(vx), int(vy), max(_VP_TILE_MIN_PX, int(vw)), max(_VP_TILE_MIN_PX, int(vh)))
+
+
+def _aux_windows_actually_docked(n: int) -> bool:
+    """``dock_in`` API 성공과 달리 Workspace ``docked`` 가 False 인 경우가 있어 검증."""
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        return False
+    if sn <= 1:
+        return False
+    for ti in range(1, sn):
+        try:
+            w = ui.Workspace.get_window(_split_window_name(ti))
+            if w is None or not bool(getattr(w, "docked", False)):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _apply_aux_window_chrome_flags(wname: str) -> None:
+    """보조 타일 — Workspace 탭 제목 표시(스크롤바만 끔). 타이틀바 제거는 조작·제목 문제를 유발."""
+    try:
+        wui = ui.Workspace.get_window(str(wname))
+        if wui is None:
+            return
+        try:
+            wui.title = str(wname)
+        except Exception:
+            pass
+        try:
+            wui.flags = ui.WINDOW_FLAGS_NO_SCROLLBAR
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+async def _enforce_equal_split_grid_async(
+    ext: Any, token: int, n: int, *, preserve_main_viewport: bool = False
+) -> Tuple[int, int, int, int]:
+    """
+    보조 타일(및 필요 시 메인) 격자 배치.
+
+    ``preserve_main_viewport=True`` — **메인 Viewport Dock 은 유지**, 보조 창만 배치(Dock 폴백).
+    """
+    fracs = _split_cell_layout_fracs(n)
+    vx, vy, vw, vh = _get_split_tile_bbox(ext)
+    if vw < _VP_TILE_MIN_PX * 2 or vh < _VP_TILE_MIN_PX:
+        vx, vy, vw, vh = _read_viewport_split_area()
+    bottom_cap = int(vy) + int(vh)
+    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
+    for _ in range(3):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return (vx, vy, vw, vh)
+        await kit_app.get_app().next_update_async()
+    await _finalize_split_window_geometry_sequential(
+        ext,
+        token,
+        win_names,
+        fracs,
+        vx,
+        vy,
+        vw,
+        vh,
+        max_bottom_y=bottom_cap,
+        preserve_main_viewport=preserve_main_viewport,
+    )
+    try:
+        ext._tbs_split_saved_viewport_rect = (int(vx), int(vy), int(vw), int(vh))
+    except Exception:
+        pass
+    try:
+        print(
+            f"[TBS multi-sim] 동일 크기 격자 배치 OK area=({vx},{vy},{vw}x{vh}) tiles={n}",
+            flush=True,
+        )
+    except Exception:
+        pass
+    return (vx, vy, vw, vh)
+
+
+def _apply_viewport_clipped_split_grid(
+    n: int, ext: Any = None, *, preserve_main_viewport: bool = False
+) -> None:
+    """동기 격자 — Dock 폴백 시 보조 창만(또는 전체) 배치."""
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        return
+    if sn <= 1:
+        return
+    if ext is not None:
+        vx, vy, vw, vh = _get_split_tile_bbox(ext)
+    else:
+        vx, vy, vw, vh = _read_viewport_split_area()
+    bottom_cap = int(vy) + int(vh)
+    fracs = _split_cell_layout_fracs(sn)
+    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, sn)]
+    _apply_split_geometry_sync(
+        win_names,
+        fracs,
+        vx,
+        vy,
+        vw,
+        vh,
+        max_bottom_y=bottom_cap,
+        preserve_main_viewport=preserve_main_viewport,
+    )
+    for ti in range(sn):
+        if preserve_main_viewport and ti == 0:
+            _sync_viewport_resolution_from_workspace_window("Viewport")
+            continue
+        nm = "Viewport" if ti == 0 else _split_window_name(ti)
+        _sync_viewport_resolution_from_workspace_window(str(nm))
+
+
+async def _apply_viewport_clipped_split_grid_async(ext: Any, token: int, n: int) -> None:
+    """보조 창 생성·USD open 직후 Workspace rect 가 안정된 뒤 격자를 적용한다."""
+    for _ in range(4):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        await kit_app.get_app().next_update_async()
+    _apply_viewport_clipped_split_grid(n, ext=ext)
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        sn = int(n)
+    for _ in range(12):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        await kit_app.get_app().next_update_async()
+    for ti in range(0, max(1, int(sn))):
+        nm = "Viewport" if ti == 0 else _split_window_name(ti)
+        _sync_viewport_resolution_from_workspace_window(nm)
 
 
 def _split_dock_operations(n: int) -> List[Tuple[str, str, Any, float]]:
@@ -260,7 +468,7 @@ def _split_dock_operations(n: int) -> List[Tuple[str, str, Any, float]]:
 
 
 async def _wait_workspace_windows_ready(
-    ext: Any, token: int, names: List[str], max_frames: int = 48
+    ext: Any, token: int, names: List[str], max_frames: int = 16
 ) -> bool:
     """보조 창 이름이 ``Workspace`` 에 등록될 때까지 잠깐 대기."""
     for _ in range(max(1, int(max_frames))):
@@ -276,7 +484,7 @@ async def _wait_workspace_windows_ready(
 
 
 async def _wait_aux_windows_docked(
-    ext: Any, token: int, aux_names: List[str], max_frames: int = 36
+    ext: Any, token: int, aux_names: List[str], max_frames: int = 12
 ) -> bool:
     """보조 창마다 ``docked`` 가 True 가 될 때까지 잠깐 대기(Kit 가 한두 프레임 늦게 갱신할 수 있음)."""
     for _ in range(max(1, int(max_frames))):
@@ -298,7 +506,7 @@ async def _wait_aux_windows_docked(
 
 
 def _dock_aux_into_target(child_w: Any, target_w: Any, pos: Any, ratio: float) -> bool:
-    """보조 Workspace 창을 기준 ``Window`` 옆 Dock 에 붙인다. ``dock_in`` 만 사용(deprecated API 금지)."""
+    """보조 Workspace 창을 기준 ``Window`` 옆 Dock 에 붙인다. undock 없이 ``dock_in`` 만."""
     if child_w is None or target_w is None:
         return False
     din = getattr(child_w, "dock_in", None)
@@ -318,6 +526,16 @@ def _dock_viewport_fill_dockspace() -> bool:
     메뉴·패널을 숨긴 뒤에도 Dock 트리가 옛 비율을 유지하면 3D 영역이 늘지 않는다.
     Kit UI 테스트 패턴(``Viewport.dock_in(DockSpace, …)``)과 동일하게 ``dock_in`` 으로 갱신한다.
     """
+    return _dock_viewport_to_dockspace(1.0)
+
+
+def _dock_viewport_to_dockspace(ratio: float = 0.62) -> bool:
+    """
+    ``Viewport`` 를 ``DockSpace`` 에 붙인다.
+
+    ``ratio=1.0`` 은 Viewport 가 DockSpace 전체를 차지(Stage 등 패널 소실).
+    분할 teardown 복원에는 **0.62** 등 Kit 기본에 가까운 값을 쓴다.
+    """
     try:
         ds = ui.Workspace.get_window("DockSpace")
         vp = ui.Workspace.get_window("Viewport")
@@ -329,13 +547,13 @@ def _dock_viewport_fill_dockspace() -> bool:
         din = getattr(vp, "dock_in", None)
         if not callable(din):
             return False
-        # 비율 1.0 = 대상(DockSpace) 쪽에 남는 단일 창으로 재배치(LEFT 가 일반적).
+        r = max(0.05, min(1.0, float(ratio)))
         for pos_name in ("LEFT", "TOP", "SAME"):
             pos = getattr(DP, pos_name, None)
             if pos is None:
                 continue
             try:
-                din(ds, pos, 1.0)
+                din(ds, pos, r)
                 return True
             except Exception:
                 continue
@@ -391,6 +609,149 @@ def _sync_viewport_resolution_from_workspace_window(win_name: str) -> None:
         api.resolution = (max(1, ww), max(1, hh))
     except Exception:
         pass
+
+
+def _split_tile_index_from_win_name(win_name: str) -> int:
+    """``Viewport`` → 0, ``TBS_SimSplit_1`` → 1 …"""
+    wn = str(win_name or "").strip()
+    if wn == "Viewport":
+        return 0
+    if wn.startswith("TBS_SimSplit_"):
+        try:
+            return int(wn.rsplit("_", 1)[-1])
+        except Exception:
+            return 1
+    return 0
+
+
+def _compute_split_tile_pixel_rect(
+    n: int, tile_index: int, ext: Any = None
+) -> Tuple[int, int, int, int]:
+    """격자 기준 타일 (px, py, tw, th). hydrate 후 Workspace 크기가 틀어져도 기준값."""
+    if ext is not None:
+        vx, vy, vw, vh = _get_split_tile_bbox(ext)
+    else:
+        vx, vy, vw, vh = _read_viewport_split_area()
+    fracs = _split_cell_layout_fracs(n)
+    ti = max(0, min(int(tile_index), len(fracs) - 1))
+    bottom_cap = int(vy) + int(vh)
+    if n == 2 and ti < 2 and int(vw) >= _VP_TILE_MIN_PX * 2:
+        half_w = max(_VP_TILE_MIN_PX, int(vw) // 2)
+        th = max(_VP_TILE_MIN_PX, int(vh))
+        py = int(vy)
+        if py + th > bottom_cap:
+            th = max(_VP_TILE_MIN_PX, bottom_cap - py)
+        if ti == 0:
+            return (int(vx), py, half_w, th)
+        return (int(vx) + half_w, py, int(vw) - half_w, th)
+    x0, y0, x1, y1 = fracs[ti]
+    tw = max(_VP_TILE_MIN_PX, int(vw * (x1 - x0)))
+    th = max(_VP_TILE_MIN_PX, int(vh * (y1 - y0)))
+    px = int(vx) + int(vw * x0)
+    py = int(vy) + int(vh * y0)
+    if py + th > bottom_cap:
+        th = max(_VP_TILE_MIN_PX, bottom_cap - py)
+    return (px, py, tw, th)
+
+
+def refresh_split_viewport_resolution_from_grid(
+    win_name: str,
+    split_n: int,
+    *,
+    ext: Any = None,
+    force_window_rect: bool = False,
+) -> None:
+    """
+    격자 기준 해상도·(선택) Workspace rect.
+
+    hydrate·``aux display activate`` 직후 Kit 이 보조 창을 1280×720 등 기본값으로 되돌리는 경우,
+    Workspace ``width``/``height`` 대신 **격자 계산값**으로 맞춘다.
+    """
+    wn = str(win_name or "").strip()
+    if not wn:
+        return
+    try:
+        sn = channel_count_for_split(int(split_n))
+    except Exception:
+        sn = 2
+    if sn <= 1:
+        _sync_viewport_resolution_from_workspace_window(wn)
+        return
+    ti = _split_tile_index_from_win_name(wn)
+    px, py, tw, th = _compute_split_tile_pixel_rect(sn, ti, ext)
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        if force_window_rect:
+            win = ui.Workspace.get_window(wn)
+            if win is not None:
+                _workspace_show_named_window(wn, True)
+                win.position_x = int(px)
+                win.position_y = int(py)
+                win.width = int(tw)
+                win.height = int(th)
+        api = get_viewport_from_window_name(wn)
+        if api is not None:
+            if hasattr(api, "resolution"):
+                api.resolution = (max(1, int(tw)), max(1, int(th)))
+            if hasattr(api, "fill_frame"):
+                api.fill_frame = True
+    except Exception:
+        pass
+
+
+def _bring_kit_chrome_visible() -> None:
+    """Console/Content 등 — 위치는 건드리지 않고 표시만(분할 후 뒤로 가려짐 완화)."""
+    for nm in ("Console", "Content", "Stage", "Property"):
+        _workspace_show_named_window(str(nm), True)
+
+
+def reapply_split_layout_sync(ext: Any, n: int) -> None:
+    """분할 레이아웃 재적용 — Dock 성공 시 ``dock_in`` 만, 실패 시 보조 격자."""
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        return
+    if sn <= 1:
+        return
+    if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+        _reapply_split_dock_in_geometry(ext)
+        for ti in range(sn):
+            nm = "Viewport" if ti == 0 else _split_window_name(ti)
+            _sync_viewport_resolution_from_workspace_window(nm)
+    else:
+        _apply_viewport_clipped_split_grid(
+            sn, ext=ext, preserve_main_viewport=True
+        )
+    try:
+        set_viewport_fill_frame_for_split_count(sn, True)
+    except Exception:
+        pass
+    _bring_kit_chrome_visible()
+
+
+async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int) -> None:
+    """hydrate 직후 레이아웃 재동기화 — Dock/격자 중 활성 경로만."""
+    for _ in range(4):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        await kit_app.get_app().next_update_async()
+    reapply_split_layout_sync(ext, n)
+    if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+        for _ in range(8):
+            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                return
+            await kit_app.get_app().next_update_async()
+        _reapply_split_dock_in_geometry(ext)
+    else:
+        await _enforce_equal_split_grid_async(
+            ext, token, n, preserve_main_viewport=True
+        )
+    try:
+        set_viewport_fill_frame_for_split_count(n, True)
+    except Exception:
+        pass
+    _bring_kit_chrome_visible()
 
 
 def set_viewport_fill_frame_for_split_count(split_n: int, fill: bool) -> None:
@@ -463,19 +824,28 @@ async def _apply_split_dock_layout(ext: Any, token: int, n: int) -> bool:
             except Exception:
                 pass
             return False
-        for _ in range(4):
+        for _ in range(2):
             if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
                 return False
             await kit_app.get_app().next_update_async()
-    if not await _wait_aux_windows_docked(ext, token, aux_names, max_frames=36):
+    if not await _wait_aux_windows_docked(ext, token, aux_names, max_frames=48):
         try:
             print(
-                "[TBS multi-sim] Dock 분할: dock_in 후에도 보조 창 docked=False → 좌표 격자로 폴백합니다",
+                "[TBS multi-sim] Dock: docked 플래그 미확인 — dock_in 은 적용됨, Dock 성공으로 처리",
                 flush=True,
             )
         except Exception:
             pass
-        return False
+    for nm in aux_names:
+        hidden = False
+        for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
+            if str(ent.get("win_name") or "") == str(nm) and ent.get("aux_hidden_until_load"):
+                hidden = True
+                break
+        if hidden:
+            continue
+        _workspace_show_named_window(str(nm), True)
+        _sync_viewport_resolution_from_workspace_window(str(nm))
     try:
         print("[TBS multi-sim] Viewport Dock 분할 적용 완료 (dock_in)", flush=True)
     except Exception:
@@ -483,8 +853,29 @@ async def _apply_split_dock_layout(ext: Any, token: int, n: int) -> bool:
     return True
 
 
+async def _retry_split_dock_layout(ext: Any, token: int, n: int, *, attempts: int = 4) -> bool:
+    """``dock_in`` 이 floating 좌표 때문에 실패할 때 undock 후 재시도."""
+    for attempt in range(max(1, int(attempts))):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return False
+        if await _apply_split_dock_layout(ext, token, n):
+            return True
+        if attempt + 1 < attempts:
+            for ti in range(1, n):
+                _undock_workspace_window(_split_window_name(ti))
+            for _ in range(4):
+                await kit_app.get_app().next_update_async()
+    return False
+
+
 def _main_usd_path_for_clone(ext: Any) -> Optional[str]:
     """TBS Load 로 연 경로 우선, 없으면 현재 기본 스테이지 루트 레이어에서 추정."""
+    try:
+        from .tbs_split_composed_loader import resolve_split_master_usd_path
+
+        return resolve_split_master_usd_path(ext)
+    except Exception:
+        pass
     try:
         lp = str(getattr(ext, "_tbs_last_loaded_usd_path", "") or "").strip()
         if lp:
@@ -578,8 +969,15 @@ async def _clone_usd_for_aux_tile(usd_path: str, ext: Any, token: int, ti: int) 
         )
     )
     dest_uri = Path(dest).as_uri()
+    src_uri = usd_path
     try:
-        await asyncio.wait_for(omni.client.copy_async(usd_path, dest_uri), timeout=300.0)
+        from .tbs_split_composed_loader import usd_path_for_omni_client
+
+        src_uri = usd_path_for_omni_client(usd_path)
+    except Exception:
+        src_uri = usd_path
+    try:
+        await asyncio.wait_for(omni.client.copy_async(src_uri, dest_uri), timeout=300.0)
     except Exception as e:
         try:
             if os.path.isfile(dest):
@@ -611,6 +1009,13 @@ def _make_aux_wrapper_root_layer(usd_path: str, ext: Any, token: int, ti: int) -
     메인이 직접 연 원본과 **다른 루트 파일 식별자**를 갖게 해 Kit 의 Stage 공유를 피한다.
     """
     ident = str(usd_path or "").strip().replace("\\", "/")
+    try:
+        from .tbs_data_paths import resolve_local_data_path
+
+        resolved = resolve_local_data_path(usd_path) or usd_path
+        ident = str(resolved or "").strip().replace("\\", "/")
+    except Exception:
+        pass
     if not ident:
         return None, "빈 usd 경로"
     wrap_path = os.path.normpath(
@@ -646,6 +1051,26 @@ def _export_empty_session_usda(sess_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"session layer 파일 생성 실패: {e}"
     return True, ""
+
+
+def _make_aux_shell_stage_path(ext: Any, token: int, ti: int) -> Tuple[Optional[str], str]:
+    """분할 레이아웃만 먼저 보여줄 때 쓰는 최소 빈 스테이지(즉시 open)."""
+    path = os.path.normpath(
+        os.path.join(
+            tempfile.gettempdir(),
+            f"morph_tbs_shell_aux_{ti}_{token}_{os.getpid()}.usda",
+        )
+    )
+    try:
+        from pxr import Usd
+
+        stage = Usd.Stage.CreateNew(path)
+        stage.DefinePrim("/World", "Xform")
+        stage.GetRootLayer().Save()
+    except Exception as exc:
+        return None, f"shell stage 생성 실패: {exc}"
+    _register_session_layer_path(ext, path)
+    return path, ""
 
 
 async def _ctx_open_stage_path(ctx: Any, root: str, sess_path: Optional[str]) -> Tuple[bool, str]:
@@ -732,34 +1157,45 @@ async def _open_aux_stage_with_unique_session(
     ext: Any,
     token: int,
     ti: int,
+    *,
+    skip_file_clone: bool = False,
 ) -> Tuple[bool, str]:
     """
     보조 컨텍스트에서 씬을 연다.
 
-    1) 기본(**``TBS_MULTI_SPLIT_FILE_CLONE``** unset/true): 원본을 **타일별 임시 파일로 복제** 후 그 경로를 연다
-       (동일 URL 을 subLayer 로만 묶을 때 생기는 **레이어·씬 공유**를 끊기 위함).
-    2) 복제를 끈 경우: 타일 전용 **래퍼 루트 .usda**(subLayer = 원본)로 연다.
-    3) ``TBS_MULTI_SPLIT_SESSION_LAYER`` 가 켜져 있으면 위 루트 + session layer, 실패 시 루트만 재시도.
+    1) **타일 전용 복제/스냅샷**(``morph_tbs_clone_aux_*`` / ``morph_tbs_composed_aux_*``)은 바로 연다.
+    2) 그 외: 원본 USD 를 타일별 임시 파일로 **반드시** 복제(``TBS_MULTI_SPLIT_FILE_CLONE=0`` 이면 실패).
+    3) **래퍼 .usda(subLayer)** 는 메인과 ``Sdf.Layer`` 를 공유해 Hydra 동시 렌더 시 GPU crash → 분할 3D 에서 사용 안 함.
+    4) session layer 는 복제 파일 open 시 생략(가속).
     """
     root_path: Optional[str] = None
-    if _use_aux_file_clone():
+    if _is_preopened_aux_stage_path(usd_path):
+        root_path = str(usd_path)
+    elif not skip_file_clone and _use_aux_file_clone():
         clone_path, cerr = await _clone_usd_for_aux_tile(usd_path, ext, token, ti)
         if clone_path:
             root_path = clone_path
         else:
             try:
-                print(f"[TBS multi-sim] 보조 USD 복제 실패, 래퍼로 폴백: {cerr}", flush=True)
+                print(
+                    f"[TBS multi-sim] 보조 USD 복제 실패 tile={ti} (래퍼 폴백 금지 — subLayer 공유 crash): {cerr}",
+                    flush=True,
+                )
             except Exception:
                 pass
+            return False, str(cerr or "보조 USD 복제 실패")
 
     if root_path is None:
+        if sim_viewport_split_3d_enabled():
+            return False, "분할 3D: 타일별 USD 복제 필수(래퍼 subLayer 공유는 GPU crash 유발)"
         wrap_path, werr = _make_aux_wrapper_root_layer(usd_path, ext, token, ti)
         if not wrap_path:
             return False, werr
         root_path = wrap_path
 
+    composed_open = _is_split_aux_stage_file(str(root_path or usd_path))
     sess_path: Optional[str] = None
-    if _use_multi_split_session_layer():
+    if _use_multi_split_session_layer() and not composed_open:
         sess_path = os.path.normpath(
             os.path.join(
                 tempfile.gettempdir(),
@@ -899,6 +1335,38 @@ def _destroy_kit_viewport(vp: Any) -> None:
             pass
 
 
+def _is_tbs_composed_snapshot_path(path: str) -> bool:
+    """``export_main_composed_stage_to_temp`` / ``get_or_export_main_composed_stage`` 결과 경로."""
+    try:
+        base = os.path.basename(str(path or ""))
+    except Exception:
+        return False
+    return base.startswith("morph_tbs_composed_aux_")
+
+
+def _is_tbs_clone_aux_path(path: str) -> bool:
+    """``_clone_usd_for_aux_tile`` 로 만든 타일 전용 복제 파일."""
+    try:
+        base = os.path.basename(str(path or ""))
+    except Exception:
+        return False
+    return base.startswith("morph_tbs_clone_aux_")
+
+
+def _is_preopened_aux_stage_path(path: str) -> bool:
+    """이미 타일별로 복제·Export 된 경로 — 재복제·래퍼(subLayer 공유) 없이 바로 연다."""
+    return _is_tbs_composed_snapshot_path(path) or _is_tbs_clone_aux_path(path)
+
+
+def _is_split_aux_stage_file(path: str) -> bool:
+    """분할 보조 타일용 임시 stage (Flatten 스냅샷·타일 clone). session layer 생략으로 open 가속."""
+    try:
+        base = os.path.basename(str(path or ""))
+    except Exception:
+        return False
+    return base.startswith("morph_tbs_composed_aux_") or base.startswith("morph_tbs_clone_aux_")
+
+
 def _log_viewport_usd_context_bind(win_name: str, expect_ctx: str) -> None:
     """뷰포트 API가 기대한 USD 컨텍스트 이름에 묶였는지 한 번 확인(조작 경로 디버그)."""
     try:
@@ -915,6 +1383,322 @@ def _log_viewport_usd_context_bind(win_name: str, expect_ctx: str) -> None:
             )
     except Exception:
         pass
+
+
+_DISABLE_NAV_KEYS = (
+    "disable_pan",
+    "disable_zoom",
+    "disable_tumble",
+    "disable_look",
+    "disable_move",
+    "disable_fly",
+)
+
+
+def _is_viewport_camera_manipulator_model(obj: Any) -> bool:
+    if obj is None or type(obj).__name__ == "CameraModel":
+        return False
+    get_as_floats = getattr(obj, "get_as_floats", None)
+    set_floats = getattr(obj, "set_floats", None)
+    if not callable(get_as_floats) or not callable(set_floats):
+        return False
+    try:
+        transform = get_as_floats("transform")
+        return bool(transform and len(transform) >= 16)
+    except Exception:
+        return False
+
+
+def _collect_camera_manipulator_models_for_window(win_name: str) -> List[Any]:
+    """지정 Workspace 뷰포트 창의 camera manipulator model 만 수집(active viewport 에 의존하지 않음)."""
+    models: List[Any] = []
+    seen: set[int] = set()
+
+    def _try_add(obj: Any) -> None:
+        if obj is None or not _is_viewport_camera_manipulator_model(obj):
+            return
+        oid = id(obj)
+        if oid in seen:
+            return
+        seen.add(oid)
+        models.append(obj)
+
+    api: Any = None
+    vp_win: Any = None
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        api = get_viewport_from_window_name(str(win_name))
+    except Exception:
+        api = None
+    if api is not None:
+        for attr in (
+            "camera_manipulator",
+            "_camera_manipulator",
+            "manipulator",
+            "camera_model",
+            "_camera_model",
+        ):
+            _try_add(getattr(api, attr, None))
+        for attr in ("viewport_window", "window", "_viewport_window", "_window"):
+            cand = getattr(api, attr, None)
+            if cand is not None and callable(getattr(cand, "get_frame", None)):
+                vp_win = cand
+                break
+    if vp_win is None:
+        try:
+            w = ui.Workspace.get_window(str(win_name))
+        except Exception:
+            w = None
+        if w is not None:
+            for attr in ("viewport_window", "viewport", "_viewport_window"):
+                cand = getattr(w, attr, None)
+                if cand is not None:
+                    vp_win = cand
+                    break
+    if vp_win is not None:
+        for attr in (
+            "camera_manipulator",
+            "_camera_manipulator",
+            "manipulator",
+            "viewport_widget",
+            "_viewport_widget",
+            "viewport_frame",
+            "_viewport_frame",
+        ):
+            w = getattr(vp_win, attr, None)
+            _try_add(w)
+            if w is not None:
+                _try_add(getattr(w, "model", None))
+                _try_add(getattr(w, "camera_manipulator", None))
+                cm = getattr(w, "camera_manipulator", None)
+                if cm is not None:
+                    _try_add(getattr(cm, "model", None))
+                for sv_attr in ("scene_view", "_scene_view"):
+                    sv = getattr(w, sv_attr, None)
+                    if sv is not None:
+                        _try_add(getattr(sv, "model", None))
+    return models
+
+
+def _set_model_navigation_enabled(model: Any, enabled: bool) -> None:
+    flag = 0 if enabled else 1
+    try:
+        model.set_ints("disable_undo", [1])
+    except Exception:
+        pass
+    for key in _DISABLE_NAV_KEYS:
+        try:
+            model.set_ints(key, [flag])
+        except Exception:
+            pass
+
+
+def _ensure_viewport_camera_navigation_enabled(win_name: str) -> None:
+    """보조 분할 타일에서 Alt+드래그 orbit 등 카메라 조작이 가능하도록 navigation 을 켠다."""
+    models = _collect_camera_manipulator_models_for_window(str(win_name))
+    for model in models:
+        _set_model_navigation_enabled(model, True)
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        api = get_viewport_from_window_name(str(win_name))
+        if api is not None:
+            for attr in ("enable_input", "inputs_enabled"):
+                if hasattr(api, attr):
+                    try:
+                        setattr(api, attr, True)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def _schedule_split_viewport_input_ready(win_name: str, *, frames: int = 8) -> None:
+    """뷰포트 생성 직후 manipulator 가 붙을 때까지 몇 프레임 뒤 navigation 을 다시 켠다."""
+
+    async def _go() -> None:
+        for _ in range(max(1, int(frames))):
+            await kit_app.get_app().next_update_async()
+        _ensure_viewport_camera_navigation_enabled(str(win_name))
+
+    try:
+        asyncio.ensure_future(_go())
+    except Exception:
+        pass
+
+
+def _cancel_split_aux_navigation_hold(ext: Any) -> None:
+    """이전 분할 빌드의 post_update navigation 재적용 구독을 해제한다."""
+    sub = getattr(ext, "_sim_split_nav_hold_sub", None)
+    if sub is not None:
+        try:
+            sub.unsubscribe()
+        except Exception:
+            pass
+    try:
+        ext._sim_split_nav_hold_sub = None
+    except Exception:
+        pass
+
+
+def _apply_split_navigation_to_aux(ext: Any, n: int, token: int, *, hold_ticks: int = 48) -> None:
+    """보조 타일 카메라 orbit/pan — Dock·레이아웃 변경 직후 호출."""
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        sn = 1
+    if sn <= 1:
+        return
+    for ti in range(1, sn):
+        wn = _split_window_name(ti)
+        _ensure_viewport_camera_navigation_enabled(wn)
+        _wire_split_viewport_click_focus(wn)
+    _schedule_split_aux_navigation_hold(ext, n, token, ticks=int(hold_ticks))
+
+
+def _schedule_split_aux_navigation_hold(ext: Any, n: int, token: int, *, ticks: int = 36) -> None:
+    """
+    Dock·레이아웃 직후 manipulator 가 재생성되며 navigation 이 꺼지는 경우(특히 3·4분할 2번째 보조 타일)를
+    post_update 로 몇 프레임 동안 재적용한다.
+    """
+    _cancel_split_aux_navigation_hold(ext)
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        sn = 1
+    if sn <= 1:
+        return
+    win_names = [_split_window_name(ti) for ti in range(1, sn)]
+    remaining = [max(6, int(ticks))]
+    sub_ref: List[Any] = [None]
+
+    def _tick(_e: Any = None) -> None:
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != int(token):
+            if sub_ref[0] is not None:
+                try:
+                    sub_ref[0].unsubscribe()
+                except Exception:
+                    pass
+            try:
+                ext._sim_split_nav_hold_sub = None
+            except Exception:
+                pass
+            return
+        if remaining[0] <= 0:
+            if sub_ref[0] is not None:
+                try:
+                    sub_ref[0].unsubscribe()
+                except Exception:
+                    pass
+            try:
+                ext._sim_split_nav_hold_sub = None
+            except Exception:
+                pass
+            return
+        if remaining[0] % 2 == 0:
+            for wn in win_names:
+                _ensure_viewport_camera_navigation_enabled(str(wn))
+        remaining[0] -= 1
+
+    try:
+        sub_ref[0] = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+            _tick,
+            name="morph.tbs_control_2.split_aux_nav_hold",
+        )
+        try:
+            ext._sim_split_nav_hold_sub = sub_ref[0]
+        except Exception:
+            pass
+    except Exception:
+        for wn in win_names:
+            _ensure_viewport_camera_navigation_enabled(str(wn))
+
+
+def _clear_split_viewport_input_hook(win_name: str) -> None:
+    """보조 타일 파괴·재생성 시 이전 ``set_mouse_pressed_fn`` 잔여를 제거."""
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        api = get_viewport_from_window_name(str(win_name))
+    except Exception:
+        api = None
+    for frame in _split_viewport_input_frames(str(win_name), api):
+        for fn_name in ("set_mouse_pressed_fn", "set_mouse_released_fn"):
+            fn = getattr(frame, fn_name, None)
+            if callable(fn):
+                try:
+                    fn(None)
+                except Exception:
+                    pass
+
+
+def _split_viewport_input_frames(win_name: str, api: Any = None) -> List[Any]:
+    frames: List[Any] = []
+    if api is None:
+        try:
+            from omni.kit.viewport.utility import get_viewport_from_window_name
+
+            api = get_viewport_from_window_name(str(win_name))
+        except Exception:
+            api = None
+    if api is not None:
+        for attr in ("viewport_window", "window", "_viewport_window", "_window"):
+            cand = getattr(api, attr, None)
+            if cand is not None:
+                fr = getattr(cand, "frame", None)
+                if fr is not None:
+                    frames.append(fr)
+    try:
+        w = ui.Workspace.get_window(str(win_name))
+        fr = getattr(w, "frame", None) if w is not None else None
+        if fr is not None:
+            frames.append(fr)
+    except Exception:
+        pass
+    out: List[Any] = []
+    seen: set[int] = set()
+    for fr in frames:
+        if id(fr) not in seen:
+            seen.add(id(fr))
+            out.append(fr)
+    return out
+
+
+def _wire_split_viewport_click_focus(win_name: str) -> None:
+    """보조 타일 클릭 시 해당 뷰포트를 active 로 — Workspace frame 이 아닌 viewport widget 에만 연결."""
+    _clear_split_viewport_input_hook(str(win_name))
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        api = get_viewport_from_window_name(str(win_name))
+    except Exception:
+        api = None
+    frames = _split_viewport_input_frames(str(win_name), api)
+    if not frames:
+        return
+
+    def _on_press(_x: float, _y: float, _btn: int, _mod: int) -> bool:
+        try:
+            from omni.kit.viewport.utility import get_viewport_from_window_name
+
+            api2 = get_viewport_from_window_name(str(win_name))
+            if api2 is not None:
+                focus_fn = getattr(api2, "focus", None)
+                if callable(focus_fn):
+                    focus_fn()
+                _ensure_viewport_camera_navigation_enabled(str(win_name))
+        except Exception:
+            pass
+        return False
+
+    for frame in frames:
+        fn_set = getattr(frame, "set_mouse_pressed_fn", None)
+        if callable(fn_set):
+            try:
+                fn_set(_on_press)
+            except Exception:
+                pass
 
 
 def _workspace_show_named_window(name: str, visible: bool) -> None:
@@ -941,38 +1725,193 @@ def _workspace_show_named_window(name: str, visible: bool) -> None:
 
 
 def _restore_main_viewport_layout(ext: Any) -> None:
-    """분할 전에 저장한 Dock 사각형으로 기본 Viewport 를 되돌린다."""
-    r = getattr(ext, "_tbs_split_saved_viewport_rect", None)
+    """
+    분할 전 저장한 Viewport 사각형으로 되돌린다.
+
+    ``_tbs_split_saved_viewport_rect``(분할 중 캡처)는 Dock 분할 후 값이라
+    1화면 복귀 시 Console/Content 를 덮을 수 있어 **사용하지 않는다**.
+    """
+    panels: Dict[str, Tuple[int, int, int, int]] = dict(
+        getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
+    )
+    r = panels.get("Viewport")
+    if r is not None:
+        _apply_window_rect("Viewport", r)
+        return
     try:
         main_vp = ui.Workspace.get_window("Viewport")
-        if r is None or main_vp is None:
-            return
-        vx, vy, vw, vh = r
-        main_vp.position_x = int(vx)
-        main_vp.position_y = int(vy)
-        main_vp.width = max(64, int(vw))
-        main_vp.height = max(64, int(vh))
-        _workspace_show_named_window("Viewport", True)
+        if main_vp is not None:
+            _workspace_show_named_window("Viewport", True)
+    except Exception:
+        pass
+
+
+def _undock_workspace_window(win_name: str) -> bool:
+    """Dock 트리에 붙은 Workspace 창을 분리한다(幽靈 dock pane·collapsible Viewport 방지)."""
+    wn = str(win_name or "").strip()
+    if not wn:
+        return False
+    try:
+        w = ui.Workspace.get_window(wn)
+        if w is None:
+            return False
+        undock = getattr(w, "undock", None)
+        if callable(undock):
+            try:
+                undock()
+                return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def _aux_viewport_api_healthy(win_name: str) -> bool:
+    """보조 타일 Workspace 이름에 대응하는 Viewport API 가 살아 있는지."""
+    wn = str(win_name or "").strip()
+    if not wn:
+        return False
+    try:
+        if ui.Workspace.get_window(wn) is None:
+            return False
+    except Exception:
+        return False
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        api = get_viewport_from_window_name(wn)
+        if api is None:
+            return False
+        for attr in ("viewport_window", "window", "_viewport_window", "_window"):
+            cand = getattr(api, attr, None)
+            if cand is not None and callable(getattr(cand, "get_frame", None)):
+                return True
+        return callable(getattr(api, "get_frame", None))
+    except Exception:
+        return False
+
+
+def _restore_single_viewport_after_dock_teardown(ext: Any) -> None:
+    """
+    Dock 2~4분할 → 1화면: Console/Content/Viewport **절대 좌표는 건드리지 않는다**.
+
+    보조 ``dock_in`` 타일만 제거된 뒤 Kit Dock 이 Viewport 를 다시 채우게 둔다.
+    """
+    _workspace_show_named_window("Viewport", True)
+    try:
+        set_viewport_fill_frame_for_split_count(1, False)
+    except Exception:
+        pass
+    _sync_viewport_resolution_from_workspace_window("Viewport")
+    _bring_kit_chrome_visible()
+
+
+def _restore_viewport_after_split_teardown(ext: Any) -> None:
+    """1분할 복귀 — Dock 분할이었으면 좌표 복원 없이, 격자였으면 Viewport 만 복원."""
+    used_dock = bool(getattr(ext, "_tbs_split_used_dock_layout", False))
+    if used_dock:
+        _restore_single_viewport_after_dock_teardown(ext)
+    else:
+        _restore_main_viewport_layout(ext)
+        _bring_kit_chrome_visible()
+    try:
+        ext._tbs_split_used_dock_layout = False
+    except Exception:
+        pass
+    _schedule_deferred_single_viewport_restore(ext, used_dock=used_dock)
+
+
+def _schedule_deferred_single_viewport_restore(ext: Any, *, used_dock: bool) -> None:
+    """보조 창 제거·Dock 재배치가 끝난 뒤 Viewport 해상도만 다시 맞춘다."""
+
+    async def _go() -> None:
+        for _ in range(14):
+            await kit_app.get_app().next_update_async()
+        if used_dock:
+            _restore_single_viewport_after_dock_teardown(ext)
+        else:
+            _restore_main_viewport_layout(ext)
+            _bring_kit_chrome_visible()
+
+    try:
+        asyncio.ensure_future(_go())
+    except Exception:
+        pass
+
+
+def _schedule_deferred_kit_layout_restore(ext: Any) -> None:
+    """(레거시) — ``_schedule_deferred_single_viewport_restore`` 로 위임."""
+    used_dock = bool(getattr(ext, "_tbs_split_used_dock_layout", False))
+    _schedule_deferred_single_viewport_restore(ext, used_dock=used_dock)
+
+
+def _destroy_stale_split_workspace_window(win_name: str) -> None:
+    """이전 분할 빌드가 남긴 동명 Workspace/Viewport 를 제거(undock 없음)."""
+    wn = str(win_name or "").strip()
+    if not wn:
+        return
+    _clear_split_viewport_input_hook(wn)
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        api = get_viewport_from_window_name(wn)
+        if api is not None:
+            _destroy_kit_viewport(api)
+    except Exception:
+        pass
+    try:
+        w = ui.Workspace.get_window(wn)
+        if w is not None:
+            for ent_attr in ("viewport_window", "window", "_viewport_window"):
+                cand = getattr(w, ent_attr, None)
+                if cand is not None:
+                    _destroy_viewport_window(cand)
+            _workspace_show_named_window(wn, False)
     except Exception:
         pass
 
 
 def teardown_sim_multi_viewports(ext: Any) -> None:
     """분할 뷰·보조 USD 컨텍스트를 정리하고 기본 Viewport 를 복원한다."""
+    _cancel_split_aux_navigation_hold(ext)
+    used_dock = bool(getattr(ext, "_tbs_split_used_dock_layout", False))
+    if used_dock:
+        for ti in range(1, 5):
+            _undock_workspace_window(_split_window_name(ti))
+    for ti in range(1, 5):
+        _destroy_stale_split_workspace_window(_split_window_name(ti))
+    try:
+        from .tbs_split_composed_loader import release_aux_split_runtimes
+
+        release_aux_split_runtimes(ext, keep_screen_1=True)
+    except Exception:
+        pass
+    try:
+        ext._sim_runners_by_screen = {}
+    except Exception:
+        pass
     destroy_viewport_snapshot_hud_layers(ext)
     entries: List[Dict[str, Any]] = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
     # 보조 뷰를 먼저 파괴한 뒤 메인 Viewport 를 복원한다(메인만 먼저 키우면 보조와 동시에 그려져 GPU 부담).
     for ent in entries:
         if ent.get("kind") == "main_viewport":
             continue
+        wn = str(ent.get("win_name") or "")
+        if wn:
+            _clear_split_viewport_input_hook(wn)
+            if used_dock:
+                _undock_workspace_window(wn)
         if ent.get("kit_vp") is not None:
             _destroy_kit_viewport(ent.get("kit_vp"))
         else:
             _destroy_viewport_window(ent.get("window"))
     for ent in entries:
         if ent.get("kind") == "main_viewport":
-            _restore_main_viewport_layout(ext)
+            _restore_viewport_after_split_teardown(ext)
             break
+    else:
+        _restore_viewport_after_split_teardown(ext)
     try:
         ext._sim_multi_viewport_entries = []
     except Exception:
@@ -997,14 +1936,50 @@ def teardown_sim_multi_viewports(ext: Any) -> None:
     except Exception:
         pass
 
+    try:
+        ext._tbs_split_layout_usd_key = None
+    except Exception:
+        pass
+
     _workspace_show_named_window("Viewport", True)
+
+
+def schedule_split_rebuild_after_master_reload(ext: Any) -> None:
+    """
+    Master USD 재로드 후 분할 수>1 이면 **뷰포트는 유지**하고 스테이지만 빠르게 갱신한다.
+
+    전체 teardown+Flatten 재빌드(수 초) 대신 clone+reopen+hydrate 만 수행.
+    """
+    invalidate_split_layout_cache(ext)
+    try:
+        n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+    except Exception:
+        n = 1
+    if n <= 1:
+        return
+
+    async def _go() -> None:
+        for _ in range(2):
+            await kit_app.get_app().next_update_async()
+        usd_path = _main_usd_path_for_clone(ext)
+        if not usd_path:
+            return
+        tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
+        await _refresh_aux_split_stages_async(ext, n, tok, usd_path)
+
+    try:
+        asyncio.ensure_future(_go())
+    except Exception:
+        pass
 
 
 _VP_TILE_MIN_PX = 128
 
-# 분할 수 변경 시: 티어다운 직후 곧바로 Hydra/뷰를 다시 만들면 GPU 가 깨지는 경우가 있어 잠깐 쉰다.
-_SPLIT_REBUILD_SETTLE_SEC = 0.88
-_SPLIT_REBUILD_SETTLE_FRAMES = 12
+# 분할 수 변경 시: 티어다운 직후 Hydra/뷰를 다시 만들기 전 짧은 settle (GPU 크래시 완화).
+_SPLIT_REBUILD_SETTLE_SEC_FIRST = 0.05
+_SPLIT_REBUILD_SETTLE_FRAMES_FIRST = 1
+_SPLIT_REBUILD_SETTLE_SEC = 0.05
+_SPLIT_REBUILD_SETTLE_FRAMES = 1
 
 
 def _read_viewport_rect() -> Tuple[int, int, int, int]:
@@ -1026,6 +2001,198 @@ def _read_viewport_rect() -> Tuple[int, int, int, int]:
         return (0, 0, max(400, mw), max(300, mh))
     except Exception:
         return (0, 0, 1280, 720)
+
+
+def _read_window_rect(name: str) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        w = ui.Workspace.get_window(str(name))
+        if w is None:
+            return None
+        return (
+            int(getattr(w, "position_x", 0) or 0),
+            int(getattr(w, "position_y", 0) or 0),
+            int(getattr(w, "width", 0) or 0),
+            int(getattr(w, "height", 0) or 0),
+        )
+    except Exception:
+        return None
+
+
+def _apply_window_rect(name: str, rect: Tuple[int, int, int, int]) -> None:
+    try:
+        w = ui.Workspace.get_window(str(name))
+        if w is None:
+            return
+        x, y, ww, hh = rect
+        w.position_x = int(x)
+        w.position_y = int(y)
+        w.width = max(64, int(ww))
+        w.height = max(64, int(hh))
+        _workspace_show_named_window(str(name), True)
+    except Exception:
+        pass
+
+
+def _capture_kit_panel_layout(ext: Any) -> None:
+    """Console/Content/Viewport 등 Kit 패널 위치·크기 저장."""
+    panels: Dict[str, Tuple[int, int, int, int]] = {}
+    for nm in ("Viewport", "Console", "Content", "Stage", "Property"):
+        r = _read_window_rect(nm)
+        if r is not None and int(r[2]) >= 8 and int(r[3]) >= 8:
+            panels[str(nm)] = r
+    try:
+        ext._tbs_split_saved_panel_layout = panels
+    except Exception:
+        pass
+
+
+def _ensure_kit_chrome_panels_on_top(ext: Any) -> None:
+    """
+    분할 중 Console·Content 등이 Viewport 뒤로 가려지지 않도록 위치 복원 + 표시.
+
+    Viewport 크기는 **건드리지 않는다**(Dock 분할이 Viewport 내부에서 처리).
+    """
+    panels: Dict[str, Tuple[int, int, int, int]] = dict(
+        getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
+    )
+    for nm in ("Console", "Content", "Stage", "Property"):
+        r = panels.get(str(nm))
+        if r is not None:
+            _apply_window_rect(str(nm), r)
+        _workspace_show_named_window(str(nm), True)
+
+
+def _schedule_ensure_kit_chrome_panels_on_top(ext: Any) -> None:
+    """Dock 재배치 직후 Kit 가 레이아웃을 다시 그린 뒤 Console/Content 를 앞으로."""
+
+    async def _go() -> None:
+        for _ in range(10):
+            await kit_app.get_app().next_update_async()
+        _ensure_kit_chrome_panels_on_top(ext)
+
+    try:
+        asyncio.ensure_future(_go())
+    except Exception:
+        pass
+
+
+def _capture_kit_layout_before_split(ext: Any) -> None:
+    """2~4분할 직전 현재 Kit 레이아웃 저장(1화면 복귀 시 Console/Content·Viewport 복원용)."""
+    _capture_kit_panel_layout(ext)
+
+
+def _restore_kit_full_layout_after_split(ext: Any) -> None:
+    """
+    1화면 복귀 — **Viewport 만** 분할 전 rect 로 복원.
+
+    Console/Content 는 Kit Dock 탭 그룹이라 절대 좌표 복원 시 서로 덮는다.
+    """
+    panels: Dict[str, Tuple[int, int, int, int]] = dict(
+        getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
+    )
+    if not panels:
+        _restore_single_viewport_after_dock_teardown(ext)
+        return
+    r = panels.get("Viewport")
+    if r is not None:
+        _apply_window_rect("Viewport", r)
+    try:
+        set_viewport_fill_frame_for_split_count(1, False)
+    except Exception:
+        pass
+    _sync_viewport_resolution_from_workspace_window("Viewport")
+    _bring_kit_chrome_visible()
+
+
+def _split_tile_bbox_top_cap_y(ext: Any, vy: int, vh: int) -> int:
+    """분할 타일 하단 한계 — Console/Content **저장 위치** 기준(읽기만, 창은 이동하지 않음)."""
+    cap = int(vy) + int(vh)
+    panels: Dict[str, Tuple[int, int, int, int]] = dict(
+        getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
+    )
+    for panel_name in ("Console", "Content"):
+        pr = panels.get(str(panel_name))
+        if pr is None:
+            pr = _read_window_rect(panel_name)
+        if pr is None:
+            continue
+        if int(pr[2]) < 8 or int(pr[3]) < 8:
+            continue
+        panel_top = int(pr[1])
+        if panel_top > int(vy) + _VP_TILE_MIN_PX and int(vy) + int(vh) > panel_top:
+            cap = min(cap, panel_top)
+    return max(int(vy) + _VP_TILE_MIN_PX, int(cap))
+
+
+def _restore_kit_bottom_panels(ext: Any) -> None:
+    """
+    (1화면 복귀 전용) Console·Content 저장 rect 복원.
+
+    **2~4분할 중에는 호출하지 않는다** — Kit Dock 탭(Console|Content) 관계가 깨져
+    Content 가 Console 을 덮는다.
+    """
+    panels: Dict[str, Tuple[int, int, int, int]] = dict(
+        getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
+    )
+    for nm in ("Console", "Content"):
+        r = panels.get(str(nm))
+        if r is not None:
+            _apply_window_rect(str(nm), r)
+        _workspace_show_named_window(str(nm), True)
+
+
+def _capture_split_tile_bbox(ext: Any) -> Tuple[int, int, int, int]:
+    """
+    분할 격자에 쓸 영역 — **분할 직전 저장한 Viewport** rect 를 우선 사용하고,
+    Console/Content 상단까지만(읽기 전용) 자른다.
+
+    Viewport·TBS_SimSplit_* 만 이후 단계에서 리사이즈한다.
+    """
+    panels: Dict[str, Tuple[int, int, int, int]] = dict(
+        getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
+    )
+    saved_vp = panels.get("Viewport")
+    if (
+        saved_vp is not None
+        and int(saved_vp[2]) >= _VP_TILE_MIN_PX
+        and int(saved_vp[3]) >= _VP_TILE_MIN_PX
+    ):
+        vx, vy, vw, vh = (
+            int(saved_vp[0]),
+            int(saved_vp[1]),
+            int(saved_vp[2]),
+            int(saved_vp[3]),
+        )
+    else:
+        vx, vy, vw, vh = _read_viewport_rect()
+    bottom = _split_tile_bbox_top_cap_y(ext, vy, vh)
+    vh = max(_VP_TILE_MIN_PX, bottom - int(vy))
+    if vw < _VP_TILE_MIN_PX or vh < _VP_TILE_MIN_PX:
+        ds = _read_dockspace_rect()
+        if ds is not None:
+            dx, dy, dw, dh = ds
+            if dw >= _VP_TILE_MIN_PX and dh >= _VP_TILE_MIN_PX:
+                vx, vy, vw, vh = int(dx), int(dy), int(dw), int(dh)
+                bottom = _split_tile_bbox_top_cap_y(ext, vy, vh)
+                vh = max(_VP_TILE_MIN_PX, bottom - int(vy))
+    try:
+        ext._tbs_split_saved_viewport_rect = (int(vx), int(vy), int(vw), int(vh))
+    except Exception:
+        pass
+    return (int(vx), int(vy), int(vw), int(vh))
+
+
+def _get_split_tile_bbox(ext: Any) -> Tuple[int, int, int, int]:
+    """분할 빌드 중 저장된 Viewport bbox (없으면 1회 캡처)."""
+    r = getattr(ext, "_tbs_split_saved_viewport_rect", None)
+    if r is not None and len(r) == 4:
+        try:
+            vx, vy, vw, vh = (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+            if vw >= _VP_TILE_MIN_PX and vh >= _VP_TILE_MIN_PX:
+                return (vx, vy, vw, vh)
+        except Exception:
+            pass
+    return _capture_split_tile_bbox(ext)
 
 
 def _read_dockspace_rect() -> Optional[Tuple[int, int, int, int]]:
@@ -1116,14 +2283,13 @@ def _read_split_layout_bbox_for_chrome(n: int, menus_hidden: bool) -> Tuple[int,
 
 def _refresh_docked_multi_split_after_chrome(ext: Any, n: int) -> None:
     """
-    Dock 기반 2~4분할: 메인 ``Viewport`` 를 먼저 확장된 ``DockSpace`` 에 한 판으로 붙인 뒤,
-    보조 창 ``dock_in`` 을 다시 적용한다.
+    Dock 기반 2~4분할: 보조 창 ``dock_in`` 만 다시 적용한다.
 
-    보조만 ``dock_in`` 을 반복하면 메인 Viewport 가 옛 Dock 면적에 묶인 채로 남는 경우가 있다.
+    ``Viewport.dock_in(DockSpace, 1.0)`` 은 Console·Content 를 밀거나 Viewport 가
+    전체를 덮는 부작용이 있어 **메인 Viewport 는 건드리지 않는다**.
     """
     if n <= 1:
         return
-    _dock_viewport_fill_dockspace()
     _reapply_split_dock_in_geometry(ext)
 
 
@@ -1134,16 +2300,51 @@ def _apply_split_geometry_sync(
     vy: int,
     vw: int,
     vh: int,
+    *,
+    max_bottom_y: Optional[int] = None,
+    ext: Any = None,
+    preserve_main_viewport: bool = False,
 ) -> None:
     """분할 타일 창 크기·위치를 한 번에 적용(토큰 검사 없음). Dock/메뉴 변경 뒤 재맞춤용."""
+    bottom_cap = int(max_bottom_y) if max_bottom_y is not None else int(vy) + int(vh)
+    n_tiles = min(len(win_names), len(fracs))
+    if n_tiles == 2 and int(vw) >= _VP_TILE_MIN_PX * 2:
+        half_w = max(_VP_TILE_MIN_PX, int(vw) // 2)
+        th = max(_VP_TILE_MIN_PX, int(vh))
+        py = int(vy)
+        if py + th > bottom_cap:
+            th = max(_VP_TILE_MIN_PX, bottom_cap - py)
+        placements = [
+            (win_names[0], int(vx), py, half_w, th),
+            (win_names[1], int(vx) + half_w, py, int(vw) - half_w, th),
+        ]
+        for name, px, py2, tw, th2 in placements:
+            if preserve_main_viewport and str(name) == "Viewport":
+                continue
+            try:
+                win = ui.Workspace.get_window(str(name))
+                if win is not None:
+                    _workspace_show_named_window(str(name), True)
+                    win.position_x = int(px)
+                    win.position_y = int(py2)
+                    win.width = int(tw)
+                    win.height = int(th2)
+                    _sync_viewport_resolution_from_workspace_window(str(name))
+            except Exception:
+                pass
+        return
     for i, (x0, y0, x1, y1) in enumerate(fracs):
         if i >= len(win_names):
             break
         name = win_names[i]
+        if preserve_main_viewport and str(name) == "Viewport":
+            continue
         tw = max(_VP_TILE_MIN_PX, int(vw * (x1 - x0)))
         th = max(_VP_TILE_MIN_PX, int(vh * (y1 - y0)))
         px = vx + int(vw * x0)
         py = vy + int(vh * y0)
+        if py + th > bottom_cap:
+            th = max(_VP_TILE_MIN_PX, bottom_cap - py)
         try:
             win = ui.Workspace.get_window(name)
             if win is not None:
@@ -1152,6 +2353,7 @@ def _apply_split_geometry_sync(
                 win.position_y = int(py)
                 win.width = int(tw)
                 win.height = int(th)
+                _sync_viewport_resolution_from_workspace_window(str(name))
         except Exception:
             pass
 
@@ -1179,63 +2381,17 @@ def _menubar_reserved_height_px() -> int:
 
 def _relayout_single_viewport_fill_available(ext: Any, menus_hidden: bool) -> None:
     """
-    1분할일 때 ``Viewport`` Workspace 창을 가용 영역에 맞춘다.
+    1분할 — Viewport/Console/Content **절대 좌표는 건드리지 않는다**.
 
-    - **메뉴 숨김 ON** (``menus_hidden=True``): 우선 ``Viewport.dock_in(DockSpace, …)`` 로 Dock 을
-      한 칸으로 다시 잡은 뒤(절대 좌표는 Dock 에서 무시되는 경우가 많음), 필요 시 ``DockSpace``/메인
-      창 사각형으로 폴백한다.
-    - **메뉴 숨김 OFF** (``menus_hidden=False``): 메뉴바가 다시 생긴 뒤 ``DockSpace`` 안에서
-      상단 메뉴 높이만큼 뺀 영역에 맞춘다(Kit 가 Viewport 탭 크기를 아직 반영 안 한 경우 보정).
+    ``dock_in(DockSpace)``·DockSpace 크기 맞춤은 1화면 복귀 시 Console/Content 가
+    Viewport 뒤로 가려지는 주된 원인이었다.
     """
-    if menus_hidden:
-        if _dock_viewport_fill_dockspace():
-            try:
-                ext._tbs_split_saved_viewport_rect = _read_viewport_rect()
-            except Exception:
-                pass
-            return
-        r = _read_dockspace_rect()
-        if r is None:
-            try:
-                mw = int(ui.Workspace.get_main_window_width() or 1280)
-                mh = int(ui.Workspace.get_main_window_height() or 720)
-                r = (0, 0, max(400, mw), max(300, mh))
-            except Exception:
-                return
-        vx, vy, vw, vh = int(r[0]), int(r[1]), int(r[2]), int(r[3])
-        # DockSpace 가 아직 이전 레이아웃 크기일 때가 있어, Viewport 창이 이미 더 크면 그쪽을 반영한다.
-        try:
-            px, py, pw, ph = _read_viewport_rect()
-            if pw >= 64 and ph >= 64:
-                vw = max(vw, int(pw))
-                vh = max(vh, int(ph))
-        except Exception:
-            pass
-    else:
-        r = _read_dockspace_rect()
-        if r is not None:
-            mbh = _menubar_reserved_height_px()
-            vx, vy, vw, vh = int(r[0]), int(r[1]) + mbh, int(r[2]), max(64, int(r[3]) - mbh)
-        else:
-            vx, vy, vw, vh = _read_viewport_rect()
-    if vw < 64 or vh < 64:
-        return
     try:
-        ext._tbs_split_saved_viewport_rect = (vx, vy, vw, vh)
+        set_viewport_fill_frame_for_split_count(1, bool(menus_hidden))
     except Exception:
         pass
-    try:
-        w = ui.Workspace.get_window("Viewport")
-        if w is not None:
-            _workspace_show_named_window("Viewport", True)
-            w.position_x = int(vx)
-            w.position_y = int(vy)
-            w.width = int(vw)
-            w.height = int(vh)
-    except Exception:
-        pass
-    if not menus_hidden:
-        _sync_viewport_resolution_from_workspace_window("Viewport")
+    _sync_viewport_resolution_from_workspace_window("Viewport")
+    _bring_kit_chrome_visible()
 
 
 def relayout_split_views_to_viewport(ext: Any, _menus_hidden: bool = False) -> None:
@@ -1264,35 +2420,26 @@ def relayout_split_views_to_viewport(ext: Any, _menus_hidden: bool = False) -> N
         _relayout_single_viewport_fill_available(ext, mh)
         return
 
-    if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
-        if mh:
-            _refresh_docked_multi_split_after_chrome(ext, n)
-        else:
-            _reapply_split_dock_in_geometry(ext)
-        if not mh:
-            for ti in range(0, n):
-                nm = "Viewport" if ti == 0 else _split_window_name(ti)
-                _sync_viewport_resolution_from_workspace_window(nm)
-        return
-
-    entries = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
-    if len(entries) < 2:
-        return
-
-    vx, vy, vw, vh = _read_split_layout_bbox_for_chrome(n, mh)
-    if vw < _VP_TILE_MIN_PX * 2 or vh < _VP_TILE_MIN_PX * 2:
-        return
     try:
-        ext._tbs_split_saved_viewport_rect = (vx, vy, vw, vh)
+        if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+            _reapply_split_dock_in_geometry(ext)
+        else:
+            asyncio.ensure_future(
+                _enforce_equal_split_grid_async(
+                    ext,
+                    int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0),
+                    n,
+                    preserve_main_viewport=True,
+                )
+            )
     except Exception:
-        pass
-
-    fracs = _split_cell_layout_fracs(n)
-    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
-    _apply_split_geometry_sync(win_names, fracs, vx, vy, vw, vh)
+        _apply_viewport_clipped_split_grid(n, ext=ext, preserve_main_viewport=True)
+    _bring_kit_chrome_visible()
     if not mh:
-        for nm in win_names:
+        for ti in range(0, n):
+            nm = "Viewport" if ti == 0 else _split_window_name(ti)
             _sync_viewport_resolution_from_workspace_window(nm)
+    return
 
 
 def schedule_split_layout_refresh_for_chrome_change(ext: Any, menus_hidden: bool) -> None:
@@ -1344,6 +2491,9 @@ async def _finalize_split_window_geometry_sequential(
     vy: int,
     vw: int,
     vh: int,
+    *,
+    max_bottom_y: Optional[int] = None,
+    preserve_main_viewport: bool = False,
 ) -> None:
     """
     타일 창 크기/위치를 한 코루틴 안에서만 순차 적용한다.
@@ -1361,7 +2511,18 @@ async def _finalize_split_window_geometry_sequential(
         if i >= len(win_names):
             break
         name = win_names[i]
-        _apply_split_geometry_sync([name], [frac], vx, vy, vw, vh)
+        if preserve_main_viewport and str(name) == "Viewport":
+            continue
+        _apply_split_geometry_sync(
+            [name],
+            [frac],
+            vx,
+            vy,
+            vw,
+            vh,
+            max_bottom_y=max_bottom_y,
+            preserve_main_viewport=preserve_main_viewport,
+        )
         await kit_app.get_app().next_update_async()
 
 
@@ -1371,24 +2532,38 @@ async def _assign_split_cameras_after_layout(
     win_names: List[str],
     cam_paths: List[Optional[str]],
 ) -> None:
+    """보조 타일 카메라 — 메인 Viewport 와 동일 경로(기울어짐·빈 shell 기본 카메라 방지)."""
     try:
         from omni.kit.viewport.utility import get_viewport_from_window_name
     except Exception:
         return
 
-    for _ in range(6):
+    main_api = get_viewport_from_window_name("Viewport")
+    main_cam = ""
+    if main_api is not None:
+        try:
+            main_cam = str(getattr(main_api, "camera_path", "") or "").strip()
+        except Exception:
+            main_cam = ""
+    if not main_cam:
+        main_cam = "/OmniverseKit_Persp"
+
+    for _ in range(8):
         if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
             return
         missing = False
         for i, name in enumerate(win_names):
-            if i >= len(cam_paths) or not cam_paths[i]:
+            if i == 0 or str(name) == "Viewport":
                 continue
-            api = get_viewport_from_window_name(name)
+            want = main_cam
+            if i < len(cam_paths) and cam_paths[i]:
+                want = str(cam_paths[i])
+            api = get_viewport_from_window_name(str(name))
             if api is None:
                 missing = True
                 continue
             try:
-                api.camera_path = cam_paths[i]
+                api.camera_path = want
             except Exception:
                 missing = True
         if not missing:
@@ -1420,7 +2595,7 @@ def notify_sim_split_ui_sync(ext: Any) -> None:
 
 
 def _rollback_split_attempt(ext: Any, entries: List[Dict[str, Any]], ctx_names: List[str]) -> None:
-    _restore_main_viewport_layout(ext)
+    _restore_kit_full_layout_after_split(ext)
     for ent in entries:
         if ent.get("kind") == "main_viewport":
             continue
@@ -1438,27 +2613,1041 @@ def _rollback_split_attempt(ext: Any, entries: List[Dict[str, Any]], ctx_names: 
     notify_sim_split_ui_sync(ext)
 
 
-async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str) -> None:
-    """첫 타일=기본 Viewport, 나머지=보조 컨텍스트+create_viewport_window(usd_context_name=...)."""
-    await kit_app.get_app().next_update_async()
+def _split_layout_already_active(ext: Any, n: int) -> bool:
+    """동일 분할 수·보조 컨텍스트·USD 지문·런타임이 살아 있으면 재빌드를 생략한다."""
+    try:
+        sn = channel_count_for_split(int(n))
+        cur = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+        if cur != sn or sn <= 1:
+            return False
+        built_key = str(getattr(ext, "_tbs_split_layout_usd_key", "") or "").strip()
+        current_key = _split_layout_usd_key(ext)
+        if not built_key or not current_key or built_key != current_key:
+            return False
+        ctx = list(getattr(ext, "_sim_multi_context_names", None) or [])
+        entries = list(getattr(ext, "_sim_multi_viewport_entries", None) or [])
+        if len(ctx) != sn - 1:
+            return False
+        if len(entries) < sn:
+            return False
+        try:
+            from .tbs_split_composed_loader import get_split_runtime_for_screen
+        except Exception:
+            get_split_runtime_for_screen = None  # type: ignore
+        for ti in range(1, sn):
+            wname = _split_window_name(ti)
+            try:
+                if ui.Workspace.get_window(wname) is None:
+                    return False
+            except Exception:
+                return False
+            if not _aux_viewport_api_healthy(wname):
+                return False
+            if get_split_runtime_for_screen is not None:
+                if get_split_runtime_for_screen(ext, ti + 1) is None:
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+async def _hydrate_aux_split_tile_background(
+    ext: Any,
+    token: int,
+    ctx_name: str,
+    screen_1based: int,
+    *,
+    fast_visual: bool,
+) -> None:
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+    try:
+        from .tbs_split_composed_loader import hydrate_split_screen_composed_stage_async
+
+        await hydrate_split_screen_composed_stage_async(
+            ext,
+            ctx_name,
+            screen_1based,
+            settle_frames=3,
+            fast_visual=fast_visual,
+        )
+    except Exception as exc:
+        try:
+            print(
+                f"[TBS multi-sim] 보조 합성 USD hydrate(백그라운드) 실패 screen={screen_1based}: {exc}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
+
+async def _finalize_aux_split_tile_after_open(
+    ext: Any,
+    token: int,
+    ctx_name: str,
+    screen_1based: int,
+    *,
+    fast_visual: bool,
+) -> None:
+    """Dock 이후 백그라운드: runtime hydrate + 화면별 EP2/EP3 레이아웃."""
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+    await _hydrate_aux_split_tile_background(
+        ext,
+        token,
+        ctx_name,
+        screen_1based,
+        fast_visual=fast_visual,
+    )
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+    try:
+        from .tbs_ep_port_visibility import apply_ep_port_layout_for_context
+
+        apply_ep_port_layout_for_context(
+            ext,
+            ctx_name,
+            int(screen_1based),
+            reason="split_finalize",
+        )
+    except Exception as exc:
+        try:
+            print(
+                f"[TBS multi-sim] 보조 EP 레이아웃 적용 실패 screen={screen_1based}: {exc}",
+                flush=True,
+            )
+        except Exception:
+            pass
+    try:
+        from .tbs_split_composed_loader import (
+            _activate_aux_split_display,
+            get_split_runtime_for_screen,
+        )
+
+        rt = get_split_runtime_for_screen(ext, int(screen_1based))
+        main_rt = get_split_runtime_for_screen(ext, 1)
+        if rt is not None:
+            si = max(2, int(screen_1based))
+            _activate_aux_split_display(
+                rt.evaluator,
+                main_rt.evaluator if main_rt is not None else None,
+                aux_win_name=_split_window_name(si - 1),
+                ext=ext,
+            )
+    except Exception:
+        pass
+    try:
+        si = max(2, int(screen_1based))
+        wn = _split_window_name(si - 1)
+        _ensure_viewport_camera_navigation_enabled(wn)
+        _wire_split_viewport_click_focus(wn)
+    except Exception:
+        pass
+    try:
+        sn = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+        if sn > 1:
+            reapply_split_layout_sync(ext, sn)
+            asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, sn))
+    except Exception:
+        pass
+
+
+def _split_aux_layout_healthy(ext: Any, split_n: int) -> bool:
+    """보조 타일·컨텍스트가 요청 분할 수와 일치하는지(부분 리사이즈 가능 여부)."""
+    try:
+        sn = channel_count_for_split(int(split_n))
+    except Exception:
+        return False
+    if sn <= 1:
+        return False
+    ctx = list(getattr(ext, "_sim_multi_context_names", None) or [])
+    if len(ctx) != sn - 1:
+        return False
+    entries = list(getattr(ext, "_sim_multi_viewport_entries", None) or [])
+    if len(entries) < sn:
+        return False
+    for ti in range(1, sn):
+        wname = _split_window_name(ti)
+        try:
+            if ui.Workspace.get_window(wname) is None:
+                return False
+        except Exception:
+            return False
+        if not _aux_viewport_api_healthy(wname):
+            return False
+    return True
+
+
+def _destroy_aux_split_tile(ext: Any, ti: int, entries: List[Dict[str, Any]], ctx_names: List[str]) -> None:
+    """보조 타일 하나(``ti``=1..)만 제거 — 뷰포트·USD 컨텍스트·런타임."""
+    wname = _split_window_name(ti)
+    _undock_workspace_window(wname)
+    _clear_split_viewport_input_hook(wname)
+    ctx_name = f"morph_tbs_split_aux_{ti}"
+    for ent in list(entries):
+        try:
+            ci = int(ent.get("cell_index", -999))
+        except Exception:
+            ci = -999
+        if ent.get("win_name") != wname and ci != ti:
+            continue
+        if ent.get("kit_vp") is not None:
+            _destroy_kit_viewport(ent.get("kit_vp"))
+        else:
+            _destroy_viewport_window(ent.get("window"))
+        try:
+            entries.remove(ent)
+        except ValueError:
+            pass
+    _workspace_show_named_window(wname, False)
+    _release_usd_context_names([ctx_name])
+    if ctx_name in ctx_names:
+        ctx_names.remove(ctx_name)
+    try:
+        from .tbs_split_composed_loader import release_split_runtime_for_screen
+
+        release_split_runtime_for_screen(ext, ti + 1)
+    except Exception:
+        pass
+
+
+def _spawn_aux_tile_hydrate(
+    ext: Any,
+    token: int,
+    ctx_name: str,
+    screen_1based: int,
+    *,
+    fast_visual: bool = True,
+    stagger_frames: int = 0,
+) -> None:
+    """합성 인스턴스 hydrate — Dock·뷰포트 안정 후 백그라운드 실행."""
+
+    async def _go() -> None:
+        delay = max(0, int(stagger_frames))
+        for _ in range(delay):
+            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                return
+            await kit_app.get_app().next_update_async()
+        await _finalize_aux_split_tile_after_open(
+            ext,
+            token,
+            ctx_name,
+            screen_1based,
+            fast_visual=fast_visual,
+        )
+
+    try:
+        asyncio.ensure_future(_go())
+    except Exception:
+        pass
+
+
+def _spawn_pending_aux_tile_hydrates(
+    ext: Any,
+    n: int,
+    token: int,
+    *,
+    on_all_done: Optional[Callable[[], None]] = None,
+) -> None:
+    """Dock 완료 후 hydrate_pending 보조 타일에 인스턴스 hydrate 를 순차 시작."""
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        return
+    if sn <= 1:
+        if callable(on_all_done):
+            try:
+                on_all_done()
+            except Exception:
+                pass
+        return
+    entries = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    pending: List[Tuple[str, int]] = []
+    for ent in entries:
+        if ent.get("stage_load_pending"):
+            continue
+        if not ent.get("hydrate_pending"):
+            continue
+        try:
+            ci = int(ent.get("cell_index", -1))
+        except Exception:
+            ci = -1
+        if ci < 1:
+            continue
+        ctx_name = str(ent.get("context_name") or f"morph_tbs_split_aux_{ci}").strip()
+        if ctx_name:
+            pending.append((ctx_name, ci + 1))
+            ent["hydrate_pending"] = False
+    pending.sort(key=lambda x: x[1])
+    if not pending:
+        if callable(on_all_done):
+            try:
+                on_all_done()
+            except Exception:
+                pass
+        return
+
+    remaining = [len(pending)]
+
+    def _one_done() -> None:
+        remaining[0] -= 1
+        if remaining[0] <= 0 and callable(on_all_done):
+            try:
+                on_all_done()
+            except Exception:
+                pass
+
+    for idx, (ctx_name, screen_i) in enumerate(pending):
+
+        async def _go(cn: str = ctx_name, si: int = screen_i, delay: int = idx) -> None:
+            for _ in range(max(0, int(delay) * 2)):
+                if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                    return
+                await kit_app.get_app().next_update_async()
+            try:
+                await _finalize_aux_split_tile_after_open(
+                    ext,
+                    token,
+                    cn,
+                    si,
+                    fast_visual=True,
+                )
+            finally:
+                _one_done()
+
+        try:
+            asyncio.ensure_future(_go())
+        except Exception:
+            _one_done()
+
+
+async def _clone_aux_paths_parallel(
+    usd_path: str,
+    ext: Any,
+    token: int,
+    tile_indices: List[int],
+    *,
+    use_composed: bool,
+    composed_shared: Optional[str],
+) -> Optional[Dict[int, Tuple[str, bool]]]:
+    """보조 타일 USD 경로를 **병렬** copy_async 로 준비한다."""
+    out: Dict[int, Tuple[str, bool]] = {}
+
+    async def _one(ti: int) -> Tuple[int, Optional[str], bool, str]:
+        path, composed, err = await _resolve_aux_tile_usd_path(
+            usd_path,
+            ext,
+            token,
+            ti,
+            use_composed=use_composed,
+            composed_shared=composed_shared,
+        )
+        return ti, path, composed, err
+
+    try:
+        results = await asyncio.gather(*[_one(ti) for ti in tile_indices])
+    except Exception:
+        return None
+    for ti, path, composed, err in results:
+        if not path:
+            try:
+                print(f"[TBS multi-sim] 보조 타일 {ti} USD 병렬 복제 실패: {err}", flush=True)
+            except Exception:
+                pass
+            return None
+        out[int(ti)] = (str(path), bool(composed))
+    return out
+
+
+async def _refresh_aux_split_stages_async(ext: Any, n: int, token: int, usd_path: str) -> None:
+    """
+    Master 재로드 후: 기존 Viewport/Workspace 창은 유지하고 보조 **스테이지만** 교체+hydrate.
+
+    전체 teardown·Flatten 없이 수백 ms~1초 수준으로 끝나도록 한다.
+    """
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        sn = 1
+    if sn <= 1:
+        return
+
+    entries: List[Dict[str, Any]] = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    ctx_names: List[str] = list(getattr(ext, "_sim_multi_context_names", []) or [])
+    if len(ctx_names) < sn - 1 or len(entries) < sn:
+        try:
+            print("[TBS multi-sim] 분할 빠른 갱신 불가 → 전체 재빌드", flush=True)
+        except Exception:
+            pass
+        teardown_sim_multi_viewports(ext)
+        await _post_teardown_rebuild_split(ext, sn, token, usd_path, prev_n=1)
         return
 
     try:
-        from omni.kit.viewport.utility import create_viewport_window
-    except Exception as e:
+        print(f"[TBS multi-sim] 분할 빠른 갱신: clone+reopen+hydrate (n={sn})", flush=True)
+    except Exception:
+        pass
+
+    use_composed = _use_split_composed_export(ext)
+    composed_shared: Optional[str] = None
+    if use_composed:
         try:
-            print(f"[TBS multi-sim] create_viewport_window import 실패: {e}", flush=True)
+            from .tbs_split_composed_loader import get_or_export_main_composed_stage
+
+            composed_shared = get_or_export_main_composed_stage(ext, token, 0)
+        except Exception:
+            composed_shared = None
+        if not composed_shared:
+            use_composed = False
+
+    clone_map = await _clone_aux_paths_parallel(
+        usd_path,
+        ext,
+        token,
+        list(range(1, sn)),
+        use_composed=use_composed,
+        composed_shared=composed_shared,
+    )
+    if clone_map is None:
+        teardown_sim_multi_viewports(ext)
+        await _post_teardown_rebuild_split(ext, sn, token, usd_path, prev_n=1)
+        return
+
+    for ti in range(1, sn):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        ctx_name = f"morph_tbs_split_aux_{ti}"
+        ctx = _named_usd_context(ctx_name)
+        if ctx is None:
+            continue
+        aux_usd, _composed = clone_map[ti]
+        try:
+            from .tbs_split_composed_loader import release_split_runtime_for_screen
+
+            release_split_runtime_for_screen(ext, ti + 1)
+        except Exception:
+            pass
+        ok_open, _err = await _open_aux_stage_with_unique_session(
+            ctx,
+            aux_usd,
+            ext,
+            token,
+            ti,
+            skip_file_clone=True,
+        )
+        if not ok_open:
+            continue
+        for ent in entries:
+            try:
+                if int(ent.get("cell_index", -1)) == ti:
+                    ent["hydrate_pending"] = True
+                    ent["context_name"] = ctx_name
+            except Exception:
+                pass
+
+    try:
+        ext._sim_multi_viewport_entries = entries
+    except Exception:
+        pass
+
+    for _ in range(2):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        await kit_app.get_app().next_update_async()
+
+    def _nav_after_hydrate() -> None:
+        try:
+            reapply_split_layout_sync(ext, sn)
+            asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, sn))
+        except Exception:
+            pass
+        _apply_split_navigation_to_aux(ext, sn, token, hold_ticks=96)
+
+    _spawn_pending_aux_tile_hydrates(ext, sn, token, on_all_done=_nav_after_hydrate)
+    _apply_split_navigation_to_aux(ext, sn, token, hold_ticks=48)
+
+    try:
+        ext._tbs_split_layout_usd_key = _split_layout_usd_key(ext)
+    except Exception:
+        pass
+
+
+async def _resolve_aux_tile_usd_path(
+    usd_path: str,
+    ext: Any,
+    token: int,
+    ti: int,
+    *,
+    use_composed: bool,
+    composed_shared: Optional[str],
+) -> Tuple[Optional[str], bool, str]:
+    """
+    타일별 **독립 USD 파일** 경로를 만든다. 실패 시 (None, False, err).
+    composed_shared 를 타일 간·Hydra 간 공유하지 않는다(clone 필수).
+    """
+    if use_composed and composed_shared:
+        tile_copy, cerr = await _clone_usd_for_aux_tile(composed_shared, ext, token, ti)
+        if not tile_copy:
+            return None, True, str(cerr or "composed 스냅샷 복제 실패")
+        _register_session_layer_path(ext, tile_copy)
+        return tile_copy, True, ""
+
+    clone_path, cerr = await _clone_usd_for_aux_tile(usd_path, ext, token, ti)
+    if not clone_path:
+        return None, False, str(cerr or "Master USD 복제 실패")
+    _register_session_layer_path(ext, clone_path)
+    return clone_path, False, ""
+
+
+async def _provision_aux_split_tile(
+    ext: Any,
+    ti: int,
+    token: int,
+    usd_path: str,
+    *,
+    use_composed: bool,
+    composed_shared: Optional[str],
+    fracs: List[Tuple[float, float, float, float]],
+    vx: int,
+    vy: int,
+    vw: int,
+    vh: int,
+    entries: List[Dict[str, Any]],
+    ctx_names: List[str],
+    pre_cloned: Optional[Tuple[str, bool]] = None,
+    defer_stage_load: bool = False,
+) -> bool:
+    """보조 타일 1개: USD 컨텍스트·스테이지·뷰포트 창 생성(hydrate 는 호출측에서 spawn)."""
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return False
+
+    ctx_name = f"morph_tbs_split_aux_{ti}"
+    ctx = _named_usd_context(ctx_name)
+    if ctx is None:
+        try:
+            print(f"[TBS multi-sim] USD 컨텍스트 생성 실패: {ctx_name}", flush=True)
+        except Exception:
+            pass
+        return False
+    ctx_names.append(ctx_name)
+    try:
+        ext._sim_multi_context_names = list(ctx_names)
+    except Exception:
+        pass
+
+    if defer_stage_load:
+        shell_path, shell_err = _make_aux_shell_stage_path(ext, token, ti)
+        if not shell_path:
+            try:
+                print(f"[TBS multi-sim] 보조 타일 {ti} shell stage 실패: {shell_err}", flush=True)
+            except Exception:
+                pass
+            _release_usd_context_names([ctx_name])
+            if ctx_name in ctx_names:
+                ctx_names.remove(ctx_name)
+            return False
+        ok_open, err_open = await _ctx_open_stage_path(ctx, shell_path, None)
+        composed_used = False
+    elif pre_cloned is not None:
+        aux_usd, composed_used = str(pre_cloned[0]), bool(pre_cloned[1])
+        ok_open, err_open = await _open_aux_stage_with_unique_session(
+            ctx,
+            aux_usd,
+            ext,
+            token,
+            ti,
+            skip_file_clone=True,
+        )
+    else:
+        aux_usd, composed_used, usd_err = await _resolve_aux_tile_usd_path(
+            usd_path,
+            ext,
+            token,
+            ti,
+            use_composed=use_composed,
+            composed_shared=composed_shared,
+        )
+        if not aux_usd:
+            try:
+                print(f"[TBS multi-sim] 보조 타일 {ti} USD 준비 실패: {usd_err}", flush=True)
+            except Exception:
+                pass
+            _release_usd_context_names([ctx_name])
+            if ctx_name in ctx_names:
+                ctx_names.remove(ctx_name)
+            return False
+        ok_open, err_open = await _open_aux_stage_with_unique_session(
+            ctx,
+            aux_usd,
+            ext,
+            token,
+            ti,
+            skip_file_clone=True,
+        )
+
+    if not ok_open:
+        try:
+            print(f"[TBS multi-sim] 보조 스테이지 열기 실패 ctx={ctx_name} err={err_open}", flush=True)
+        except Exception:
+            pass
+        _release_usd_context_names([ctx_name])
+        if ctx_name in ctx_names:
+            ctx_names.remove(ctx_name)
+        return False
+
+    try:
+        st = ctx.get_stage() if hasattr(ctx, "get_stage") else None
+        if st is not None:
+            _apply_stage_fps_30(st)
+    except Exception:
+        pass
+
+    await kit_app.get_app().next_update_async()
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return False
+
+    wname = _split_window_name(ti)
+    _destroy_stale_split_workspace_window(wname)
+    x0, y0, x1, y1 = fracs[ti]
+    pw = max(_VP_TILE_MIN_PX, int(vw * (x1 - x0)))
+    ph = max(_VP_TILE_MIN_PX, int(vh * (y1 - y0)))
+
+    try:
+        from omni.kit.viewport.utility import create_viewport_window
+    except Exception:
+        create_viewport_window = None  # type: ignore
+
+    vp_obj = None
+    if create_viewport_window is not None:
+        try:
+            vp_obj = create_viewport_window(
+                name=wname,
+                usd_context_name=ctx_name,
+                width=int(pw),
+                height=int(ph),
+            )
+        except Exception as e:
+            try:
+                print(f"[TBS multi-sim] create_viewport_window 실패 name={wname} err={e}", flush=True)
+            except Exception:
+                pass
+
+    if vp_obj is None:
+        try:
+            from omni.kit.viewport.window import ViewportWindow
+
+            win = ViewportWindow(
+                name=wname,
+                usd_context_name=ctx_name,
+                width=int(pw),
+                height=int(ph),
+            )
+            entries.append(
+                {
+                    "window": win,
+                    "viewport_window": win,
+                    "context_name": ctx_name,
+                    "win_name": wname,
+                    "cell_index": ti,
+                    "kit_vp": None,
+                    "composed_hydrate": composed_used,
+                    "hydrate_pending": True,
+                    "stage_load_pending": bool(defer_stage_load),
+                    "aux_hidden_until_load": bool(defer_stage_load),
+                    "aux_hidden_until_layout": True,
+                }
+            )
+        except Exception as e2:
+            try:
+                print(f"[TBS multi-sim] ViewportWindow 폴백도 실패 name={wname} err={e2}", flush=True)
+            except Exception:
+                pass
+            _release_usd_context_names([ctx_name])
+            if ctx_name in ctx_names:
+                ctx_names.remove(ctx_name)
+            return False
+    else:
+        entries.append(
+            {
+                "kit_vp": vp_obj,
+                "viewport_window": vp_obj,
+                "context_name": ctx_name,
+                "win_name": wname,
+                "cell_index": ti,
+                "composed_hydrate": composed_used,
+                "hydrate_pending": True,
+                "stage_load_pending": bool(defer_stage_load),
+                "aux_hidden_until_load": bool(defer_stage_load),
+                "aux_hidden_until_layout": True,
+            }
+        )
+
+    _apply_aux_window_chrome_flags(wname)
+    _workspace_show_named_window(wname, False)
+
+    await kit_app.get_app().next_update_async()
+    _log_viewport_usd_context_bind(wname, ctx_name)
+    for _ in range(2):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return False
+        await kit_app.get_app().next_update_async()
+    return True
+
+
+async def _load_aux_split_stages_background(
+    ext: Any,
+    n: int,
+    token: int,
+    usd_path: str,
+    *,
+    prev_n: int = 1,
+) -> None:
+    """
+    분할 레이아웃 표시 **이후** 보조 타일에 합성 USD 를 연다.
+
+    prewarm 스냅샷이 있으면 ``copy_async`` 만(빠름), 없으면 백그라운드 Flatten 후 연다.
+    """
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+
+    use_composed = _use_split_composed_export(ext)
+    composed_shared: Optional[str] = None
+    try:
+        from .tbs_split_composed_loader import (
+            ext_has_composed_instances,
+            resolve_composed_snapshot_for_split_async,
+        )
+
+        need_composed = ext_has_composed_instances(ext)
+        if need_composed:
+            composed_shared = await resolve_composed_snapshot_for_split_async(ext, token)
+            use_composed = bool(composed_shared)
+            try:
+                print(
+                    f"[TBS multi-sim] bg load: composed={use_composed} "
+                    f"snapshot={'ready' if composed_shared else 'none'}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+    except Exception:
+        need_composed = False
+
+    clone_map = await _clone_aux_paths_parallel(
+        usd_path,
+        ext,
+        token,
+        list(range(1, n)),
+        use_composed=use_composed,
+        composed_shared=composed_shared,
+    )
+    if clone_map is None:
+        try:
+            print("[TBS multi-sim] bg load: USD 복제 실패", flush=True)
         except Exception:
             pass
         return
 
-    fracs = _split_cell_layout_fracs(n)
-    vx, vy, vw, vh = _read_viewport_rect()
+    entries: List[Dict[str, Any]] = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    for ti in range(1, n):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        pre = clone_map.get(ti)
+        if not pre:
+            continue
+        aux_usd, composed_used = str(pre[0]), bool(pre[1])
+        ctx_name = f"morph_tbs_split_aux_{ti}"
+        ctx = _named_usd_context(ctx_name)
+        if ctx is None:
+            continue
+        ok_open, err_open = await _open_aux_stage_with_unique_session(
+            ctx,
+            aux_usd,
+            ext,
+            token,
+            ti,
+            skip_file_clone=True,
+        )
+        if not ok_open:
+            try:
+                print(
+                    f"[TBS multi-sim] bg load: tile={ti} open FAIL err={err_open}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            continue
+        for ent in entries:
+            try:
+                ci = int(ent.get("cell_index", -1))
+            except Exception:
+                ci = -1
+            if ci != ti:
+                continue
+            ent["stage_load_pending"] = False
+            ent["composed_hydrate"] = composed_used
+            ent["hydrate_pending"] = True
+            break
+        await kit_app.get_app().next_update_async()
+
     try:
-        ext._tbs_split_saved_viewport_rect = (vx, vy, vw, vh)
+        ext._sim_multi_viewport_entries = entries
     except Exception:
         pass
+
+    on_done = getattr(ext, "_tbs_split_nav_after_hydrate_fn", None)
+    _spawn_pending_aux_tile_hydrates(
+        ext,
+        n,
+        token,
+        on_all_done=on_done if callable(on_done) else None,
+    )
+
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
+    cam_paths: List[Optional[str]] = [None] + ["/OmniverseKit_Persp"] * (n - 1)
+    await _assign_split_cameras_after_layout(ext, token, win_names, cam_paths)
+    if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+        _reapply_split_dock_in_geometry(ext)
+    for ent in entries:
+        wn = str(ent.get("win_name") or "").strip()
+        if wn and ent.get("aux_hidden_until_load"):
+            _apply_aux_window_chrome_flags(wn)
+            _workspace_show_named_window(wn, True)
+            ent["aux_hidden_until_load"] = False
+            _sync_viewport_resolution_from_workspace_window(wn)
+    try:
+        ext._sim_multi_viewport_entries = entries
+    except Exception:
+        pass
+
+
+async def _finish_split_layout_after_tiles(
+    ext: Any, n: int, token: int, *, prev_n: int = 1, skip_hydrate: bool = False
+) -> None:
+    """타일 생성/제거 후 Dock·카메라·navigation 공통 마무리."""
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+
+    notify_sim_split_ui_sync(ext)
+
+    for _ in range(2):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        await kit_app.get_app().next_update_async()
+
+    ctx_names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+    _log_split_stage_not_shared_with_main(ctx_names)
+
+    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
+    cam_paths: List[Optional[str]] = [None] + ["/OmniverseKit_Persp"] * (n - 1)
+
+    if sim_viewport_split_dock_enabled():
+        docked_ok = await _apply_split_dock_layout(ext, token, n)
+        if not docked_ok:
+            docked_ok = await _retry_split_dock_layout(ext, token, n)
+    else:
+        docked_ok = False
+    try:
+        ext._tbs_split_used_dock_layout = bool(docked_ok)
+    except Exception:
+        pass
+
+    if docked_ok:
+        for _ in range(8):
+            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                return
+            await kit_app.get_app().next_update_async()
+        for ti in range(n):
+            nm = "Viewport" if ti == 0 else _split_window_name(ti)
+            _sync_viewport_resolution_from_workspace_window(nm)
+        try:
+            print("[TBS multi-sim] 분할 레이아웃: Viewport Dock (Console/Content 유지)", flush=True)
+        except Exception:
+            pass
+    else:
+        await _enforce_equal_split_grid_async(
+            ext, token, n, preserve_main_viewport=True
+        )
+
+    _bring_kit_chrome_visible()
+
+    for ti in range(1, n):
+        wn = _split_window_name(ti)
+        hidden = False
+        for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
+            if str(ent.get("win_name") or "") == wn:
+                if ent.get("aux_hidden_until_load"):
+                    hidden = True
+                ent["aux_hidden_until_layout"] = False
+                break
+        if not hidden:
+            _apply_aux_window_chrome_flags(wn)
+            _workspace_show_named_window(wn, True)
+            _sync_viewport_resolution_from_workspace_window(wn)
+            _schedule_split_viewport_input_ready(wn, frames=12)
+
+    try:
+        set_viewport_fill_frame_for_split_count(n, True)
+    except Exception:
+        pass
+
+    await _assign_split_cameras_after_layout(ext, token, win_names, cam_paths)
+    _apply_split_navigation_to_aux(ext, n, token, hold_ticks=96)
+
+    def _nav_after_all_hydrate() -> None:
+        try:
+            reapply_split_layout_sync(ext, n)
+            asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, n))
+        except Exception:
+            pass
+        _apply_split_navigation_to_aux(ext, n, token, hold_ticks=96)
+
+    if skip_hydrate:
+        try:
+            print("[TBS multi-sim] 분할 레이아웃 완료 — 보조 스테이지 로드는 백그라운드", flush=True)
+        except Exception:
+            pass
+    else:
+        _spawn_pending_aux_tile_hydrates(ext, n, token, on_all_done=_nav_after_all_hydrate)
+
+    try:
+        ext._tbs_split_nav_after_hydrate_fn = _nav_after_all_hydrate
+    except Exception:
+        pass
+
+    try:
+        ext._tbs_split_layout_usd_key = _split_layout_usd_key(ext)
+    except Exception:
+        pass
+
+    try:
+        print(
+            f"[TBS multi-sim] 분할={n} | 첫 타일=메인 Viewport | 보조 컨텍스트 {len(ctx_names)}개 | "
+            f"partial_from={prev_n}",
+            flush=True,
+        )
+    except Exception:
+        pass
+    try:
+        ext._tbs_split_main_viewport_window = _resolve_viewport_window_for_workspace_name("Viewport")
+    except Exception:
+        try:
+            ext._tbs_split_main_viewport_window = None
+        except Exception:
+            pass
+    try:
+        from .tbs_split_composed_loader import register_main_composed_runtime
+
+        register_main_composed_runtime(ext)
+    except Exception:
+        pass
+    try:
+        ext._sim_runners_by_screen = {}
+    except Exception:
+        pass
+
+
+async def _shrink_split_async(ext: Any, n: int, prev_n: int, token: int) -> None:
+    """분할 수 축소(예: 3→2) — 남는 보조 타일은 유지해 재빌드·조작 리셋을 피한다."""
+    await kit_app.get_app().next_update_async()
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+
+    _cancel_split_aux_navigation_hold(ext)
+    entries: List[Dict[str, Any]] = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    ctx_names: List[str] = list(getattr(ext, "_sim_multi_context_names", []) or [])
+
+    for ti in range(n, prev_n):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        _destroy_aux_split_tile(ext, ti, entries, ctx_names)
+
+    try:
+        ext._sim_multi_viewport_entries = entries
+        ext._sim_multi_context_names = ctx_names
+        ext._sim_viewport_split_count = n
+    except Exception:
+        pass
+
+    await _finish_split_layout_after_tiles(ext, n, token, prev_n=prev_n)
+
+
+async def _grow_split_async(ext: Any, n: int, prev_n: int, token: int, usd_path: str) -> None:
+    """분할 수 확대(예: 2→3) — 기존 보조 타일은 유지하고 새 타일만 추가."""
+    await kit_app.get_app().next_update_async()
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+
+    _cancel_split_aux_navigation_hold(ext)
+    use_composed = _use_split_composed_export(ext)
+    composed_shared: Optional[str] = None
+    if use_composed:
+        try:
+            from .tbs_split_composed_loader import get_or_export_main_composed_stage
+
+            composed_shared = get_or_export_main_composed_stage(ext, token, 0)
+        except Exception:
+            composed_shared = None
+
+    fracs = _split_cell_layout_fracs(n)
+    vx, vy, vw, vh = _get_split_tile_bbox(ext)
+    entries: List[Dict[str, Any]] = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    ctx_names: List[str] = list(getattr(ext, "_sim_multi_context_names", []) or [])
+
+    for ti in range(prev_n, n):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        ok = await _provision_aux_split_tile(
+            ext,
+            ti,
+            token,
+            usd_path,
+            use_composed=use_composed,
+            composed_shared=composed_shared,
+            fracs=fracs,
+            vx=vx,
+            vy=vy,
+            vw=vw,
+            vh=vh,
+            entries=entries,
+            ctx_names=ctx_names,
+        )
+        if not ok:
+            try:
+                print(f"[TBS multi-sim] 분할 확대 실패 tile={ti} → 전체 재빌드", flush=True)
+            except Exception:
+                pass
+            teardown_sim_multi_viewports(ext)
+            await _post_teardown_rebuild_split(ext, n, token, usd_path, prev_n=prev_n)
+            return
+
+    try:
+        ext._sim_multi_viewport_entries = entries
+        ext._sim_multi_context_names = ctx_names
+        ext._sim_viewport_split_count = n
+    except Exception:
+        pass
+
+    await _finish_split_layout_after_tiles(ext, n, token, prev_n=prev_n)
+
+
+async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str, *, prev_n: int = 1) -> None:
+    """
+    첫 타일=기본 Viewport, 나머지=보조 컨텍스트+create_viewport_window.
+
+    shell/빈 스테이지 없이 **실제 USD 를 연 뒤** Dock 분할(메인 카메라와 동일 시점).
+    """
+    await kit_app.get_app().next_update_async()
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+
+    _capture_kit_layout_before_split(ext)
+    fracs = _split_cell_layout_fracs(n)
+    vx, vy, vw, vh = _capture_split_tile_bbox(ext)
 
     entries: List[Dict[str, Any]] = []
     ctx_names: List[str] = []
@@ -1474,266 +3663,255 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str) 
     _workspace_show_named_window("Viewport", True)
     entries.append({"kind": "main_viewport", "win_name": "Viewport", "cell_index": 0, "viewport_window": None, "kit_vp": None})
 
+    use_composed = _use_split_composed_export(ext)
+    composed_shared: Optional[str] = None
+    if use_composed:
+        try:
+            from .tbs_split_composed_loader import get_or_export_main_composed_stage
+
+            composed_shared = get_or_export_main_composed_stage(ext, token, 0)
+        except Exception:
+            composed_shared = None
+        if not composed_shared:
+            use_composed = False
+            try:
+                from .tbs_split_composed_loader import (
+                    ext_has_composed_instances,
+                    resolve_composed_snapshot_for_split_async,
+                )
+
+                if ext_has_composed_instances(ext):
+                    composed_shared = await resolve_composed_snapshot_for_split_async(ext, token)
+                    use_composed = bool(composed_shared)
+            except Exception:
+                pass
+
+    try:
+        mode = "composed-clone" if use_composed else "master-clone+hydrate"
+        print(f"[TBS multi-sim] 분할 빌드: {mode} (n={n})", flush=True)
+    except Exception:
+        pass
+
+    clone_map = await _clone_aux_paths_parallel(
+        usd_path,
+        ext,
+        token,
+        list(range(1, n)),
+        use_composed=use_composed,
+        composed_shared=composed_shared,
+    )
+    if clone_map is None:
+        _rollback_split_attempt(ext, entries, ctx_names)
+        return
+
     for ti in range(1, n):
         if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
             _rollback_split_attempt(ext, entries, ctx_names)
             return
-
-        ctx_name = f"morph_tbs_split_aux_{ti}"
-        ctx = _named_usd_context(ctx_name)
-        if ctx is None:
-            try:
-                print(f"[TBS multi-sim] USD 컨텍스트 생성 실패: {ctx_name}", flush=True)
-            except Exception:
-                pass
+        ok = await _provision_aux_split_tile(
+            ext,
+            ti,
+            token,
+            usd_path,
+            use_composed=use_composed,
+            composed_shared=composed_shared,
+            fracs=fracs,
+            vx=vx,
+            vy=vy,
+            vw=vw,
+            vh=vh,
+            entries=entries,
+            ctx_names=ctx_names,
+            pre_cloned=clone_map.get(ti),
+            defer_stage_load=False,
+        )
+        if not ok:
             _rollback_split_attempt(ext, entries, ctx_names)
             return
-        ctx_names.append(ctx_name)
-        ok_open, err_open = await _open_aux_stage_with_unique_session(ctx, usd_path, ext, token, ti)
-        if not ok_open:
-            try:
-                print(f"[TBS multi-sim] 보조 스테이지 열기 실패 ctx={ctx_name} err={err_open}", flush=True)
-            except Exception:
-                pass
-            _rollback_split_attempt(ext, entries, ctx_names)
-            return
-        try:
-            st = ctx.get_stage() if hasattr(ctx, "get_stage") else None
-            if st is not None:
-                _apply_stage_fps_30(st)
-        except Exception:
-            pass
-
-        for _ in range(8):
-            await kit_app.get_app().next_update_async()
-
-        wname = _split_window_name(ti)
-        x0, y0, x1, y1 = fracs[ti]
-        pw = max(_VP_TILE_MIN_PX, int(vw * (x1 - x0)))
-        ph = max(_VP_TILE_MIN_PX, int(vh * (y1 - y0)))
-        px = vx + int(vw * x0)
-        py = vy + int(vh * y0)
-
-        vp_obj = None
-        try:
-            try:
-                vp_obj = create_viewport_window(
-                    name=wname,
-                    usd_context_name=ctx_name,
-                    width=int(pw),
-                    height=int(ph),
-                    position_x=int(px),
-                    position_y=int(py),
-                )
-            except TypeError:
-                vp_obj = create_viewport_window(
-                    name=wname,
-                    usd_context_name=ctx_name,
-                    width=int(pw),
-                    height=int(ph),
-                )
-        except Exception as e:
-            try:
-                print(f"[TBS multi-sim] create_viewport_window 실패 name={wname} err={e}", flush=True)
-            except Exception:
-                pass
-            try:
-                from omni.kit.viewport.window import ViewportWindow
-
-                win = ViewportWindow(
-                    name=wname,
-                    usd_context_name=ctx_name,
-                    width=int(pw),
-                    height=int(ph),
-                )
-                entries.append(
-                    {
-                        "window": win,
-                        "viewport_window": win,
-                        "context_name": ctx_name,
-                        "win_name": wname,
-                        "cell_index": ti,
-                        "kit_vp": None,
-                    }
-                )
-            except Exception as e2:
-                try:
-                    print(f"[TBS multi-sim] ViewportWindow 폴백도 실패 name={wname} err={e2}", flush=True)
-                except Exception:
-                    pass
-                _rollback_split_attempt(ext, entries, ctx_names)
-                return
-        else:
-            if vp_obj is None:
-                _rollback_split_attempt(ext, entries, ctx_names)
-                return
-            entries.append(
-                {
-                    "kit_vp": vp_obj,
-                    "viewport_window": vp_obj,
-                    "context_name": ctx_name,
-                    "win_name": wname,
-                    "cell_index": ti,
-                }
-            )
-
-        try:
-            wui = ui.Workspace.get_window(wname)
-            if wui is not None:
-                # 타이틀·스크롤만 끄고 이동/크기 조절은 허용(분할 타일을 손으로 맞출 수 있게).
-                wui.flags = ui.WINDOW_FLAGS_NO_TITLE_BAR | ui.WINDOW_FLAGS_NO_SCROLLBAR
-                _workspace_show_named_window(wname, True)
-        except Exception:
-            pass
-
-        for _ in range(4):
-            await kit_app.get_app().next_update_async()
-        _log_viewport_usd_context_bind(wname, ctx_name)
-
-    try:
-        await asyncio.sleep(0.06)
-    except Exception:
-        pass
-    for _ in range(4):
-        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
-            return
-        await kit_app.get_app().next_update_async()
 
     try:
         ext._sim_multi_viewport_entries = entries
         ext._sim_multi_context_names = ctx_names
+        ext._sim_viewport_split_count = n
     except Exception:
         pass
 
-    _log_split_stage_not_shared_with_main(ctx_names)
-
-    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
-    cam_paths: List[Optional[str]] = [None] + ["/OmniverseKit_Persp"] * (n - 1)
-
-    docked_ok = await _apply_split_dock_layout(ext, token, n)
-    try:
-        ext._tbs_split_used_dock_layout = bool(docked_ok)
-    except Exception:
-        pass
-
-    if not docked_ok:
-        await _finalize_split_window_geometry_sequential(ext, token, win_names, fracs, vx, vy, vw, vh)
-    else:
-        for _ in range(10):
-            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
-                return
-            await kit_app.get_app().next_update_async()
-
-    await _assign_split_cameras_after_layout(ext, token, win_names, cam_paths)
-
-    try:
-        print(
-            f"[TBS multi-sim] 분할={n} | 첫 타일=메인 Viewport | 보조 컨텍스트 {len(ctx_names)}개 | path={usd_path}",
-            flush=True,
-        )
-    except Exception:
-        pass
-    try:
-        ext._tbs_split_main_viewport_window = _resolve_viewport_window_for_workspace_name("Viewport")
-    except Exception:
-        try:
-            ext._tbs_split_main_viewport_window = None
-        except Exception:
-            pass
-    notify_sim_split_ui_sync(ext)
+    await _finish_split_layout_after_tiles(
+        ext, n, token, prev_n=max(1, int(prev_n)), skip_hydrate=False
+    )
 
 
-async def _post_teardown_rebuild_split(ext: Any, n: int, token: int, usd_path: str) -> None:
+async def _post_teardown_rebuild_split(ext: Any, n: int, token: int, usd_path: str, *, prev_n: int = 1) -> None:
     """티어다운 직후 GPU/Hydra 정리 시간을 준 뒤 분할 뷰를 다시 만든다(4→3 등 전환 시 크래시 완화)."""
     try:
-        await asyncio.sleep(_SPLIT_REBUILD_SETTLE_SEC)
+        pn = max(1, int(prev_n))
+    except Exception:
+        pn = 1
+    if pn <= 1 and n > 1:
+        settle_sec = _SPLIT_REBUILD_SETTLE_SEC_FIRST
+        settle_frames = _SPLIT_REBUILD_SETTLE_FRAMES_FIRST
+    elif pn > n:
+        settle_sec = 0.10
+        settle_frames = 2
+    else:
+        settle_sec = _SPLIT_REBUILD_SETTLE_SEC
+        settle_frames = _SPLIT_REBUILD_SETTLE_FRAMES
+    try:
+        await asyncio.sleep(settle_sec)
     except Exception:
         pass
-    for _ in range(_SPLIT_REBUILD_SETTLE_FRAMES):
+    for _ in range(settle_frames):
         if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
             return
         await kit_app.get_app().next_update_async()
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
-    await _build_multi_split_async(ext, n, token, usd_path)
+    await _build_multi_split_async(ext, n, token, usd_path, prev_n=pn)
 
 
 def _apply_sim_viewport_split_layout_impl(ext: Any, n: int) -> None:
     """메인 스레드(권장: post-update 이후)에서 호출."""
     n = channel_count_for_split(n)
+    try:
+        prev_n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+    except Exception:
+        prev_n = 1
+
+    if n <= 1:
+        teardown_sim_multi_viewports(ext)
+        try:
+            ext._sim_viewport_split_count = 1
+        except Exception:
+            pass
+        try:
+            ext._tbs_split_3d_disabled_notice = False
+        except Exception:
+            pass
+        try:
+            print(f"[TBS multi-sim] 분할=1 | {split_layout_description(1)}", flush=True)
+        except Exception:
+            pass
+        notify_sim_split_ui_sync(ext)
+        return
+
+    if not sim_viewport_split_3d_enabled():
+        teardown_sim_multi_viewports(ext)
+        try:
+            ext._sim_viewport_split_count = 1
+        except Exception:
+            pass
+        try:
+            if not getattr(ext, "_tbs_split_3d_disabled_notice", False):
+                ext._tbs_split_3d_disabled_notice = True
+                print(
+                    "[TBS multi-sim] 보조 3D 뷰가 꺼져 있습니다(TBS_SIM_VIEWPORT_SPLIT_3D=0 등). "
+                    "독립 타일을 보려면 해당 변수를 지우거나 1/true 로 두세요. "
+                    "보조 타일은 루트 래퍼 USD 로 분리(TBS_MULTI_SPLIT_SESSION_LAYER=0 이면 래퍼만).",
+                    flush=True,
+                )
+        except Exception:
+            pass
+        try:
+            print(f"[TBS multi-sim] 분할={n} | {split_layout_description(n)} (3D 타일 미생성)", flush=True)
+        except Exception:
+            pass
+        return
+
+    if not getattr(ext, "_tbs_multi_split_usd_ready", False):
+        teardown_sim_multi_viewports(ext)
+        try:
+            ext._sim_viewport_split_count = 1
+        except Exception:
+            pass
+        try:
+            print("[TBS multi-sim] TBS 제어창 Load 로 연 스테이지가 있을 때만 분할 뷰를 씁니다.", flush=True)
+        except Exception:
+            pass
+        return
+
+    usd_path = _main_usd_path_for_clone(ext)
+    if not usd_path:
+        teardown_sim_multi_viewports(ext)
+        try:
+            ext._sim_viewport_split_count = 1
+        except Exception:
+            pass
+        try:
+            print("[TBS multi-sim] 복제할 USD 경로를 찾지 못해 분할 뷰를 만들지 않습니다.", flush=True)
+        except Exception:
+            pass
+        return
+
+    try:
+        ext._sim_viewport_split_count = n
+    except Exception:
+        pass
+    tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
+
+    if _split_layout_already_active(ext, n):
+        _apply_split_navigation_to_aux(ext, n, tok, hold_ticks=72)
+        notify_sim_split_ui_sync(ext)
+        return
+
+    # 재로드 등으로 USD 지문만 바뀐 경우: Viewport 유지 + clone/reopen/hydrate (전체 재빌드 생략).
+    if (
+        n > 1
+        and prev_n == n
+        and _split_aux_layout_healthy(ext, n)
+        and str(getattr(ext, "_tbs_split_layout_usd_key", "") or "").strip() != _split_layout_usd_key(ext)
+    ):
+        try:
+            asyncio.ensure_future(_refresh_aux_split_stages_async(ext, n, tok, usd_path))
+        except Exception:
+            pass
+        notify_sim_split_ui_sync(ext)
+        return
+
+    # 분할 수만 바뀌고 보조 타일이 건강하면 전체 teardown 없이 부분 리사이즈(3→2 조작 유지·속도 개선).
+    if (
+        n > 1
+        and prev_n > 1
+        and n != prev_n
+        and _split_aux_layout_healthy(ext, prev_n)
+        and str(getattr(ext, "_tbs_split_layout_usd_key", "") or "").strip() == _split_layout_usd_key(ext)
+    ):
+        try:
+            if n < prev_n:
+                asyncio.ensure_future(_shrink_split_async(ext, n, prev_n, tok))
+            else:
+                asyncio.ensure_future(_grow_split_async(ext, n, prev_n, tok, usd_path))
+        except Exception:
+            teardown_sim_multi_viewports(ext)
+            try:
+                asyncio.ensure_future(_post_teardown_rebuild_split(ext, n, tok, usd_path, prev_n=prev_n))
+            except Exception:
+                pass
+        return
+
+    # 1→2 최초 분할: 메인 Viewport 레이아웃을 건드리지 않고 바로 빌드(체크 직후 화면 깨짐 방지).
+    if (
+        n > 1
+        and prev_n <= 1
+        and not list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    ):
+        for ti in range(1, 5):
+            _destroy_stale_split_workspace_window(_split_window_name(ti))
+        try:
+            asyncio.ensure_future(_build_multi_split_async(ext, n, tok, usd_path, prev_n=prev_n))
+        except Exception:
+            teardown_sim_multi_viewports(ext)
+            try:
+                asyncio.ensure_future(_post_teardown_rebuild_split(ext, n, tok, usd_path, prev_n=prev_n))
+            except Exception:
+                pass
+        notify_sim_split_ui_sync(ext)
+        return
+
     teardown_sim_multi_viewports(ext)
     try:
-        if n <= 1:
-            try:
-                ext._sim_viewport_split_count = 1
-            except Exception:
-                pass
-            try:
-                ext._tbs_split_3d_disabled_notice = False
-            except Exception:
-                pass
-            try:
-                print(f"[TBS multi-sim] 분할=1 | {split_layout_description(1)}", flush=True)
-            except Exception:
-                pass
-            return
-
-        if not sim_viewport_split_3d_enabled():
-            try:
-                ext._sim_viewport_split_count = 1
-            except Exception:
-                pass
-            try:
-                if not getattr(ext, "_tbs_split_3d_disabled_notice", False):
-                    ext._tbs_split_3d_disabled_notice = True
-                    print(
-                        "[TBS multi-sim] 보조 3D 뷰가 꺼져 있습니다(TBS_SIM_VIEWPORT_SPLIT_3D=0 등). "
-                        "독립 타일을 보려면 해당 변수를 지우거나 1/true 로 두세요. "
-                        "보조 타일은 루트 래퍼 USD 로 분리(TBS_MULTI_SPLIT_SESSION_LAYER=0 이면 래퍼만).",
-                        flush=True,
-                    )
-            except Exception:
-                pass
-            try:
-                print(f"[TBS multi-sim] 분할={n} | {split_layout_description(n)} (3D 타일 미생성)", flush=True)
-            except Exception:
-                pass
-            return
-
-        if not getattr(ext, "_tbs_multi_split_usd_ready", False):
-            try:
-                ext._sim_viewport_split_count = 1
-            except Exception:
-                pass
-            try:
-                print("[TBS multi-sim] TBS 제어창 Load 로 연 스테이지가 있을 때만 분할 뷰를 씁니다.", flush=True)
-            except Exception:
-                pass
-            return
-
-        usd_path = _main_usd_path_for_clone(ext)
-        if not usd_path:
-            try:
-                ext._sim_viewport_split_count = 1
-            except Exception:
-                pass
-            try:
-                print("[TBS multi-sim] 복제할 USD 경로를 찾지 못해 분할 뷰를 만들지 않습니다.", flush=True)
-            except Exception:
-                pass
-            return
-
-        try:
-            ext._sim_viewport_split_count = n
-        except Exception:
-            pass
-        tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
-        try:
-            asyncio.ensure_future(_post_teardown_rebuild_split(ext, n, tok, usd_path))
-        except Exception:
-            pass
-    finally:
-        notify_sim_split_ui_sync(ext)
+        asyncio.ensure_future(_post_teardown_rebuild_split(ext, n, tok, usd_path, prev_n=prev_n))
+    except Exception:
+        pass
 
 
 def apply_sim_viewport_split_layout(ext: Any, split_n: int) -> None:
@@ -2089,6 +4267,20 @@ def destroy_viewport_snapshot_hud_layers(ext: Any) -> None:
         pass
 
 
+def _snapshot_hud_placer_offset_x(ext: Any, screen_1based: int, panel_w: int, margin: int = 8) -> int:
+    """HUD 패널을 우측 상단에 두되, 전체 뷰포트를 덮지 않게 Placer offset 을 계산한다."""
+    si = int(screen_1based)
+    wname = "Viewport" if si <= 1 else _split_window_name(si - 1)
+    try:
+        w = ui.Workspace.get_window(str(wname))
+        ww = int(getattr(w, "width", 0) or 0)
+        if ww > panel_w + margin:
+            return max(0, ww - panel_w - margin)
+    except Exception:
+        pass
+    return max(0, 360 - panel_w - margin)
+
+
 def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
     """
     각 분할 타일의 ``ViewportWindow.get_frame`` 레이어에 우측 상단 2D 패널을 붙인다(별도 ``ui.Window`` 없음).
@@ -2124,6 +4316,9 @@ def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
     new_roots: Dict[int, Any] = {}
 
     for si in range(1, n + 1):
+        if si >= 2:
+            # 보조 타일: get_frame 2D HUD 가 마우스(Alt+orbit)를 가로채므로 화면1만 HUD 표시.
+            continue
         vw = _viewport_window_for_screen(ext, si)
         if vw is None:
             continue
@@ -2150,36 +4345,29 @@ def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
         root: Optional[Any] = None
         body_lbl: Optional[Any] = None
         try:
-            ra = getattr(ui, "Alignment", None)
-            rt = getattr(ra, "RIGHT_TOP", None) if ra is not None else None
+            ox = _snapshot_hud_placer_offset_x(ext, si, pw)
             with vw.get_frame(slot):
-                root = ui.ZStack(alignment=rt) if rt is not None else ui.ZStack()
-                with root:
-                    # RIGHT_TOP 정렬이 환경에 따라 동작이 달라질 수 있어, Spacer 기반으로 우측 상단에 고정한다.
-                    with ui.VStack():
-                        ui.Spacer(height=200)
-                        with ui.HStack():
-                            ui.Spacer()
-                            with ui.Frame(
-                                width=pw,
-                                height=ph,
-                                style={
-                                    "border_width": 1,
-                                    "border_color": 0xFF5A6A80,
-                                    "border_radius": 4,
-                                    "padding": 8,
-                                },
-                            ):
-                                with ui.ZStack():
-                                    ui.Rectangle(style={"background_color": 0xCC1A1A1A})
-                                    body_lbl = ui.Label(
-                                        body,
-                                        word_wrap=True,
-                                        width=max(1, pw - 16),
-                                        height=max(1, ph - 16),
-                                        style={"color": 0xFFFFFFFF, "font_size": 13},
-                                    )
-                        ui.Spacer()
+                with ui.Placer(offset_x=int(ox), offset_y=8):
+                    root = ui.Frame(
+                        width=pw,
+                        height=ph,
+                        style={
+                            "border_width": 1,
+                            "border_color": 0xFF5A6A80,
+                            "border_radius": 4,
+                            "padding": 8,
+                        },
+                    )
+                    with root:
+                        with ui.ZStack():
+                            ui.Rectangle(style={"background_color": 0xCC1A1A1A})
+                            body_lbl = ui.Label(
+                                body,
+                                word_wrap=True,
+                                width=max(1, pw - 16),
+                                height=max(1, ph - 16),
+                                style={"color": 0xFFFFFFFF, "font_size": 13},
+                            )
         except Exception:
             root = None
             body_lbl = None
@@ -2208,7 +4396,7 @@ def schedule_viewport_snapshot_hud_refresh(ext: Any) -> None:
         tok = 0
 
     async def _go() -> None:
-        for _ in range(10):
+        for _ in range(4):
             try:
                 await kit_app.get_app().next_update_async()
             except Exception:

@@ -86,8 +86,6 @@ class SequenceRunner(_LegacySequenceRunner):
     def _use_lam_engine(self, steps: List[Dict[str, Any]], usd_context_name: Optional[str]) -> bool:
         if self._tbs_registry is None or self._tbs_scheduler is None:
             return False
-        if (usd_context_name or "").strip():
-            return False
         return True
 
     def run(
@@ -113,7 +111,12 @@ class SequenceRunner(_LegacySequenceRunner):
 
         self._lam_last_steps = list(normalized)
         self._steps = list(normalized)
-        self._lam_runner = TbsLamSequenceRunner(self._tbs_registry, self._tbs_scheduler)
+        ctx_nm = str(usd_context_name or "").strip() or None
+        self._lam_runner = TbsLamSequenceRunner(
+            self._tbs_registry,
+            self._tbs_scheduler,
+            usd_context_name=ctx_nm,
+        )
         self._lam_running = True
         cb = self.on_sequence_completed
         sp = max(0.01, float(speed_scale or 1.0))

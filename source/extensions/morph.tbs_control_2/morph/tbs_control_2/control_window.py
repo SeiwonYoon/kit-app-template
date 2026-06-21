@@ -195,6 +195,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import copy
 import random
+import asyncio
 import threading
 import time
 import queue
@@ -933,16 +934,32 @@ def _execute_mapped_sequence_stub(
                 runner_obj = runners.get(str(scr_i))
             except Exception:
                 runner_obj = None
-            if runner_obj is None:
-                try:
-                    from .sequence_engine import SequenceRunner
+            try:
+                from .sequence_engine import SequenceRunner
+                from .tbs_split_composed_loader import get_split_runtime_for_screen
+
+                rt = get_split_runtime_for_screen(ext, scr_i)
+                if rt is not None:
+                    if runner_obj is None:
+                        runner_obj = SequenceRunner(
+                            registry=rt.registry,
+                            scheduler=rt.scheduler,
+                            evaluator=rt.evaluator,
+                        )
+                        runners[str(scr_i)] = runner_obj
+                    else:
+                        runner_obj._tbs_registry = rt.registry
+                        runner_obj._tbs_scheduler = rt.scheduler
+                        runner_obj._tbs_evaluator = rt.evaluator
+                elif runner_obj is None:
                     runner_obj = SequenceRunner(
                         registry=getattr(ext, "_tbs_registry", None),
                         scheduler=getattr(ext, "_tbs_scheduler", None),
                         evaluator=getattr(ext, "_tbs_evaluator", None),
                     )
                     runners[str(scr_i)] = runner_obj
-                except Exception:
+            except Exception:
+                if runner_obj is None:
                     runner_obj = getattr(ext, "_sim_runner", None)
 
             try:
@@ -1473,6 +1490,20 @@ def _on_save_sim_settings_to_screen(ext: Any, screen_1based: int) -> None:
         _sync_ep3_port_cell_visibility(ext)
     except Exception:
         pass
+    if int(screen_1based) >= 2:
+        try:
+            ctx_nm = _usd_context_name_for_sim_screen(ext, int(screen_1based))
+            if ctx_nm:
+                from .tbs_ep_port_visibility import apply_ep_port_layout_for_context
+
+                apply_ep_port_layout_for_context(
+                    ext,
+                    str(ctx_nm),
+                    int(screen_1based),
+                    reason="screen_save",
+                )
+        except Exception:
+            pass
     try:
         sim_multi_view.schedule_viewport_snapshot_hud_refresh(ext)
     except Exception:
@@ -1652,6 +1683,77 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
         process_time_priority=proc_pri,
     )
     return timing, init
+
+
+def notify_tbs_composed_usd_ready_for_split(ext: Any, usd_path: str = "") -> None:
+    """합성 Master USD open 성공 후 분할화면 체크박스 행을 켠다 (구 ``load_window`` Load 완료와 동일)."""
+    try:
+        from . import sim_multi_view
+
+        sim_multi_view.invalidate_split_layout_cache(ext)
+    except Exception:
+        pass
+    p = str(usd_path or "").strip()
+    if p:
+        try:
+            from .tbs_data_paths import resolve_local_data_path
+
+            resolved = resolve_local_data_path(p) or p
+            ext._tbs_last_loaded_usd_path = str(resolved).strip()
+        except Exception:
+            try:
+                ext._tbs_last_loaded_usd_path = p
+            except Exception:
+                pass
+    try:
+        from .tbs_split_composed_loader import register_main_composed_runtime
+
+        register_main_composed_runtime(ext)
+    except Exception:
+        pass
+    try:
+        from .tbs_split_composed_loader import schedule_split_composed_snapshot_prewarm
+
+        schedule_split_composed_snapshot_prewarm(ext)
+    except Exception:
+        pass
+    try:
+        ext._tbs_multi_split_usd_ready = True
+    except Exception:
+        pass
+    try:
+        fn = getattr(ext, "_sync_sim_multi_split_row_visibility_fn", None)
+        if callable(fn):
+            fn(ext)
+    except Exception:
+        pass
+
+    async def _sync_after_stage_settles() -> None:
+        try:
+            await app.get_app().next_update_async()
+        except Exception:
+            return
+        f2 = getattr(ext, "_sync_sim_multi_split_row_visibility_fn", None)
+        if callable(f2):
+            try:
+                f2(ext)
+            except Exception:
+                pass
+        try:
+            _refresh_sim_per_screen_rows(ext)
+        except Exception:
+            pass
+
+    try:
+        asyncio.ensure_future(_sync_after_stage_settles())
+    except Exception:
+        pass
+    try:
+        from . import sim_multi_view
+
+        sim_multi_view.schedule_split_rebuild_after_master_reload(ext)
+    except Exception:
+        pass
 
 
 def _sync_sim_multi_split_row_visibility(ext: Any) -> None:
@@ -3118,33 +3220,9 @@ def _compact_cell_value(v: str, max_len: int = 10) -> str:
 
 
 def _ep_count_idx_for_port_panel(ext: Any, screen_1based: int) -> int:
-    """
-    포트 상태 패널에서 BP4/EP3 칸 표시용 (0=EP2구성, 1=EP3구성).
+    from .tbs_ep_port_visibility import ep_count_idx_for_screen
 
-    멀티 분할 시 화면별 「현재 설정 저장」스냅샷이 있으면 그 값을 쓰고,
-    없으면 "화면1 스냅샷(기본값)"을 따른다.
-    (요구사항: 화면2~4는 저장 전까지 현재 UI 변경의 영향을 받지 않아야 함)
-    """
-    try:
-        si = int(screen_1based)
-    except Exception:
-        si = 1
-    if si < 1:
-        si = 1
-    try:
-        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
-        idx = si - 1
-        if 0 <= idx < len(snaps) and isinstance(snaps[idx], dict):
-            return int(snaps[idx].get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
-        # 화면2~4가 미저장(None)인 경우: 화면1 기본값을 폴백으로 사용
-        if si > 1 and len(snaps) >= 1 and isinstance(snaps[0], dict):
-            return int(snaps[0].get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
-    except Exception:
-        pass
-    try:
-        return int(get_sim_ep_count_idx(ext))
-    except Exception:
-        return 0
+    return ep_count_idx_for_screen(ext, int(screen_1based))
 
 
 def _sync_ep3_port_cell_visibility_for_channel(ext: Any, ch: Dict[str, Any]) -> None:
@@ -9060,12 +9138,21 @@ def _restore_sim_prim_motion_to_initial(
         pass
 
     try:
-        reg = getattr(ext, "_tbs_registry", None)
+        from .tbs_split_composed_loader import get_split_runtime_for_usd_context
+
+        rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
+        reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
         if reg is not None and hasattr(reg, "all_instances"):
             for inst in reg.all_instances():
                 _add(str(getattr(inst, "prim_path", "") or ""))
     except Exception:
-        pass
+        try:
+            reg = getattr(ext, "_tbs_registry", None)
+            if reg is not None and hasattr(reg, "all_instances"):
+                for inst in reg.all_instances():
+                    _add(str(getattr(inst, "prim_path", "") or ""))
+        except Exception:
+            pass
 
     def _do_on_main() -> None:
         # USD write / stage 접근은 반드시 main thread 에서만 수행한다.
@@ -9097,7 +9184,10 @@ def _restore_sim_prim_motion_to_initial(
         except Exception:
             pass
         try:
-            sch = getattr(ext, "_tbs_scheduler", None)
+            from .tbs_split_composed_loader import get_split_runtime_for_usd_context
+
+            rt_sch = get_split_runtime_for_usd_context(ext, usd_context_name)
+            sch = rt_sch.scheduler if rt_sch is not None else getattr(ext, "_tbs_scheduler", None)
             stop_fn = getattr(sch, "stop_all", None) if sch is not None else None
             if callable(stop_fn):
                 stop_fn()
@@ -9106,6 +9196,7 @@ def _restore_sim_prim_motion_to_initial(
         if paths:
             from . import port_lot_visibility as _plv_paths
             from .tbs_lam_sequence_engine import _reset_tbs_offset_ops_for_paths
+            from .tbs_usd_stage_context import pop_usd_context_name, push_usd_context_name
 
             reset_paths = list(paths)
             if preserve_foup_offsets:
@@ -9115,13 +9206,20 @@ def _restore_sim_prim_motion_to_initial(
                 except Exception:
                     pass
             if reset_paths:
-                _reset_tbs_offset_ops_for_paths(reset_paths)
+                prev_ctx = push_usd_context_name(usd_context_name)
+                try:
+                    _reset_tbs_offset_ops_for_paths(reset_paths)
+                finally:
+                    pop_usd_context_name(prev_ctx)
 
         try:
             from .tbs_lam_sequence_editor import _range_start_seconds_for_instance
+            from .tbs_split_composed_loader import get_split_runtime_for_usd_context
 
-            reg = getattr(ext, "_tbs_registry", None)
-            ev = getattr(ext, "_tbs_evaluator", None)
+            rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
+            reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
+            ev = rt_ctx.evaluator if rt_ctx is not None else getattr(ext, "_tbs_evaluator", None)
+            sch = rt_ctx.scheduler if rt_ctx is not None else getattr(ext, "_tbs_scheduler", None)
             if reg is not None and hasattr(reg, "all_instances"):
                 for inst in reg.all_instances():
                     pp = str(getattr(inst, "prim_path", "") or "").strip()

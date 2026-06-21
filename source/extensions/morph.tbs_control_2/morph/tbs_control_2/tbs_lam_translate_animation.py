@@ -36,20 +36,27 @@ _update_sub = None
 
 
 def _stage():
-    try:
-        ctx = ou.get_context()
-        return ctx.get_stage() if ctx else None
-    except Exception:
-        return None
+    from .tbs_usd_stage_context import get_stage_for_thread_context
+
+    return get_stage_for_thread_context()
 
 
 def is_translate_animation_running() -> bool:
     return bool(_animations)
 
 
-def is_prim_translate_animation_running(prim_path: str) -> bool:
+def is_prim_translate_animation_running(prim_path: str, usd_context_name: Optional[str] = None) -> bool:
     """지정 prim 에 대한 TBS_OFFSET translate 보간이 진행 중인지."""
-    return bool(prim_path) and prim_path in _animations
+    from .tbs_usd_stage_context import anim_key
+
+    if not prim_path:
+        return False
+    if usd_context_name is not None:
+        return anim_key(prim_path, usd_context_name) in _animations
+    if prim_path in _animations:
+        return True
+    suffix = f"\x00{prim_path}"
+    return any(str(k).endswith(suffix) for k in _animations)
 
 
 def _get_or_create_offset_translate_op(prim):
@@ -145,14 +152,17 @@ def run_prim_translate_animation(
     speed_ref: float = 1.0,
 ) -> None:
     global _animations, _update_sub
+    from .tbs_usd_stage_context import anim_key, get_current_usd_context_name
+
     if not segments:
         return
+    ctx_nm = get_current_usd_context_name()
     stage = _stage()
     if not stage:
         return
     prim = stage.GetPrimAtPath(prim_path)
     if not prim or not prim.IsValid():
-        print(f"{_PRINT_PREFIX} prim not found: {prim_path}", flush=True)
+        print(f"{_PRINT_PREFIX} prim not found: {prim_path} ctx={ctx_nm!r}", flush=True)
         return
 
     start_pos = _get_prim_local_translate(prim)
@@ -175,8 +185,10 @@ def run_prim_translate_animation(
                 pass
         return
 
-    _animations[prim_path] = {
+    key = anim_key(prim_path, ctx_nm)
+    _animations[key] = {
         "prim_path": prim_path,
+        "usd_context_name": ctx_nm,
         "start_pos": Gf.Vec3f(start_pos[0], start_pos[1], start_pos[2]),
         "segments": normalized,
         "segment_index": 0,
@@ -188,12 +200,24 @@ def run_prim_translate_animation(
     _ensure_update_sub()
 
 
-def stop_prim_translate_animation(prim_path: str) -> bool:
+def stop_prim_translate_animation(prim_path: str, usd_context_name: Optional[str] = None) -> bool:
     global _animations
-    if prim_path in _animations:
-        _animations.pop(prim_path, None)
+    from .tbs_usd_stage_context import anim_key
+
+    key = anim_key(prim_path, usd_context_name)
+    if key in _animations:
+        _animations.pop(key, None)
         _maybe_release_update_sub()
         return True
+    if usd_context_name is None:
+        removed = False
+        for k in list(_animations.keys()):
+            if k.endswith(f"\x00{prim_path}"):
+                _animations.pop(k, None)
+                removed = True
+        if removed:
+            _maybe_release_update_sub()
+        return removed
     return False
 
 
@@ -234,6 +258,8 @@ def _maybe_release_update_sub() -> None:
 
 
 def _on_update(e) -> None:
+    from .tbs_usd_stage_context import pop_usd_context_name, prim_path_from_anim_key, push_usd_context_name
+
     payload = getattr(e, "payload", None) or {}
     dt = float(payload.get("dt", 0.0) or 0.0)
     if dt <= 0:
@@ -244,16 +270,20 @@ def _on_update(e) -> None:
         get_csv_play_anim_dt_scale = None  # type: ignore
     if not _animations:
         return
-    stage = _stage()
-    if not stage:
-        return
 
     to_remove: List[str] = []
-    for prim_path, state in list(_animations.items()):
+    for anim_key, state in list(_animations.items()):
+        ctx_nm = state.get("usd_context_name")
+        prim_path = str(state.get("prim_path") or prim_path_from_anim_key(anim_key))
+        prev_ctx = push_usd_context_name(ctx_nm)
         try:
+            stage = _stage()
+            if not stage:
+                to_remove.append(anim_key)
+                continue
             prim = stage.GetPrimAtPath(prim_path)
             if not prim or not prim.IsValid():
-                to_remove.append(prim_path)
+                to_remove.append(anim_key)
                 continue
             frame_dt = dt
             if get_csv_play_anim_dt_scale is not None:
@@ -287,7 +317,7 @@ def _on_update(e) -> None:
                                 cb()
                             except Exception:
                                 pass
-                        to_remove.append(prim_path)
+                        to_remove.append(anim_key)
                 else:
                     remainder = elapsed - duration
                     state["elapsed_in_segment"] = remainder
@@ -312,7 +342,9 @@ def _on_update(e) -> None:
             _set_prim_translate(prim, current)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} update error path={prim_path}: {exc}", flush=True)
-            to_remove.append(prim_path)
+            to_remove.append(anim_key)
+        finally:
+            pop_usd_context_name(prev_ctx)
     for k in to_remove:
         _animations.pop(k, None)
     _maybe_release_update_sub()
