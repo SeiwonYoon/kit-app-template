@@ -236,12 +236,20 @@ def views_are_close(
 def format_config_snippet(snap: CameraViewSnapshot) -> str:
     e = snap.eye_xyz
     t = snap.target_xyz
+    coords = (
+        f"    eye_xyz=({e[0]:.6f}, {e[1]:.6f}, {e[2]:.6f}),\n"
+        f"    target_xyz=({t[0]:.6f}, {t[1]:.6f}, {t[2]:.6f}),\n"
+    )
     return (
         "# lam_viewport_overlay_config.py 에 붙여넣기\n"
         "PLAY_CAMERA_PRESET_ENABLED = True\n"
         "PLAY_CAMERA_PRESET = PlayCameraPresetSpec(\n"
-        f"    eye_xyz=({e[0]:.6f}, {e[1]:.6f}, {e[2]:.6f}),\n"
-        f"    target_xyz=({t[0]:.6f}, {t[1]:.6f}, {t[2]:.6f}),\n"
+        f"{coords}"
+        ")\n\n"
+        "# 탑뷰 보기 — TOP_VIEW_PRESET 에 붙여넣기\n"
+        "TOP_VIEW_PRESET_ENABLED = True\n"
+        "TOP_VIEW_PRESET = PlayCameraPresetSpec(\n"
+        f"{coords}"
         ")\n"
     )
 
@@ -310,7 +318,11 @@ def _camera_local_matrix(
     return world
 
 
-def apply_camera_view(snap: CameraViewSnapshot) -> bool:
+def apply_camera_view(
+    snap: CameraViewSnapshot,
+    *,
+    up_xyz: Optional[Tuple[float, float, float]] = None,
+) -> bool:
     stage = _get_stage()
     path = _active_camera_path_str()
     if not stage or not path:
@@ -318,12 +330,15 @@ def apply_camera_view(snap: CameraViewSnapshot) -> bool:
     cam_prim = stage.GetPrimAtPath(path)
     if not cam_prim or not cam_prim.IsValid():
         return False
-    try:
-        from .lam_viewport_overlay_config import PLAY_CAMERA_PRESET  # type: ignore
+    if up_xyz is not None:
+        up = tuple(float(x) for x in up_xyz)
+    else:
+        try:
+            from .lam_viewport_overlay_config import PLAY_CAMERA_PRESET  # type: ignore
 
-        up = tuple(float(x) for x in PLAY_CAMERA_PRESET.up_xyz)
-    except Exception:
-        up = (0.0, 0.0, 1.0)
+            up = tuple(float(x) for x in PLAY_CAMERA_PRESET.up_xyz)
+        except Exception:
+            up = (0.0, 0.0, 1.0)
 
     dist = (_vec3(snap.target_xyz) - _vec3(snap.eye_xyz)).GetLength()
     if dist < 1e-6:

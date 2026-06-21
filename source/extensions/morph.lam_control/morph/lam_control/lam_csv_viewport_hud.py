@@ -340,6 +340,12 @@ class LamCsvViewportControlsHud:
                                                 width=52,
                                                 height=_CHECKBOX_ROW_HEIGHT,
                                             )
+                                            self._csv.mount_top_view_checkbox_ui(
+                                                ui,
+                                                label_width=_CHECKBOX_LABEL_WIDTH,
+                                                row_height=_CHECKBOX_ROW_HEIGHT,
+                                                spacing=4,
+                                            )
                                         except Exception as exc:
                                             print(
                                                 f"{_PRINT_PREFIX} play camera fly UI: {exc}",

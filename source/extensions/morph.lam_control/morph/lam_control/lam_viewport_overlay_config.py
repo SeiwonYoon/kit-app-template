@@ -58,6 +58,18 @@ PLAY_CAMERA_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
 
 
 # ---------------------------------------------------------------------------
+# Viewport 「탑뷰 보기」 — preset 뷰 고정 + 카메라 조작 잠금 (lam_viewport_top_view.py)
+# 「뷰저장」 콘솔 출력 블록을 TOP_VIEW_PRESET 에 붙여넣기 (Play preset 과 동일 형식).
+# ---------------------------------------------------------------------------
+STARTUP_CHECK_TOP_VIEW: bool = False
+TOP_VIEW_PRESET_ENABLED: bool = True
+TOP_VIEW_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
+    eye_xyz=(239.023316, 4175.874309, 12994.797994),
+    target_xyz=(13.721364, 3544.061638, 2916.364276),
+)
+
+
+# ---------------------------------------------------------------------------
 # 웨이퍼 3D 번호 (Viewport 「웨이퍼번호보기」 체크 ON 일 때)
 # ---------------------------------------------------------------------------
 # FOUP1~3 × 25슬롯(총 75) prim 위 번호 라벨 표시 여부.
@@ -335,6 +347,7 @@ __all__ = [
     "STARTUP_CHECK_PICK_WHITELIST",
     "STARTUP_CHECK_PLAY_PRIM_HIDE",
     "STARTUP_CHECK_PLAY_CAMERA_FLY",
+    "STARTUP_CHECK_TOP_VIEW",
     "PLAY_CAMERA_PRESET_ENABLED",
     "PLAY_CAMERA_FLY_DURATION_SEC",
     "PLAY_CAMERA_FLY_POSITION_EPS_M",
@@ -343,6 +356,8 @@ __all__ = [
     "PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC",
     "PlayCameraPresetSpec",
     "PLAY_CAMERA_PRESET",
+    "TOP_VIEW_PRESET_ENABLED",
+    "TOP_VIEW_PRESET",
     "PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET",
     "PLAY_HIDE_FADE_ENABLED",
     "PLAY_HIDE_FADE_DURATION_SEC",

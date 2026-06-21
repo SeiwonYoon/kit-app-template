@@ -4555,6 +4555,7 @@ class LamSimulationCsvPlayWindow:
         self._pick_whitelist_model: Any = None
         self._play_prim_hide_model: Any = None
         self._play_camera_fly_model: Any = None
+        self._top_view_model: Any = None
         self._overlay_checkbox_syncing: bool = False
         self._overlay_checkbox_initialized: bool = False
         self._overlay_apply_pending: bool = False
@@ -4745,6 +4746,21 @@ class LamSimulationCsvPlayWindow:
                 except Exception:
                     _cf_def = False
                 self._play_camera_fly_model = SimpleBoolModel(_cf_def)
+        if self._top_view_model is None:
+            try:
+                from .lam_viewport_overlay_state import get_ui_model_top_view
+
+                self._top_view_model = get_ui_model_top_view()
+            except Exception:
+                try:
+                    from .lam_viewport_overlay_config import (  # type: ignore
+                        STARTUP_CHECK_TOP_VIEW,
+                    )
+
+                    _tv_def = bool(STARTUP_CHECK_TOP_VIEW)
+                except Exception:
+                    _tv_def = False
+                self._top_view_model = SimpleBoolModel(_tv_def)
         register_csv_play_timeline_window(self)
 
     # NOTE: overlay 토글은 changed_fn/모델 이벤트로만 동기화한다.
@@ -4888,6 +4904,32 @@ class LamSimulationCsvPlayWindow:
                 tooltip=(
                     "체크 후 Play: 설정 뷰로 부드럽게 이동한 뒤 prim숨김·재생. "
                     "preset: lam_viewport_overlay_config PLAY_CAMERA_PRESET"
+                ),
+            )
+            ui.Spacer()
+
+    def mount_top_view_checkbox_ui(
+        self,
+        ui: Any,
+        *,
+        label_width: int = 52,
+        row_height: int = 22,
+        spacing: int = 4,
+    ) -> None:
+        """「탑뷰 보기」 — preset 뷰 고정 + 카메라 조작 잠금."""
+        self.ensure_playback_models()
+        m = self._top_view_model
+        if m is None:
+            return
+        with ui.HStack(spacing=int(spacing), height=int(row_height)):
+            ui.Label("탑뷰 보기", width=int(label_width), height=int(row_height))
+            ui.CheckBox(
+                model=m,
+                width=20,
+                height=int(row_height),
+                tooltip=(
+                    "체크 ON: TOP_VIEW_PRESET 뷰로 이동 후 pan/zoom/tumble 등 카메라 조작 잠금. "
+                    "체크 OFF: 조작만 해제(시점 유지). preset: lam_viewport_overlay_config TOP_VIEW_PRESET"
                 ),
             )
             ui.Spacer()
@@ -5173,6 +5215,7 @@ class LamSimulationCsvPlayWindow:
                 try:
                     self.mount_play_camera_fly_checkbox_ui(ui, label_width=88)
                     self.mount_play_camera_capture_button_ui(ui, width=52)
+                    self.mount_top_view_checkbox_ui(ui, label_width=88)
                     self.mount_play_prim_hide_checkbox_ui(ui, label_width=88)
                 except Exception as exc:
                     self._log(f"play prim hide checkbox UI: {exc}")
