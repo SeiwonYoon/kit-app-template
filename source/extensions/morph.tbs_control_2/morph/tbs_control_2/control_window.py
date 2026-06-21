@@ -3290,8 +3290,33 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
 _PANEL_PORT_KEYS = ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")
 
 
+def _ports_occ_is_complete_snapshot(occ: Dict[str, Any]) -> bool:
+    """UI 패널 전체 키(INOUT~EP3)를 모두 포함한 스냅샷인지."""
+    if not isinstance(occ, dict) or not occ:
+        return False
+    return all(k in occ for k in _PANEL_PORT_KEYS)
+
+
+def _ports_occ_trust_all_empty(occ: Dict[str, Any], *, seq_u: str = "") -> bool:
+    """전 포트가 비어 있어도 이전 스냅샷으로 되돌리면 안 되는 authoritative payload 인지."""
+    if str(seq_u or "").strip().upper() == "PORT_OCC_REFRESH":
+        return True
+    if not isinstance(occ, dict) or not occ:
+        return False
+    if any(bool(str(v or "").strip()) for v in occ.values()):
+        return False
+    if _ports_occ_is_complete_snapshot(occ):
+        return True
+    keys = set(str(k).strip().upper() for k in occ.keys())
+    if "INOUT" not in keys:
+        return False
+    ep_keys = {k for k in keys if k.startswith("EP")}
+    # ep_count=2 엔진 스냅샷(INOUT+BP*+EP1+EP2)도 전 포트 비움을 신뢰
+    return len(ep_keys) >= 2
+
+
 def _merge_ports_occupancy_with_last(
-    ext: Any, screen: int, occ: Dict[str, Any]
+    ext: Any, screen: int, occ: Dict[str, Any], *, seq_u: str = ""
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """부분/빈 ports_occupancy 를 화면별 마지막 스냅샷과 merge."""
     scr = max(1, int(screen))
@@ -3315,7 +3340,11 @@ def _merge_ports_occupancy_with_last(
         if isinstance(occ_prev, dict) and occ_prev:
             occ_out = dict(occ_prev)
     try:
-        if occ_out and (not any(bool(str(v or "").strip()) for v in occ_out.values())):
+        if (
+            occ_out
+            and (not any(bool(str(v or "").strip()) for v in occ_out.values()))
+            and (not _ports_occ_trust_all_empty(occ_out, seq_u=seq_u))
+        ):
             if isinstance(occ_prev, dict) and occ_prev and any(
                 bool(str(v or "").strip()) for v in occ_prev.values()
             ):
@@ -3332,6 +3361,7 @@ def _sync_port_panel_from_engine_occ(
     sim_time: str = "",
     *,
     allow_post_anim_block: bool = True,
+    seq_u: str = "",
 ) -> None:
     """
     엔진 ports_occupancy → 포트 패널(텍스트) 동기화.
@@ -3346,7 +3376,9 @@ def _sync_port_panel_from_engine_occ(
                 return
         except Exception:
             pass
-    occ_m, by_prev = _merge_ports_occupancy_with_last(ext, scr, occ if isinstance(occ, dict) else {})
+    occ_m, by_prev = _merge_ports_occupancy_with_last(
+        ext, scr, occ if isinstance(occ, dict) else {}, seq_u=str(seq_u or "")
+    )
     if not occ_m or not any((k in occ_m) for k in _PANEL_PORT_KEYS):
         return
     try:
@@ -4360,6 +4392,7 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     except Exception:
         by_prev = {}
         occ_prev = None
+    seq_u = str(p.get("seq", "") or "").strip().upper()
     # 1) 부분 dict는 merge (누락 키가 '-'로 보이는 문제 방지)
     try:
         if isinstance(occ_prev, dict) and occ_prev:
@@ -4376,14 +4409,17 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
                 occ = dict(occ_prev)
         except Exception:
             pass
-    # 3) "전부 빈 값"도 마지막 스냅샷으로 폴백(명시적 reset payload가 아닌 이상)
+    # 3) "전부 빈 값"도 마지막 스냅샷으로 폴백 — 단, 엔진 authoritative payload(회수 완료 등)는 신뢰
     try:
-        if occ and (not any(bool(str(v or "").strip()) for v in occ.values())):
+        if (
+            occ
+            and (not any(bool(str(v or "").strip()) for v in occ.values()))
+            and (not _ports_occ_trust_all_empty(occ, seq_u=seq_u))
+        ):
             if isinstance(occ_prev, dict) and occ_prev and any(bool(str(v or "").strip()) for v in occ_prev.values()):
                 occ = dict(occ_prev)
     except Exception:
         pass
-    seq_u = str(p.get("seq", "") or "").strip().upper()
     # 애니 이벤트 시작: 엔진 점유를 포트 패널에 즉시 반영(IN/OUT 안착 직후·이동 시작 시 등).
     if _is_anim_port_event(seq_u):
         try:
@@ -4393,6 +4429,7 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
                 occ,
                 str(p.get("sim_time", "") or ""),
                 allow_post_anim_block=False,
+                seq_u=seq_u,
             )
         except Exception:
             pass
