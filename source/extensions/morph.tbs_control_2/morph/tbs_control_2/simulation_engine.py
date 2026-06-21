@@ -1652,7 +1652,13 @@ class TBSSimulationEngine:
             except Exception:
                 waiting_n = 0
 
-            # START 이벤트(애니메이션 훅: Y +3.2)
+            # START 직전: payload·restore 경로가 +Y lift 를 알 수 있도록 active EP 를 먼저 설정
+            try:
+                self._foup_proc_active_ep = str(ep_port).strip().upper()
+            except Exception:
+                self._foup_proc_active_ep = ""
+
+            # START 이벤트(애니메이션 훅: Y +lift)
             try:
                 self._emit_event({"seq": "FOUP_PROCESS_START", "port_id": ep_port, "lot_id": lot.lot_id})
             except Exception:
@@ -1677,12 +1683,6 @@ class TBSSimulationEngine:
                     yield self.env.timeout(1.0)
                 except Exception:
                     pass
-
-            # +Y 이동이 끝난 뒤 공정 시간 구간: Prim 은 +Y320 상태이므로 페이로드에 표시해 UI 가 옵션 A 재스냅 가능.
-            try:
-                self._foup_proc_active_ep = str(ep_port).strip().upper()
-            except Exception:
-                self._foup_proc_active_ep = ""
 
             # 공정 시간 대기(전역 1개만)
             try:

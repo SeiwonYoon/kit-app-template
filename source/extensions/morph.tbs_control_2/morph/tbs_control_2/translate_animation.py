@@ -171,6 +171,25 @@ def run_prim_translate_animation(
         _update_sub = stream.create_subscription_to_pop(_on_update, name="morph.tbs_control_2.translate_animation")
 
 
+def is_prim_translate_animation_running(
+    prim_path: str,
+    usd_context_name: Optional[str] = None,
+) -> bool:
+    """해당 prim 의 translate 애니가 진행 중인지(컨텍스트 미지정 시 전 컨텍스트 검사)."""
+    pp = str(prim_path or "").strip()
+    if not pp:
+        return False
+    if usd_context_name is not None:
+        return _tx_anim_key(pp, usd_context_name) in _animations
+    for k in _animations.keys():
+        try:
+            if str(k).split("\x00", 1)[-1] == pp:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def stop_prim_translate_animation(prim_path: str, usd_context_name: Optional[str] = None) -> bool:
     global _animations, _update_sub
     key = _tx_anim_key(prim_path, usd_context_name)

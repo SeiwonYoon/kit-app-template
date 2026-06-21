@@ -1040,6 +1040,7 @@ class SequenceRunner:
     def __post_init__(self) -> None:
         self._running = False
         self._usd_context_name: Optional[str] = None
+        self._foup_proc_active_ep: str = ""
         self._speed_scale: float = 1.0
         self._steps: List[Dict[str, Any]] = []
         self._baseline: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
@@ -1394,6 +1395,18 @@ class SequenceRunner:
                 usd_animation_control.reset_timeline_to_zero(getattr(self, "_usd_context_name", None))
             except Exception:
                 pass
+        elif self._usd_context_name is not None:
+            # 시뮬 중 JSON 연속 재생: baseline 복원 없이 pause 만(FOUP ±Y·포트 lift 유지).
+            self.pause()
+            try:
+                self._clear_all_hides()
+            except Exception:
+                pass
+            try:
+                usd_animation_control.stop_usd_animation(getattr(self, "_usd_context_name", None))
+                usd_animation_control.reset_timeline_to_zero(getattr(self, "_usd_context_name", None))
+            except Exception:
+                pass
         else:
             self.stop()
 
@@ -1413,14 +1426,17 @@ class SequenceRunner:
         # 타임라인 time=0 적용이 "다음 프레임"에 평가되는 경우가 있어,
         # 프림 baseline 복원/시퀀스 시작을 다음 프레임으로 지연해 덮어쓰기/미복원 문제를 방지한다.
         def _start():
-            # 포트 LOT 표시용 prim(port_lot_prim_paths.json)은 시퀀스 스텝에 없어도 움직일 수 있으므로,
-            # 애니 시작 시 한 번 authoring 자세로 복원한다(보임/숨김은 건드리지 않음).
-            try:
-                from .port_lot_visibility import restore_port_lot_prims_to_authoring
+            # 시뮬 중 JSON 연속 재생: 포트 LOT(FOUP ±Y) 위치는 건드리지 않는다.
+            if getattr(self, "_usd_context_name", None) is None:
+                try:
+                    from .port_lot_visibility import restore_port_lot_prims_to_authoring
 
-                restore_port_lot_prims_to_authoring()
-            except Exception:
-                pass
+                    restore_port_lot_prims_to_authoring(
+                        usd_context_name=getattr(self, "_usd_context_name", None),
+                        foup_proc_active_ep=str(getattr(self, "_foup_proc_active_ep", "") or ""),
+                    )
+                except Exception:
+                    pass
             # baseline은 '최초 상태'를 보존해야 하므로 매 실행마다 덮어쓰지 않는다.
             # 다만 스텝 편집으로 새 prim이 등장할 수 있으니, baseline에 없는 prim만 보강 캡처한다.
             self._capture_baseline(force=False)
@@ -1483,13 +1499,31 @@ class SequenceRunner:
         except Exception:
             _plv = None
         # exclude_paths는 "현재 위치부터 시작" 부분 적용을 위한 선택적 복원 예외 목록.
+        active_ep = str(getattr(self, "_foup_proc_active_ep", "") or "").strip().upper()
+        sim_ctx = getattr(self, "_usd_context_name", None) is not None
+        port_lot_paths: set = set()
+        if _plv is not None:
+            try:
+                port_lot_paths = set(_plv._iter_unique_mapped_prim_paths())
+            except Exception:
+                port_lot_paths = set()
         for path, (t, r) in list(self._baseline.items()):
             if exclude_paths and path in exclude_paths:
                 continue
+            if sim_ctx and path in port_lot_paths:
+                continue
             try:
                 if _plv is not None:
+                    if _plv.should_skip_port_lot_baseline_reset(
+                        path,
+                        foup_proc_active_ep=active_ep,
+                    ):
+                        continue
                     try:
-                        lifted_t = _plv.get_foup_lifted_translate(path)
+                        lifted_t = _plv.get_foup_restore_translate(
+                            path,
+                            foup_proc_active_ep=active_ep,
+                        )
                     except Exception:
                         lifted_t = None
                     if lifted_t is not None:
@@ -1500,7 +1534,29 @@ class SequenceRunner:
                         continue
                     try:
                         if _plv.is_foup_in_progress(path):
-                            # +Y / -Y 애니가 도중이면 baseline 복원을 건너뛴다(중간 점프 방지).
+                            try:
+                                from .translate_animation import is_prim_translate_animation_running
+
+                                if is_prim_translate_animation_running(path):
+                                    continue
+                            except Exception:
+                                pass
+                            sign = _plv.get_foup_lift_sign(path)
+                            if sign > 0 or (active_ep and _plv._port_id_for_prim_path(path) == active_ep):
+                                tgt = _plv.foup_lifted_target_translate(path)
+                                if tgt is not None:
+                                    prim = stage.GetPrimAtPath(path)
+                                    if prim and prim.IsValid():
+                                        _set_translate(prim, tgt)
+                                        _plv.mark_foup_lifted(path, True)
+                                continue
+                            if sign < 0:
+                                base = _plv.foup_authoring_baseline_translate(path)
+                                if base is not None:
+                                    prim = stage.GetPrimAtPath(path)
+                                    if prim and prim.IsValid():
+                                        _set_translate(prim, base)
+                                continue
                             continue
                     except Exception:
                         pass

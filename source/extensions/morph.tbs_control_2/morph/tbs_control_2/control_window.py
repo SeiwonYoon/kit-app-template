@@ -1146,6 +1146,12 @@ def _execute_mapped_sequence_stub(
             except Exception as exc:
                 print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
             if runner_obj is not None:
+                try:
+                    runner_obj._foup_proc_active_ep = _resolve_foup_proc_active_ep(
+                        ext, scr_i, dict(job or {})
+                    )
+                except Exception:
+                    pass
                 runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run, speed_scale=eff_sp)
             try:
                 _refresh_sim_progress_from_last(ext)
@@ -1175,6 +1181,9 @@ def _execute_mapped_sequence_stub(
             "port_id": port,
             "parsed": parsed,
             "tbs_sim_screen": str(_scr),
+            "foup_proc_active_ep": str(
+                payload.get("foup_proc_active_ep", "") or ""
+            ).strip().upper(),
         }
         # 우선순위: 생성(OHT->EP 직접투입 등) / 회수(REMOVED) 는 현재 애니가 끝나자마자 즉시 실행되어야 한다.
         # - 선점(interrupt)은 하지 않고, pending 큐의 "앞"에 삽입한다.
@@ -5074,6 +5083,38 @@ def _remember_foup_active_ep(ext: Any, screen: int, payload: Dict[str, Any]) -> 
     return ""
 
 
+def _resolve_foup_proc_active_ep(
+    ext: Any,
+    screen: int,
+    payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    """화면 캐시 → payload → 시뮬 엔진 순으로 FOUP active EP 를 조회."""
+    ep = _remember_foup_active_ep(ext, int(screen), payload or {})
+    if ep:
+        return ep
+    scr = int(screen)
+    try:
+        engines = getattr(ext, "_sim_engines", None)
+        if isinstance(engines, dict):
+            eng = engines.get(str(scr)) or engines.get(scr)
+            if eng is not None:
+                ep = str(getattr(eng, "_foup_proc_active_ep", "") or "").strip().upper()
+                if ep:
+                    return ep
+    except Exception:
+        pass
+    try:
+        if scr == 1:
+            eng = getattr(ext, "_sim_engine", None)
+            if eng is not None:
+                ep = str(getattr(eng, "_foup_proc_active_ep", "") or "").strip().upper()
+                if ep:
+                    return ep
+    except Exception:
+        pass
+    return ""
+
+
 def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: int) -> None:
     """Seek Fast-apply: 포트·FOUP 가시성만 반영(JSON 애니 생략)."""
     if not isinstance(payload, dict):
@@ -7595,10 +7636,21 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             from . import port_lot_visibility as _plv  # type: ignore
             if seq_u0 == "FOUP_PROCESS_START":
                 _plv.mark_foup_in_progress(prim_path, True)
-                # plateau 진입은 +Y 1초 애니가 끝난 시점에 표시(아래 1-E 에서 on_completed 콜백).
+                _remember_foup_active_ep(ext, scr, {"foup_proc_active_ep": port_id})
+                try:
+                    runners = getattr(ext, "_sim_runners_by_screen", None)
+                    if isinstance(runners, dict):
+                        r = runners.get(str(scr)) or runners.get(scr)
+                        if r is not None:
+                            r._foup_proc_active_ep = port_id
+                    r0 = getattr(ext, "_sim_runner", None)
+                    if r0 is not None and scr == 1:
+                        r0._foup_proc_active_ep = port_id
+                except Exception:
+                    pass
             else:  # FOUP_PROCESS_END
-                # END 진입 즉시 plateau 해제 — 곧 시작될 -Y 애니가 baseline+320 강제 set 과 충돌하지 않게 한다.
                 _plv.mark_foup_lifted(prim_path, False)
+                _remember_foup_active_ep(ext, scr, {"foup_proc_active_ep": ""})
                 _schedule_foup_inprogress_unmark(ext, prim_path, delay_sec=1.05)
         except Exception:
             pass
@@ -7619,36 +7671,23 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
             _plv.apply_port_lot_prim_material_for_context(ctx_nm, prim_path, mat_path)
         except Exception:
             pass
-        # 1-E) START 면 +Y lift, END 면 -Y lift (1.0초 부드러운 이동)
-        #     - Y lift 는 sim_control_defaults.foup_proc_y_lift (SSOT)
-        #     - 같은 prim 의 진행 중 translate 가 있으면 먼저 정지(중첩 방지)
-        lift = float(foup_proc_y_lift())
-        dy = lift if seq_u0 == "FOUP_PROCESS_START" else -lift
+        # 1-E) START/END: 현재 Y → 목표 Y 까지 1초 부드럽게 이동(이미 도달 시 생략).
         try:
-            stop_prim_translate_animation(prim_path, usd_context_name=ctx_nm)
-        except Exception:
-            pass
+            from . import port_lot_visibility as _plv_anim  # type: ignore
 
-        on_completed_cb = None
-        if seq_u0 == "FOUP_PROCESS_START":
-            def _on_lift_completed(_pp: str = prim_path) -> None:
-                # +Y 1초 애니가 끝났다 = prim 이 baseline+320 자리에 도달했다.
-                # 이후 "포트 초기화" 가 들어와도 baseline+320 으로 강제 set 되어 자리 유지.
-                try:
-                    from . import port_lot_visibility as _plv2  # type: ignore
-                    _plv2.mark_foup_lifted(_pp, True)
-                except Exception:
-                    pass
-            on_completed_cb = _on_lift_completed
-
-        try:
-            run_prim_translate_animation(
-                prim_path,
-                [{"duration": 1.0, "delta": (0.0, float(dy), 0.0)}],
-                loop=False,
-                on_completed=on_completed_cb,
-                usd_context_name=ctx_nm,
-            )
+            if seq_u0 == "FOUP_PROCESS_START":
+                _plv_anim.run_foup_smooth_y_anim(
+                    prim_path,
+                    usd_context_name=ctx_nm,
+                    toward_lifted=True,
+                    foup_proc_active_ep=port_id,
+                )
+            else:
+                _plv_anim.run_foup_smooth_y_anim(
+                    prim_path,
+                    usd_context_name=ctx_nm,
+                    toward_lifted=False,
+                )
         except Exception:
             pass
         # 1-F) FOUP 분기는 여기서 종료(매핑/JSON 파이프라인을 타지 않는다)
@@ -8956,7 +8995,7 @@ def _reset_sim_motion_before_json_run(
                 runner_obj.pause()
         except Exception:
             pass
-    active_ep = _remember_foup_active_ep(ext, scr_i, {})
+    active_ep = _resolve_foup_proc_active_ep(ext, scr_i, dict(job or {}))
     _restore_sim_prim_motion_to_initial(
         ext,
         extra_steps=extra,
@@ -8991,8 +9030,9 @@ def _restore_sim_prim_motion_to_initial(
     try:
         from . import port_lot_visibility as _plv
 
-        for p in (_plv.load_port_lot_prim_paths() or {}).values():
-            _add(str(p))
+        if not preserve_foup_offsets:
+            for p in (_plv.load_port_lot_prim_paths() or {}).values():
+                _add(str(p))
     except Exception:
         pass
 
@@ -9029,14 +9069,15 @@ def _restore_sim_prim_motion_to_initial(
 
     def _do_on_main() -> None:
         # USD write / stage 접근은 반드시 main thread 에서만 수행한다.
-        try:
-            from . import tbs_lam_rotate_animation as _lrx
-            from . import tbs_lam_translate_animation as _ltx
+        if not preserve_foup_offsets:
+            try:
+                from . import tbs_lam_rotate_animation as _lrx
+                from . import tbs_lam_translate_animation as _ltx
 
-            _ltx.stop_all_translate_animations()
-            _lrx.stop_all_rotate_animations()
-        except Exception:
-            pass
+                _ltx.stop_all_translate_animations()
+                _lrx.stop_all_rotate_animations()
+            except Exception:
+                pass
         try:
             stop_all_translate_animations(preserve_foup_port_lot_prims=bool(preserve_foup_offsets))
             stop_all_rotate_animations()
@@ -9049,10 +9090,10 @@ def _restore_sim_prim_motion_to_initial(
             if not preserve_foup_offsets:
                 _plv.clear_foup_in_progress()
                 _plv.clear_foup_lifted()
-            _plv.restore_port_lot_prims_to_authoring(
-                usd_context_name=usd_context_name,
-                foup_proc_active_ep=str(foup_proc_active_ep or ""),
-            )
+                _plv.restore_port_lot_prims_to_authoring(
+                    usd_context_name=usd_context_name,
+                    foup_proc_active_ep=str(foup_proc_active_ep or ""),
+                )
         except Exception:
             pass
         try:
@@ -9063,9 +9104,18 @@ def _restore_sim_prim_motion_to_initial(
         except Exception:
             pass
         if paths:
+            from . import port_lot_visibility as _plv_paths
             from .tbs_lam_sequence_engine import _reset_tbs_offset_ops_for_paths
 
-            _reset_tbs_offset_ops_for_paths(paths)
+            reset_paths = list(paths)
+            if preserve_foup_offsets:
+                try:
+                    port_set = set(_plv_paths._iter_unique_mapped_prim_paths())
+                    reset_paths = [p for p in reset_paths if p not in port_set]
+                except Exception:
+                    pass
+            if reset_paths:
+                _reset_tbs_offset_ops_for_paths(reset_paths)
 
         try:
             from .tbs_lam_sequence_editor import _range_start_seconds_for_instance

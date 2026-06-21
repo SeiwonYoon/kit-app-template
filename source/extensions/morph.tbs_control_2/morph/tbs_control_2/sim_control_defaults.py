@@ -29,7 +29,7 @@ class SimControlDefaults:
 
     # FOUP 공정 중 EP LOT prim Y축 이동량(스테이지 단위).
     # START 시 +값, END 시 -값, 포트 위치 복원 시 plateau = baseline + 이 값.
-    foup_proc_y_lift: float = 4.0
+    foup_proc_y_lift: float = 30.0
 
     # OHT → IN/OUT·EP 직접 투입
     oht_to_bp1_min: float = 5.0

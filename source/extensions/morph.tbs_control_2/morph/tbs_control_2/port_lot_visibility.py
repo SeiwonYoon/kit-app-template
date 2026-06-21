@@ -51,6 +51,8 @@ _FOUP_IN_PROGRESS_PATHS: Set[str] = set()
 #   START 의 +Y 1초 애니 ``on_completed`` 콜백에서 add,
 #   END 이벤트 진입 시 즉시 discard(이후 -Y 복귀 애니 진행은 _FOUP_IN_PROGRESS_PATHS 의 skip 로 보호).
 _FOUP_LIFTED_PATHS: Set[str] = set()
+# +Y 진행(+1) / -Y 진행(-1). 애니가 끊긴 뒤 restore 가 어느 쪽으로 맞출지 결정.
+_FOUP_LIFT_SIGN: Dict[str, int] = {}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FOUP material 경로 (한 곳에서만 수정하면 전체에 반영됩니다)
@@ -147,6 +149,46 @@ def _iter_unique_mapped_prim_paths() -> List[str]:
     return out
 
 
+def is_port_lot_mapped_prim(prim_path: str) -> bool:
+    """``port_lot_prim_paths.json`` 에 등록된 prim 경로인지."""
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    return p in set(_iter_unique_mapped_prim_paths())
+
+
+def should_skip_port_lot_baseline_reset(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+    foup_proc_active_ep: str = "",
+) -> bool:
+    """JSON 전환·baseline 복원 시 포트 LOT prim 을 baseline 으로 되돌리지 말아야 하면 True."""
+    p = str(prim_path or "").strip()
+    if not p or not is_port_lot_mapped_prim(p):
+        return False
+    if is_foup_port_lot_active(p, foup_proc_active_ep=foup_proc_active_ep):
+        return True
+    try:
+        from .translate_animation import is_prim_translate_animation_running
+
+        if is_prim_translate_animation_running(p, usd_context_name):
+            return True
+    except Exception:
+        pass
+    try:
+        if is_prim_at_foup_lifted_position(
+            p,
+            usd_context_name=usd_context_name,
+            foup_proc_active_ep=foup_proc_active_ep,
+        ):
+            mark_foup_lifted(p, True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def clear_port_lot_authoring_cache() -> None:
     """시뮬 리셋 등에서 다음 애니 시작 시 authoring을 다시 잡을 수 있게 캐시를 비운다.
     함께 FOUP 진행중 보호 집합도 초기화하여, 잔여 플래그로 인해 다음 시뮬에서 복원이 막히지 않게 한다.
@@ -154,6 +196,7 @@ def clear_port_lot_authoring_cache() -> None:
     _PORT_LOT_AUTHORING.clear()
     _FOUP_IN_PROGRESS_PATHS.clear()
     _FOUP_LIFTED_PATHS.clear()
+    _FOUP_LIFT_SIGN.clear()
 
 
 def mark_foup_in_progress(prim_path: str, in_progress: bool) -> None:
@@ -177,6 +220,7 @@ def clear_foup_in_progress() -> None:
     """모든 FOUP 진행중 표시를 비운다(시뮬 시작/리셋/정지 시 안전망용)."""
     _FOUP_IN_PROGRESS_PATHS.clear()
     _FOUP_LIFTED_PATHS.clear()
+    _FOUP_LIFT_SIGN.clear()
 
 
 def is_foup_in_progress(prim_path: str) -> bool:
@@ -202,6 +246,7 @@ def mark_foup_lifted(prim_path: str, lifted: bool) -> None:
 def clear_foup_lifted() -> None:
     """모든 plateau 표시를 비운다(시뮬 시작/리셋/정지 시 안전망용)."""
     _FOUP_LIFTED_PATHS.clear()
+    _FOUP_LIFT_SIGN.clear()
 
 
 def is_foup_lifted(prim_path: str) -> bool:
@@ -214,7 +259,317 @@ def foup_proc_y_lift() -> float:
     try:
         return float(SIM_CONTROL_DEFAULTS.foup_proc_y_lift)
     except Exception:
-        return 4.0
+        return 30.0
+
+
+def foup_y_position_epsilon() -> float:
+    """lift/baseline 위치 비교 허용 오차(스테이지 단위)."""
+    return max(0.05, abs(float(foup_proc_y_lift())) * 0.025)
+
+
+def _read_prim_translate(stage: Any, prim_path: str) -> Optional[Gf.Vec3f]:
+    if not stage or not prim_path:
+        return None
+    try:
+        from .sequence_engine import _get_translate
+
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return None
+        t = _get_translate(prim)
+        return Gf.Vec3f(float(t[0]), float(t[1]), float(t[2]))
+    except Exception:
+        return None
+
+
+def is_prim_at_foup_baseline_position(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+) -> bool:
+    """authoring baseline Y 와 현재 Y 가 거의 같으면 True."""
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    stage = _get_stage_for_context(usd_context_name)
+    ensure_port_lot_authoring_captured(stage)
+    rec = _PORT_LOT_AUTHORING.get(p)
+    if rec is None or stage is None:
+        return False
+    cur = _read_prim_translate(stage, p)
+    if cur is None:
+        return False
+    eps = foup_y_position_epsilon()
+    try:
+        return abs(float(cur[1]) - float(rec[0][1])) <= eps
+    except Exception:
+        return False
+
+
+def is_prim_at_foup_lifted_position(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+    foup_proc_active_ep: str = "",
+) -> bool:
+    """baseline + foup_proc_y_lift Y 와 현재 Y 가 거의 같으면 True."""
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    target = get_foup_restore_translate(p, foup_proc_active_ep=foup_proc_active_ep)
+    if target is None and (p in _FOUP_LIFTED_PATHS or is_foup_lifted(p)):
+        rec = _PORT_LOT_AUTHORING.get(p)
+        if rec is None:
+            return False
+        lift = float(foup_proc_y_lift())
+        target = Gf.Vec3f(float(rec[0][0]), float(rec[0][1]) + lift, float(rec[0][2]))
+    if target is None:
+        return False
+    stage = _get_stage_for_context(usd_context_name)
+    if stage is None:
+        return False
+    cur = _read_prim_translate(stage, p)
+    if cur is None:
+        return False
+    eps = foup_y_position_epsilon()
+    try:
+        return abs(float(cur[1]) - float(target[1])) <= eps
+    except Exception:
+        return False
+
+
+def snap_foup_prim_to_lifted(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+    foup_proc_active_ep: str = "",
+) -> bool:
+    """애니 없이 baseline + lift 위치로 즉시 스냅(공정 중 외부 초기화용)."""
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    active_ep = str(foup_proc_active_ep or "").strip().upper()
+    port_id = _port_id_for_prim_path(p)
+    if active_ep and port_id == active_ep:
+        mark_foup_lifted(p, True)
+    target = get_foup_restore_translate(p, foup_proc_active_ep=active_ep)
+    if target is None:
+        rec = _PORT_LOT_AUTHORING.get(p)
+        if rec is None:
+            stage0 = _get_stage_for_context(usd_context_name)
+            ensure_port_lot_authoring_captured(stage0)
+            rec = _PORT_LOT_AUTHORING.get(p)
+        if rec is None:
+            return False
+        lift = float(foup_proc_y_lift())
+        target = Gf.Vec3f(float(rec[0][0]), float(rec[0][1]) + lift, float(rec[0][2]))
+        mark_foup_lifted(p, True)
+    stage = _get_stage_for_context(usd_context_name)
+    ensure_port_lot_authoring_captured(stage)
+    if not stage:
+        return False
+    try:
+        from .sequence_engine import _set_rotate_xyz, _set_translate
+
+        stop_prim_translate_animation_all_contexts(p)
+        stop_prim_rotate_animation(p)
+        prim = stage.GetPrimAtPath(p)
+        if not prim or not prim.IsValid():
+            return False
+        base_r = _PORT_LOT_AUTHORING.get(p, (target, Gf.Vec3f(0, 0, 0)))[1]
+        _set_translate(prim, target)
+        _set_rotate_xyz(prim, base_r)
+        mark_foup_lifted(p, True)
+        return True
+    except Exception:
+        return False
+
+
+def snap_foup_prim_to_baseline(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+) -> bool:
+    """애니 없이 authoring baseline 으로 즉시 스냅."""
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    stage = _get_stage_for_context(usd_context_name)
+    ensure_port_lot_authoring_captured(stage)
+    rec = _PORT_LOT_AUTHORING.get(p)
+    if not stage or rec is None:
+        return False
+    try:
+        from .sequence_engine import _set_rotate_xyz, _set_translate
+
+        stop_prim_translate_animation_all_contexts(p)
+        stop_prim_rotate_animation(p)
+        prim = stage.GetPrimAtPath(p)
+        if not prim or not prim.IsValid():
+            return False
+        t, r = rec
+        _set_translate(prim, t)
+        _set_rotate_xyz(prim, r)
+        mark_foup_lifted(p, False)
+        return True
+    except Exception:
+        return False
+
+
+def set_foup_lift_sign(prim_path: str, sign: int) -> None:
+    p = str(prim_path or "").strip()
+    if not p:
+        return
+    s = int(sign)
+    if s > 0:
+        _FOUP_LIFT_SIGN[p] = 1
+    elif s < 0:
+        _FOUP_LIFT_SIGN[p] = -1
+    else:
+        _FOUP_LIFT_SIGN.pop(p, None)
+
+
+def get_foup_lift_sign(prim_path: str) -> int:
+    return int(_FOUP_LIFT_SIGN.get(str(prim_path or "").strip(), 0) or 0)
+
+
+def is_foup_port_lot_active(
+    prim_path: str,
+    *,
+    foup_proc_active_ep: str = "",
+) -> bool:
+    """공정 중(plateau·±Y·active EP)인 FOUP prim 인지."""
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    if p in _FOUP_IN_PROGRESS_PATHS or p in _FOUP_LIFTED_PATHS:
+        return True
+    active_ep = str(foup_proc_active_ep or "").strip().upper()
+    if active_ep and _port_id_for_prim_path(p) == active_ep:
+        return True
+    return False
+
+
+def foup_authoring_baseline_translate(prim_path: str) -> Optional[Gf.Vec3f]:
+    p = str(prim_path or "").strip()
+    if not p:
+        return None
+    rec = _PORT_LOT_AUTHORING.get(p)
+    if rec is None:
+        return None
+    try:
+        t = rec[0]
+        return Gf.Vec3f(float(t[0]), float(t[1]), float(t[2]))
+    except Exception:
+        return None
+
+
+def foup_lifted_target_translate(prim_path: str) -> Optional[Gf.Vec3f]:
+    base = foup_authoring_baseline_translate(prim_path)
+    if base is None:
+        return None
+    lift = float(foup_proc_y_lift())
+    return Gf.Vec3f(float(base[0]), float(base[1]) + lift, float(base[2]))
+
+
+def run_foup_smooth_y_anim(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+    toward_lifted: bool,
+    duration: float = 1.0,
+    on_completed: Any = None,
+    foup_proc_active_ep: str = "",
+) -> bool:
+    """현재 Y → baseline(+lift) 목표까지 1초(기본) 부드럽게 이동. 이미 도달 시 애니 생략."""
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    try:
+        from .translate_animation import (
+            is_prim_translate_animation_running,
+            run_prim_translate_animation,
+        )
+    except Exception:
+        return False
+    if is_prim_translate_animation_running(p, usd_context_name):
+        return False
+    stage = _get_stage_for_context(usd_context_name)
+    ensure_port_lot_authoring_captured(stage)
+    if not stage:
+        return False
+    base = foup_authoring_baseline_translate(p)
+    if base is None:
+        try:
+            prim0 = stage.GetPrimAtPath(p)
+            if prim0 and prim0.IsValid():
+                from .sequence_engine import _get_rotate_xyz, _get_translate
+
+                _PORT_LOT_AUTHORING[p] = (_get_translate(prim0), _get_rotate_xyz(prim0))
+                base = foup_authoring_baseline_translate(p)
+        except Exception:
+            base = None
+    if base is None:
+        return False
+    lift = float(foup_proc_y_lift())
+    target = (
+        Gf.Vec3f(float(base[0]), float(base[1]) + lift, float(base[2]))
+        if toward_lifted
+        else Gf.Vec3f(float(base[0]), float(base[1]), float(base[2]))
+    )
+    cur = _read_prim_translate(stage, p)
+    if cur is None:
+        return False
+    eps = foup_y_position_epsilon()
+    dy = float(target[1]) - float(cur[1])
+    if abs(dy) <= eps:
+        if toward_lifted:
+            mark_foup_lifted(p, True)
+            set_foup_lift_sign(p, 0)
+        else:
+            mark_foup_lifted(p, False)
+            set_foup_lift_sign(p, 0)
+        if callable(on_completed):
+            try:
+                on_completed()
+            except Exception:
+                pass
+        return False
+    if toward_lifted:
+        mark_foup_in_progress(p, True)
+        set_foup_lift_sign(p, 1)
+        active_ep = str(foup_proc_active_ep or "").strip().upper()
+        if active_ep and _port_id_for_prim_path(p) == active_ep:
+            mark_foup_lifted(p, True)
+    else:
+        mark_foup_lifted(p, False)
+        set_foup_lift_sign(p, -1)
+
+    def _done() -> None:
+        if toward_lifted:
+            mark_foup_lifted(p, True)
+        set_foup_lift_sign(p, 0)
+        if callable(on_completed):
+            try:
+                on_completed()
+            except Exception:
+                pass
+
+    try:
+        stop_prim_translate_animation_all_contexts(p)
+    except Exception:
+        pass
+    try:
+        run_prim_translate_animation(
+            p,
+            [{"duration": max(0.05, float(duration)), "delta": (0.0, dy, 0.0)}],
+            loop=False,
+            on_completed=_done,
+            usd_context_name=usd_context_name,
+        )
+        return True
+    except Exception:
+        return False
 
 
 def prim_path_for_port(port_id: str) -> str:
@@ -249,11 +604,26 @@ def get_foup_restore_translate(
     p = str(prim_path or "").strip()
     if not p:
         return None
-    if p in _FOUP_IN_PROGRESS_PATHS and p not in _FOUP_LIFTED_PATHS:
-        return None
     active_ep = str(foup_proc_active_ep or "").strip().upper()
     port_id = _port_id_for_prim_path(p)
-    should_offset = p in _FOUP_LIFTED_PATHS
+    should_offset = False
+    if p in _FOUP_IN_PROGRESS_PATHS and p not in _FOUP_LIFTED_PATHS:
+        try:
+            from .translate_animation import is_prim_translate_animation_running
+
+            if is_prim_translate_animation_running(p):
+                return None
+        except Exception:
+            pass
+        sign = get_foup_lift_sign(p)
+        if sign > 0 or (active_ep and port_id == active_ep):
+            should_offset = True
+        elif sign < 0:
+            return None
+        else:
+            return None
+    if not should_offset:
+        should_offset = p in _FOUP_LIFTED_PATHS
     if not should_offset and active_ep and port_id == active_ep:
         should_offset = True
         mark_foup_lifted(p, True)
@@ -340,6 +710,28 @@ def restore_port_lot_prims_to_authoring(
         lifted_t = get_foup_restore_translate(path, foup_proc_active_ep=active_ep)
         if lifted_t is not None:
             try:
+                prim = stage.GetPrimAtPath(path)
+                if not prim or not prim.IsValid():
+                    continue
+                cur = _read_prim_translate(stage, path)
+                if cur is not None:
+                    eps = foup_y_position_epsilon()
+                    if (
+                        abs(float(cur[0]) - float(lifted_t[0])) <= eps
+                        and abs(float(cur[1]) - float(lifted_t[1])) <= eps
+                        and abs(float(cur[2]) - float(lifted_t[2])) <= eps
+                    ):
+                        continue
+                try:
+                    from .translate_animation import is_prim_translate_animation_running
+
+                    if is_prim_translate_animation_running(path):
+                        continue
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
                 stop_prim_translate_animation_all_contexts(path)
                 stop_prim_rotate_animation(path)
             except Exception:
@@ -355,7 +747,39 @@ def restore_port_lot_prims_to_authoring(
                 continue
             continue
         if path in _FOUP_IN_PROGRESS_PATHS:
-            # +Y / -Y 애니가 도중인 prim 은 진행을 끊지 않는다(중간 위치 점프 방지).
+            try:
+                from .translate_animation import is_prim_translate_animation_running
+
+                if is_prim_translate_animation_running(path):
+                    continue
+            except Exception:
+                pass
+            sign = get_foup_lift_sign(path)
+            if sign > 0 or (active_ep and _port_id_for_prim_path(path) == active_ep):
+                tgt = foup_lifted_target_translate(path)
+                if tgt is not None:
+                    try:
+                        prim = stage.GetPrimAtPath(path)
+                        if prim and prim.IsValid():
+                            _set_translate(prim, tgt)
+                            mark_foup_lifted(path, True)
+                    except Exception:
+                        pass
+            elif sign < 0:
+                base = foup_authoring_baseline_translate(path)
+                if base is not None:
+                    try:
+                        prim = stage.GetPrimAtPath(path)
+                        if prim and prim.IsValid():
+                            _set_translate(prim, base)
+                    except Exception:
+                        pass
+            continue
+        if should_skip_port_lot_baseline_reset(
+            path,
+            usd_context_name=usd_context_name,
+            foup_proc_active_ep=active_ep,
+        ):
             continue
         try:
             stop_prim_translate_animation_all_contexts(path)
