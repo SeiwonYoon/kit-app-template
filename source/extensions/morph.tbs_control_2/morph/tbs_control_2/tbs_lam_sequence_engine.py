@@ -67,10 +67,17 @@ from . import tbs_lam_rotate_animation as _lrx_preload  # type: ignore  # noqa: 
 
 _PRINT_PREFIX = "[TBS/SEQ]"
 _runner_quiet_log: bool = False
+_quiet_tls = threading.local()
+
+
+def _is_quiet_log() -> bool:
+    if bool(getattr(_quiet_tls, "quiet", False)):
+        return True
+    return bool(_runner_quiet_log)
 
 
 def _seq_log(msg: str = "", **kwargs: Any) -> None:
-    if _runner_quiet_log:
+    if _is_quiet_log():
         return
     if msg:
         print(msg, **kwargs)
@@ -199,72 +206,27 @@ def _pop_lam_stage_context(prev: Optional[str]) -> None:
 # `_apply_start_snapshot`) 을 main thread 의 다음 update tick 으로 dispatch 한다.
 # background thread 는 dispatch 만 하고 step duration 만큼 sleep → 다음 step 진행.
 def _dispatch_main(fn: Callable[[], None]) -> None:
-    """fn 을 다음 main update tick 에서 실행(fire-and-forget). background thread 안전.
-
-    `create_subscription_to_pop` 자체는 thread-safe(주로 lock-free 또는 짧은 mutex 만)
-    하다고 가정. 실제 fn() 은 main thread 의 update 콜백 안에서 실행되므로 USD write 가
-    stage write lock 과 충돌하지 않는다.
-    """
-    from .tbs_usd_stage_context import (
-        get_current_usd_context_name,
-        pop_usd_context_name,
-        push_usd_context_name,
-    )
-
-    captured_ctx = get_current_usd_context_name()
-    box: Dict[str, Any] = {"sub": None}
-
-    def _do(_e=None) -> None:
-        prev = push_usd_context_name(captured_ctx)
-        try:
-            fn()
-        except Exception as exc:
-            _seq_log(f"{_PRINT_PREFIX} dispatch_main fn failed: {exc}", flush=True)
-        finally:
-            pop_usd_context_name(prev)
-            try:
-                if box["sub"] is not None:
-                    box["sub"].unsubscribe()
-            except Exception:
-                pass
-            box["sub"] = None
-
+    """main-thread FIFO dispatch (``tbs_main_dispatch``)."""
     try:
-        import omni.kit.app as _kapp  # cache hit (lam_translate_animation 가 모듈 최상단에서 이미 로드).
-        box["sub"] = _kapp.get_app().get_update_event_stream().create_subscription_to_pop(
-            _do, name="morph.tbs_control_2.sequence_engine.dispatch_main"
-        )
+        from .tbs_main_dispatch import dispatch_main as _fifo_dispatch_main
+
+        _fifo_dispatch_main(fn)
     except Exception as exc:
-        # fallback — Kit 가 없는 환경/테스트. 그냥 직접 호출 (이 환경에선 deadlock 도 없을 것).
-        _seq_log(f"{_PRINT_PREFIX} dispatch_main fallback (direct call): {exc}", flush=True)
-        _do(None)
+        _seq_log(f"{_PRINT_PREFIX} dispatch_main failed: {exc}", flush=True)
 
 
 def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> bool:
-    """다음 main update 프레임에서 `fn()` 실행이 완료될 때까지 대기.
+    """FIFO main dispatch — 완료까지 대기."""
+    try:
+        from .tbs_main_dispatch import dispatch_main_wait as _fifo_dispatch_main_wait
 
-    Run(reset) 시 TBS_OFFSET 초기화처럼 background thread 에서 반드시 main-thread USD write
-    완료 후 다음 로직으로 진행해야 할 때 사용한다.
-    """
-    done = threading.Event()
-    err: List[Optional[BaseException]] = [None]
-
-    def wrapped() -> None:
-        try:
-            fn()
-        except BaseException as e:
-            err[0] = e
-        finally:
-            done.set()
-
-    _dispatch_main(wrapped)
-    ok = done.wait(timeout=float(timeout))
-    if not ok:
-        _seq_log(f"{_PRINT_PREFIX} _dispatch_main_wait TIMEOUT after {timeout}s", flush=True)
+        ok = _fifo_dispatch_main_wait(fn, timeout=float(timeout))
+        if not ok:
+            _seq_log(f"{_PRINT_PREFIX} _dispatch_main_wait TIMEOUT after {timeout}s", flush=True)
+        return ok
+    except Exception as exc:
+        _seq_log(f"{_PRINT_PREFIX} _dispatch_main_wait failed: {exc}", flush=True)
         return False
-    if err[0] is not None:
-        raise err[0]
-    return True
 
 
 def _collect_prim_paths_for_reset(steps: List[dict]) -> List[str]:
@@ -415,10 +377,21 @@ def _wrap_to_180(deg: float) -> float:
     return d
 
 
-def _reset_tbs_offset_ops_for_paths(paths: List[str]) -> None:
+def _reset_tbs_offset_ops_for_paths(
+    paths: List[str],
+    *,
+    usd_context_name: Optional[str] = None,
+) -> None:
     """애니메이션 중지 후 `TBS_OFFSET` Translate/Rotate 를 0 으로."""
     from . import tbs_lam_translate_animation as _ltx
     from . import tbs_lam_rotate_animation as _lrx
+    from .tbs_usd_stage_context import get_current_usd_context_name
+
+    ctx = (
+        str(usd_context_name).strip()
+        if usd_context_name is not None and str(usd_context_name).strip()
+        else get_current_usd_context_name()
+    )
 
     try:
         _lrx.stop_world_pivot_rotate_animation()
@@ -426,8 +399,8 @@ def _reset_tbs_offset_ops_for_paths(paths: List[str]) -> None:
         pass
     for p in paths:
         try:
-            _ltx.stop_prim_translate_animation(p)
-            _lrx.stop_prim_rotate_animation(p)
+            _ltx.stop_prim_translate_animation(p, ctx)
+            _lrx.stop_prim_rotate_animation(p, ctx)
         except Exception:
             pass
         try:
@@ -514,11 +487,15 @@ class TbsLamSequenceRunner:
         self._stop_flag.set()
         if cancel_all_move_rotate:
             try:
-                from . import tbs_lam_translate_animation as _ltx
                 from . import tbs_lam_rotate_animation as _lrx
+                from . import tbs_lam_translate_animation as _ltx
 
-                _ltx.stop_all_translate_animations()
-                _lrx.stop_all_rotate_animations()
+                if self._usd_context_name:
+                    _ltx.stop_translate_animations_for_context(self._usd_context_name)
+                    _lrx.stop_rotate_animations_for_context(self._usd_context_name)
+                else:
+                    _ltx.stop_all_translate_animations()
+                    _lrx.stop_all_rotate_animations()
             except Exception:
                 pass
         try:
@@ -536,9 +513,8 @@ class TbsLamSequenceRunner:
         quiet: bool = False,
     ) -> None:
         """동기 차단형 시퀀스 실행. background thread 에서 호출 권장."""
-        global _runner_quiet_log
-        prev_quiet = _runner_quiet_log
-        _runner_quiet_log = _runner_quiet_log or bool(quiet)
+        prev_tls_quiet = bool(getattr(_quiet_tls, "quiet", False))
+        _quiet_tls.quiet = prev_tls_quiet or bool(quiet)
         prev_ctx = _push_lam_stage_context(self._usd_context_name)
         try:
             self._stop_flag.clear()
@@ -552,6 +528,19 @@ class TbsLamSequenceRunner:
                 return
 
             sp = float(max(0.01, speed_scale or 1.0))
+
+            try:
+                from . import sim_multi_diag as _mdiag
+
+                _mdiag.log_lam_run(
+                    getattr(self, "_diag_ext", None),
+                    phase="BEGIN",
+                    ctx=self._usd_context_name,
+                    steps=len(steps),
+                    speed=sp,
+                )
+            except Exception:
+                pass
 
             if reset_each_start:
                 rpaths = _collect_prim_paths_for_reset(steps)
@@ -587,6 +576,17 @@ class TbsLamSequenceRunner:
             while a < len(steps):
                 if self._stop_flag.is_set():
                     _seq_log(f"{_PRINT_PREFIX} stop requested at step[{a}]", flush=True)
+                    try:
+                        from . import sim_multi_diag as _mdiag
+
+                        _mdiag.log_lam_stop_step(
+                            getattr(self, "_diag_ext", None),
+                            ctx=self._usd_context_name,
+                            step_idx=int(a),
+                            reason="stop_flag",
+                        )
+                    except Exception:
+                        pass
                     break
                 sp = _playback_speed_scale(sp)
                 b = _group_end_index(steps, a)
@@ -605,6 +605,65 @@ class TbsLamSequenceRunner:
             except Exception:
                 pass
 
+            # JSON 전체 종료 직전 — 그룹별 wait 가 BG/main 레이스로 빠졌을 수 있는
+            # TIMESAMPLES replay·legacy FOUP translate 잔류를 한 번 더 drain 한다.
+            if steps and not self._stop_flag.is_set():
+                drain_sec = 30.0
+                try:
+                    sp_final = _playback_speed_scale(float(max(0.01, speed_scale or 1.0)))
+                    last = max(0, len(steps) - 1)
+                    all_tx, all_rot, all_replay = self._collect_motion_targets_from_steps(
+                        steps, 0, last
+                    )
+                    extra = self._estimate_group_motion_extra_timeout(steps, 0, last, sp_final)
+                    drain_sec = max(15.0, float(extra))
+                    self._wait_for_motion_complete(
+                        all_tx,
+                        all_rot,
+                        all_replay,
+                        max_extra_sec=extra,
+                    )
+                except Exception:
+                    pass
+                try:
+                    from .sim_channel_scope import drain_channel_motion_complete
+
+                    drain_channel_motion_complete(
+                        self._usd_context_name,
+                        self._registry,
+                        max_sec=drain_sec,
+                        stable_ticks=4,
+                    )
+                except Exception:
+                    pass
+
+            try:
+                from . import sim_multi_diag as _mdiag
+
+                _mdiag.log_lam_run(
+                    getattr(self, "_diag_ext", None),
+                    phase="END",
+                    ctx=self._usd_context_name,
+                    steps=len(steps),
+                    speed=float(max(0.01, speed_scale or 1.0)),
+                    detail=f"stopped={self._stop_flag.is_set()}",
+                )
+                try:
+                    from .sim_channel_scope import probe_channel_motion_busy_on_main
+
+                    if probe_channel_motion_busy_on_main(
+                        self._usd_context_name, self._registry
+                    ):
+                        _seq_log(
+                            f"{_PRINT_PREFIX} LAM_END WARN motion still busy "
+                            f"ctx={self._usd_context_name!r}",
+                            flush=True,
+                        )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
             if on_complete:
                 try:
                     on_complete()
@@ -612,7 +671,7 @@ class TbsLamSequenceRunner:
                     pass
         finally:
             _pop_lam_stage_context(prev_ctx)
-            _runner_quiet_log = prev_quiet
+            _quiet_tls.quiet = prev_tls_quiet
 
     # ------------------------------------------------------------------ group
 
@@ -784,25 +843,30 @@ class TbsLamSequenceRunner:
         *,
         max_extra_sec: float,
     ) -> None:
-        """추정 duration 대기 후에도 anim/replay 가 살아 있으면 완료까지 폴링."""
+        """추정 duration 대기 후에도 anim/replay 가 살아 있으면 완료까지 폴링.
+
+        inst.state·애니 dict 는 main thread 에서만 갱신되므로, idle 판정은 main 에서 수행한다.
+        """
         if not translate_paths and not rotate_paths and not replay_prims:
+            try:
+                from .sim_channel_scope import wait_channel_motion_idle
+
+                if wait_channel_motion_idle(
+                    self._usd_context_name,
+                    self._registry,
+                    max_sec=max(0.5, float(max_extra_sec)),
+                    stop_flag=self._stop_flag,
+                ):
+                    return
+            except Exception:
+                pass
             return
 
         deadline = time.monotonic() + max(0.5, float(max_extra_sec))
         poll = 0.033
-
-        def _any_busy() -> bool:
-            for p in translate_paths:
-                if _ltx_preload.is_prim_translate_animation_running(p):
-                    return True
-            for p in rotate_paths:
-                if _lrx_preload.is_prim_rotate_animation_running(p):
-                    return True
-            for rp in replay_prims:
-                inst = self._registry.get_by_prim_path(rp)
-                if inst is not None and str(inst.state) == "playing":
-                    return True
-            return False
+        ctx_nm = self._usd_context_name
+        timeout_extensions = 0
+        max_timeout_extensions = 4
 
         while not self._stop_flag.is_set():
             try:
@@ -811,17 +875,71 @@ class TbsLamSequenceRunner:
                 sync_csv_play_live_speed_from_ui()
             except Exception:
                 pass
-            if not _any_busy():
+
+            busy = True
+            try:
+                from .sim_channel_scope import probe_channel_motion_busy_on_main
+
+                busy = probe_channel_motion_busy_on_main(
+                    ctx_nm,
+                    self._registry,
+                    translate_paths=translate_paths,
+                    rotate_paths=rotate_paths,
+                    replay_prims=replay_prims,
+                    check_all_channel=True,
+                )
+            except Exception:
+                busy = self._any_motion_busy_fallback(
+                    translate_paths, rotate_paths, replay_prims
+                )
+
+            if not busy:
                 return
             if time.monotonic() >= deadline:
+                if busy and timeout_extensions < max_timeout_extensions:
+                    timeout_extensions += 1
+                    deadline = time.monotonic() + max(0.5, float(max_extra_sec))
+                    continue
                 _seq_log(
                     f"{_PRINT_PREFIX} motion complete wait timeout "
                     f"(tx={len(translate_paths)} rot={len(rotate_paths)} "
                     f"replay={len(replay_prims)})",
                     flush=True,
                 )
+                try:
+                    from . import sim_multi_diag as _mdiag
+
+                    _mdiag.log_lam_motion_timeout(
+                        getattr(self, "_diag_ext", None),
+                        ctx=self._usd_context_name,
+                        tx=len(translate_paths),
+                        rot=len(rotate_paths),
+                        replay=len(replay_prims),
+                    )
+                except Exception:
+                    pass
                 return
             self._sleep(poll, allow_stop=True)
+
+    def _any_motion_busy_fallback(
+        self,
+        translate_paths: List[str],
+        rotate_paths: List[str],
+        replay_prims: List[str],
+    ) -> bool:
+        """wait_channel_motion_idle 실패 시 BG thread 폴백(정확도 낮음)."""
+        ctx_nm = self._usd_context_name
+        for p in translate_paths:
+            if _ltx_preload.is_prim_translate_animation_running(p, ctx_nm):
+                return True
+        for p in rotate_paths:
+            if _lrx_preload.is_prim_rotate_animation_running(p, ctx_nm):
+                return True
+        for rp in replay_prims:
+            inst = self._registry.get_by_prim_path(rp)
+            if inst is not None and str(inst.state) == "playing":
+                return True
+        return False
 
     # ------------------------------------------------------------------ step
 
@@ -1232,9 +1350,10 @@ class TbsLamSequenceRunner:
 
         # USD write 는 반드시 main thread 에서 (lam_sequence_engine 상단 _dispatch_main 주석 참조).
         def _do_in_main() -> None:
+            ctx_nm = self._usd_context_name
             for p in paths:
                 try:
-                    _ltx.stop_prim_translate_animation(p)
+                    _ltx.stop_prim_translate_animation(p, ctx_nm)
                     if from_initial:
                         cur = _ltx.read_tbs_offset_translate_xyz(p)
                         ddx = float(dx) - float(cur[0])
@@ -1284,12 +1403,18 @@ class TbsLamSequenceRunner:
                     _seq_log(f"{_PRINT_PREFIX} (main) MOVE failed prim={p}: {exc}", flush=True)
 
         _seq_log(f"{_PRINT_PREFIX} _start_move idx={idx} dispatching to main thread", flush=True)
-        _dispatch_main(_do_in_main)
-        _seq_log(
-            f"{_PRINT_PREFIX} step[{idx}] MOVE dispatched prim={paths} "
-            f"from_initial={from_initial} dur={duration}",
-            flush=True,
-        )
+        dispatch_timeout = max(30.0, float(duration) * 3.0 + 10.0)
+        if not _dispatch_main_wait(_do_in_main, timeout=dispatch_timeout):
+            _seq_log(
+                f"{_PRINT_PREFIX} step[{idx}] MOVE dispatch TIMEOUT after {dispatch_timeout:.1f}s",
+                flush=True,
+            )
+        else:
+            _seq_log(
+                f"{_PRINT_PREFIX} step[{idx}] MOVE started prim={paths} "
+                f"from_initial={from_initial} dur={duration}",
+                flush=True,
+            )
         return duration
 
     # --------------------------------------------------------------- ROTATE
@@ -1325,12 +1450,13 @@ class TbsLamSequenceRunner:
                 return 0.0
 
         def _do_in_main() -> None:
+            ctx_nm = self._usd_context_name
             try:
                 # 1) 충돌 방지: 진행 중인 translate / rotate 모두 stop.
                 for p in paths:
                     try:
-                        _ltx.stop_prim_translate_animation(p)
-                        _lrx.stop_prim_rotate_animation(p)
+                        _ltx.stop_prim_translate_animation(p, ctx_nm)
+                        _lrx.stop_prim_rotate_animation(p, ctx_nm)
                     except Exception:
                         pass
 
@@ -1397,7 +1523,12 @@ class TbsLamSequenceRunner:
             f"prim={paths} r=({rx},{ry},{rz}) from_initial={from_initial} dur={duration}",
             flush=True,
         )
-        _dispatch_main(_do_in_main)
+        dispatch_timeout = max(30.0, float(duration) * 3.0 + 10.0)
+        if not _dispatch_main_wait(_do_in_main, timeout=dispatch_timeout):
+            _seq_log(
+                f"{_PRINT_PREFIX} step[{idx}] ROTATE dispatch TIMEOUT after {dispatch_timeout:.1f}s",
+                flush=True,
+            )
         return duration
 
     # -------------------------------------------------------- SET_PRIM_VISIBILITY

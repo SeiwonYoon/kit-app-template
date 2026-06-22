@@ -165,6 +165,13 @@ def _use_split_composed_export(ext: Any = None) -> bool:
     스냅샷이 있을 때만 True (``copy_async`` 만으로 빠르게 복제).
     """
     try:
+        from .tbs_split_composed_loader import split_dual_usd_paths_enabled
+
+        if split_dual_usd_paths_enabled(ext):
+            return False
+    except Exception:
+        pass
+    try:
         v = str(os.environ.get("TBS_MULTI_SPLIT_COMPOSED_EXPORT", "") or "").strip().lower()
     except Exception:
         v = ""
@@ -1169,8 +1176,18 @@ async def _open_aux_stage_with_unique_session(
     4) session layer 는 복제 파일 open 시 생략(가속).
     """
     root_path: Optional[str] = None
-    if _is_preopened_aux_stage_path(usd_path):
-        root_path = str(usd_path)
+    p_in = str(usd_path or "").strip()
+    if _is_preopened_aux_stage_path(p_in, ext, ti):
+        try:
+            from .tbs_data_paths import resolve_local_data_path
+            from .tbs_split_composed_loader import aux_usd_path_is_direct_open, resolve_split_aux_usd_path
+
+            if aux_usd_path_is_direct_open(p_in, ext, ti):
+                root_path = str(resolve_split_aux_usd_path(ext, ti) or resolve_local_data_path(p_in) or p_in)
+            else:
+                root_path = p_in
+        except Exception:
+            root_path = p_in
     elif not skip_file_clone and _use_aux_file_clone():
         clone_path, cerr = await _clone_usd_for_aux_tile(usd_path, ext, token, ti)
         if clone_path:
@@ -1193,7 +1210,7 @@ async def _open_aux_stage_with_unique_session(
             return False, werr
         root_path = wrap_path
 
-    composed_open = _is_split_aux_stage_file(str(root_path or usd_path))
+    composed_open = _is_split_aux_stage_file(str(root_path or usd_path), ext, ti)
     sess_path: Optional[str] = None
     if _use_multi_split_session_layer() and not composed_open:
         sess_path = os.path.normpath(
@@ -1353,13 +1370,25 @@ def _is_tbs_clone_aux_path(path: str) -> bool:
     return base.startswith("morph_tbs_clone_aux_")
 
 
-def _is_preopened_aux_stage_path(path: str) -> bool:
+def _is_preopened_aux_stage_path(path: str, ext: Any = None, ti: int = 0) -> bool:
     """이미 타일별로 복제·Export 된 경로 — 재복제·래퍼(subLayer 공유) 없이 바로 연다."""
-    return _is_tbs_composed_snapshot_path(path) or _is_tbs_clone_aux_path(path)
+    if _is_tbs_composed_snapshot_path(path) or _is_tbs_clone_aux_path(path):
+        return True
+    if ext is not None:
+        try:
+            from .tbs_split_composed_loader import aux_usd_path_is_direct_open
+
+            if aux_usd_path_is_direct_open(path, ext, ti):
+                return True
+        except Exception:
+            pass
+    return False
 
 
-def _is_split_aux_stage_file(path: str) -> bool:
-    """분할 보조 타일용 임시 stage (Flatten 스냅샷·타일 clone). session layer 생략으로 open 가속."""
+def _is_split_aux_stage_file(path: str, ext: Any = None, ti: int = 0) -> bool:
+    """분할 보조 타일용 stage — session layer 생략으로 open 가속."""
+    if _is_preopened_aux_stage_path(path, ext, ti):
+        return True
     try:
         base = os.path.basename(str(path or ""))
     except Exception:
@@ -2986,11 +3015,19 @@ async def _refresh_aux_split_stages_async(ext: Any, n: int, token: int, usd_path
         return
 
     try:
-        print(f"[TBS multi-sim] 분할 빠른 갱신: clone+reopen+hydrate (n={sn})", flush=True)
+        print(f"[TBS multi-sim] 분할 빠른 갱신: reopen+hydrate (n={sn})", flush=True)
     except Exception:
         pass
 
-    use_composed = _use_split_composed_export(ext)
+    try:
+        from .tbs_split_composed_loader import resolve_split_aux_usd_path, split_dual_usd_paths_enabled
+
+        dual_path = split_dual_usd_paths_enabled(ext)
+    except Exception:
+        dual_path = False
+        resolve_split_aux_usd_path = None  # type: ignore
+
+    use_composed = False if dual_path else _use_split_composed_export(ext)
     composed_shared: Optional[str] = None
     if use_composed:
         try:
@@ -3087,6 +3124,21 @@ async def _resolve_aux_tile_usd_path(
     타일별 **독립 USD 파일** 경로를 만든다. 실패 시 (None, False, err).
     composed_shared 를 타일 간·Hydra 간 공유하지 않는다(clone 필수).
     """
+    try:
+        from .tbs_split_composed_loader import resolve_split_aux_usd_path
+
+        aux_pre = resolve_split_aux_usd_path(ext, ti)
+        if aux_pre:
+            try:
+                print(
+                    f"[TBS multi-sim] 보조 타일 {ti}: dual-path USD (복제 생략) path={aux_pre}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            return aux_pre, False, ""
+    except Exception:
+        pass
     if use_composed and composed_shared:
         tile_copy, cerr = await _clone_usd_for_aux_tile(composed_shared, ext, token, ti)
         if not tile_copy:
@@ -3687,7 +3739,12 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str, 
                 pass
 
     try:
-        mode = "composed-clone" if use_composed else "master-clone+hydrate"
+        from .tbs_split_composed_loader import split_dual_usd_paths_enabled
+
+        if split_dual_usd_paths_enabled(ext):
+            mode = "dual-path+hydrate"
+        else:
+            mode = "composed-clone" if use_composed else "master-clone+hydrate"
         print(f"[TBS multi-sim] 분할 빌드: {mode} (n={n})", flush=True)
     except Exception:
         pass

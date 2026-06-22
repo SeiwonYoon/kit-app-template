@@ -32,6 +32,59 @@ class SplitScreenRuntime:
     scheduler: PlaybackScheduler
 
 
+def resolve_split_aux_usd_path(ext: Any, tile_index: int = 0) -> Optional[str]:
+    """보조 분할 타일용 사전 준비 Master USD 경로. 없으면 None(기존 복제 방식)."""
+    _ = ext  # 향후 타일별 경로 확장용
+    _ = tile_index
+    try:
+        from . import tbs_usd_window as _tuw
+
+        raw = str(getattr(_tuw, "default_aux_load_usd_path", "") or "").strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        return None
+    resolved = resolve_local_data_path(raw)
+    if not resolved:
+        try:
+            print(
+                f"{_PRINT_PREFIX} default_aux_load_usd_path 파일 없음: {raw!r} "
+                f"(data/ 기준 또는 절대 경로 확인)",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return None
+    return str(resolved).strip() or None
+
+
+def aux_usd_path_is_direct_open(path: str, ext: Any, tile_index: int = 0) -> bool:
+    """런타임 복제·래퍼 없이 보조 타일에서 바로 open 가능한 USD 경로."""
+    p = str(path or "").strip()
+    if not p:
+        return False
+    aux = resolve_split_aux_usd_path(ext, tile_index)
+    if not aux:
+        return False
+    try:
+        a = os.path.normcase(os.path.normpath(aux))
+        b = os.path.normcase(os.path.normpath(p))
+        if a == b:
+            return True
+        alt = resolve_local_data_path(p)
+        if alt and os.path.normcase(os.path.normpath(alt)) == a:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def split_dual_usd_paths_enabled(ext: Any = None) -> bool:
+    """화면1·화면2 각각 다른 Master 파일 경로를 쓰는 모드."""
+    _ = ext
+    return resolve_split_aux_usd_path(ext, 0) is not None
+
+
 def resolve_split_master_usd_path(ext: Any) -> Optional[str]:
     """분할 복제·래퍼에 쓸 Master USD 경로(절대/URL 우선)."""
     raw = ""
@@ -530,6 +583,44 @@ def _install_registry_copy(aux_registry: AnimationInstanceRegistry, main_instanc
                 aux_registry._by_prim[pp] = deepcopy(inst)
 
 
+def _sync_aux_registry_metadata_from_main(
+    main_registry: AnimationInstanceRegistry,
+    aux_registry: AnimationInstanceRegistry,
+) -> int:
+    """듀얼 USD 경로: 보조 화면 Discover 후 화면1과 동일한 ``source_asset``·시간 메타를 맞춘다."""
+    touched = 0
+    for aux_inst in aux_registry.all_instances():
+        pp = str(getattr(aux_inst, "prim_path", "") or "").strip()
+        if not pp:
+            continue
+        main_inst = main_registry.get_by_prim_path(pp)
+        if main_inst is None:
+            continue
+        for attr in (
+            "source_asset",
+            "mirror_root_prim_path",
+            "asset_start_time",
+            "asset_end_time",
+            "asset_tps",
+            "asset_kind",
+            "instance_id",
+            "baked",
+        ):
+            try:
+                val = getattr(main_inst, attr, None)
+            except Exception:
+                continue
+            if val is None or val == "" or val == 0:
+                continue
+            try:
+                if getattr(aux_inst, attr, None) != val:
+                    setattr(aux_inst, attr, val)
+                    touched += 1
+            except Exception:
+                pass
+    return touched
+
+
 def _replicate_inst_sublayer(main_master: MasterStage, aux_master: MasterStage, prim_path: str) -> bool:
     src = main_master.get_inst_sublayer(prim_path)
     if src is None:
@@ -749,6 +840,8 @@ def hydrate_split_screen_composed_stage(
         si = 2
 
     register_main_composed_runtime(ext)
+    independent_aux = split_dual_usd_paths_enabled(ext)
+    # 듀얼 경로에서도 화면1 registry·baked 런타임을 메타/attach 동기화에 사용한다.
     main_rt = get_split_runtime_for_screen(ext, 1)
 
     master = MasterStage(context_name=cn)
@@ -781,7 +874,51 @@ def hydrate_split_screen_composed_stage(
     extracted = 0
     sublayers = 0
 
-    if main_instances and main_rt is not None and main_rt.master is not None:
+    if independent_aux:
+        main_instances = []
+        print(
+            f"{_PRINT_PREFIX} screen{si} dual-path: 독립 Discover+Extract "
+            f"(화면1 메타·baked 동기화)",
+            flush=True,
+        )
+        try:
+            added = CompositionDiscovery(master, registry).discover()
+            print(
+                f"{_PRINT_PREFIX} screen{si} discover added={len(added)} (dual-path)",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} screen{si} discover failed: {exc}", flush=True)
+        if main_rt is not None:
+            try:
+                n_meta = _sync_aux_registry_metadata_from_main(main_rt.registry, registry)
+                print(
+                    f"{_PRINT_PREFIX} screen{si} sync metadata from screen1: "
+                    f"fields={n_meta}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} screen{si} sync metadata failed: {exc}",
+                    flush=True,
+                )
+        for inst in registry.all_instances():
+            pp = str(getattr(inst, "prim_path", "") or "").strip()
+            if not pp:
+                continue
+            ok_rep = False
+            if main_rt is not None:
+                main_inst = main_rt.registry.get_by_prim_path(pp)
+                if main_inst is not None:
+                    ok_rep = _attach_from_main_baked(
+                        evaluator, main_rt.evaluator, main_inst
+                    )
+            if ok_rep:
+                replicated += 1
+            elif _extract_one(evaluator, pp, log_tag=f"split-extract-{si}"):
+                extracted += 1
+
+    if (not independent_aux) and main_instances and main_rt is not None and main_rt.master is not None:
         _sync_main_mirror_state_before_replicate(main_rt)
         _install_registry_copy(registry, main_instances)
         sublayers = _replicate_all_inst_sublayers(main_rt.master, master)
@@ -801,7 +938,7 @@ def hydrate_split_screen_composed_stage(
                     extracted += 1
             else:
                 replicated += 1
-    else:
+    elif not independent_aux:
         try:
             added = CompositionDiscovery(master, registry).discover()
             print(
@@ -823,12 +960,13 @@ def hydrate_split_screen_composed_stage(
         ext=ext,
     )
 
-    if main_instances and main_rt is not None and wrote < len(main_instances):
-        for inst in main_instances:
+    aux_inst_count = len(list(registry.all_instances()))
+    if main_rt is not None and wrote < aux_inst_count:
+        for inst in registry.all_instances():
             pp = str(getattr(inst, "prim_path", "") or "").strip()
             if not pp:
                 continue
-            if main_rt.master is not None:
+            if not independent_aux and main_instances and main_rt.master is not None:
                 _replicate_inst_sublayer(main_rt.master, master, pp)
             if _extract_one(evaluator, pp, log_tag=f"split-extract-retry-{si}"):
                 extracted += 1
@@ -855,6 +993,12 @@ def hydrate_split_screen_composed_stage(
         scheduler=scheduler,
     )
     _runtime_map(ext)[str(si)] = rt
+    try:
+        from . import sim_multi_diag as _mdiag
+
+        _mdiag.log_runtime_registered(ext, si)
+    except Exception:
+        pass
     return rt
 
 
@@ -903,6 +1047,7 @@ async def hydrate_split_screen_composed_stage_async(
 
 __all__ = [
     "SplitScreenRuntime",
+    "aux_usd_path_is_direct_open",
     "clear_split_composed_export_cache",
     "composed_split_snapshot_ready",
     "resolve_composed_snapshot_for_split_async",
@@ -916,7 +1061,9 @@ __all__ = [
     "register_main_composed_runtime",
     "release_aux_split_runtimes",
     "release_split_runtime_for_screen",
+    "resolve_split_aux_usd_path",
     "resolve_split_master_usd_path",
     "schedule_split_composed_snapshot_prewarm",
+    "split_dual_usd_paths_enabled",
     "usd_path_for_omni_client",
 ]

@@ -232,6 +232,20 @@ def stop_all_translate_animations() -> None:
         _update_sub = None
 
 
+def stop_translate_animations_for_context(usd_context_name: Optional[str]) -> None:
+    """지정 USD 컨텍스트의 translate 애니만 중지."""
+    global _animations, _update_sub
+    target = str(usd_context_name or "").strip()
+    for k, state in list(_animations.items()):
+        ctx = str(state.get("usd_context_name") or "").strip()
+        if ctx == target:
+            try:
+                del _animations[k]
+            except Exception:
+                pass
+    _maybe_release_update_sub()
+
+
 # ----------------------------------------------------------------- internal
 
 def _ensure_update_sub() -> None:
@@ -357,6 +371,7 @@ __all__ = [
     "run_prim_translate_animation",
     "stop_prim_translate_animation",
     "stop_all_translate_animations",
+    "stop_translate_animations_for_context",
     "zero_tbs_offset_translate_at_path",
     "snap_tbs_offset_translate_to_absolute",
 ]

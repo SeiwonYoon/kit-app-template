@@ -55,10 +55,23 @@ class SequenceRunner(_LegacySequenceRunner):
         self._lam_thread: Optional[threading.Thread] = None
         self._lam_running = False
         self._lam_last_steps: List[Dict[str, Any]] = []
+        self._last_usd_context_name: Optional[str] = None
 
     def is_running(self) -> bool:
         if self._lam_running:
             return True
+        if self._lam_thread is not None and self._lam_thread.is_alive():
+            return True
+        ctx = self._last_usd_context_name
+        if self._lam_runner is not None:
+            ctx = getattr(self._lam_runner, "_usd_context_name", ctx)
+        try:
+            from .sim_channel_scope import is_channel_motion_busy
+
+            if is_channel_motion_busy(ctx, self._tbs_registry):
+                return True
+        except Exception:
+            pass
         return super().is_running()
 
     def _halt_lam_runner(self) -> None:
@@ -70,9 +83,15 @@ class SequenceRunner(_LegacySequenceRunner):
         self._lam_running = False
         self._lam_thread = None
 
-    def pause(self) -> None:
+    def pause(self, *, cancel_all_move_rotate: bool = True) -> None:
         """애니만 중단 — prim 위치는 유지 (시뮬 **정지**)."""
-        self._halt_lam_runner()
+        if self._lam_runner is not None:
+            try:
+                self._lam_runner.stop(cancel_all_move_rotate=cancel_all_move_rotate)
+            except Exception:
+                pass
+        self._lam_running = False
+        self._lam_thread = None
         super().pause()
 
     def stop(self) -> None:
@@ -94,6 +113,7 @@ class SequenceRunner(_LegacySequenceRunner):
         *,
         usd_context_name: Optional[str] = None,
         speed_scale: float = 1.0,
+        wait_until_done: bool = False,
     ) -> None:
         normalized = _normalize_steps(list(steps or []))
         if not self._use_lam_engine(normalized, usd_context_name):
@@ -102,21 +122,41 @@ class SequenceRunner(_LegacySequenceRunner):
 
         from .tbs_lam_sequence_engine import TbsLamSequenceRunner
 
+        ctx_nm = str(usd_context_name or "").strip() or None
+        self._last_usd_context_name = ctx_nm
+
         if self._lam_thread is not None and self._lam_thread.is_alive():
             try:
+                diag_ext = getattr(self, "_diag_ext", None)
+                diag_scr = int(getattr(self, "_diag_screen", 1) or 1)
                 if self._lam_runner is not None:
-                    self._lam_runner.stop()
+                    try:
+                        from . import sim_multi_diag as _mdiag
+
+                        _mdiag.log_runner_preempt(
+                            diag_ext,
+                            screen=diag_scr,
+                            ctx=ctx_nm,
+                        )
+                    except Exception:
+                        pass
+                    self._lam_runner.stop(cancel_all_move_rotate=True)
+                try:
+                    self._lam_thread.join(timeout=10.0)
+                except Exception:
+                    pass
+                self._lam_running = False
             except Exception:
                 pass
 
         self._lam_last_steps = list(normalized)
         self._steps = list(normalized)
-        ctx_nm = str(usd_context_name or "").strip() or None
         self._lam_runner = TbsLamSequenceRunner(
             self._tbs_registry,
             self._tbs_scheduler,
             usd_context_name=ctx_nm,
         )
+        self._lam_runner._diag_ext = getattr(self, "_diag_ext", None)  # type: ignore[attr-defined]
         self._lam_running = True
         cb = self.on_sequence_completed
         sp = max(0.01, float(speed_scale or 1.0))
@@ -132,6 +172,18 @@ class SequenceRunner(_LegacySequenceRunner):
             except Exception as exc:
                 print(f"[TBS/SEQ] lam runner failed: {exc}", flush=True)
             finally:
+                # JSON run() 반환 후 main FIFO·MOVE 잔류 drain — ANIM_DONE 전 필수.
+                try:
+                    from .sim_channel_scope import drain_channel_motion_complete
+
+                    drain_channel_motion_complete(
+                        self._last_usd_context_name,
+                        self._tbs_registry,
+                        max_sec=120.0,
+                        stable_ticks=4,
+                    )
+                except Exception:
+                    pass
                 self._lam_running = False
                 if callable(cb):
                     try:
@@ -141,6 +193,11 @@ class SequenceRunner(_LegacySequenceRunner):
 
         self._lam_thread = threading.Thread(target=_bg, name="tbs_lam_sequence_run", daemon=True)
         self._lam_thread.start()
+        if wait_until_done:
+            try:
+                self._lam_thread.join()
+            except Exception:
+                pass
 
 
 __all__ = [

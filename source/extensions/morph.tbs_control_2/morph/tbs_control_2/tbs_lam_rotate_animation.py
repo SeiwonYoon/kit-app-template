@@ -251,6 +251,20 @@ def stop_all_rotate_animations() -> None:
         _update_sub = None
 
 
+def stop_rotate_animations_for_context(usd_context_name: Optional[str]) -> None:
+    """지정 USD 컨텍스트의 rotate 애니만 중지."""
+    global _rot_animations, _update_sub
+    target = str(usd_context_name or "").strip()
+    for k, state in list(_rot_animations.items()):
+        ctx = str(state.get("usd_context_name") or "").strip()
+        if ctx == target:
+            try:
+                _rot_animations.pop(k, None)
+            except Exception:
+                pass
+    _maybe_release_update_sub()
+
+
 # ----------------------------------------------------------------- internal
 
 def _ensure_update_sub() -> None:
@@ -381,6 +395,7 @@ __all__ = [
     "stop_world_pivot_rotate_animation",
     "stop_prim_rotate_animation",
     "stop_all_rotate_animations",
+    "stop_rotate_animations_for_context",
     "zero_tbs_offset_rotate_at_path",
     "read_tbs_offset_rotate_xyz_deg",
 ]

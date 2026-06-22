@@ -62,6 +62,45 @@ def is_translate_animation_running() -> bool:
         return False
 
 
+def is_translate_animation_running_for_context(
+    usd_context_name: Optional[str],
+) -> bool:
+    """지정 USD 컨텍스트에서 legacy translate 애니가 진행 중인지."""
+    target = str(usd_context_name or "").strip()
+    try:
+        for state in _animations.values():
+            if not isinstance(state, dict):
+                continue
+            ctx = str(state.get("usd_context_name") or "").strip()
+            if target:
+                if ctx == target:
+                    return True
+            elif not ctx:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def count_translate_animations_for_context(usd_context_name: Optional[str]) -> int:
+    """진단용 — 해당 컨텍스트의 legacy translate 애니 개수."""
+    target = str(usd_context_name or "").strip()
+    n = 0
+    try:
+        for state in _animations.values():
+            if not isinstance(state, dict):
+                continue
+            ctx = str(state.get("usd_context_name") or "").strip()
+            if target:
+                if ctx == target:
+                    n += 1
+            elif not ctx:
+                n += 1
+    except Exception:
+        pass
+    return n
+
+
 def _get_or_create_offset_translate_op(prim):
     x = UsdGeom.Xformable(prim)
     if not x:
@@ -234,6 +273,50 @@ def stop_prim_translate_animation_all_contexts(prim_path: str) -> int:
             pass
         _update_sub = None
     return removed
+
+
+def stop_translate_animations_for_context(
+    usd_context_name: Optional[str],
+    *,
+    preserve_foup_port_lot_prims: bool = False,
+) -> None:
+    """지정 USD 컨텍스트의 translate 애니만 중지."""
+    global _animations, _update_sub
+    target = str(usd_context_name or "").strip()
+    if not preserve_foup_port_lot_prims:
+        for k, state in list(_animations.items()):
+            ctx = str(state.get("usd_context_name") or "").strip()
+            if ctx == target:
+                try:
+                    del _animations[k]
+                except Exception:
+                    pass
+    else:
+        try:
+            from . import port_lot_visibility as _plv  # type: ignore
+        except Exception:
+            _plv = None
+        for k, state in list(_animations.items()):
+            ctx = str(state.get("usd_context_name") or "").strip()
+            if ctx != target:
+                continue
+            if _plv is not None:
+                try:
+                    path = str(state.get("prim_path") or "").strip()
+                    if path and _plv.is_foup_in_progress(path):
+                        continue
+                except Exception:
+                    pass
+            try:
+                del _animations[k]
+            except Exception:
+                pass
+    if not _animations and _update_sub is not None:
+        try:
+            _update_sub.unsubscribe()
+        except Exception:
+            pass
+        _update_sub = None
 
 
 def stop_all_translate_animations(preserve_foup_port_lot_prims: bool = False) -> None:

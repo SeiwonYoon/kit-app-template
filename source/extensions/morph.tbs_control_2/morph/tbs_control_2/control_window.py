@@ -922,6 +922,19 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 scr_i = 1
             scr_i = max(1, scr_i)
+            if _is_multi_viewport_sim(ext):
+                if threading.current_thread().name != _anim_screen_worker_name(scr_i):
+                    _enqueue_anim_screen_job(
+                        ext,
+                        scr_i,
+                        lambda j=job: _start_job(j),
+                        priority=int(job.get("_priority", 10) if isinstance(job, dict) else 10),
+                    )
+                    return
+            try:
+                _halt_screen_json_anim(ext, scr_i, join_sec=3.0)
+            except Exception:
+                pass
             try:
                 runners = getattr(ext, "_sim_runners_by_screen", None)
                 if not isinstance(runners, dict):
@@ -934,6 +947,12 @@ def _execute_mapped_sequence_stub(
                 runner_obj = runners.get(str(scr_i))
             except Exception:
                 runner_obj = None
+            try:
+                if runner_obj is not None:
+                    runner_obj._diag_ext = ext  # type: ignore[attr-defined]
+                    runner_obj._diag_screen = scr_i  # type: ignore[attr-defined]
+            except Exception:
+                pass
             try:
                 from .sequence_engine import SequenceRunner
                 from .tbs_split_composed_loader import get_split_runtime_for_screen
@@ -1025,6 +1044,35 @@ def _execute_mapped_sequence_stub(
                 # bg thread 에서도 pending 등록은 동기(스레드 안전). USD 반영은 main 에서 수행.
                 _queue_post_anim_port_apply(ext, int(scr_i), src_done)
 
+                # 다음 JSON/ANIM_DONE 직전 — TIMESAMPLES·legacy translate 잔류 drain (BG thread).
+                try:
+                    from .sim_channel_scope import drain_channel_motion_complete, stop_channel_animations
+                    from .tbs_split_composed_loader import get_split_runtime_for_screen
+
+                    _ctx_done = _usd_context_name_for_sim_screen(ext, scr_i)
+                    _rt_done = get_split_runtime_for_screen(ext, scr_i)
+                    _reg_done = _rt_done.registry if _rt_done is not None else None
+                    idle = drain_channel_motion_complete(
+                        _ctx_done,
+                        _reg_done,
+                        max_sec=30.0,
+                        stable_ticks=4,
+                    )
+                    if not idle:
+                        try:
+                            from . import sim_multi_diag as _mdiag
+
+                            _mdiag.log_motion_drain_timeout(
+                                ext, screen=int(scr_i), ctx=_ctx_done
+                            )
+                        except Exception:
+                            pass
+                        stop_channel_animations(
+                            _ctx_done, diag_reason="on_done_drain_timeout"
+                        )
+                except Exception:
+                    pass
+
                 def _finish_on_main() -> None:
                     try:
                         _flush_pending_post_anim_port_applies(ext, int(scr_i))
@@ -1045,8 +1093,32 @@ def _execute_mapped_sequence_stub(
                         nxt = pending.pop(0)
                         if isinstance(pending_by, dict):
                             pending_by[str(scr_i)] = pending
+                        try:
+                            from . import sim_multi_diag as _mdiag
+
+                            _mdiag.log_anim_done(
+                                ext,
+                                screen=scr_i,
+                                file_name=str((job or {}).get("file", "") or ""),
+                                pending_left=len(pending),
+                                next_file=str((nxt or {}).get("file", "") or ""),
+                            )
+                        except Exception:
+                            pass
                         _start_job(nxt)
                         return
+                    try:
+                        from . import sim_multi_diag as _mdiag
+
+                        _mdiag.log_anim_done(
+                            ext,
+                            screen=scr_i,
+                            file_name=str((job or {}).get("file", "") or ""),
+                            pending_left=0,
+                            next_file="",
+                        )
+                    except Exception:
+                        pass
                     if pause_evt is not None:
                         try:
                             pause_evt.clear()
@@ -1073,9 +1145,9 @@ def _execute_mapped_sequence_stub(
                     if threading.current_thread() is threading.main_thread():
                         _finish_on_main()
                     else:
-                        from .tbs_lam_sequence_engine import _dispatch_main
+                        from .tbs_main_dispatch import dispatch_main_wait
 
-                        _dispatch_main(_finish_on_main)
+                        dispatch_main_wait(_finish_on_main, timeout=60.0)
                 except Exception:
                     try:
                         _finish_on_main()
@@ -1162,6 +1234,21 @@ def _execute_mapped_sequence_stub(
                 _reset_sim_motion_before_json_run(ext, job, runner_obj=runner_obj)
             except Exception as exc:
                 print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
+            try:
+                from . import sim_multi_diag as _mdiag
+
+                _mdiag.log_anim_start(
+                    ext,
+                    screen=scr_i,
+                    ctx=_ctx_run,
+                    file_name=str((job or {}).get("file", "") or ""),
+                    est_total=float(est_total_f),
+                    eff_sp=float(eff_sp),
+                    proc_sec=float(proc_sec_job),
+                    runner=runner_obj,
+                )
+            except Exception:
+                pass
             if runner_obj is not None:
                 try:
                     runner_obj._foup_proc_active_ep = _resolve_foup_proc_active_ep(
@@ -1169,7 +1256,20 @@ def _execute_mapped_sequence_stub(
                     )
                 except Exception:
                     pass
-                runner_obj.run(job.get("parsed", []), usd_context_name=_ctx_run, speed_scale=eff_sp)
+                runner_obj.run(
+                    job.get("parsed", []),
+                    usd_context_name=_ctx_run,
+                    speed_scale=eff_sp,
+                    wait_until_done=_is_multi_viewport_sim(ext),
+                )
+            else:
+                try:
+                    print(
+                        f"[ANIM] 실행 스킵 — SequenceRunner 없음 screen={scr_i} ctx={_ctx_run!r}",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
             try:
                 _refresh_sim_progress_from_last(ext)
             except Exception:
@@ -1225,7 +1325,53 @@ def _execute_mapped_sequence_stub(
             runner_busy = bool(rr is not None and getattr(rr, "is_running", lambda: False)())
         except Exception:
             runner_busy = False
+        if _is_multi_viewport_sim(ext):
+            try:
+                from . import sim_multi_diag as _mdiag
+
+                _mdiag.log_anim_dispatch(
+                    ext,
+                    screen=_scr,
+                    sim_time=str(sim_time or ""),
+                    event=str(seq),
+                    file_name=p.name,
+                    est_total=float(est_total) if isinstance(est_total, (float, int)) else 0.0,
+                    runner_busy=runner_busy,
+                    decision="WORKER_QUEUE",
+                )
+            except Exception:
+                pass
+            _enqueue_anim_screen_job(
+                ext,
+                _scr,
+                lambda j=job: _start_job(j),
+                priority=int(job.get("_priority", 10)),
+            )
+            _append_anim_history_log(
+                ext,
+                f"[ANIM] 화면워커적재 | screen={_scr} | event={seq} | est={est_text} | action={action_text} | file={p.name}",
+            )
+            try:
+                _refresh_sim_progress_from_last(ext)
+            except Exception:
+                pass
+            return
         if runner_busy:
+            try:
+                from . import sim_multi_diag as _mdiag
+
+                _mdiag.log_anim_dispatch(
+                    ext,
+                    screen=_scr,
+                    sim_time=str(sim_time or ""),
+                    event=str(seq),
+                    file_name=p.name,
+                    est_total=float(est_total) if isinstance(est_total, (float, int)) else 0.0,
+                    runner_busy=True,
+                    decision="QUEUE",
+                )
+            except Exception:
+                pass
             try:
                 pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
                 if not isinstance(pending_by, dict):
@@ -1250,6 +1396,21 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 pass
             return
+        try:
+            from . import sim_multi_diag as _mdiag
+
+            _mdiag.log_anim_dispatch(
+                ext,
+                screen=_scr,
+                sim_time=str(sim_time or ""),
+                event=str(seq),
+                file_name=p.name,
+                est_total=float(est_total) if isinstance(est_total, (float, int)) else 0.0,
+                runner_busy=False,
+                decision="START",
+            )
+        except Exception:
+            pass
         _start_job(job)
     except Exception as e:
         _append_anim_history_log(ext, f"[ANIM] 실행실패 | event={seq} | action={action_text} | file={p.name} | err={e}")
@@ -1706,7 +1867,10 @@ def notify_tbs_composed_usd_ready_for_split(ext: Any, usd_path: str = "") -> Non
             except Exception:
                 pass
     try:
-        from .tbs_split_composed_loader import register_main_composed_runtime
+        from .tbs_split_composed_loader import (
+            register_main_composed_runtime,
+            split_dual_usd_paths_enabled,
+        )
 
         register_main_composed_runtime(ext)
     except Exception:
@@ -1714,7 +1878,8 @@ def notify_tbs_composed_usd_ready_for_split(ext: Any, usd_path: str = "") -> Non
     try:
         from .tbs_split_composed_loader import schedule_split_composed_snapshot_prewarm
 
-        schedule_split_composed_snapshot_prewarm(ext)
+        if not split_dual_usd_paths_enabled(ext):
+            schedule_split_composed_snapshot_prewarm(ext)
     except Exception:
         pass
     try:
@@ -5459,9 +5624,10 @@ def _halt_anim_for_prerun_seek(ext: Any, *, screen: int) -> None:
     except Exception:
         pass
     try:
-        stop_all_translate_animations()
-        stop_all_curve_animations()
-        stop_all_rotate_animations()
+        from .sim_channel_scope import stop_channel_animations
+
+        ctx = _usd_context_name_for_sim_screen(ext, int(screen))
+        stop_channel_animations(ctx)
     except Exception:
         pass
 
@@ -6503,6 +6669,147 @@ def _is_multi_viewport_sim(ext: Any) -> bool:
         return False
 
 
+_ANIM_SCREEN_WORKER_STOP = object()
+
+
+def _anim_screen_worker_name(screen_idx: int) -> str:
+    return f"morph.tbs_anim_scr_{max(1, int(screen_idx))}"
+
+
+def _ensure_anim_screen_worker(ext: Any, screen_idx: int) -> None:
+    """멀티 뷰: 화면별 JSON 애니 전용 워커(1화면=1스레드 직렬 실행)."""
+    scr = max(1, int(screen_idx))
+    key = str(scr)
+    workers = getattr(ext, "_sim_anim_workers_by_screen", None)
+    if not isinstance(workers, dict):
+        workers = {}
+        ext._sim_anim_workers_by_screen = workers
+    ent = workers.get(key)
+    if isinstance(ent, dict):
+        th = ent.get("thread")
+        if th is not None and getattr(th, "is_alive", lambda: False)():
+            return
+    lock = threading.Lock()
+    cond = threading.Condition(lock)
+    queue: list = []
+
+    def _loop() -> None:
+        while True:
+            with cond:
+                while not queue:
+                    cond.wait()
+                item = queue.pop(0)
+            if item is _ANIM_SCREEN_WORKER_STOP:
+                break
+            try:
+                fn = item.get("run_fn") if isinstance(item, dict) else None
+                if callable(fn):
+                    fn()
+            except Exception:
+                pass
+
+    th = threading.Thread(target=_loop, name=_anim_screen_worker_name(scr), daemon=True)
+    workers[key] = {"thread": th, "lock": lock, "cond": cond, "queue": queue}
+    th.start()
+
+
+def _halt_screen_json_anim(ext: Any, screen_idx: int, *, join_sec: float = 5.0) -> None:
+    """해당 화면의 진행 중 JSON·main dispatch·MOVE 를 즉시 중단(다음 JSON 선행)."""
+    scr = max(1, int(screen_idx))
+    ctx = _usd_context_name_for_sim_screen(ext, scr)
+    reg = None
+    try:
+        from .tbs_split_composed_loader import get_split_runtime_for_screen
+
+        rt = get_split_runtime_for_screen(ext, scr)
+        if rt is not None:
+            reg = rt.registry
+    except Exception:
+        reg = None
+    try:
+        runners = getattr(ext, "_sim_runners_by_screen", None)
+        rr = runners.get(str(scr)) if isinstance(runners, dict) else None
+        if rr is not None:
+            try:
+                if bool(getattr(rr, "is_running", lambda: False)()):
+                    rr.pause(cancel_all_move_rotate=True)
+            except Exception:
+                pass
+            th = getattr(rr, "_lam_thread", None)
+            if th is not None and getattr(th, "is_alive", lambda: False)():
+                try:
+                    th.join(timeout=max(0.5, float(join_sec)))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        from .sim_channel_scope import drain_channel_motion_complete, stop_channel_animations
+
+        stop_channel_animations(ctx, diag_reason="halt_screen_json")
+        drain_channel_motion_complete(ctx, reg, max_sec=max(1.0, float(join_sec)), stable_ticks=3)
+    except Exception:
+        pass
+
+
+def _enqueue_anim_screen_job(
+    ext: Any,
+    screen_idx: int,
+    run_fn: Any,
+    *,
+    priority: int = 10,
+) -> None:
+    """화면 워커 큐에 job 추가. priority<=0 이면 맨 앞. 새 이벤트 시 이전 JSON 선행 중단."""
+    scr = max(1, int(screen_idx))
+    try:
+        _halt_screen_json_anim(ext, scr, join_sec=2.0)
+    except Exception:
+        pass
+    _ensure_anim_screen_worker(ext, scr)
+    ent = ext._sim_anim_workers_by_screen[str(scr)]
+    lock = ent["lock"]
+    cond = ent["cond"]
+    queue = ent["queue"]
+    payload = {"run_fn": run_fn}
+    with cond:
+        # 이전 대기 job 은 버림 — 최신 이벤트 JSON 만 처음부터 실행.
+        queue.clear()
+        if int(priority) <= 0:
+            queue.insert(0, payload)
+        else:
+            queue.append(payload)
+        cond.notify()
+
+
+def _stop_anim_screen_workers(ext: Any) -> None:
+    workers = getattr(ext, "_sim_anim_workers_by_screen", None)
+    if not isinstance(workers, dict):
+        return
+    for key, ent in list(workers.items()):
+        if not isinstance(ent, dict):
+            continue
+        lock = ent.get("lock")
+        cond = ent.get("cond")
+        queue = ent.get("queue")
+        th = ent.get("thread")
+        try:
+            if lock is not None and cond is not None and queue is not None:
+                with cond:
+                    queue.append(_ANIM_SCREEN_WORKER_STOP)
+                    cond.notify()
+        except Exception:
+            pass
+        try:
+            if th is not None:
+                th.join(timeout=2.0)
+        except Exception:
+            pass
+        try:
+            workers.pop(key, None)
+        except Exception:
+            pass
+
+
 def _pause_event_for_screen(ext: Any, screen_idx: int) -> Optional[threading.Event]:
     try:
         m = getattr(ext, "_sim_tick_pause_events_by_screen", None)
@@ -6633,6 +6940,12 @@ def _sim_multi_engine_tick_worker(
         try:
             if sim is not None and not getattr(sim, "is_done", False):
                 sim.tick(scaled)
+        except Exception:
+            pass
+        try:
+            from . import sim_multi_diag as _mdiag
+
+            _mdiag.log_tick_heartbeat(ext, screen=screen_idx, sim=sim)
         except Exception:
             pass
 
@@ -8074,6 +8387,10 @@ def _detach_sim_update(ext: Any) -> None:
         ext._sim_tick_threads = []
     except Exception:
         pass
+    try:
+        _stop_anim_screen_workers(ext)
+    except Exception:
+        pass
     if th is not None:
         try:
             th.join(timeout=1.0)
@@ -8142,7 +8459,7 @@ def on_sim_start_clicked(ext: Any) -> None:
         pass
     on_sim_stop_clicked(ext)
     try:
-        _restore_sim_prim_motion_to_initial(ext)
+        _restore_all_sim_channels_prim_motion(ext)
     except Exception:
         pass
     # FOUP 진행중 보호 표시 추가 안전망(이전 세션 잔여 차단):
@@ -8460,6 +8777,12 @@ def on_sim_start_clicked(ext: Any) -> None:
         - 시퀀스 러너/개별 애니메이션을 stop 한다.
         """
         try:
+            from . import sim_multi_diag as _mdiag
+
+            _mdiag.log_interrupt(ext, screen=screen, reason="proc_priority")
+        except Exception:
+            pass
+        try:
             scr = str(screen or "").strip() or None
             # pending 큐 비우기(현재 모드에서는 애니 길이를 기다리지 않음)
             if scr is not None:
@@ -8495,15 +8818,15 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             pass
         try:
-            stop_all_translate_animations(preserve_foup_port_lot_prims=True)
-        except Exception:
-            pass
-        try:
-            stop_all_rotate_animations()
-        except Exception:
-            pass
-        try:
-            stop_all_curve_animations()
+            from .sim_channel_scope import stop_channel_animations
+
+            ctx_nm = None
+            if scr is not None:
+                try:
+                    ctx_nm = _usd_context_name_for_sim_screen(ext, int(scr))
+                except Exception:
+                    ctx_nm = None
+            stop_channel_animations(ctx_nm, preserve_foup_port_lot_prims=True, diag_reason="interrupt_proc_priority")
         except Exception:
             pass
         pe = getattr(ext, "_sim_tick_pause_event", None)
@@ -8844,6 +9167,18 @@ def on_sim_start_clicked(ext: Any) -> None:
             _append_sim_log(ext, f"[SIM] 멀티 시뮼 시작 (채널={n_ch}, 화면별 스냅샷)")
         except Exception:
             pass
+        try:
+            from . import sim_multi_diag as _mdiag
+
+            _mdiag.log_sim_start_multi(
+                ext,
+                n_ch=n_ch,
+                run_gen=int(getattr(ext, "_sim_run_gen", 0) or 0),
+                snaps=snaps,
+                engines=engines,
+            )
+        except Exception:
+            pass
 
     # --- 프리런(오프라인) → 타임라인 재생 모드 ---
     # 요구사항:
@@ -8927,6 +9262,12 @@ def on_sim_start_clicked(ext: Any) -> None:
                 pass
             try:
                 ext._sim_prerun_results_by_screen = results
+            except Exception:
+                pass
+            try:
+                from . import sim_multi_diag as _mdiag
+
+                _mdiag.log_prerun_done(ext, results)
             except Exception:
                 pass
         finally:
@@ -9059,7 +9400,7 @@ def _reset_sim_motion_before_json_run(
     *,
     runner_obj: Any = None,
 ) -> None:
-    """시뮬 중 **새 JSON** 직전 — 포트 가시성은 유지하고 위치·재생 상태만 초기화."""
+    """시뮬 중 **새 JSON** 직전 — 해당 화면만 애니 중지·TBS_OFFSET 초기화( evaluator replay 는 유지)."""
     try:
         scr_i = int(str((job or {}).get("tbs_sim_screen", "1") or "1").strip() or "1")
     except Exception:
@@ -9067,20 +9408,63 @@ def _reset_sim_motion_before_json_run(
     scr_i = max(1, scr_i)
     ctx = _usd_context_name_for_sim_screen(ext, scr_i)
     extra = (job or {}).get("parsed") if isinstance((job or {}).get("parsed"), list) else []
+    runner_was_running = False
     if runner_obj is not None:
         try:
-            if getattr(runner_obj, "is_running", lambda: False)():
-                runner_obj.pause()
+            runner_was_running = bool(getattr(runner_obj, "is_running", lambda: False)())
         except Exception:
-            pass
+            runner_was_running = False
+    if runner_obj is not None:
+        try:
+            if runner_was_running:
+                runner_obj.pause(cancel_all_move_rotate=True)
+                th = getattr(runner_obj, "_lam_thread", None)
+                if th is not None and getattr(th, "is_alive", lambda: False)():
+                    try:
+                        th.join(timeout=3.0)
+                    except Exception:
+                        pass
+        except Exception:
+            try:
+                if getattr(runner_obj, "is_running", lambda: False)():
+                    runner_obj.pause(cancel_all_move_rotate=True)
+            except Exception:
+                pass
+    try:
+        from . import sim_multi_diag as _mdiag
+
+        _mdiag.log_anim_reset(
+            ext,
+            screen=scr_i,
+            ctx=ctx,
+            motion_only=True,
+            runner_was_running=runner_was_running,
+            path_count=len(extra),
+            reason="pre_json_run",
+        )
+    except Exception:
+        pass
     active_ep = _resolve_foup_proc_active_ep(ext, scr_i, dict(job or {}))
     _restore_sim_prim_motion_to_initial(
         ext,
-        extra_steps=extra,
+        extra_steps=extra if extra else None,
         usd_context_name=ctx,
         preserve_foup_offsets=True,
         foup_proc_active_ep=active_ep,
+        motion_only=True,
+        include_registry_paths=False,
     )
+
+
+def _restore_all_sim_channels_prim_motion(ext: Any, **kwargs: Any) -> None:
+    """멀티 분할 시 각 화면 스테이지를 독립적으로 초기 자세 복원."""
+    try:
+        n_ch = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
+    except Exception:
+        n_ch = 1
+    for si in range(1, n_ch + 1):
+        ctx = _usd_context_name_for_sim_screen(ext, si)
+        _restore_sim_prim_motion_to_initial(ext, usd_context_name=ctx, **kwargs)
 
 
 def _restore_sim_prim_motion_to_initial(
@@ -9090,11 +9474,14 @@ def _restore_sim_prim_motion_to_initial(
     usd_context_name: Optional[str] = None,
     preserve_foup_offsets: bool = False,
     foup_proc_active_ep: str = "",
+    motion_only: bool = False,
+    include_registry_paths: bool = True,
 ) -> None:
     """시뮬 **시작·리셋** 및 **JSON 전환** 시 MOVE·ROTATE·FOUP·USD_TIMELINE prim 을 초기 자세로.
 
     포트 LOT 숨김/보임(visibility)은 건드리지 않는다 — transform·TBS_OFFSET·인스턴스 replay 만 복원.
     ``preserve_foup_offsets=True`` 이면 FOUP 공정 플래그를 지우지 않고 EP plateau 를 유지한다.
+    ``motion_only=True`` 이면 JSON 직전용 — evaluator invalidate/replay 해제는 생략한다.
     """
     paths_seen: set[str] = set()
     paths: List[str] = []
@@ -9118,19 +9505,39 @@ def _restore_sim_prim_motion_to_initial(
         from .tbs_lam_sequence_engine import _collect_prim_paths_for_reset
 
         runners = getattr(ext, "_sim_runners_by_screen", None)
+        scr_filter: Optional[int] = None
+        if usd_context_name is not None:
+            try:
+                cn = str(usd_context_name or "").strip()
+                names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+                for i, nm in enumerate(names):
+                    if str(nm or "").strip() == cn:
+                        scr_filter = i + 2
+                        break
+            except Exception:
+                scr_filter = None
         if isinstance(runners, dict):
-            for r in runners.values():
+            if scr_filter is not None:
+                r = runners.get(str(scr_filter))
                 if r is not None:
                     for p in _collect_prim_paths_for_reset(
                         getattr(r, "_lam_last_steps", None) or []
                     ):
                         _add(p)
-        r0 = getattr(ext, "_sim_runner", None)
-        if r0 is not None:
-            for p in _collect_prim_paths_for_reset(
-                getattr(r0, "_lam_last_steps", None) or []
-            ):
-                _add(p)
+            else:
+                for r in runners.values():
+                    if r is not None:
+                        for p in _collect_prim_paths_for_reset(
+                            getattr(r, "_lam_last_steps", None) or []
+                        ):
+                            _add(p)
+        if scr_filter is None or scr_filter == 1:
+            r0 = getattr(ext, "_sim_runner", None)
+            if r0 is not None:
+                for p in _collect_prim_paths_for_reset(
+                    getattr(r0, "_lam_last_steps", None) or []
+                ):
+                    _add(p)
         if extra_steps:
             for p in _collect_prim_paths_for_reset(extra_steps):
                 _add(p)
@@ -9140,37 +9547,48 @@ def _restore_sim_prim_motion_to_initial(
     try:
         from .tbs_split_composed_loader import get_split_runtime_for_usd_context
 
-        rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
-        reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
-        if reg is not None and hasattr(reg, "all_instances"):
-            for inst in reg.all_instances():
-                _add(str(getattr(inst, "prim_path", "") or ""))
-    except Exception:
-        try:
-            reg = getattr(ext, "_tbs_registry", None)
+        if include_registry_paths:
+            rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
+            reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
             if reg is not None and hasattr(reg, "all_instances"):
                 for inst in reg.all_instances():
                     _add(str(getattr(inst, "prim_path", "") or ""))
-        except Exception:
-            pass
+    except Exception:
+        if include_registry_paths:
+            try:
+                reg = getattr(ext, "_tbs_registry", None)
+                if reg is not None and hasattr(reg, "all_instances"):
+                    for inst in reg.all_instances():
+                        _add(str(getattr(inst, "prim_path", "") or ""))
+            except Exception:
+                pass
 
     def _do_on_main() -> None:
         # USD write / stage 접근은 반드시 main thread 에서만 수행한다.
-        if not preserve_foup_offsets:
-            try:
-                from . import tbs_lam_rotate_animation as _lrx
-                from . import tbs_lam_translate_animation as _ltx
+        try:
+            from .sim_channel_scope import stop_channel_animations
 
-                _ltx.stop_all_translate_animations()
-                _lrx.stop_all_rotate_animations()
+            stop_channel_animations(
+                usd_context_name,
+                preserve_foup_port_lot_prims=bool(preserve_foup_offsets),
+                diag_reason=f"restore_motion motion_only={motion_only}",
+            )
+        except Exception:
+            if not preserve_foup_offsets:
+                try:
+                    from . import tbs_lam_rotate_animation as _lrx
+                    from . import tbs_lam_translate_animation as _ltx
+
+                    _ltx.stop_all_translate_animations()
+                    _lrx.stop_all_rotate_animations()
+                except Exception:
+                    pass
+            try:
+                stop_all_translate_animations(preserve_foup_port_lot_prims=bool(preserve_foup_offsets))
+                stop_all_rotate_animations()
+                stop_all_curve_animations()
             except Exception:
                 pass
-        try:
-            stop_all_translate_animations(preserve_foup_port_lot_prims=bool(preserve_foup_offsets))
-            stop_all_rotate_animations()
-            stop_all_curve_animations()
-        except Exception:
-            pass
         try:
             from . import port_lot_visibility as _plv
 
@@ -9190,6 +9608,17 @@ def _restore_sim_prim_motion_to_initial(
             sch = rt_sch.scheduler if rt_sch is not None else getattr(ext, "_tbs_scheduler", None)
             stop_fn = getattr(sch, "stop_all", None) if sch is not None else None
             if callable(stop_fn):
+                try:
+                    from . import sim_multi_diag as _mdiag
+
+                    _mdiag.log_scheduler_stop(
+                        ctx=usd_context_name,
+                        scheduler=sch,
+                        motion_only=bool(motion_only),
+                        reason="restore_motion",
+                    )
+                except Exception:
+                    pass
                 stop_fn()
         except Exception:
             pass
@@ -9208,43 +9637,44 @@ def _restore_sim_prim_motion_to_initial(
             if reset_paths:
                 prev_ctx = push_usd_context_name(usd_context_name)
                 try:
-                    _reset_tbs_offset_ops_for_paths(reset_paths)
+                    _reset_tbs_offset_ops_for_paths(reset_paths, usd_context_name=usd_context_name)
                 finally:
                     pop_usd_context_name(prev_ctx)
 
-        try:
-            from .tbs_lam_sequence_editor import _range_start_seconds_for_instance
-            from .tbs_split_composed_loader import get_split_runtime_for_usd_context
+        if not motion_only:
+            try:
+                from .tbs_lam_sequence_editor import _range_start_seconds_for_instance
+                from .tbs_split_composed_loader import get_split_runtime_for_usd_context
 
-            rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
-            reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
-            ev = rt_ctx.evaluator if rt_ctx is not None else getattr(ext, "_tbs_evaluator", None)
-            sch = rt_ctx.scheduler if rt_ctx is not None else getattr(ext, "_tbs_scheduler", None)
-            if reg is not None and hasattr(reg, "all_instances"):
-                for inst in reg.all_instances():
-                    pp = str(getattr(inst, "prim_path", "") or "").strip()
-                    if not pp.startswith("/"):
-                        continue
-                    try:
-                        inst.virtual_time = _range_start_seconds_for_instance(inst)
-                        inst.state = "stopped"
-                    except Exception:
-                        pass
-                    if ev is not None:
-                        for fn_name in (
-                            "end_replay_mode",
-                            "end_master_timeline_mode",
-                            "invalidate_mapping",
-                            "force_rebuild_attr_cache",
-                        ):
-                            fn = getattr(ev, fn_name, None)
-                            if callable(fn):
-                                try:
-                                    fn(pp)
-                                except Exception:
-                                    pass
-        except Exception:
-            pass
+                rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
+                reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
+                ev = rt_ctx.evaluator if rt_ctx is not None else getattr(ext, "_tbs_evaluator", None)
+                sch = rt_ctx.scheduler if rt_ctx is not None else getattr(ext, "_tbs_scheduler", None)
+                if reg is not None and hasattr(reg, "all_instances"):
+                    for inst in reg.all_instances():
+                        pp = str(getattr(inst, "prim_path", "") or "").strip()
+                        if not pp.startswith("/"):
+                            continue
+                        try:
+                            inst.virtual_time = _range_start_seconds_for_instance(inst)
+                            inst.state = "stopped"
+                        except Exception:
+                            pass
+                        if ev is not None:
+                            for fn_name in (
+                                "end_replay_mode",
+                                "end_master_timeline_mode",
+                                "invalidate_mapping",
+                                "force_rebuild_attr_cache",
+                            ):
+                                fn = getattr(ev, fn_name, None)
+                                if callable(fn):
+                                    try:
+                                        fn(pp)
+                                    except Exception:
+                                        pass
+            except Exception:
+                pass
 
         try:
             usd_animation_control.stop_usd_animation(usd_context_name)
@@ -9268,7 +9698,6 @@ def on_sim_stop_clicked(ext: Any) -> None:
     시뮬레이션 중지(Stop).
 
     목표(요구사항):
-    - stop/reset 후 "다음 스텝에서 다시 이어서 진행되는" 잔여 실행을 방지한다.
     - 멀티 화면에서 화면별 runner/큐/인터럽트/일시정지(pause) 상태가 남아
       다음 실행이 깨지는 회귀(애니가 있는데 재생이 안 됨, 진행률 0% 교착 등)를 방지한다.
 
@@ -9298,6 +9727,12 @@ def on_sim_stop_clicked(ext: Any) -> None:
         ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
     except Exception:
         ext._sim_run_gen = 1
+    try:
+        from .sim_multi_diag import set_session_active
+
+        set_session_active(False)
+    except Exception:
+        pass
     try:
         _set_sim_prerun_ui_busy(ext, False)
     except Exception:
@@ -9614,7 +10049,7 @@ def on_sim_reset_clicked(ext: Any) -> None:
         pass
     on_sim_stop_clicked(ext)
     try:
-        _restore_sim_prim_motion_to_initial(ext)
+        _restore_all_sim_channels_prim_motion(ext)
     except Exception:
         pass
     try:
