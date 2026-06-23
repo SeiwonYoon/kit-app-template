@@ -1012,7 +1012,8 @@ class SimTimelinePlayer:
             self._last_wall_by_screen[scr] = time.perf_counter()
             self._playing = True
 
-    def tick(self) -> None:
+    def advance_sim_clock(self) -> None:
+        """wall-clock 기준으로 ``sim_now`` 만 전진 (emit 없음)."""
         now_wall = time.perf_counter()
         sp = 1.0
         try:
@@ -1030,6 +1031,10 @@ class SimTimelinePlayer:
                 self._sim_now_by_screen[scr] = float(t_sim)
                 self._last_wall_by_screen[scr] = float(now_wall)
 
+    def emit_due_items(self, *, max_emits: int = 24) -> int:
+        """``sim_now`` 이하 타임라인 항목 emit (프레임당 상한)."""
+        emitted = 0
+        max_n = max(1, int(max_emits))
         for scr, res in self._results.items():
             t_sim = self.sim_now(scr)
             i = 0
@@ -1037,7 +1042,7 @@ class SimTimelinePlayer:
                 i = int(self._cursor_by_screen.get(scr, 0))
             items = res.items
             event_emitted_this_tick = False
-            while i < len(items) and float(items[i].t) <= float(t_sim) + 1e-9:
+            while i < len(items) and float(items[i].t) <= float(t_sim) + 1e-9 and emitted < max_n:
                 it = items[i]
                 if str(it.kind) == "event":
                     if event_emitted_this_tick:
@@ -1052,6 +1057,7 @@ class SimTimelinePlayer:
                         self._emit(it.kind, it.payload, int(scr))
                     except Exception:
                         pass
+                    emitted += 1
                     i += 1
                     event_emitted_this_tick = True
                     break
@@ -1059,9 +1065,16 @@ class SimTimelinePlayer:
                     self._emit(it.kind, it.payload, int(scr))
                 except Exception:
                     pass
+                emitted += 1
                 i += 1
             with self._lock:
                 self._cursor_by_screen[scr] = int(i)
+        return int(emitted)
+
+    def tick(self) -> None:
+        """레거시 — ``advance_sim_clock`` + ``emit_due_items``."""
+        self.advance_sim_clock()
+        self.emit_due_items()
 
 
 def prerun_engine_to_timeline(
