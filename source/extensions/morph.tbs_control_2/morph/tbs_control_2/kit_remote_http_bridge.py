@@ -45,6 +45,13 @@ from .control_window import (
     on_xml_seq_changed,
     refresh_object_list,
 )
+from .control_sim_bar_graph import (
+    BAR_STATE_COLORS_HEX,
+    BAR_STATES,
+    bar_graph_row_order,
+    bar_state_from_seg,
+    compute_duration_sec_by_row,
+)
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 from .tbs_data_paths import resolve_local_data_path
 from .tbs_usd_window import default_load_usd_path
@@ -87,27 +94,41 @@ def _pump_main_queue(_e: Any) -> None:
             pass
 
 
+def _prerun_export_by_screen_for_api(ext: Any) -> Dict[str, Any]:
+    raw = getattr(ext, "_sim_prerun_export_json_by_screen", None)
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in raw.items():
+        if isinstance(v, dict):
+            out[str(k)] = v
+    return out
+
+
 def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
     """포트 아래 EP 타임라인(막대) 상태 — Kit ``_update_ep_timeline_under_port_state`` rows 와 동일."""
+    sk = str(scr_key)
     st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
-    st = st_by.get(str(scr_key)) if isinstance(st_by, dict) else None
+    st = st_by.get(sk) if isinstance(st_by, dict) else None
     try:
-        si = int(str(scr_key).strip() or "1")
+        si = int(sk.strip() or "1")
     except Exception:
         si = 1
     ep_idx = int(_ep_count_idx_for_port_panel(ext, si))
-    eps = ["EP1", "EP2"]
-    if ep_idx != 0:
-        eps.append("EP3")
-    row_order = list(eps) + ["ALL_EP"]
+    row_order = bar_graph_row_order(ep_idx)
+    base = {
+        "t_now": 0.0,
+        "total_est": 30.0,
+        "rows": {},
+        "empty_acc": {k: 0.0 for k in row_order},
+        "row_order": row_order,
+        "states": list(BAR_STATES),
+        "colors": dict(BAR_STATE_COLORS_HEX),
+        "duration_sec_by_row": {k: {} for k in row_order},
+        "has_prerun": False,
+    }
     if not isinstance(st, dict):
-        return {
-            "t_now": 0.0,
-            "total_est": 30.0,
-            "rows": {},
-            "empty_acc": {k: 0.0 for k in row_order},
-            "row_order": row_order,
-        }
+        return base
     t_last = st.get("t_last")
     try:
         t_now = float(t_last) if t_last is not None else 0.0
@@ -128,31 +149,48 @@ def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
             if not isinstance(segs, list):
                 rows_out[rk] = []
                 continue
-            rows_out[rk] = [
-                {"empty": bool(x.get("empty")), "dur": float(x.get("dur", 0.0))}
-                for x in segs
-                if isinstance(x, dict)
-            ]
-    empty_acc: Dict[str, float] = {k: 0.0 for k in row_order}
-    for ep in eps:
+            row_segs: List[Dict[str, Any]] = []
+            for x in segs:
+                if not isinstance(x, dict):
+                    continue
+                try:
+                    dur = float(x.get("dur", 0.0))
+                except Exception:
+                    dur = 0.0
+                if dur <= 1e-9:
+                    continue
+                st_name = bar_state_from_seg(x)
+                row_segs.append(
+                    {
+                        "state": st_name,
+                        "dur_sec": dur,
+                        "dur": dur,
+                        "empty": st_name == "empty",
+                        "color": BAR_STATE_COLORS_HEX.get(st_name, "#888888"),
+                    }
+                )
+            rows_out[rk] = row_segs
+    duration_sec_by_row = (
+        compute_duration_sec_by_row(rows_state) if isinstance(rows_state, dict) else {}
+    )
+    empty_acc: Dict[str, float] = {}
+    for rk in row_order:
         try:
-            empty_acc[ep] = sum(
-                float(s.get("dur", 0.0)) for s in rows_out.get(ep, []) if bool(s.get("empty", False))
-            )
+            empty_acc[rk] = float((duration_sec_by_row.get(rk) or {}).get("empty", 0.0))
         except Exception:
-            empty_acc[ep] = 0.0
-    try:
-        empty_acc["ALL_EP"] = sum(
-            float(s.get("dur", 0.0)) for s in rows_out.get("ALL_EP", []) if bool(s.get("empty", False))
-        )
-    except Exception:
-        empty_acc["ALL_EP"] = 0.0
+            empty_acc[rk] = 0.0
+    export_by = getattr(ext, "_sim_prerun_export_json_by_screen", None)
+    has_prerun = isinstance(export_by, dict) and isinstance(export_by.get(sk), dict)
     return {
         "t_now": float(t_now),
         "total_est": float(total_est_f),
         "rows": rows_out,
         "empty_acc": empty_acc,
         "row_order": row_order,
+        "states": list(BAR_STATES),
+        "colors": dict(BAR_STATE_COLORS_HEX),
+        "duration_sec_by_row": duration_sec_by_row,
+        "has_prerun": bool(has_prerun),
     }
 
 
@@ -444,6 +482,7 @@ def _snapshot(ext: Any) -> Dict[str, Any]:
         "sim_multi_split_row_visible": bool(split_row_visible),
         "channels": channels,
         "ep_timeline": ep_timeline_root,
+        "prerun_export_by_screen": _prerun_export_by_screen_for_api(ext),
         "per_screen_snapshots": per_screen_snapshots,
         "gate_pending": gate_pending,
     }
@@ -900,6 +939,31 @@ class _TbsRemoteHandler(BaseHTTPRequestHandler):
             try:
                 snap = _run_on_main(lambda: _snapshot(_ext_ref))
                 body = json.dumps(snap, ensure_ascii=False).encode("utf-8")
+                self._send(200, body, "application/json; charset=utf-8", cors=True)
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode("utf-8"), "application/json; charset=utf-8", cors=True)
+            return
+        if path == "/api/prerun":
+            if _ext_ref is None:
+                self._send(503, b'{"error":"ext not ready"}', "application/json; charset=utf-8", cors=True)
+                return
+            try:
+                q = self.path.split("?", 1)
+                screen_q = ""
+                if len(q) > 1:
+                    for part in q[1].split("&"):
+                        if part.startswith("screen="):
+                            screen_q = part.split("=", 1)[-1].strip()
+                            break
+                export_all = _run_on_main(lambda: _prerun_export_by_screen_for_api(_ext_ref))
+                if screen_q:
+                    doc = export_all.get(str(screen_q))
+                    if not isinstance(doc, dict):
+                        self._send(404, json.dumps({"error": "no prerun for screen"}).encode("utf-8"), "application/json; charset=utf-8", cors=True)
+                        return
+                    body = json.dumps(doc, ensure_ascii=False).encode("utf-8")
+                else:
+                    body = json.dumps(export_all, ensure_ascii=False).encode("utf-8")
                 self._send(200, body, "application/json; charset=utf-8", cors=True)
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}).encode("utf-8"), "application/json; charset=utf-8", cors=True)

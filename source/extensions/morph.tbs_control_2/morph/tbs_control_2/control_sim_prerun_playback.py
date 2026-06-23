@@ -26,14 +26,6 @@ class SimPreRunResult:
     items: Tuple[SimTimelineItem, ...]
 
 
-@dataclass
-class EpBarPrecomputed:
-    """프리런 progress 시계열로 미리 계산한 EP 막대 rows."""
-
-    total_est: float
-    rows: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
-    ep_ports: Tuple[str, ...] = ()
-
 
 @dataclass(frozen=True)
 class TimetableRowMeta:
@@ -238,26 +230,6 @@ def _push_bar_seg(
         segs.append({"empty": bool(empty), "dur": float(dur)})
     if cap_segments is not None and len(segs) > int(cap_segments):
         del segs[: -int(cap_segments)]
-
-
-def merge_bar_row_segments(segs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """인접 동일 상태 세그먼트 병합(렌더 갭·줄무늬 완화)."""
-    out: List[Dict[str, Any]] = []
-    for s in segs or []:
-        if not isinstance(s, dict):
-            continue
-        try:
-            dur = float(s.get("dur", 0.0))
-        except Exception:
-            dur = 0.0
-        if dur <= 1e-9:
-            continue
-        empty = bool(s.get("empty", False))
-        if out and bool(out[-1].get("empty")) == empty:
-            out[-1]["dur"] = float(out[-1]["dur"]) + dur
-        else:
-            out.append({"empty": empty, "dur": dur})
-    return out
 
 
 _EP_BAR_KEYS = ("EP1", "EP2", "EP3")
@@ -483,48 +455,6 @@ def commit_bar_ep_occ_from_interval(
             bar_ep_occ[ep] = v
 
 
-def allocate_bar_segment_pixels(
-    segs: List[Dict[str, Any]],
-    *,
-    total_est: float,
-    bar_w: int,
-    t_cover: Optional[float] = None,
-) -> List[Tuple[int, bool]]:
-    """
-    세그먼트 duration → 픽셀 폭(합이 정확히 target_px).
-
-    세그먼트별 round() 시 생기는 1px 틈·줄무늬를 방지한다.
-    """
-    merged = merge_bar_row_segments(segs)
-    if total_est <= 1e-9 or bar_w <= 0 or not merged:
-        return []
-    dur_sum = sum(float(s.get("dur", 0.0)) for s in merged)
-    if dur_sum <= 1e-9:
-        return []
-    if t_cover is None:
-        t_cover = dur_sum
-    target_px = int(round((float(t_cover) / float(total_est)) * float(bar_w)))
-    target_px = max(0, min(int(bar_w), target_px))
-    if target_px <= 0:
-        return []
-    weights = [float(s.get("dur", 0.0)) for s in merged]
-    wsum = sum(weights)
-    if wsum <= 1e-9:
-        return []
-    raw = [(target_px * w / wsum) for w in weights]
-    widths = [int(f) for f in raw]
-    slack = target_px - sum(widths)
-    if slack > 0:
-        order = sorted(range(len(raw)), key=lambda i: (raw[i] - widths[i]), reverse=True)
-        for i in range(slack):
-            widths[order[i % len(order)]] += 1
-    out: List[Tuple[int, bool]] = []
-    for i, s in enumerate(merged):
-        if widths[i] > 0:
-            out.append((int(widths[i]), bool(s.get("empty", False))))
-    return out
-
-
 def _resolve_ep_list_for_bar(
     eps: List[str],
     p: Dict[str, Any],
@@ -633,137 +563,6 @@ def _initial_bar_ep_at_t0(
             if v:
                 out[ep] = v
         break
-    return out
-
-
-def build_ep_bar_from_timeline_replay(
-    items: Tuple[SimTimelineItem, ...],
-    *,
-    final_sim_time: float,
-    ep_ports: Optional[List[str]] = None,
-) -> EpBarPrecomputed:
-    """
-    프리런 타임라인을 state-only 로 재생하며 EP 막대 rows 를 만든다.
-
-    라이브 재생과 동일하게 **JSON 종료(post-anim) 시점**에만 EP 점유를 막대에 반영한다.
-    엔진 ``ports_occupancy`` 스냅샷을 막대에 직접 쓰지 않는다.
-    """
-    total_est = max(0.0, float(final_sim_time))
-    rows: Dict[str, List[Dict[str, Any]]] = {}
-    kind_prio = {"log": 0, "event": 1, "progress": 2}
-    try:
-        sorted_items = tuple(
-            sorted(
-                (it for it in (items or ()) if isinstance(it, SimTimelineItem)),
-                key=lambda it: (float(getattr(it, "t", 0.0) or 0.0), int(kind_prio.get(str(it.kind), 9))),
-            )
-        )
-    except Exception:
-        sorted_items = ()
-
-    prog_items = [it for it in sorted_items if str(it.kind).lower() == "progress" and isinstance(it.payload, dict)]
-
-    eps: List[str] = []
-    if isinstance(ep_ports, list) and ep_ports:
-        eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
-    if not eps:
-        for it in prog_items:
-            p0 = dict(it.payload)
-            ep_ports_raw = p0.get("ep_ports", [])
-            if isinstance(ep_ports_raw, list) and ep_ports_raw:
-                eps = [str(x).strip().upper() for x in ep_ports_raw if str(x).strip().upper().startswith("EP")]
-                break
-    if not eps:
-        eps = ["EP1", "EP2"]
-
-    panel_occ: Dict[str, str] = {}
-    pending: List[Tuple[float, int, Dict[str, Any], Dict[str, str]]] = []
-    for idx, it in enumerate(sorted_items):
-        kind = str(it.kind or "").strip().lower()
-        if kind != "progress" or not isinstance(it.payload, dict):
-            continue
-        p = dict(it.payload)
-        po = p.get("ports_occupancy")
-        if isinstance(po, dict) and po:
-            panel_occ = {str(k).strip().upper(): str(v or "") for k, v in po.items()}
-        st = _s_val(p.get("status")).upper()
-        el = _f_val(p.get("elapsed"), 0.0)
-        if st != "RUNNING" or abs(el) > 1e-9:
-            continue
-        if not _progress_event_affects_ep(p):
-            continue
-        t_json_end = _json_end_sim_time_from_progress(
-            p,
-            fallback_t=_f_val(p.get("sim_time", it.t), float(getattr(it, "t", 0.0) or 0.0)),
-        )
-        if t_json_end is None:
-            continue
-        pending.append((float(t_json_end), int(idx), _post_anim_src_from_progress(p), dict(panel_occ)))
-
-    pending.sort(key=lambda x: (float(x[0]), int(x[1])))
-
-    bar_ep_occ = _initial_bar_ep_at_t0(sorted_items, eps)
-    t_cur = 0.0
-    t_final = max(0.0, float(final_sim_time))
-    for t_json_end, _idx, src, occ_snap in pending:
-        t_apply = min(float(t_json_end), float(t_final))
-        if t_apply > t_cur + 1e-9:
-            _push_bar_rows_from_occ(rows, eps, bar_ep_occ, t_apply - t_cur, cap_segments=None)
-            t_cur = t_apply
-        occ_pred = predict_ports_occupancy_after_anim(dict(occ_snap), src)
-        for ep in eps:
-            bar_ep_occ[ep] = str(occ_pred.get(ep, "") or "")
-    if t_final > t_cur + 1e-9:
-        _push_bar_rows_from_occ(rows, eps, bar_ep_occ, t_final - t_cur, cap_segments=None)
-
-    for r in list(eps) + ["ALL_EP"]:
-        if r not in rows:
-            rows[r] = []
-        else:
-            rows[r] = merge_bar_row_segments(rows[r])
-
-    if total_est <= 0.0:
-        total_est = max(30.0, t_final)
-
-    return EpBarPrecomputed(total_est=float(total_est), rows=rows, ep_ports=tuple(eps))
-
-
-def build_ep_bar_from_progress_items(
-    items: Tuple[SimTimelineItem, ...],
-    *,
-    final_sim_time: float,
-    ep_ports: Optional[List[str]] = None,
-) -> EpBarPrecomputed:
-    """하위 호환 래퍼 — 타임라인 state-only 재생으로 막대를 만든다."""
-    return build_ep_bar_from_timeline_replay(
-        items,
-        final_sim_time=float(final_sim_time),
-        ep_ports=ep_ports,
-    )
-
-
-def truncate_bar_rows_at_t(rows: Dict[str, List[Dict[str, Any]]], t_cut: float) -> Dict[str, List[Dict[str, Any]]]:
-    """완성 rows 에서 ``t_cut`` 초까지만 잘라 복사본을 반환."""
-    t_cut = max(0.0, float(t_cut))
-    out: Dict[str, List[Dict[str, Any]]] = {}
-    for row_name, segs in (rows or {}).items():
-        acc = 0.0
-        clipped: List[Dict[str, Any]] = []
-        for seg in segs or []:
-            if not isinstance(seg, dict):
-                continue
-            dur = float(seg.get("dur", 0.0))
-            if acc + dur <= t_cut + 1e-9:
-                clipped.append({"empty": bool(seg.get("empty")), "dur": dur})
-                acc += dur
-            elif acc < t_cut - 1e-9:
-                rem = t_cut - acc
-                clipped.append({"empty": bool(seg.get("empty")), "dur": rem})
-                acc = t_cut
-                break
-            else:
-                break
-        out[str(row_name)] = clipped
     return out
 
 

@@ -259,22 +259,34 @@ from .translate_animation import (
     stop_prim_translate_animation,
 )
 
-from .control_sim_prerun_playback import (
+from .control_sim_bar_graph import (
+    BAR_STATE_DOWN,
+    BAR_STATE_EMPTY,
+    BAR_STATE_LOAD,
+    BAR_STATE_PROC,
     EpBarPrecomputed,
+    allocate_bar_segment_pixels,
+    bar_graph_row_order,
+    bar_state_color,
+    bar_state_from_seg,
+    build_ep_bar_from_progress_items,
+    build_prerun_export_document,
+    merge_bar_row_segments,
+    truncate_bar_rows_at_t,
+    write_prerun_export_json,
+)
+from .control_sim_bar_graph import _aggregate_all_ep_state  # noqa: PLC2701 — UI live 막대 ALL_EP 집계
+from .control_sim_prerun_playback import (
     PlaybackEngine,
     SimPreRunResult,
     SimTimelinePlayer,
     _progress_event_affects_ep,
-    build_ep_bar_from_progress_items,
     build_seek_snapshots_by_item_index,
     build_timetable_row_metas,
     effective_ports_occupancy_at_t,
-    allocate_bar_segment_pixels,
     interval_occ_parts,
-    merge_bar_row_segments,
     prerun_engine_to_timeline,
     resolve_seek_through_index,
-    truncate_bar_rows_at_t,
 )
 from .ebs_control_panel_ui import build_ebs_control_panel_content, get_sim_ep_count_idx, init_ebs_control_models
 from .control_sim_playback_gate import (
@@ -2371,13 +2383,27 @@ def _sim_channel_upper_height(ext: Any) -> int:
     return 84 + _ep_timeline_host_height(ext) + 168 + 8
 
 
+def _sim_snapshot_for_screen(ext: Any, screen_1based: int) -> Dict[str, Any]:
+    snaps = getattr(ext, "_sim_per_screen_snapshots", None)
+    if isinstance(snaps, list):
+        try:
+            si = max(1, int(screen_1based))
+            if si <= len(snaps):
+                s = snaps[si - 1]
+                if isinstance(s, dict):
+                    return dict(s)
+        except Exception:
+            pass
+    return {}
+
+
 def _ep_timeline_host_height(ext: Any) -> int:
-    """EP 막대 줄 수(EP1/EP2[/EP3]/ALL_EP)에 맞춘 ScrollingFrame 높이."""
+    """막대 행 수(EP·ALL_EP·INOUT·BP)에 맞춘 ScrollingFrame 높이."""
     try:
         idx = int(get_sim_ep_count_idx(ext))
     except Exception:
         idx = 0
-    n_bars = 4 if idx == 1 else 3
+    n_bars = len(bar_graph_row_order(idx))
     _, _, _, frame_pad, _ = _ep_occ_timeline_layout_dims(ext)
     bar_h = 14
     tick_h = 14
@@ -3643,7 +3669,7 @@ def _bar_segment_rect_widths(
     total_est: float,
     bar_w: int,
     t_cover: Optional[float] = None,
-) -> List[Tuple[int, bool]]:
+) -> List[Tuple[int, str]]:
     return allocate_bar_segment_pixels(
         segs,
         total_est=float(total_est),
@@ -3755,7 +3781,7 @@ def _resolve_ep_timeline_sim_time(ext: Any, screen: int, sim_time_text: str) -> 
 
 
 def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict[str, Any], sim_time_text: str) -> None:
-    """포트상태 영역 바로 아래의 EP 타임라인 3줄(EP1/EP2(/EP3)/ALL_EP) + 시간 라벨."""
+    """포트상태 아래 막대 — EP·ALL_EP·INOUT·BP (5상태, 프리런 사전계산 우선)."""
     host = ch.get("ep_timeline_host")
     try:
         screen = int(ch.get("screen", 1))
@@ -3864,17 +3890,15 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         else:
             dt = max(0.0, float(t_bar) - float(t_last))
 
-    # EP 줄은 항상 EP1/EP2를 표시하고, EP3는 설정(EP count=3)일 때만 추가한다.
-    eps = ["EP1", "EP2"]
-    try:
-        # 중요: 분할 화면은 화면별 저장 스냅샷의 ep_count_idx를 따라야 한다.
-        # (전역 콤보를 보면 모든 화면이 동일 EP 개수로 그려지는 문제가 생긴다)
-        ep_idx = int(_ep_count_idx_for_port_panel(ext, int(screen)))
-    except Exception:
-        ep_idx = 0
-    if ep_idx != 0:
-        eps.append("EP3")
-    rows = list(eps) + ["ALL_EP"]
+    # 막대 행: EP·ALL_EP·INOUT·BP (EP 개수에 따라 BP3 또는 BP4까지)
+    ep_idx = int(_ep_count_idx_for_port_panel(ext, int(screen)))
+    rows = list(bar_graph_row_order(ep_idx))
+    if use_precomputed and bar_pre is not None and bar_pre.row_order:
+        rows = list(bar_pre.row_order)
+
+    snap = _sim_snapshot_for_screen(ext, int(screen))
+    ep_count = 3 if ep_idx else 2
+    fault_ports = _fault_ports_from_snapshot(snap, ep_count) if snap else set()
 
     rows_state = st.get("rows", {})
     if not isinstance(rows_state, dict):
@@ -3884,53 +3908,51 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         if r not in rows_state or not isinstance(rows_state.get(r), list):
             rows_state[r] = []
 
-    def _is_empty_port(ep: str) -> bool:
-        v = occ.get(ep, "")
-        return not bool(str(v or "").strip())
+    def _live_port_bar_state(port: str) -> str:
+        p = str(port or "").strip().upper()
+        if p in fault_ports:
+            return "down"
+        has_lot = bool(str(occ.get(p, "") or "").strip())
+        if p.startswith("EP"):
+            if not has_lot:
+                return BAR_STATE_EMPTY
+            try:
+                by_f = getattr(ext, "_sim_foup_proc_active_ep_by_screen", None)
+                ap = str((by_f or {}).get(str(screen), "") or "").strip().upper() if isinstance(by_f, dict) else ""
+                if ap == p:
+                    return "proc"
+            except Exception:
+                pass
+            return BAR_STATE_LOAD
+        return BAR_STATE_EMPTY if not has_lot else BAR_STATE_LOAD
 
-    all_empty = True
-    # empty_acc:
-    # - UI 막대그래프 우측에 "현재까지 누적된 EMPTY 시간(초)"을 상시 표시하기 위한 값.
-    # - 이 값은 막대그래프용 rows_state(세그먼트 dur 합)에서 계산한다.
-    # - 시뮬 종료 후 요약 로그에 찍히는 EP_EMPTY/ALL_EP_EMPTY는 simulation_engine.py에서
-    #   tick 기반으로 별도로 누적(_ep_empty_sec/_all_ep_empty_sec)되며, 개념적으로 동일한 통계다.
     empty_acc: Dict[str, float] = {}
-    for ep in eps:
-        empty = _is_empty_port(ep)
-        if not empty:
-            all_empty = False
-        if dt > 1e-9:
-            segs = rows_state[ep]
-            if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(empty):
+    if not use_precomputed and dt > 1e-9:
+        for r in rows:
+            st_seg = _live_port_bar_state(r)
+            if r == "ALL_EP":
+                ep_rows = [x for x in rows if x.startswith("EP")]
+                ep_st = [_live_port_bar_state(x) for x in ep_rows]
+                st_seg = _aggregate_all_ep_state(ep_st)
+            segs = rows_state[r]
+            if segs and isinstance(segs[-1], dict) and bar_state_from_seg(segs[-1]) == st_seg:
                 segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dt)
             else:
-                segs.append({"empty": bool(empty), "dur": float(dt)})
+                segs.append({"state": st_seg, "dur": float(dt)})
             if len(segs) > 4096:
                 merged = merge_bar_row_segments(segs)
                 if len(merged) > 220:
                     merged = merged[-220:]
-                rows_state[ep] = merged
-                segs = rows_state[ep]
-        # 현재까지 "EMPTY" 누적(세그먼트 합)
+                rows_state[r] = merged
+    for r in rows:
         try:
-            empty_acc[ep] = sum(float(s.get("dur", 0.0)) for s in rows_state.get(ep, []) if isinstance(s, dict) and bool(s.get("empty", False)))
+            empty_acc[r] = sum(
+                float(s.get("dur", 0.0))
+                for s in rows_state.get(r, [])
+                if isinstance(s, dict) and bar_state_from_seg(s) == BAR_STATE_EMPTY
+            )
         except Exception:
-            empty_acc[ep] = 0.0
-    if dt > 1e-9:
-        segs = rows_state["ALL_EP"]
-        if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(all_empty):
-            segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dt)
-        else:
-            segs.append({"empty": bool(all_empty), "dur": float(dt)})
-        if len(segs) > 4096:
-            merged = merge_bar_row_segments(segs)
-            if len(merged) > 220:
-                merged = merged[-220:]
-            rows_state["ALL_EP"] = merged
-    try:
-        empty_acc["ALL_EP"] = sum(float(s.get("dur", 0.0)) for s in rows_state.get("ALL_EP", []) if isinstance(s, dict) and bool(s.get("empty", False)))
-    except Exception:
-        empty_acc["ALL_EP"] = 0.0
+            empty_acc[r] = 0.0
 
     # total_est(막대 스케일): 폴백 max(30,t*1.2)로 먼저 고정된 뒤 엔진 sim_total_est 가 늦게 들어오면
     # 이전에는 상향이 안 되어 30칸이 전부 빨간 EMPTY 세그로만 채워진 것처럼 보였다 → 확정값이 더 크면 상향만 허용.
@@ -3970,8 +3992,14 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         te_snap = float(total_est)
     except Exception:
         te_snap = 0.0
+    eps_fp = [r for r in rows if str(r).startswith("EP")]
+
+    def _port_occ_empty(port_key: str) -> bool:
+        return not bool(str(occ.get(str(port_key), "") or "").strip())
+
     try:
-        occ_fp = tuple((str(ep), bool(_is_empty_port(ep))) for ep in eps) + (bool(all_empty),)
+        all_empty_fp = all(_port_occ_empty(ep) for ep in eps_fp) if eps_fp else True
+        occ_fp = tuple((str(ep), _port_occ_empty(ep)) for ep in eps_fp) + (bool(all_empty_fp),)
     except Exception:
         occ_fp = ()
     old = ch.get("ep_timeline_widget", None)
@@ -4036,8 +4064,8 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     BAR_H = 14
     tick_step = max(10.0, float(int((((float(total_est) / 8.0) + 9.999) // 10.0) * 10.0)))
 
-    def _color(empty: bool) -> int:
-        return 0xFF0000FF if empty else 0xFF00FF00
+    def _color(state: str) -> int:
+        return bar_state_color(str(state or BAR_STATE_EMPTY))
 
     with host:
         ch["ep_timeline_widget"] = ui.VStack(spacing=2)
@@ -4086,7 +4114,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                         alignment=ui.Alignment.LEFT_CENTER,
                         style={"color": 0xFFE0E6F0, "font_size": 10},
                     )
-                # 막대(EP1/EP2(/EP3)/ALL_EP) — 줄은 항상 렌더된다.
+                # 막대(EP·ALL_EP·INOUT·BP) — 줄은 항상 렌더된다.
                 for r in rows:
                     with ui.HStack(height=BAR_H, spacing=int(row_sp)):
                         ui.Label(r, width=NAME_W, height=BAR_H, style={"color": 0xFFBFC7D5, "font_size": 11})
@@ -4116,12 +4144,12 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
                             )
                             with ui.HStack(height=BAR_H, spacing=0):
                                 used = 0
-                                for w, empty in rects:
+                                for w, seg_st in rects:
                                     used += int(w)
                                     ui.Rectangle(
                                         width=int(w),
                                         height=BAR_H,
-                                        style={"background_color": _color(bool(empty))},
+                                        style={"background_color": _color(seg_st)},
                                     )
                                 if used < BAR_W:
                                     ui.Spacer(width=(BAR_W - used))
@@ -6383,14 +6411,24 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
     bar_by: Dict[str, EpBarPrecomputed] = {}
     meta_by: Dict[str, List[Any]] = {}
     seek_by: Dict[str, List[Any]] = {}
+    export_by: Dict[str, Dict[str, Any]] = {}
     for scr, res in results.items():
         try:
             si = int(scr)
         except Exception:
             continue
+        snap = _sim_snapshot_for_screen(ext, si)
+        try:
+            ep_idx = int(snap.get("ep_count_idx", _ep_count_idx_for_port_panel(ext, si)) or 0)
+        except Exception:
+            ep_idx = int(_ep_count_idx_for_port_panel(ext, si))
+        ep_count = 3 if ep_idx else 2
+        faults = _fault_ports_from_snapshot(snap, ep_count) if snap else set()
         bar = build_ep_bar_from_progress_items(
             res.items,
             final_sim_time=float(res.final_sim_time),
+            ep_count_idx=int(ep_idx),
+            fault_ports=faults,
         )
         bar_by[str(si)] = bar
         metas = build_timetable_row_metas(res)
@@ -6399,6 +6437,30 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
             seek_by[str(si)] = build_seek_snapshots_by_item_index(res.items)
         except Exception:
             seek_by[str(si)] = []
+        try:
+            export_doc = build_prerun_export_document(
+                screen=si,
+                result=res,
+                bar=bar,
+                timetable_metas=metas,
+                seek_snapshots_count=len(seek_by.get(str(si)) or []),
+                sim_snapshot=snap,
+            )
+            export_by[str(si)] = export_doc
+            try:
+                from pathlib import Path
+                from datetime import datetime
+
+                out_dir = Path(__file__).resolve().parents[2] / "data" / "sim_prerun"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_path = out_dir / f"prerun_screen{si}_{stamp}.json"
+                write_prerun_export_json(str(out_path), export_doc)
+                print(f"[SIM] 프리런 export JSON (화면{si}): {out_path}", flush=True)
+            except Exception as ex:
+                print(f"[SIM] 프리런 export JSON 저장 실패(화면{si}): {ex}", flush=True)
+        except Exception as ex:
+            print(f"[SIM] 프리런 export 문서 구성 실패(화면{si}): {ex}", flush=True)
         header = f"[SIM] 타임테이블(프리런) — 화면{si}"
         ch = _resolve_timetable_channel_for_screen(ext, si)
         if ch is None:
@@ -6451,6 +6513,7 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
         ext._sim_ep_bar_prerun_by_screen = bar_by
         ext._sim_timetable_row_metas_by_screen = meta_by
         ext._sim_seek_snapshots_by_screen = seek_by
+        ext._sim_prerun_export_json_by_screen = export_by
     except Exception:
         pass
     try:
@@ -7687,8 +7750,7 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
 def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: Dict[str, Any]) -> None:
     """
     진행현황 패널 하단: EP 점유 상태를 시뮬 시간 기준으로 누적 막대그래프로 표현한다.
-    - EP1/EP2(/EP3) + ALL_EP(모든 EP empty) 1줄씩
-    - EMPTY=빨강, FULL=초록
+    프리런 막대가 있으면 EP·ALL_EP 행만 동일 5상태 데이터로 표시한다.
     """
     host = ch.get("progress_ep_timeline_host")
     if host is None:
@@ -7698,15 +7760,6 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
     except Exception:
         screen = 1
     scr_key = str(screen)
-    # 상태 저장소
-    st_by = getattr(ext, "_sim_ep_timeline_state_by_screen", None)
-    if not isinstance(st_by, dict):
-        st_by = {}
-        ext._sim_ep_timeline_state_by_screen = st_by
-    st = st_by.get(scr_key)
-    if not isinstance(st, dict):
-        st = {"t_last": None, "rows": {}}
-        st_by[scr_key] = st
 
     sim_time = None
     try:
@@ -7715,77 +7768,114 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
         sim_time = None
     if sim_time is None:
         return
-    t_last = st.get("t_last", None)
-    st["t_last"] = sim_time
-    if t_last is None:
-        return
-    dt = max(0.0, float(sim_time) - float(t_last))
-    if dt <= 1e-9:
-        return
 
-    occ_raw = payload.get("ports_occupancy", {})
-    if not isinstance(occ_raw, dict):
-        occ_raw = {}
-    occ_eff = _occ_for_ep_timeline(
-        ext,
-        screen,
-        occ_raw,
-        f"{sim_time:.2f}",
-        progress_p=payload if isinstance(payload, dict) else None,
-    )
+    pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
+    bar_pre = pre_by.get(scr_key) if isinstance(pre_by, dict) else None
+    use_pre = isinstance(bar_pre, EpBarPrecomputed)
 
-    # EP 라인 결정: 엔진이 보낸 ep_ports를 최우선으로 사용한다(가장 안정적).
-    eps: List[str] = []
-    ep_ports = payload.get("ep_ports", [])
-    if isinstance(ep_ports, list) and ep_ports:
-        eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
-    if not eps:
-        eps = [str(k).strip().upper() for k in occ_eff.keys() if str(k).strip().upper().startswith("EP")]
-    eps = sorted(eps, key=lambda x: int(str(x).upper().replace("EP", "") or "0"))
-    if not eps:
-        eps = ["EP1", "EP2"]
-    rows = list(eps) + ["ALL_EP"]
+    rows_state: Dict[str, List[Dict[str, Any]]] = {}
+    rows: List[str] = []
+    if use_pre and bar_pre is not None:
+        rows_state = truncate_bar_rows_at_t(bar_pre.rows, float(sim_time))
+        eps_pre = [r for r in (bar_pre.row_order or ()) if str(r).startswith("EP")]
+        rows = list(eps_pre) + (["ALL_EP"] if "ALL_EP" in (bar_pre.row_order or ()) else [])
+    else:
+        st_by = getattr(ext, "_sim_ep_timeline_state_by_screen", None)
+        if not isinstance(st_by, dict):
+            st_by = {}
+            ext._sim_ep_timeline_state_by_screen = st_by
+        st = st_by.get(scr_key)
+        if not isinstance(st, dict):
+            st = {"t_last": None, "rows": {}}
+            st_by[scr_key] = st
+        t_last = st.get("t_last", None)
+        st["t_last"] = sim_time
+        if t_last is None:
+            return
+        dt = max(0.0, float(sim_time) - float(t_last))
+        if dt <= 1e-9:
+            return
 
-    rows_state = st.get("rows", {})
-    if not isinstance(rows_state, dict):
-        rows_state = {}
-        st["rows"] = rows_state
-
-    def _push(row: str, empty: bool, dur: float):
-        segs = rows_state.get(row)
-        if not isinstance(segs, list):
-            segs = []
-            rows_state[row] = segs
-        if segs and isinstance(segs[-1], dict) and bool(segs[-1].get("empty")) == bool(empty):
-            segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dur)
-        else:
-            segs.append({"empty": bool(empty), "dur": float(dur)})
-        if len(segs) > 220:
-            del segs[:-200]
-
-    for r in rows:
-        if r not in rows_state or not isinstance(rows_state.get(r), list):
-            rows_state[r] = []
-
-    t_cursor = float(t_last)
-    for dt_part, occ_part in interval_occ_parts(occ_raw, payload, float(t_last), float(sim_time)):
-        if dt_part <= 1e-9:
-            continue
-        t_cursor += float(dt_part)
-        occ_disp = _occ_for_ep_timeline(
+        occ_raw = payload.get("ports_occupancy", {})
+        if not isinstance(occ_raw, dict):
+            occ_raw = {}
+        occ_eff = _occ_for_ep_timeline(
             ext,
             screen,
-            occ_part if isinstance(occ_part, dict) else {},
-            f"{t_cursor:.6f}",
+            occ_raw,
+            f"{sim_time:.2f}",
             progress_p=payload if isinstance(payload, dict) else None,
         )
-        all_ep_empty = True
-        for ep in eps:
-            empty = not bool(str(occ_disp.get(ep, "") or "").strip())
-            if not empty:
-                all_ep_empty = False
-            _push(ep, empty=empty, dur=dt_part)
-        _push("ALL_EP", empty=all_ep_empty, dur=dt_part)
+
+        eps: List[str] = []
+        ep_ports = payload.get("ep_ports", [])
+        if isinstance(ep_ports, list) and ep_ports:
+            eps = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
+        if not eps:
+            eps = [str(k).strip().upper() for k in occ_eff.keys() if str(k).strip().upper().startswith("EP")]
+        eps = sorted(eps, key=lambda x: int(str(x).upper().replace("EP", "") or "0"))
+        if not eps:
+            eps = ["EP1", "EP2"]
+        rows = list(eps) + ["ALL_EP"]
+
+        rows_state = st.get("rows", {})
+        if not isinstance(rows_state, dict):
+            rows_state = {}
+            st["rows"] = rows_state
+
+        snap = _sim_snapshot_for_screen(ext, screen)
+        ep_count = 3 if int(_ep_count_idx_for_port_panel(ext, screen)) else 2
+        fault_ports = _fault_ports_from_snapshot(snap, ep_count) if snap else set()
+
+        def _live_ep_state(ep: str, occ_disp: Dict[str, Any]) -> str:
+            p = str(ep or "").strip().upper()
+            if p in fault_ports:
+                return BAR_STATE_DOWN
+            if not bool(str(occ_disp.get(p, "") or "").strip()):
+                return BAR_STATE_EMPTY
+            try:
+                by_f = getattr(ext, "_sim_foup_proc_active_ep_by_screen", None)
+                ap = str((by_f or {}).get(scr_key, "") or "").strip().upper() if isinstance(by_f, dict) else ""
+                if ap == p:
+                    return BAR_STATE_PROC
+            except Exception:
+                pass
+            return BAR_STATE_LOAD
+
+        def _push(row: str, state: str, dur: float) -> None:
+            segs = rows_state.get(row)
+            if not isinstance(segs, list):
+                segs = []
+                rows_state[row] = segs
+            st_seg = str(state or BAR_STATE_EMPTY)
+            if segs and isinstance(segs[-1], dict) and bar_state_from_seg(segs[-1]) == st_seg:
+                segs[-1]["dur"] = float(segs[-1].get("dur", 0.0)) + float(dur)
+            else:
+                segs.append({"state": st_seg, "dur": float(dur)})
+            if len(segs) > 220:
+                del segs[:-200]
+
+        for r in rows:
+            if r not in rows_state or not isinstance(rows_state.get(r), list):
+                rows_state[r] = []
+
+        t_cursor = float(t_last)
+        for dt_part, occ_part in interval_occ_parts(occ_raw, payload, float(t_last), float(sim_time)):
+            if dt_part <= 1e-9:
+                continue
+            t_cursor += float(dt_part)
+            occ_disp = _occ_for_ep_timeline(
+                ext,
+                screen,
+                occ_part if isinstance(occ_part, dict) else {},
+                f"{t_cursor:.6f}",
+                progress_p=payload if isinstance(payload, dict) else None,
+            )
+            ep_states = [_live_ep_state(ep, occ_disp) for ep in eps]
+            all_ep_st = _aggregate_all_ep_state(ep_states)
+            for ep, ep_st in zip(eps, ep_states):
+                _push(ep, ep_st, dt_part)
+            _push("ALL_EP", all_ep_st, dt_part)
 
     old = ch.get("progress_ep_timeline_widget", None)
     if old is not None:
@@ -7805,10 +7895,13 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
     # total_est가 없거나 0이면(리셋/초기화 상태) "총시간 라벨"은 표시하지 않는다.
     # 단, 막대 스케일 계산을 위해 내부 total_est는 최소값(10s)을 사용한다.
     _total_raw = 0.0
-    try:
-        _total_raw = float(str(payload.get("sim_total_est_sec", "")).strip() or "0.0")
-    except Exception:
-        _total_raw = 0.0
+    if use_pre and bar_pre is not None and float(bar_pre.total_est) > 0.0:
+        _total_raw = float(bar_pre.total_est)
+    else:
+        try:
+            _total_raw = float(str(payload.get("sim_total_est_sec", "")).strip() or "0.0")
+        except Exception:
+            _total_raw = 0.0
     show_total_label = bool(isinstance(_total_raw, (float, int)) and float(_total_raw) > 0.0)
     total_est = max(10.0, float(_total_raw) if show_total_label else 0.0)
     if total_est <= 0.0:
@@ -7826,9 +7919,8 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
         tick_step = 10.0
     tick_step = max(10.0, tick_step)
 
-    def _color(empty: bool) -> int:
-        # omni.ui 정수 색상 해석 이슈를 피하기 위해 명시값 사용
-        return 0xFF0000FF if empty else 0xFF00FF00  # 빨강 / 초록
+    def _seg_color(state: str) -> int:
+        return bar_state_color(str(state or BAR_STATE_EMPTY))
 
     with host:
         ch["progress_ep_timeline_widget"] = ui.VStack(spacing=4)
@@ -7915,12 +8007,12 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
                     )
                     with ui.HStack(height=BAR_H, spacing=0):
                         used = 0
-                        for w, empty in rects:
+                        for w, seg_st in rects:
                             used += int(w)
                             ui.Rectangle(
                                 width=int(w),
                                 height=BAR_H,
-                                style={"background_color": _color(bool(empty))},
+                                style={"background_color": _seg_color(seg_st)},
                             )
                         if used < BAR_W:
                             ui.Spacer(width=(BAR_W - used))
