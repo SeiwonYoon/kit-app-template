@@ -961,24 +961,25 @@ class SimTimelinePlayer:
         results_by_screen: Dict[int, SimPreRunResult],
         emit_fn: Callable[[str, Any, int], None],
         speed_supplier: Callable[[], float],
+        event_emit_allowed: Optional[Callable[[int], bool]] = None,
     ) -> None:
         self._results = dict(results_by_screen or {})
         self._emit = emit_fn
         self._speed = speed_supplier
+        self._event_emit_allowed = event_emit_allowed
         self._lock = threading.Lock()
         self._playing = False
-        self._t0_wall = 0.0
-        self._t0_sim_by_screen: Dict[int, float] = {}
-        self._cursor_by_screen: Dict[int, int] = {}
         self._sim_now_by_screen: Dict[int, float] = {}
+        self._cursor_by_screen: Dict[int, int] = {}
+        self._last_wall_by_screen: Dict[int, float] = {}
 
     def start(self) -> None:
         with self._lock:
             self._playing = True
-            self._t0_wall = time.perf_counter()
-            self._t0_sim_by_screen = {scr: 0.0 for scr in self._results.keys()}
+            now_wall = time.perf_counter()
             self._cursor_by_screen = {scr: 0 for scr in self._results.keys()}
             self._sim_now_by_screen = {scr: 0.0 for scr in self._results.keys()}
+            self._last_wall_by_screen = {scr: now_wall for scr in self._results.keys()}
 
     def stop(self) -> None:
         with self._lock:
@@ -1006,27 +1007,28 @@ class SimTimelinePlayer:
             if res is not None:
                 t = min(float(res.final_sim_time), t)
                 ic = min(ic, len(res.items))
-            self._t0_sim_by_screen[scr] = t
             self._sim_now_by_screen[scr] = t
             self._cursor_by_screen[scr] = ic
-            self._t0_wall = time.perf_counter()
+            self._last_wall_by_screen[scr] = time.perf_counter()
             self._playing = True
 
     def tick(self) -> None:
+        now_wall = time.perf_counter()
+        sp = 1.0
+        try:
+            sp = max(0.05, float(self._speed()))
+        except Exception:
+            sp = 1.0
         with self._lock:
             if not self._playing:
                 return
-            sp = 1.0
-            try:
-                sp = max(0.05, float(self._speed()))
-            except Exception:
-                sp = 1.0
-            wall_dt = time.perf_counter() - float(self._t0_wall)
             for scr, res in self._results.items():
-                t_base = float(self._t0_sim_by_screen.get(scr, 0.0))
-                t_sim = t_base + float(wall_dt) * float(sp)
+                last_w = float(self._last_wall_by_screen.get(scr, now_wall))
+                dt = max(0.0, now_wall - last_w)
+                t_sim = float(self._sim_now_by_screen.get(scr, 0.0)) + float(dt) * float(sp)
                 t_sim = min(float(res.final_sim_time), float(t_sim))
                 self._sim_now_by_screen[scr] = float(t_sim)
+                self._last_wall_by_screen[scr] = float(now_wall)
 
         for scr, res in self._results.items():
             t_sim = self.sim_now(scr)
@@ -1034,8 +1036,25 @@ class SimTimelinePlayer:
             with self._lock:
                 i = int(self._cursor_by_screen.get(scr, 0))
             items = res.items
+            event_emitted_this_tick = False
             while i < len(items) and float(items[i].t) <= float(t_sim) + 1e-9:
                 it = items[i]
+                if str(it.kind) == "event":
+                    if event_emitted_this_tick:
+                        break
+                    if self._event_emit_allowed is not None:
+                        try:
+                            if not bool(self._event_emit_allowed(int(scr))):
+                                break
+                        except Exception:
+                            break
+                    try:
+                        self._emit(it.kind, it.payload, int(scr))
+                    except Exception:
+                        pass
+                    i += 1
+                    event_emitted_this_tick = True
+                    break
                 try:
                     self._emit(it.kind, it.payload, int(scr))
                 except Exception:

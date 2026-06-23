@@ -172,19 +172,23 @@ class SequenceRunner(_LegacySequenceRunner):
             except Exception as exc:
                 print(f"[TBS/SEQ] lam runner failed: {exc}", flush=True)
             finally:
-                # JSON run() 반환 후 main FIFO·MOVE 잔류 drain — ANIM_DONE 전 필수.
+                # LAM 스텝 종료 — 잔류 MOVE/TIMESAMPLES 정리 후 완료 콜백.
+                self._lam_running = False
                 try:
-                    from .sim_channel_scope import drain_channel_motion_complete
+                    from .sim_channel_scope import drain_channel_motion_complete, stop_channel_animations
 
+                    stop_channel_animations(
+                        self._last_usd_context_name,
+                        diag_reason="lam_run_end",
+                    )
                     drain_channel_motion_complete(
                         self._last_usd_context_name,
                         self._tbs_registry,
-                        max_sec=120.0,
-                        stable_ticks=4,
+                        max_sec=4.0,
+                        stable_ticks=2,
                     )
                 except Exception:
                     pass
-                self._lam_running = False
                 if callable(cb):
                     try:
                         cb()

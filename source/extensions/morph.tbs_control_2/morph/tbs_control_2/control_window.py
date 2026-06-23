@@ -277,6 +277,21 @@ from .control_sim_prerun_playback import (
     truncate_bar_rows_at_t,
 )
 from .ebs_control_panel_ui import build_ebs_control_panel_content, get_sim_ep_count_idx, init_ebs_control_models
+from .control_sim_playback_gate import (
+    can_emit_timeline_event,
+    clear_playback_gate_state,
+    clear_proc_gates,
+    compute_json_effective_speed,
+    json_wall_duration_sec,
+    set_json_wall_busy,
+)
+from .control_sim_multi_playback import (
+    get_sim_playback_player,
+    is_multi_playback_instances,
+    start_multi_playback_instances,
+    stop_multi_playback_instances,
+    tick_multi_playback,
+)
 from .control_sim_timetable_ui import (
     build_timetable_column_ui,
     mount_interactive_timetable,
@@ -922,15 +937,10 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 scr_i = 1
             scr_i = max(1, scr_i)
-            if _is_multi_viewport_sim(ext):
-                if threading.current_thread().name != _anim_screen_worker_name(scr_i):
-                    _enqueue_anim_screen_job(
-                        ext,
-                        scr_i,
-                        lambda j=job: _start_job(j),
-                        priority=int(job.get("_priority", 10) if isinstance(job, dict) else 10),
-                    )
-                    return
+            try:
+                set_json_wall_busy(ext, scr_i, True)
+            except Exception:
+                pass
             try:
                 _halt_screen_json_anim(ext, scr_i, join_sec=3.0)
             except Exception:
@@ -966,6 +976,11 @@ def _execute_mapped_sequence_stub(
                             evaluator=rt.evaluator,
                         )
                         runners[str(scr_i)] = runner_obj
+                        if int(scr_i) == 1:
+                            try:
+                                ext._sim_runner = runner_obj
+                            except Exception:
+                                pass
                     else:
                         runner_obj._tbs_registry = rt.registry
                         runner_obj._tbs_scheduler = rt.scheduler
@@ -977,6 +992,11 @@ def _execute_mapped_sequence_stub(
                         evaluator=getattr(ext, "_tbs_evaluator", None),
                     )
                     runners[str(scr_i)] = runner_obj
+                    if int(scr_i) == 1:
+                        try:
+                            ext._sim_runner = runner_obj
+                        except Exception:
+                            pass
             except Exception:
                 if runner_obj is None:
                     runner_obj = getattr(ext, "_sim_runner", None)
@@ -994,9 +1014,32 @@ def _execute_mapped_sequence_stub(
                 pause_evt = threading.Event()
                 pause_map[str(scr_i)] = pause_evt
 
+            sp = 1.0
+            try:
+                m = getattr(ext, "_sim_speed_model", None)
+                if m is not None:
+                    sp = max(0.1, float(m.get_value_as_float()))
+            except Exception:
+                sp = 1.0
+            proc_sec_job = 0.0
+            try:
+                proc_sec_job = float(job.get("proc_sec", 0.0) or 0.0)
+            except Exception:
+                proc_sec_job = 0.0
+            est_total_job = job.get("est_total", None)
+            est_total_f = 0.0
+            try:
+                if isinstance(est_total_job, (float, int)):
+                    est_total_f = float(est_total_job)
+            except Exception:
+                est_total_f = 0.0
+            eff_sp = compute_json_effective_speed(sp, proc_sec_job, est_total_f)
+            json_wall_sec = json_wall_duration_sec(est_total_f, eff_sp)
+
             started_wall = time.monotonic()
             active = dict(job)
             active["_started_wall"] = started_wall
+            active["_eff_sp"] = float(eff_sp)
             try:
                 _flush_pending_post_anim_port_applies(ext, scr_i)
             except Exception:
@@ -1011,15 +1054,15 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 ext._sim_anim_active = active
             try:
-                if isinstance(job.get("est_total"), (float, int)) and float(job.get("est_total")) > 0.0:
+                if json_wall_sec > 0.0:
                     try:
                         until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
                         if not isinstance(until_by, dict):
                             until_by = {}
                             ext._sim_tick_pause_until_wall_by_screen = until_by
-                        until_by[str(scr_i)] = float(started_wall) + float(job.get("est_total"))
+                        until_by[str(scr_i)] = float(started_wall) + float(json_wall_sec)
                     except Exception:
-                        ext._sim_tick_pause_until_wall = float(started_wall) + float(job.get("est_total"))
+                        ext._sim_tick_pause_until_wall = float(started_wall) + float(json_wall_sec)
                 else:
                     try:
                         until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
@@ -1055,8 +1098,8 @@ def _execute_mapped_sequence_stub(
                     idle = drain_channel_motion_complete(
                         _ctx_done,
                         _reg_done,
-                        max_sec=30.0,
-                        stable_ticks=4,
+                        max_sec=5.0,
+                        stable_ticks=3,
                     )
                     if not idle:
                         try:
@@ -1137,6 +1180,10 @@ def _execute_mapped_sequence_stub(
                     except Exception:
                         pass
                     try:
+                        set_json_wall_busy(ext, scr_i, False)
+                    except Exception:
+                        pass
+                    try:
                         _refresh_sim_progress_from_last(ext)
                     except Exception:
                         pass
@@ -1160,44 +1207,14 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 pass
 
-            sp = 1.0
-            try:
-                m = getattr(ext, "_sim_speed_model", None)
-                if m is not None:
-                    sp = max(0.1, float(m.get_value_as_float()))
-            except Exception:
-                sp = 1.0
             # 요구사항: 공정시간 우선 기능은 사용하지 않음(항상 OFF 고정)
             proc_priority = False
 
-            # 요구사항(공정시간 기준):
-            # - job.proc_sec 과 job.est_total(=JSON 1배속 예상 길이)을 비교해
-            #   JSON이 더 길면 proc_sec 안에 끝나도록 speed_scale 을 자동 배속한다.
-            proc_sec_job = 0.0
-            try:
-                proc_sec_job = float(job.get("proc_sec", 0.0) or 0.0)
-            except Exception:
-                proc_sec_job = 0.0
-            est_total_job = job.get("est_total", None)
-            est_total_f = 0.0
-            try:
-                if isinstance(est_total_job, (float, int)):
-                    est_total_f = float(est_total_job)
-            except Exception:
-                est_total_f = 0.0
-            eff_sp = sp
-            if proc_sec_job > 1e-9 and est_total_f > proc_sec_job + 1e-6:
-                try:
-                    ratio = float(est_total_f) / float(proc_sec_job)
-                    eff_sp = max(0.1, float(sp) * ratio)
-                except Exception:
-                    eff_sp = sp
-
-            # (fail-safe) pause_until_wall 추정은 effective speed 기준으로 재설정한다.
+            # (fail-safe) pause_until_wall — eff_sp 반영 wall JSON 길이
             try:
                 ub_by_screen = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
-                if isinstance(ub_by_screen, dict):
-                    ub_by_screen[str(scr_i)] = float(started_wall) + float(est_total_f) / max(0.1, float(eff_sp))
+                if isinstance(ub_by_screen, dict) and json_wall_sec > 0.0:
+                    ub_by_screen[str(scr_i)] = float(started_wall) + float(json_wall_sec)
             except Exception:
                 pass
             # JSON 종료 직후 포트 갱신 fail-safe: wall-clock·pending 용 이벤트 스냅샷 보관
@@ -1207,8 +1224,8 @@ def _execute_mapped_sequence_stub(
                     by_src = {}
                     ext._sim_post_anim_src_by_screen = by_src
                 snap = _normalize_post_anim_port_src(dict(job))
-                if est_total_f > 0.0:
-                    snap["_json_end_wall"] = float(started_wall) + float(est_total_f) / max(0.1, float(eff_sp))
+                if json_wall_sec > 0.0:
+                    snap["_json_end_wall"] = float(started_wall) + float(json_wall_sec)
                 by_src[str(scr_i)] = snap
             except Exception:
                 pass
@@ -1260,7 +1277,7 @@ def _execute_mapped_sequence_stub(
                     job.get("parsed", []),
                     usd_context_name=_ctx_run,
                     speed_scale=eff_sp,
-                    wait_until_done=_is_multi_viewport_sim(ext),
+                    wait_until_done=False,
                 )
             else:
                 try:
@@ -1268,6 +1285,10 @@ def _execute_mapped_sequence_stub(
                         f"[ANIM] 실행 스킵 — SequenceRunner 없음 screen={scr_i} ctx={_ctx_run!r}",
                         flush=True,
                     )
+                except Exception:
+                    pass
+                try:
+                    set_json_wall_busy(ext, scr_i, False)
                 except Exception:
                     pass
             try:
@@ -1322,40 +1343,11 @@ def _execute_mapped_sequence_stub(
         try:
             runners = getattr(ext, "_sim_runners_by_screen", None)
             rr = runners.get(str(_scr)) if isinstance(runners, dict) else None
+            if rr is None and int(_scr) == 1:
+                rr = getattr(ext, "_sim_runner", None)
             runner_busy = bool(rr is not None and getattr(rr, "is_running", lambda: False)())
         except Exception:
             runner_busy = False
-        if _is_multi_viewport_sim(ext):
-            try:
-                from . import sim_multi_diag as _mdiag
-
-                _mdiag.log_anim_dispatch(
-                    ext,
-                    screen=_scr,
-                    sim_time=str(sim_time or ""),
-                    event=str(seq),
-                    file_name=p.name,
-                    est_total=float(est_total) if isinstance(est_total, (float, int)) else 0.0,
-                    runner_busy=runner_busy,
-                    decision="WORKER_QUEUE",
-                )
-            except Exception:
-                pass
-            _enqueue_anim_screen_job(
-                ext,
-                _scr,
-                lambda j=job: _start_job(j),
-                priority=int(job.get("_priority", 10)),
-            )
-            _append_anim_history_log(
-                ext,
-                f"[ANIM] 화면워커적재 | screen={_scr} | event={seq} | est={est_text} | action={action_text} | file={p.name}",
-            )
-            try:
-                _refresh_sim_progress_from_last(ext)
-            except Exception:
-                pass
-            return
         if runner_busy:
             try:
                 from . import sim_multi_diag as _mdiag
@@ -3734,7 +3726,7 @@ def _resolve_ep_timeline_sim_time(ext: Any, screen: int, sim_time_text: str) -> 
         t_parsed = float(str(sim_time_text or "").strip() or "0.0")
     except Exception:
         t_parsed = 0.0
-    player = getattr(ext, "_sim_playback_player", None)
+    player = get_sim_playback_player(ext, si)
     if player is not None:
         try:
             if hasattr(player, "is_playing") and player.is_playing():
@@ -3776,7 +3768,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
     bar_pre = pre_by.get(scr_key) if isinstance(pre_by, dict) else None
     use_precomputed = isinstance(bar_pre, EpBarPrecomputed)
-    player = getattr(ext, "_sim_playback_player", None)
+    player = get_sim_playback_player(ext, screen)
     playback_lock = use_precomputed or (
         player is not None and hasattr(player, "is_playing") and player.is_playing()
     )
@@ -4170,7 +4162,6 @@ def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
     if not isinstance(last_by, dict):
         last_by = {}
     empty_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
-    player = getattr(ext, "_sim_playback_player", None)
     for i, ch in enumerate(chans):
         if not isinstance(ch, dict):
             continue
@@ -4180,7 +4171,7 @@ def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
         if eng is None or bool(getattr(eng, "is_done", False)):
             continue
         t_now = _resolve_ep_timeline_sim_time(ext, si, "")
-        if player is None:
+        if get_sim_playback_player(ext, si) is None:
             try:
                 t_now = float(getattr(getattr(eng, "env", None), "now", 0.0) or 0.0)
             except Exception:
@@ -4357,7 +4348,7 @@ def post_sim_progress_update(ext: Any, payload: Dict[str, str]) -> None:
 
 
 def _is_playback_time_tick_payload(payload: Dict[str, Any]) -> bool:
-    """프리런 재생 heartbeat — 진행현황 sim_time 만 갱신하고 포트/애니 상태는 재전송하지 않는다."""
+    """프리런 재생 heartbeat — sim_time·elapsed·percent 를 보간 갱신(포트/애니 상태는 재전송 안 함)."""
     return str(payload.get("playback_time_tick", "")).strip() in ("1", "true", "True", "ON", "on")
 
 
@@ -4369,17 +4360,73 @@ _PLAYBACK_TIME_TICK_STRIP_KEYS = (
 )
 
 
+def _apply_playback_step_progress_from_sim(
+    p3: Dict[str, Any],
+    tnow: float,
+    *,
+    ext: Any = None,
+    screen: int = 1,
+) -> None:
+    """
+    타임라인 progress 항목 사이(애니·공정 대기) heartbeat 에서 elapsed/percent 를 sim_now 로 보간.
+
+    프리런 타임라인에 중간 progress 가 없거나, event 게이트로 다음 event 전까지
+    커서가 멈춰 있어도 진행률(초·%) 이 연속적으로 증가한다.
+    """
+    try:
+        t0 = float(str(p3.get("event_start_sim_time") or "").strip() or "0")
+    except Exception:
+        t0 = 0.0
+    proc = 0.0
+    try:
+        proc = float(str(p3.get("proc_sec") or "").strip() or "0")
+    except Exception:
+        proc = 0.0
+    if proc <= 1e-9:
+        try:
+            proc = float(str(p3.get("total") or "").strip() or "0")
+        except Exception:
+            proc = 0.0
+    if ext is not None:
+        try:
+            active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+            act = active_by.get(str(int(screen))) if isinstance(active_by, dict) else None
+            if isinstance(act, dict):
+                try:
+                    at = float(str(act.get("t") or "").strip() or "0")
+                except Exception:
+                    at = 0.0
+                try:
+                    ap = float(str(act.get("proc_sec") or "").strip() or "0")
+                except Exception:
+                    ap = 0.0
+                if at > 1e-9:
+                    t0 = at
+                if ap > 1e-9:
+                    proc = ap
+        except Exception:
+            pass
+    if proc <= 1e-9:
+        return
+    el = max(0.0, min(float(proc), float(tnow) - float(t0)))
+    pct = min(100.0, 100.0 * el / float(proc))
+    p3["elapsed"] = f"{el:.1f}"
+    p3["total"] = f"{float(proc):.1f}"
+    p3["percent"] = str(int(pct))
+
+
 def _build_playback_time_tick_payload(
     scr: int,
     tnow: float,
     lp: Optional[Dict[str, Any]],
     *,
     final_sim_time: Optional[float] = None,
+    ext: Any = None,
 ) -> Dict[str, Any]:
     """
     프리런 재생 0.2s heartbeat 용 payload.
 
-    타임라인 아이템 사이 대기 구간에서 진행현황 ``sim_time`` 표시만 흐르게 하고,
+    ``sim_time`` 과 공정 구간 기준 ``elapsed`` / ``percent`` 를 ``tnow`` 로 보간한다.
     포트 점유·FOUP 등 상태 필드는 타임라인 emit 경로에서만 반영한다.
     """
     if isinstance(lp, dict) and str(lp.get("label", "") or "").strip():
@@ -4399,6 +4446,10 @@ def _build_playback_time_tick_payload(
     p3["playback_time_tick"] = "1"
     if isinstance(final_sim_time, (float, int)) and float(final_sim_time) > 0.0:
         p3["sim_total_est_sec"] = f"{float(final_sim_time):.2f}"
+    try:
+        _apply_playback_step_progress_from_sim(p3, float(tnow), ext=ext, screen=int(scr))
+    except Exception:
+        pass
     for k in _PLAYBACK_TIME_TICK_STRIP_KEYS:
         p3.pop(k, None)
     return p3
@@ -4933,16 +4984,18 @@ def _on_sim_bar_preview_toggled(ext: Any) -> None:
     except Exception:
         pass
     try:
-        player = getattr(ext, "_sim_playback_player", None)
         chans = getattr(ext, "_sim_monitor_channels", None)
         last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-        if player is None or not isinstance(chans, list) or not chans:
+        if not isinstance(chans, list) or not chans:
             return
         empty_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
         for i, ch in enumerate(chans):
             if not isinstance(ch, dict):
                 continue
             si = i + 1
+            player = get_sim_playback_player(ext, si)
+            if player is None:
+                continue
             try:
                 tnow = float(player.sim_now(si))
             except Exception:
@@ -5655,7 +5708,7 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
     scr_i = int(screen)
     ctx = _usd_context_name_for_sim_screen(ext, scr_i)
 
-    player = getattr(ext, "_sim_playback_player", None)
+    player = get_sim_playback_player(ext, scr_i)
     if player is not None:
         try:
             if getattr(player, "is_playing", lambda: False)():
@@ -5746,7 +5799,7 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
     except Exception:
         pass
 
-    player = getattr(ext, "_sim_playback_player", None)
+    player = get_sim_playback_player(ext, int(screen))
     if player is not None and hasattr(player, "seek"):
         try:
             player.seek(int(screen), target_t=float(t_target), item_cursor=int(play_cursor))
@@ -6252,6 +6305,8 @@ def _drain_sim_log_queue(ext: Any) -> None:
                 if isinstance(results, dict) and results:
                     try:
                         ext._sim_playback_started = True
+                        ext._sim_anim_pending = []
+                        ext._sim_anim_pending_by_screen = {}
                     except Exception:
                         pass
 
@@ -6332,12 +6387,30 @@ def _drain_sim_log_queue(ext: Any) -> None:
                         except Exception:
                             return 1.0
 
-                    player = SimTimelinePlayer(results_by_screen=results, emit_fn=_emit, speed_supplier=_speed)
-                    player.start()
+                    def _timeline_event_gate(scr: int) -> bool:
+                        return can_emit_timeline_event(ext, int(scr))
+
                     try:
-                        ext._sim_playback_player = player
+                        clear_playback_gate_state(ext)
                     except Exception:
                         pass
+
+                    if _is_multi_viewport_sim(ext):
+                        start_multi_playback_instances(
+                            ext, results, _emit, _speed, event_emit_allowed=_timeline_event_gate
+                        )
+                    else:
+                        player = SimTimelinePlayer(
+                            results_by_screen=results,
+                            emit_fn=_emit,
+                            speed_supplier=_speed,
+                            event_emit_allowed=_timeline_event_gate,
+                        )
+                        player.start()
+                        try:
+                            ext._sim_playback_player = player
+                        except Exception:
+                            pass
                     # 첫 공정(첫 이벤트) 전에도 진행현황/시간이 계속 증가하도록 초기 payload를 즉시 세팅한다.
                     try:
                         for scr, rr in results.items():
@@ -6471,6 +6544,12 @@ def _drain_sim_log_queue(ext: Any) -> None:
 def _tick_playback(ext: Any) -> None:
     """프리런 타임라인 플레이어 1프레임 tick + env.now 동기화."""
     try:
+        if is_multi_playback_instances(ext):
+            tick_multi_playback(ext)
+            return
+    except Exception:
+        pass
+    try:
         player = getattr(ext, "_sim_playback_player", None)
         if player is None:
             return
@@ -6567,6 +6646,7 @@ def _tick_playback(ext: Any) -> None:
                             float(tnow),
                             lp if isinstance(lp, dict) else None,
                             final_sim_time=te_val,
+                            ext=ext,
                         )
                         post_sim_progress_update(ext, p3)
                     except Exception:
@@ -9220,10 +9300,12 @@ def on_sim_start_clicked(ext: Any) -> None:
         ext._sim_prerun_done_evt = threading.Event()
         ext._sim_prerun_results_by_screen = None
         ext._sim_playback_player = None
+        ext._sim_playback_players_by_screen = None
         ext._sim_playback_ui_sub = None
         ext._sim_prerun_timetable_printed = False
         ext._sim_playback_started = False
         ext._sim_playback_done = False
+        clear_proc_gates(ext)
     except Exception:
         pass
 
@@ -9814,6 +9896,14 @@ def on_sim_stop_clicked(ext: Any) -> None:
         pass
     # 프리런/재생 모드 정리
     try:
+        stop_multi_playback_instances(ext)
+    except Exception:
+        pass
+    try:
+        clear_proc_gates(ext)
+    except Exception:
+        pass
+    try:
         p = getattr(ext, "_sim_playback_player", None)
         if p is not None and hasattr(p, "stop"):
             try:
@@ -10188,8 +10278,17 @@ def on_sim_reset_clicked(ext: Any) -> None:
     try:
         ext._sim_prerun_results_by_screen = None
         ext._sim_playback_player = None
+        ext._sim_playback_players_by_screen = None
         ext._sim_playback_started = False
         ext._sim_playback_done = False
+    except Exception:
+        pass
+    try:
+        stop_multi_playback_instances(ext)
+    except Exception:
+        pass
+    try:
+        clear_proc_gates(ext)
     except Exception:
         pass
     try:

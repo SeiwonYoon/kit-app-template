@@ -618,7 +618,8 @@ def refresh_timetable_row_highlight(ext: Any, *, screen: int, sim_now: float) ->
 def refresh_all_timetable_highlights(ext: Any) -> None:
     """재생 중·Seek 후 모든 화면 하이라이트 동기화."""
     try:
-        player = getattr(ext, "_sim_playback_player", None)
+        from .control_sim_multi_playback import get_sim_playback_player
+
         seen: Set[int] = set()
         by = getattr(ext, "_sim_timetable_channels", None)
         if isinstance(by, dict) and by:
@@ -634,6 +635,7 @@ def refresh_all_timetable_highlights(ext: Any) -> None:
                         continue
                 seen.add(int(si))
                 t_now = 0.0
+                player = get_sim_playback_player(ext, si)
                 if player is not None:
                     try:
                         t_now = float(player.sim_now(si))
@@ -653,6 +655,7 @@ def refresh_all_timetable_highlights(ext: Any) -> None:
             if int(si) in seen:
                 continue
             t_now = 0.0
+            player = get_sim_playback_player(ext, si)
             if player is not None:
                 try:
                     t_now = float(player.sim_now(si))
