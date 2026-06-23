@@ -807,9 +807,53 @@ def refresh_split_viewport_resolution_from_grid(
         pass
 
 
-def _bring_kit_chrome_visible() -> None:
-    """Console/Content 등 — 위치는 건드리지 않고 표시만(분할 후 뒤로 가려짐 완화)."""
+def _kit_panel_is_user_hidden(win_name: str) -> bool:
+    """Workspace 패널이 이미 숨김(visible=False)이면 레이아웃 조정으로 다시 띄우지 않는다."""
+    wn = str(win_name or "").strip()
+    if not wn:
+        return True
+    try:
+        w = ui.Workspace.get_window(wn)
+        if w is not None and not bool(getattr(w, "visible", True)):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _should_skip_kit_panel_auto_show(win_name: str, ext: Any = None) -> bool:
+    """배포 숨김·사용자 숨김 상태의 Console/Content 등은 자동 표시 대상에서 제외."""
+    if _kit_panel_is_user_hidden(win_name):
+        return True
+    if ext is None:
+        return False
+    try:
+        from .kit_chrome_visibility import is_kit_chrome_hidden
+
+        if is_kit_chrome_hidden(ext):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _bring_kit_chrome_visible(ext: Any = None) -> None:
+    """
+    Console/Content 등 — 분할 후 가려짐 완화용으로 **이미 보이는** 패널만 앞으로 올린다.
+
+    배포·``kit_chrome_hide`` 로 숨긴 패널(``visible=False``)은 건드리지 않는다.
+    """
+    if ext is not None:
+        try:
+            from .kit_chrome_visibility import is_kit_chrome_hidden
+
+            if is_kit_chrome_hidden(ext):
+                return
+        except Exception:
+            pass
     for nm in ("Console", "Content", "Stage", "Property"):
+        if _should_skip_kit_panel_auto_show(str(nm), ext):
+            continue
         _workspace_show_named_window(str(nm), True)
 
 
@@ -835,7 +879,7 @@ def reapply_split_layout_sync(ext: Any, n: int) -> None:
         set_viewport_fill_frame_for_split_count(sn, True)
     except Exception:
         pass
-    _bring_kit_chrome_visible()
+    _bring_kit_chrome_visible(ext)
 
 
 async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int) -> None:
@@ -860,7 +904,7 @@ async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int)
         set_viewport_fill_frame_for_split_count(n, True)
     except Exception:
         pass
-    _bring_kit_chrome_visible()
+    _bring_kit_chrome_visible(ext)
 
 
 def set_viewport_fill_frame_for_split_count(split_n: int, fill: bool) -> None:
@@ -1935,7 +1979,7 @@ def _restore_single_viewport_after_dock_teardown(ext: Any) -> None:
     except Exception:
         pass
     _sync_viewport_resolution_from_workspace_window("Viewport")
-    _bring_kit_chrome_visible()
+    _bring_kit_chrome_visible(ext)
 
 
 def _restore_viewport_after_split_teardown(ext: Any) -> None:
@@ -1945,7 +1989,7 @@ def _restore_viewport_after_split_teardown(ext: Any) -> None:
         _restore_single_viewport_after_dock_teardown(ext)
     else:
         _restore_main_viewport_layout(ext)
-        _bring_kit_chrome_visible()
+        _bring_kit_chrome_visible(ext)
     try:
         ext._tbs_split_used_dock_layout = False
     except Exception:
@@ -1963,7 +2007,7 @@ def _schedule_deferred_single_viewport_restore(ext: Any, *, used_dock: bool) -> 
             _restore_single_viewport_after_dock_teardown(ext)
         else:
             _restore_main_viewport_layout(ext)
-            _bring_kit_chrome_visible()
+            _bring_kit_chrome_visible(ext)
 
     try:
         asyncio.ensure_future(_go())
@@ -2188,6 +2232,8 @@ def _ensure_kit_chrome_panels_on_top(ext: Any) -> None:
         getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
     )
     for nm in ("Console", "Content", "Stage", "Property"):
+        if _should_skip_kit_panel_auto_show(str(nm), ext):
+            continue
         r = panels.get(str(nm))
         if r is not None:
             _apply_window_rect(str(nm), r)
@@ -2233,7 +2279,7 @@ def _restore_kit_full_layout_after_split(ext: Any) -> None:
     except Exception:
         pass
     _sync_viewport_resolution_from_workspace_window("Viewport")
-    _bring_kit_chrome_visible()
+    _bring_kit_chrome_visible(ext)
 
 
 def _split_tile_bbox_top_cap_y(ext: Any, vy: int, vh: int) -> int:
@@ -2267,6 +2313,8 @@ def _restore_kit_bottom_panels(ext: Any) -> None:
         getattr(ext, "_tbs_split_saved_panel_layout", None) or {}
     )
     for nm in ("Console", "Content"):
+        if _should_skip_kit_panel_auto_show(str(nm), ext):
+            continue
         r = panels.get(str(nm))
         if r is not None:
             _apply_window_rect(str(nm), r)
@@ -2517,7 +2565,8 @@ def _relayout_single_viewport_fill_available(ext: Any, menus_hidden: bool) -> No
     except Exception:
         pass
     _sync_viewport_resolution_from_workspace_window("Viewport")
-    _bring_kit_chrome_visible()
+    if not menus_hidden:
+        _bring_kit_chrome_visible(ext)
 
 
 def relayout_split_views_to_viewport(ext: Any, _menus_hidden: bool = False) -> None:
@@ -2560,7 +2609,8 @@ def relayout_split_views_to_viewport(ext: Any, _menus_hidden: bool = False) -> N
             )
     except Exception:
         _apply_viewport_clipped_split_grid(n, ext=ext, preserve_main_viewport=True)
-    _bring_kit_chrome_visible()
+    if not mh:
+        _bring_kit_chrome_visible(ext)
     if not mh:
         for ti in range(0, n):
             nm = "Viewport" if ti == 0 else _split_window_name(ti)
@@ -3622,7 +3672,8 @@ async def _finish_split_layout_after_tiles(
             ext, token, n, preserve_main_viewport=True
         )
 
-    _bring_kit_chrome_visible()
+    if not bool(getattr(ext, "_kit_chrome_hide_active", False)):
+        _bring_kit_chrome_visible(ext)
 
     for ti in range(1, n):
         wn = _split_window_name(ti)
