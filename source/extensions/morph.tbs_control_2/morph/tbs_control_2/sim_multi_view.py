@@ -569,6 +569,81 @@ def _dock_viewport_to_dockspace(ratio: float = 0.62) -> bool:
     return False
 
 
+_VP_LAYOUT_SYNC_MIN_DELTA_PX = 2
+_VP_RES_SYNC_CACHE: Dict[str, Tuple[int, int]] = {}
+_WS_RECT_SYNC_CACHE: Dict[str, Tuple[int, int, int, int]] = {}
+
+
+def _clear_viewport_layout_sync_caches() -> None:
+    """분할 teardown·재빌드 시 rect/resolution 동기화 캐시를 비운다."""
+    try:
+        _VP_RES_SYNC_CACHE.clear()
+        _WS_RECT_SYNC_CACHE.clear()
+    except Exception:
+        pass
+
+
+def _rect_delta_exceeds(
+    a: Tuple[int, ...], b: Tuple[int, ...], threshold: int = _VP_LAYOUT_SYNC_MIN_DELTA_PX
+) -> bool:
+    if len(a) != len(b):
+        return True
+    return any(abs(int(x) - int(y)) >= int(threshold) for x, y in zip(a, b))
+
+
+def _all_aux_split_windows_docked(n: int) -> bool:
+    """보조 분할 창이 모두 Dock 에 붙어 있으면 True."""
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        sn = 1
+    if sn <= 1:
+        return True
+    for ti in range(1, sn):
+        try:
+            w = ui.Workspace.get_window(_split_window_name(ti))
+        except Exception:
+            return False
+        if w is None or not bool(getattr(w, "docked", False)):
+            return False
+    return True
+
+
+def _workspace_set_rect_if_changed(
+    win: Any, win_name: str, px: int, py: int, tw: int, th: int
+) -> bool:
+    """Workspace rect — 미세 변경이면 position/size 를 건드리지 않아 테두리 떨림을 줄인다."""
+    wn = str(win_name or "").strip()
+    if not wn or win is None:
+        return False
+    target = (int(px), int(py), int(tw), int(th))
+    try:
+        current = (
+            int(getattr(win, "position_x", 0) or 0),
+            int(getattr(win, "position_y", 0) or 0),
+            int(getattr(win, "width", 0) or 0),
+            int(getattr(win, "height", 0) or 0),
+        )
+    except Exception:
+        current = None
+    cached = _WS_RECT_SYNC_CACHE.get(wn)
+    if current is not None and not _rect_delta_exceeds(current, target):
+        if cached is None:
+            _WS_RECT_SYNC_CACHE[wn] = target
+        return False
+    if cached is not None and not _rect_delta_exceeds(cached, target):
+        return False
+    try:
+        win.position_x = target[0]
+        win.position_y = target[1]
+        win.width = target[2]
+        win.height = target[3]
+        _WS_RECT_SYNC_CACHE[wn] = target
+        return True
+    except Exception:
+        return False
+
+
 def _reapply_split_dock_in_geometry(ext: Any) -> bool:
     """
     이미 Dock 분할이 성공한 상태에서 ``dock_in`` 을 같은 순서·비율로 다시 호출한다.
@@ -586,6 +661,8 @@ def _reapply_split_dock_in_geometry(ext: Any) -> bool:
     ops = _split_dock_operations(n)
     if not ops:
         return False
+    if _all_aux_split_windows_docked(n):
+        return True
     ok_any = False
     for child, target, pos, ratio in ops:
         try:
@@ -595,6 +672,9 @@ def _reapply_split_dock_in_geometry(ext: Any) -> bool:
             child_w, target_w = None, None
         if child_w is None or target_w is None:
             continue
+        if bool(getattr(child_w, "docked", False)):
+            ok_any = True
+            continue
         if _dock_aux_into_target(child_w, target_w, pos, float(ratio)):
             ok_any = True
     return ok_any
@@ -602,18 +682,37 @@ def _reapply_split_dock_in_geometry(ext: Any) -> bool:
 
 def _sync_viewport_resolution_from_workspace_window(win_name: str) -> None:
     """Workspace 창의 ``width``/``height`` 에 맞춰 뷰포트 API ``resolution`` 을 맞춘다(렌더 버퍼 크기)."""
+    wn = str(win_name or "").strip()
+    if not wn:
+        return
     try:
         from omni.kit.viewport.utility import get_viewport_from_window_name
 
-        w = ui.Workspace.get_window(str(win_name))
-        api = get_viewport_from_window_name(str(win_name))
+        w = ui.Workspace.get_window(wn)
+        api = get_viewport_from_window_name(wn)
         if w is None or api is None or not hasattr(api, "resolution"):
+            return
+        if bool(getattr(api, "fill_frame", False)):
             return
         ww = int(getattr(w, "width", 0) or 0)
         hh = int(getattr(w, "height", 0) or 0)
         if ww < 8 or hh < 8:
             return
-        api.resolution = (max(1, ww), max(1, hh))
+        target = (max(1, ww), max(1, hh))
+        prev = _VP_RES_SYNC_CACHE.get(wn)
+        if prev is not None and not _rect_delta_exceeds(prev, target):
+            return
+        try:
+            cur_res = api.resolution
+            if cur_res is not None:
+                cur_pair = (int(cur_res[0]), int(cur_res[1]))
+                if not _rect_delta_exceeds(cur_pair, target):
+                    _VP_RES_SYNC_CACHE[wn] = target
+                    return
+        except Exception:
+            pass
+        api.resolution = target
+        _VP_RES_SYNC_CACHE[wn] = target
     except Exception:
         pass
 
@@ -693,16 +792,17 @@ def refresh_split_viewport_resolution_from_grid(
             win = ui.Workspace.get_window(wn)
             if win is not None:
                 _workspace_show_named_window(wn, True)
-                win.position_x = int(px)
-                win.position_y = int(py)
-                win.width = int(tw)
-                win.height = int(th)
+                _workspace_set_rect_if_changed(win, wn, int(px), int(py), int(tw), int(th))
         api = get_viewport_from_window_name(wn)
         if api is not None:
-            if hasattr(api, "resolution"):
-                api.resolution = (max(1, int(tw)), max(1, int(th)))
             if hasattr(api, "fill_frame"):
                 api.fill_frame = True
+            if hasattr(api, "resolution") and not bool(getattr(api, "fill_frame", False)):
+                target = (max(1, int(tw)), max(1, int(th)))
+                prev = _VP_RES_SYNC_CACHE.get(wn)
+                if prev is None or _rect_delta_exceeds(prev, target):
+                    api.resolution = target
+                    _VP_RES_SYNC_CACHE[wn] = target
     except Exception:
         pass
 
@@ -722,7 +822,8 @@ def reapply_split_layout_sync(ext: Any, n: int) -> None:
     if sn <= 1:
         return
     if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
-        _reapply_split_dock_in_geometry(ext)
+        if not _all_aux_split_windows_docked(sn):
+            _reapply_split_dock_in_geometry(ext)
         for ti in range(sn):
             nm = "Viewport" if ti == 0 else _split_window_name(ti)
             _sync_viewport_resolution_from_workspace_window(nm)
@@ -749,7 +850,8 @@ async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int)
             if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
                 return
             await kit_app.get_app().next_update_async()
-        _reapply_split_dock_in_geometry(ext)
+        if not _all_aux_split_windows_docked(n):
+            _reapply_split_dock_in_geometry(ext)
     else:
         await _enforce_equal_split_grid_async(
             ext, token, n, preserve_main_viewport=True
@@ -1903,6 +2005,7 @@ def _destroy_stale_split_workspace_window(win_name: str) -> None:
 
 def teardown_sim_multi_viewports(ext: Any) -> None:
     """분할 뷰·보조 USD 컨텍스트를 정리하고 기본 Viewport 를 복원한다."""
+    _clear_viewport_layout_sync_caches()
     _cancel_split_aux_navigation_hold(ext)
     used_dock = bool(getattr(ext, "_tbs_split_used_dock_layout", False))
     if used_dock:
@@ -2354,11 +2457,8 @@ def _apply_split_geometry_sync(
                 win = ui.Workspace.get_window(str(name))
                 if win is not None:
                     _workspace_show_named_window(str(name), True)
-                    win.position_x = int(px)
-                    win.position_y = int(py2)
-                    win.width = int(tw)
-                    win.height = int(th2)
-                    _sync_viewport_resolution_from_workspace_window(str(name))
+                    if _workspace_set_rect_if_changed(win, str(name), int(px), int(py2), int(tw), int(th2)):
+                        _sync_viewport_resolution_from_workspace_window(str(name))
             except Exception:
                 pass
         return
@@ -2378,11 +2478,8 @@ def _apply_split_geometry_sync(
             win = ui.Workspace.get_window(name)
             if win is not None:
                 _workspace_show_named_window(name, True)
-                win.position_x = int(px)
-                win.position_y = int(py)
-                win.width = int(tw)
-                win.height = int(th)
-                _sync_viewport_resolution_from_workspace_window(str(name))
+                if _workspace_set_rect_if_changed(win, str(name), int(px), int(py), int(tw), int(th)):
+                    _sync_viewport_resolution_from_workspace_window(str(name))
         except Exception:
             pass
 
@@ -3980,6 +4077,7 @@ def apply_sim_viewport_split_layout(ext: Any, split_n: int) -> None:
         ext._sim_multi_view_apply_token = tok
     except Exception:
         pass
+    _clear_viewport_layout_sync_caches()
 
     async def _deferred() -> None:
         await kit_app.get_app().next_update_async()
