@@ -77,6 +77,27 @@ EP3_PORT_LAYOUT = EpPortLayout(
     show_prims=("/World/aaa_1", "/wafer_01/_05", "/wafer_01/_08", "/wafer_01/_01", "/wafer_01/_02", "/wafer_01/_03", "/wafer_01/_04", "/wafer_01/_06", "/wafer_01/_07"),
 )
 
+# EBS 적용 ON/OFF 시 추가 show/hide (EP2/3_PORT_LAYOUT 적용 후 이어서 적용)
+EBS2_SHOW_LAYOUT = EpPortLayout(
+    hide_prims=(),
+    show_prims=(),
+)
+
+EBS2_HIDE_LAYOUT = EpPortLayout(
+    hide_prims=(),
+    show_prims=(),
+)
+
+EBS3_SHOW_LAYOUT = EpPortLayout(
+    hide_prims=(),
+    show_prims=(),
+)
+
+EBS3_HIDE_LAYOUT = EpPortLayout(
+    hide_prims=(),
+    show_prims=(),
+)
+
 _PRINT_PREFIX = "[TBS/USD]"
 
 WINDOW_TITLE = "TBS USD Load"
@@ -1866,6 +1887,10 @@ __all__ = [
     "EpPortLayout",
     "EP2_PORT_LAYOUT",
     "EP3_PORT_LAYOUT",
+    "EBS2_SHOW_LAYOUT",
+    "EBS2_HIDE_LAYOUT",
+    "EBS3_SHOW_LAYOUT",
+    "EBS3_HIDE_LAYOUT",
     "load_automatically",
     "default_load_usd_path",
     "resolve_local_data_path",

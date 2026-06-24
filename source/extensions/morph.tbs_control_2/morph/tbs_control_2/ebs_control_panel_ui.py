@@ -96,6 +96,16 @@ def get_sim_ep_count_idx(ext: Any) -> int:
     return int(_SIM_DEF.ep_count_idx)
 
 
+def get_sim_ebs_enabled(ext: Any) -> bool:
+    try:
+        m = getattr(ext, "_sim_ebs_enabled_model", None)
+        if m is not None:
+            return bool(m.get_value_as_bool())
+    except Exception:
+        pass
+    return True
+
+
 def _sync_ep_count_combo_widgets(ext: Any, idx: int) -> None:
     """창·HUD 등 여러 EP 콤보 선택을 동일 인덱스로 맞춘다."""
     try:
@@ -173,6 +183,26 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_ep_count_idx_model = ui.SimpleIntModel(int(_SIM_DEF.ep_count_idx))
     ext._sim_ep_count_combo = None
     ext._sim_ep_count_combos = []
+    ext._sim_ebs_enabled_model = ui.SimpleBoolModel(True)
+    ext._sim_ebs_enabled_checkboxes: List[Any] = []
+    ext._sim_init_buffer_row = None
+    ext._sim_init_ebs_rows: List[Any] = []
+    ext._sim_fault_buffer_row = None
+    ext._sim_fault_ebs_rows: List[Any] = []
+    ext._sim_timing_inout_bp_block = None
+    ext._sim_timing_bp_ep_row = None
+    ext._sim_oht_timing_label = None
+    ext._sim_timing_ebs_compact_rows: List[Any] = []
+    try:
+
+        def _on_ebs_enabled_model_changed(_m: Any) -> None:
+            from .tbs_ep_port_visibility import on_sim_ebs_enabled_changed
+
+            on_sim_ebs_enabled_changed(ext)
+
+        ext._sim_ebs_enabled_model.add_value_changed_fn(_on_ebs_enabled_model_changed)
+    except Exception:
+        pass
     ext._sim_start_buttons: List[Any] = []
     ext._sim_init_inout_model = ui.SimpleBoolModel(False)
     ext._sim_init_bp1_model = ui.SimpleBoolModel(False)
@@ -383,6 +413,10 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
                     ext._sync_sim_multi_split_ui_fn = lambda: _sync_sim_split_checkboxes_from_ext_count(ext)
 
             with ui.HStack(spacing=8, height=28):
+                ui.Label("EBS 적용여부", width=100)
+                ui.CheckBox(model=ext._sim_ebs_enabled_model, width=30, style=cb_style)
+
+            with ui.HStack(spacing=8, height=28):
                 ui.Label("LOT 수", width=80)
                 ui.IntField(model=ext._sim_lot_count_model, width=80)
                 ui.Label("EP 개수", width=55)
@@ -406,7 +440,10 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
                 ui.Label("초", width=20, style={"color": 0xFF9AA4B2})
 
             ui.Label("초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)", height=20)
-            with ui.HStack(spacing=8, height=26):
+            init_buffer_row = ui.HStack(spacing=8, height=26)
+            ext._sim_init_buffer_row = init_buffer_row
+            ext._sim_init_ebs_rows.append(init_buffer_row)
+            with init_buffer_row:
                 ui.Label("IN/OUT", width=55)
                 ui.CheckBox(model=ext._sim_init_inout_model, width=30, style=cb_style)
                 ui.Label("BP1", width=30)
@@ -417,6 +454,7 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
                 ui.CheckBox(model=ext._sim_init_bp3_model, width=30, style=cb_style)
                 bp4_row = ui.HStack(spacing=8, height=26)
                 ext._sim_init_bp4_rows.append(bp4_row)
+                ext._sim_init_ebs_rows.append(bp4_row)
                 ext._sim_init_bp4_row = bp4_row
                 with bp4_row:
                     ui.Label("BP4", width=30)
@@ -452,13 +490,22 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
                 except Exception:
                     pass
             on_sim_ep_count_changed(ext)
+            try:
+                from .control_window import _sync_ebs_control_visibility
+
+                _sync_ebs_control_visibility(ext)
+            except Exception:
+                pass
 
             ui.Spacer(height=2)
             ui.Label(
                 "고장(비가동) 포트 (체크 시 해당 포트는 라우팅에서 제외, 실행 중에도 즉시 반영)",
                 height=20,
             )
-            with ui.HStack(spacing=8, height=26):
+            fault_buffer_row = ui.HStack(spacing=8, height=26)
+            ext._sim_fault_buffer_row = fault_buffer_row
+            ext._sim_fault_ebs_rows.append(fault_buffer_row)
+            with fault_buffer_row:
                 ui.Label("IN/OUT", width=55)
                 ui.CheckBox(model=ext._sim_fault_inout_model, width=30, style=cb_style)
                 ui.Label("BP1", width=30)
@@ -469,6 +516,7 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
                 ui.CheckBox(model=ext._sim_fault_bp3_model, width=30, style=cb_style)
                 f_bp4 = ui.HStack(spacing=8, height=26)
                 ext._sim_fault_bp4_rows.append(f_bp4)
+                ext._sim_fault_ebs_rows.append(f_bp4)
                 ext._sim_fault_bp4_row = f_bp4
                 with f_bp4:
                     ui.Label("BP4", width=30)
@@ -500,15 +548,20 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
                     pass
 
             with ui.HStack(spacing=8, height=28):
-                ui.Label("OHT→IN/OUT/EP", width=100)
+                ext._sim_oht_timing_label = ui.Label("OHT→IN/OUT/EP", width=100)
                 ui.FloatField(model=ext._sim_oht_bp1_min_model, width=70)
                 ui.Label("~", width=10)
                 ui.FloatField(model=ext._sim_oht_bp1_max_model, width=70)
-                ui.Label("IN/OUT->BP", width=60)
-                ui.FloatField(model=ext._sim_bp1_bp_min_model, width=55)
-                ui.Label("~", width=10)
-                ui.FloatField(model=ext._sim_bp1_bp_max_model, width=55)
-            with ui.HStack(spacing=8, height=28):
+                inout_bp_block = ui.HStack(spacing=8, height=28)
+                ext._sim_timing_inout_bp_block = inout_bp_block
+                with inout_bp_block:
+                    ui.Label("IN/OUT->BP", width=60)
+                    ui.FloatField(model=ext._sim_bp1_bp_min_model, width=55)
+                    ui.Label("~", width=10)
+                    ui.FloatField(model=ext._sim_bp1_bp_max_model, width=55)
+            bp_ep_row = ui.HStack(spacing=8, height=28)
+            ext._sim_timing_bp_ep_row = bp_ep_row
+            with bp_ep_row:
                 ui.Label("BP->EP", width=80)
                 ui.FloatField(model=ext._sim_bp_ep_min_model, width=70)
                 ui.Label("~", width=10)
@@ -597,6 +650,9 @@ def _build_ebs_control_panel_compact(
     with ui.VStack(padding=0, spacing=5):
         ui.Label("EBS (Viewport)", height=18, style={"font_size": 13, "color": 0xFFFFFFFF})
         with ui.HStack(spacing=4, height=26):
+            ui.Label("EBS 적용", width=lw)
+            ui.CheckBox(model=ext._sim_ebs_enabled_model, width=24, style=cb_style)
+        with ui.HStack(spacing=4, height=26):
             ui.Label("LOT 수", width=lw)
             ui.IntField(model=ext._sim_lot_count_model, width=fw)
             ui.Label("EP 개수", width=44)
@@ -617,7 +673,9 @@ def _build_ebs_control_panel_compact(
             ui.Label("~", width=8)
             ui.FloatField(model=ext._sim_foup_proc_max_model, width=sw)
         ui.Label("초기 LOT 적재", height=16, style={"color": 0xFF9AA4B2, "font_size": 11})
-        with ui.HStack(spacing=4, height=24):
+        hud_init_buf = ui.HStack(spacing=4, height=24)
+        ext._sim_init_ebs_rows.append(hud_init_buf)
+        with hud_init_buf:
             ui.Label("IN", width=22)
             ui.CheckBox(model=ext._sim_init_inout_model, width=24, style=cb_style)
             ui.Label("BP1", width=26)
@@ -628,6 +686,7 @@ def _build_ebs_control_panel_compact(
             ui.CheckBox(model=ext._sim_init_bp3_model, width=24, style=cb_style)
         bp4_row = ui.HStack(spacing=4, height=24)
         ext._sim_init_bp4_rows.append(bp4_row)
+        ext._sim_init_ebs_rows.append(bp4_row)
         with bp4_row:
             ui.Label("BP4", width=26)
             ui.CheckBox(model=ext._sim_init_bp4_model, width=24, style=cb_style)
@@ -661,7 +720,9 @@ def _build_ebs_control_panel_compact(
                 pass
         on_sim_ep_count_changed(ext)
         ui.Label("고장 포트", height=16, style={"color": 0xFF9AA4B2, "font_size": 11})
-        with ui.HStack(spacing=4, height=24):
+        hud_fault_buf = ui.HStack(spacing=4, height=24)
+        ext._sim_fault_ebs_rows.append(hud_fault_buf)
+        with hud_fault_buf:
             ui.Label("IN", width=22)
             ui.CheckBox(model=ext._sim_fault_inout_model, width=24, style=cb_style)
             ui.Label("BP1", width=26)
@@ -672,6 +733,7 @@ def _build_ebs_control_panel_compact(
             ui.CheckBox(model=ext._sim_fault_bp3_model, width=24, style=cb_style)
         f_bp4 = ui.HStack(spacing=4, height=24)
         ext._sim_fault_bp4_rows.append(f_bp4)
+        ext._sim_fault_ebs_rows.append(f_bp4)
         with f_bp4:
             ui.Label("BP4", width=26)
             ui.CheckBox(model=ext._sim_fault_bp4_model, width=24, style=cb_style)
@@ -706,7 +768,10 @@ def _build_ebs_control_panel_compact(
                 ("BP→EP", ext._sim_bp_ep_min_model, ext._sim_bp_ep_max_model),
                 ("EP→OHT", ext._sim_ep_oht_min_model, ext._sim_ep_oht_max_model),
             ):
-                with ui.HStack(spacing=4, height=26):
+                row = ui.HStack(spacing=4, height=26)
+                if lbl in ("IN→BP", "BP→EP"):
+                    ext._sim_timing_ebs_compact_rows.append(row)
+                with row:
                     ui.Label(lbl, width=lw)
                     ui.FloatField(model=mn, width=sw)
                     ui.Label("~", width=8)
@@ -724,6 +789,12 @@ def _build_ebs_control_panel_compact(
             )
             ui.Button("정지", width=60, clicked_fn=lambda: on_sim_stop_clicked(ext))
             ui.Button("리셋", width=60, clicked_fn=lambda: on_sim_reset_clicked(ext))
+        try:
+            from .control_window import _sync_ebs_control_visibility
+
+            _sync_ebs_control_visibility(ext)
+        except Exception:
+            pass
         ui.Label("창 표시", height=16, style={"color": 0xFF9AA4B2, "font_size": 11})
         for model_attr, label, _which in _AUX_KIT_WINDOW_SPECS:
             with ui.HStack(spacing=4, height=22):

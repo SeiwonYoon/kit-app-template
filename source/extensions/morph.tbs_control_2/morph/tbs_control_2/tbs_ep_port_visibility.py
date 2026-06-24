@@ -17,6 +17,7 @@ _baseline_snapshot: Dict[str, str] = {}
 _baseline_by_scope: Dict[str, Dict[str, str]] = {}
 _active_ep_count: Optional[int] = None
 _active_ep_by_scope: Dict[str, int] = {}
+_active_ebs_state_by_scope: Dict[str, Tuple[int, bool]] = {}
 _apply_retry_sub: Any = None
 
 
@@ -53,10 +54,90 @@ def ep_count_idx_for_screen(ext: Any, screen_1based: int) -> int:
         return int(_SIM_DEF.ep_count_idx)
 
 
+def ebs_enabled_for_screen(ext: Any, screen_1based: int) -> bool:
+    """화면별 EBS 적용 여부 (스냅샷 우선, 없으면 현재 UI)."""
+    try:
+        si = max(1, int(screen_1based))
+    except Exception:
+        si = 1
+    try:
+        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
+        idx = si - 1
+        if 0 <= idx < len(snaps) and isinstance(snaps[idx], dict):
+            return bool(snaps[idx].get("ebs_enabled", True))
+        if si > 1 and len(snaps) >= 1 and isinstance(snaps[0], dict):
+            return bool(snaps[0].get("ebs_enabled", True))
+    except Exception:
+        pass
+    try:
+        from .ebs_control_panel_ui import get_sim_ebs_enabled
+
+        return bool(get_sim_ebs_enabled(ext))
+    except Exception:
+        return True
+
+
 def _layout_for_ep_count(ep_count: int):
     from .tbs_usd_window import EP2_PORT_LAYOUT, EP3_PORT_LAYOUT
 
     return EP3_PORT_LAYOUT if int(ep_count) >= 3 else EP2_PORT_LAYOUT
+
+
+def _layout_for_ebs(ep_count: int, ebs_enabled: bool):
+    from .tbs_usd_window import (
+        EBS2_HIDE_LAYOUT,
+        EBS2_SHOW_LAYOUT,
+        EBS3_HIDE_LAYOUT,
+        EBS3_SHOW_LAYOUT,
+    )
+
+    if int(ep_count) >= 3:
+        return EBS3_SHOW_LAYOUT if bool(ebs_enabled) else EBS3_HIDE_LAYOUT
+    return EBS2_SHOW_LAYOUT if bool(ebs_enabled) else EBS2_HIDE_LAYOUT
+
+
+def _apply_ebs_layout_on_stage(
+    stage: Any,
+    ep_count: int,
+    ebs_enabled: bool,
+    *,
+    scope_key: str,
+    reason: str = "",
+) -> bool:
+    """EP 레이아웃 이후 EP2/3 × EBS ON/OFF 추가 show·hide."""
+    if stage is None:
+        return False
+    sk = str(scope_key)
+    ep_n = 3 if int(ep_count) >= 3 else 2
+    ebs_on = bool(ebs_enabled)
+    layout = _layout_for_ebs(ep_n, ebs_on)
+    with _lock:
+        prev = _active_ebs_state_by_scope.get(sk)
+    if prev is not None:
+        prev_ep, prev_ebs = int(prev[0]), bool(prev[1])
+        if prev_ep != ep_n or prev_ebs != ebs_on:
+            prev_layout = _layout_for_ebs(prev_ep, prev_ebs)
+            for path in _unique_paths(prev_layout.show_prims):
+                _restore_baseline(stage, path, scope_key=sk)
+    hide_paths = _unique_paths(layout.hide_prims)
+    show_paths = _unique_paths(layout.show_prims)
+    hid_ok = 0
+    show_ok = 0
+    for path in hide_paths:
+        if _set_visible_on_stage(stage, path, False, scope_key=sk):
+            hid_ok += 1
+    for path in show_paths:
+        if _set_visible_on_stage(stage, path, True, scope_key=sk):
+            show_ok += 1
+    with _lock:
+        _active_ebs_state_by_scope[sk] = (int(ep_n), bool(ebs_on))
+    note = f" ({reason})" if reason else ""
+    print(
+        f"{_PRINT_PREFIX} EBS EP={ep_n} {'ON' if ebs_on else 'OFF'} scope={sk}{note}: "
+        f"hide {hid_ok}/{len(hide_paths)}, show {show_ok}/{len(show_paths)}",
+        flush=True,
+    )
+    return bool(hid_ok + show_ok > 0 or (not hide_paths and not show_paths))
 
 
 def _default_scope_key() -> str:
@@ -189,6 +270,7 @@ def apply_ep_port_layout_on_stage(
     ep_count: int,
     *,
     scope_key: Optional[str] = None,
+    ebs_enabled: bool = True,
     reason: str = "",
 ) -> bool:
     """지정 stage 에 EP2/EP3 show·hide 를 적용한다."""
@@ -229,16 +311,24 @@ def apply_ep_port_layout_on_stage(
         f"show {show_ok}/{len(show_paths)}",
         flush=True,
     )
+    _apply_ebs_layout_on_stage(
+        stage,
+        int(ep_count),
+        bool(ebs_enabled),
+        scope_key=sk,
+        reason=reason or "ebs",
+    )
     return bool(hid_ok + show_ok > 0 or (not hide_paths and not show_paths))
 
 
-def apply_ep_port_layout(ep_count: int, *, reason: str = "") -> bool:
+def apply_ep_port_layout(ep_count: int, *, ebs_enabled: bool = True, reason: str = "") -> bool:
     """기본 ``omni.usd`` 컨텍스트 stage 에 EP2/EP3 show·hide 적용."""
     stage = _get_stage()
     return apply_ep_port_layout_on_stage(
         stage,
         ep_count,
         scope_key=_default_scope_key(),
+        ebs_enabled=bool(ebs_enabled),
         reason=reason,
     )
 
@@ -258,10 +348,12 @@ def apply_ep_port_layout_for_context(
     if stage is None:
         return False
     ep_count = ep_count_from_combo_idx(ep_count_idx_for_screen(ext, int(screen_1based)))
+    ebs_on = ebs_enabled_for_screen(ext, int(screen_1based))
     return apply_ep_port_layout_on_stage(
         stage,
         ep_count,
         scope_key=_scope_key_for_context_name(cn),
+        ebs_enabled=bool(ebs_on),
         reason=reason or f"split_screen{int(screen_1based)}",
     )
 
@@ -281,11 +373,20 @@ def schedule_apply_ep_port_layout(
     ext: Any,
     ep_count: int,
     *,
+    ebs_enabled: Optional[bool] = None,
     delay_frames: int = 24,
     max_attempts: int = 120,
     reason: str = "",
 ) -> None:
     """Master open·startup 후 stage prim 준비될 때까지 post_update 재시도."""
+    if ebs_enabled is None:
+        try:
+            from .ebs_control_panel_ui import get_sim_ebs_enabled
+
+            ebs_enabled = bool(get_sim_ebs_enabled(ext))
+        except Exception:
+            ebs_enabled = True
+    ebs_flag = bool(ebs_enabled)
     _stop_retry_subscription()
     frames_until = [max(0, int(delay_frames))]
     attempts_left = [max(1, int(max_attempts))]
@@ -298,7 +399,8 @@ def schedule_apply_ep_port_layout(
             frames_until[0] -= 1
             return
         layout = _layout_for_ep_count(ep_count)
-        paths = _unique_paths(layout.hide_prims + layout.show_prims)
+        ebs_layout = _layout_for_ebs(ep_count, ebs_flag)
+        paths = _unique_paths(layout.hide_prims + layout.show_prims + ebs_layout.hide_prims + ebs_layout.show_prims)
         if paths:
             stage = _get_stage()
             if stage is None:
@@ -321,7 +423,7 @@ def schedule_apply_ep_port_layout(
                     )
                     _finish()
                 return
-        apply_ep_port_layout(ep_count, reason=reason)
+        apply_ep_port_layout(ep_count, ebs_enabled=ebs_flag, reason=reason)
         fn = getattr(ext, "_sync_sim_multi_split_row_visibility_fn", None)
         if callable(fn):
             try:
@@ -341,7 +443,57 @@ def schedule_apply_ep_port_layout(
         )
     except Exception as exc:
         print(f"{_PRINT_PREFIX} schedule failed: {exc}", flush=True)
-        apply_ep_port_layout(ep_count, reason=reason)
+        apply_ep_port_layout(ep_count, ebs_enabled=ebs_flag, reason=reason)
+
+
+def on_sim_ebs_enabled_changed(ext: Any) -> None:
+    """EBS 적용여부 체크 변경 — UI·화면1 스냅샷·기본 USD 컨텍스트."""
+    try:
+        from .ebs_control_panel_ui import get_sim_ebs_enabled
+
+        ebs_on = bool(get_sim_ebs_enabled(ext))
+    except Exception:
+        ebs_on = True
+    try:
+        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
+    except Exception:
+        snaps = [None, None, None, None]
+    while len(snaps) < 4:
+        snaps.append(None)
+    snaps = snaps[:4]
+    try:
+        if isinstance(snaps[0], dict):
+            snaps[0]["ebs_enabled"] = bool(ebs_on)
+        elif snaps[0] is None:
+            from .control_window import _capture_per_screen_sim_settings
+
+            cap0 = _capture_per_screen_sim_settings(ext)
+            if isinstance(cap0, dict):
+                cap0["ebs_enabled"] = bool(ebs_on)
+            snaps[0] = cap0
+        ext._sim_per_screen_snapshots = snaps
+    except Exception:
+        pass
+    try:
+        from .control_window import _sync_ebs_control_visibility
+
+        _sync_ebs_control_visibility(ext)
+    except Exception:
+        pass
+    try:
+        from .ebs_control_panel_ui import get_sim_ep_count_idx
+
+        idx = int(get_sim_ep_count_idx(ext))
+    except Exception:
+        idx = 0
+    ep_count = ep_count_from_combo_idx(idx)
+    schedule_apply_ep_port_layout(
+        ext,
+        ep_count,
+        ebs_enabled=ebs_on,
+        delay_frames=2,
+        reason="ebs_enabled_changed",
+    )
 
 
 def on_sim_ep_count_combo_changed(ext: Any) -> None:
@@ -360,9 +512,16 @@ def on_sim_ep_count_combo_changed(ext: Any) -> None:
         return
     ext._ep_port_visibility_combo_idx = int(idx)
     ep_count = ep_count_from_combo_idx(idx)
+    try:
+        from .ebs_control_panel_ui import get_sim_ebs_enabled
+
+        ebs_on = bool(get_sim_ebs_enabled(ext))
+    except Exception:
+        ebs_on = True
     schedule_apply_ep_port_layout(
         ext,
         ep_count,
+        ebs_enabled=ebs_on,
         delay_frames=2,
         reason="ep_count_changed",
     )
@@ -375,10 +534,12 @@ def teardown_ep_port_visibility(_ext: Any = None) -> None:
 __all__ = [
     "ep_count_from_combo_idx",
     "ep_count_idx_for_screen",
+    "ebs_enabled_for_screen",
     "apply_ep_port_layout",
     "apply_ep_port_layout_for_context",
     "apply_ep_port_layout_on_stage",
     "schedule_apply_ep_port_layout",
     "on_sim_ep_count_combo_changed",
+    "on_sim_ebs_enabled_changed",
     "teardown_ep_port_visibility",
 ]

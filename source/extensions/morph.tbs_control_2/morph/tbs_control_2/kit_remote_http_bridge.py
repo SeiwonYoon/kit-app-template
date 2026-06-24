@@ -53,6 +53,7 @@ from .control_sim_bar_graph import (
     get_bar_state_colors_hex,
 )
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
+from .tbs_ep_port_visibility import ebs_enabled_for_screen
 from .tbs_data_paths import resolve_local_data_path
 from .tbs_usd_window import default_load_usd_path
 from .usd_loader_utils import get_resource_usd_list, path_has_supported_stage_extension
@@ -115,7 +116,8 @@ def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
     except Exception:
         si = 1
     ep_idx = int(_ep_count_idx_for_port_panel(ext, si))
-    row_order = bar_graph_row_order(ep_idx)
+    ebs_on = bool(ebs_enabled_for_screen(ext, si))
+    row_order = bar_graph_row_order(ep_idx, ebs_enabled=ebs_on)
     hex_colors = get_bar_state_colors_hex()
     base = {
         "t_now": 0.0,

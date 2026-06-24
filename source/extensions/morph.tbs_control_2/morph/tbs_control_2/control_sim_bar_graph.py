@@ -166,10 +166,12 @@ class EpBarPrecomputed:
     fault_ports: Tuple[str, ...] = ()
 
 
-def bar_graph_row_order(ep_count_idx: int) -> List[str]:
-    """EP 개수에 따른 막대 행 순서 (EP 블록 → ALL_EP → INOUT → BP)."""
+def bar_graph_row_order(ep_count_idx: int, *, ebs_enabled: bool = True) -> List[str]:
+    """EP 개수·EBS 적용 여부에 따른 막대 행 순서."""
     idx = 1 if int(ep_count_idx) else 0
     eps = ["EP1", "EP2"] + (["EP3"] if idx else [])
+    if not bool(ebs_enabled):
+        return list(eps) + ["ALL_EP"]
     bps = ["BP1", "BP2", "BP3"] + (["BP4"] if idx else [])
     return list(eps) + ["ALL_EP", "INOUT"] + bps
 
@@ -430,6 +432,7 @@ def build_ep_bar_from_timeline_replay(
     final_sim_time: float,
     ep_ports: Optional[List[str]] = None,
     ep_count_idx: int = 0,
+    ebs_enabled: bool = True,
     fault_ports: Optional[Set[str]] = None,
 ) -> EpBarPrecomputed:
     """
@@ -439,7 +442,7 @@ def build_ep_bar_from_timeline_replay(
     """
     total_est = max(0.0, float(final_sim_time))
     faults = {str(p).strip().upper() for p in (fault_ports or set()) if str(p).strip()}
-    row_order = bar_graph_row_order(int(ep_count_idx))
+    row_order = bar_graph_row_order(int(ep_count_idx), ebs_enabled=bool(ebs_enabled))
     ep_list = [r for r in row_order if r.startswith("EP")]
     if isinstance(ep_ports, list) and ep_ports:
         ep_list = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
@@ -595,6 +598,7 @@ def build_ep_bar_from_progress_items(
     final_sim_time: float,
     ep_ports: Optional[List[str]] = None,
     ep_count_idx: int = 0,
+    ebs_enabled: bool = True,
     fault_ports: Optional[Set[str]] = None,
 ) -> EpBarPrecomputed:
     return build_ep_bar_from_timeline_replay(
@@ -602,6 +606,7 @@ def build_ep_bar_from_progress_items(
         final_sim_time=float(final_sim_time),
         ep_ports=ep_ports,
         ep_count_idx=int(ep_count_idx),
+        ebs_enabled=bool(ebs_enabled),
         fault_ports=fault_ports,
     )
 

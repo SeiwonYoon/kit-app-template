@@ -1571,6 +1571,12 @@ def _capture_per_screen_sim_settings(ext: Any) -> Dict[str, Any]:
     except Exception:
         d["ep_count_idx"] = int(_SIM_DEF.ep_count_idx)
     try:
+        from .ebs_control_panel_ui import get_sim_ebs_enabled
+
+        d["ebs_enabled"] = bool(get_sim_ebs_enabled(ext))
+    except Exception:
+        d["ebs_enabled"] = True
+    try:
         d["lot_count"] = max(1, ext._sim_lot_count_model.get_value_as_int())
     except Exception:
         d["lot_count"] = int(_SIM_DEF.lot_count)
@@ -1809,17 +1815,25 @@ def _sync_default_sim_snapshot_from_ui(ext: Any) -> None:
 
 def _fault_ports_from_snapshot(snap: Dict[str, Any], ep_count: int) -> Set[str]:
     """스냅샷의 고장 포트 체크박스를 집합으로 변환한다."""
+    ebs_on = bool(snap.get("ebs_enabled", True)) if isinstance(snap, dict) else True
     out: Set[str] = set()
-    pairs = (
-        ("INOUT", "fault_inout"),
-        ("BP1", "fault_bp1"),
-        ("BP2", "fault_bp2"),
-        ("BP3", "fault_bp3"),
-        ("BP4", "fault_bp4"),
-        ("EP1", "fault_ep1"),
-        ("EP2", "fault_ep2"),
-        ("EP3", "fault_ep3"),
-    )
+    if ebs_on:
+        pairs = (
+            ("INOUT", "fault_inout"),
+            ("BP1", "fault_bp1"),
+            ("BP2", "fault_bp2"),
+            ("BP3", "fault_bp3"),
+            ("BP4", "fault_bp4"),
+            ("EP1", "fault_ep1"),
+            ("EP2", "fault_ep2"),
+            ("EP3", "fault_ep3"),
+        )
+    else:
+        pairs = (
+            ("EP1", "fault_ep1"),
+            ("EP2", "fault_ep2"),
+            ("EP3", "fault_ep3"),
+        )
     for port, key in pairs:
         try:
             if bool(snap.get(key)):
@@ -1839,17 +1853,19 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
     except Exception:
         ep_count_idx = int(_SIM_DEF.ep_count_idx)
     ep_count = 2 if ep_count_idx == 0 else 3
+    ebs_enabled = bool(snap.get("ebs_enabled", True))
     initial_full_ports: List[str] = []
-    if bool(snap.get("init_inout")):
-        initial_full_ports.append("INOUT")
-    if bool(snap.get("init_bp1")):
-        initial_full_ports.append("BP1")
-    if bool(snap.get("init_bp2")):
-        initial_full_ports.append("BP2")
-    if bool(snap.get("init_bp3")):
-        initial_full_ports.append("BP3")
-    if ep_count >= 3 and bool(snap.get("init_bp4")):
-        initial_full_ports.append("BP4")
+    if ebs_enabled:
+        if bool(snap.get("init_inout")):
+            initial_full_ports.append("INOUT")
+        if bool(snap.get("init_bp1")):
+            initial_full_ports.append("BP1")
+        if bool(snap.get("init_bp2")):
+            initial_full_ports.append("BP2")
+        if bool(snap.get("init_bp3")):
+            initial_full_ports.append("BP3")
+        if ep_count >= 3 and bool(snap.get("init_bp4")):
+            initial_full_ports.append("BP4")
     if bool(snap.get("init_ep1")):
         initial_full_ports.append("EP1")
     if bool(snap.get("init_ep2")):
@@ -1901,6 +1917,7 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
     proc_pri = False
     init = SimulationInitConfig(
         ep_count=ep_count,
+        ebs_enabled=bool(ebs_enabled),
         initial_full_ports=initial_full_ports,
         max_oht_lots=lot_count,
         process_time_priority=proc_pri,
@@ -2467,7 +2484,13 @@ def _ep_timeline_host_height(ext: Any) -> int:
         idx = int(get_sim_ep_count_idx(ext))
     except Exception:
         idx = 0
-    n_bars = len(bar_graph_row_order(idx))
+    try:
+        from .ebs_control_panel_ui import get_sim_ebs_enabled
+
+        ebs_on = bool(get_sim_ebs_enabled(ext))
+    except Exception:
+        ebs_on = True
+    n_bars = len(bar_graph_row_order(idx, ebs_enabled=ebs_on))
     _, _, _, frame_pad, _ = _ep_occ_timeline_layout_dims(ext)
     bar_h = 14
     tick_h = 14
@@ -2515,7 +2538,8 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
                             f"[포트상태·화면{screen}] 대기 중", height=18, style={"color": 0xFFBFE7FF}
                         )
                         with ui.VStack(spacing=2):
-                            with ui.HStack(spacing=4, height=24):
+                            ch["port_buffer_row"] = ui.HStack(spacing=4, height=24)
+                            with ch["port_buffer_row"]:
                                 with ui.ZStack(width=90, height=24):
                                     ch["port_cell_boxes"]["BP1"] = ui.Rectangle(
                                         style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
@@ -2538,7 +2562,8 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
                                     )
                                     ch["port_cells"]["BP4"] = ui.Label("BP4:-", width=90, height=24, style={"color": 0xFFFFFFFF})
                             with ui.HStack(spacing=4, height=24):
-                                with ui.ZStack(width=90, height=24):
+                                ch["port_inout_cell_container"] = ui.ZStack(width=90, height=24)
+                                with ch["port_inout_cell_container"]:
                                     ch["port_cell_boxes"]["INOUT"] = ui.Rectangle(
                                         style={"background_color": 0xFF2A2F38, "border_color": 0xFF7B8799, "border_width": 1}
                                     )
@@ -2745,6 +2770,8 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
             ext._sim_port_cells = c0["port_cells"]
             ext._sim_port_cell_boxes = c0["port_cell_boxes"]
             ext._sim_port_bp4_cell_container = c0.get("port_bp4_cell_container")
+            ext._sim_port_buffer_row = c0.get("port_buffer_row")
+            ext._sim_port_inout_cell_container = c0.get("port_inout_cell_container")
             ext._sim_port_ep3_cell_container = c0.get("port_ep3_cell_container")
             ext._sim_port_ep3_cell = c0.get("port_ep3_cell")
             ext._sim_progress_label = c0["progress_label"]
@@ -2764,6 +2791,8 @@ def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
             ext._sim_port_cells = {}
             ext._sim_port_cell_boxes = {}
             ext._sim_port_bp4_cell_container = None
+            ext._sim_port_buffer_row = None
+            ext._sim_port_inout_cell_container = None
             ext._sim_port_ep3_cell_container = None
             ext._sim_port_ep3_cell = None
             ext._sim_progress_label = None
@@ -3481,18 +3510,28 @@ def _ep_count_idx_for_port_panel(ext: Any, screen_1based: int) -> int:
 def _sync_ep3_port_cell_visibility_for_channel(ext: Any, ch: Dict[str, Any]) -> None:
     container = ch.get("port_ep3_cell_container")
     bp4_container = ch.get("port_bp4_cell_container")
+    buffer_row = ch.get("port_buffer_row")
+    inout_container = ch.get("port_inout_cell_container")
     try:
         si = int(ch.get("screen", 1) or 1)
     except Exception:
         si = 1
     ep_idx = _ep_count_idx_for_port_panel(ext, si)
-    # 일부 환경에서 체크 이벤트 반영이 지연되는 문제를 피하기 위해
-    # EP 개수=3이면 EP3 칸은 항상 보이게 유지하고, 체크 여부는 초기 적재 로직에서 사용.
     is_ep3 = bool(ep_idx == 1)
+    try:
+        from .tbs_ep_port_visibility import ebs_enabled_for_screen
+
+        ebs_on = bool(ebs_enabled_for_screen(ext, si))
+    except Exception:
+        ebs_on = True
     if container is not None:
         container.visible = is_ep3
     if bp4_container is not None:
-        bp4_container.visible = is_ep3
+        bp4_container.visible = is_ep3 and ebs_on
+    if buffer_row is not None:
+        buffer_row.visible = ebs_on
+    if inout_container is not None:
+        inout_container.visible = ebs_on
 
 
 def _sync_ep3_port_cell_visibility(ext: Any) -> None:
@@ -3505,6 +3544,8 @@ def _sync_ep3_port_cell_visibility(ext: Any) -> None:
     ch = {
         "port_ep3_cell_container": getattr(ext, "_sim_port_ep3_cell_container", None),
         "port_bp4_cell_container": getattr(ext, "_sim_port_bp4_cell_container", None),
+        "port_buffer_row": getattr(ext, "_sim_port_buffer_row", None),
+        "port_inout_cell_container": getattr(ext, "_sim_port_inout_cell_container", None),
     }
     _sync_ep3_port_cell_visibility_for_channel(ext, ch)
 
@@ -3959,13 +4000,14 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
         else:
             dt = max(0.0, float(t_bar) - float(t_last))
 
-    # 막대 행: EP·ALL_EP·INOUT·BP (EP 개수에 따라 BP3 또는 BP4까지)
+    # 막대 행: EP·ALL_EP·INOUT·BP (EP 개수·EBS 적용에 따라)
     ep_idx = int(_ep_count_idx_for_port_panel(ext, int(screen)))
-    rows = list(bar_graph_row_order(ep_idx))
+    snap = _sim_snapshot_for_screen(ext, int(screen))
+    ebs_on = bool(snap.get("ebs_enabled", True)) if snap else True
+    rows = list(bar_graph_row_order(ep_idx, ebs_enabled=ebs_on))
     if use_precomputed and bar_pre is not None and bar_pre.row_order:
         rows = list(bar_pre.row_order)
 
-    snap = _sim_snapshot_for_screen(ext, int(screen))
     ep_count = 3 if ep_idx else 2
     fault_ports = _fault_ports_from_snapshot(snap, ep_count) if snap else set()
 
@@ -6486,11 +6528,13 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
         except Exception:
             ep_idx = int(_ep_count_idx_for_port_panel(ext, si))
         ep_count = 3 if ep_idx else 2
+        ebs_on = bool(snap.get("ebs_enabled", True)) if snap else True
         faults = _fault_ports_from_snapshot(snap, ep_count) if snap else set()
         bar = build_ep_bar_from_progress_items(
             res.items,
             final_sim_time=float(res.final_sim_time),
             ep_count_idx=int(ep_idx),
+            ebs_enabled=bool(ebs_on),
             fault_ports=faults,
         )
         bar_by[str(si)] = bar
@@ -10808,6 +10852,54 @@ def on_copy_sim_progress(ext: Any) -> None:
         _append_sim_log(ext, "[SIM UI] 클립보드 미지원으로 콘솔 출력")
 
 
+def _sync_ebs_control_visibility(ext: Any) -> None:
+    """EBS 적용여부에 따라 버퍼 관련 UI·포트상태·공정시간 필드를 표시/숨김."""
+    try:
+        from .ebs_control_panel_ui import get_sim_ebs_enabled, get_sim_ep_count_idx
+
+        ebs_on = bool(get_sim_ebs_enabled(ext))
+        is_ep3 = int(get_sim_ep_count_idx(ext)) == 1
+    except Exception:
+        ebs_on = True
+        is_ep3 = False
+    bp4_init = set(getattr(ext, "_sim_init_bp4_rows", None) or [])
+    bp4_fault = set(getattr(ext, "_sim_fault_bp4_rows", None) or [])
+    for row in list(getattr(ext, "_sim_init_ebs_rows", None) or []):
+        try:
+            row.visible = bool(ebs_on and is_ep3) if row in bp4_init else bool(ebs_on)
+        except Exception:
+            pass
+    for row in list(getattr(ext, "_sim_fault_ebs_rows", None) or []):
+        try:
+            row.visible = bool(ebs_on and is_ep3) if row in bp4_fault else bool(ebs_on)
+        except Exception:
+            pass
+    block = getattr(ext, "_sim_timing_inout_bp_block", None)
+    if block is not None:
+        try:
+            block.visible = ebs_on
+        except Exception:
+            pass
+    bp_ep_row = getattr(ext, "_sim_timing_bp_ep_row", None)
+    if bp_ep_row is not None:
+        try:
+            bp_ep_row.visible = ebs_on
+        except Exception:
+            pass
+    lbl = getattr(ext, "_sim_oht_timing_label", None)
+    if lbl is not None:
+        try:
+            lbl.text = "OHT→IN/OUT/EP" if ebs_on else "OHT→EP"
+        except Exception:
+            pass
+    for row in list(getattr(ext, "_sim_timing_ebs_compact_rows", None) or []):
+        try:
+            row.visible = ebs_on
+        except Exception:
+            pass
+    _sync_ep3_port_cell_visibility(ext)
+
+
 def on_sim_ep_count_changed(ext: Any) -> None:
     try:
         idx = int(get_sim_ep_count_idx(ext))
@@ -10875,7 +10967,7 @@ def on_sim_ep_count_changed(ext: Any) -> None:
             pass
     if not is_ep3 and getattr(ext, "_sim_fault_ep3_model", None) is not None:
         ext._sim_fault_ep3_model.set_value(False)
-    _sync_ep3_port_cell_visibility(ext)
+    _sync_ebs_control_visibility(ext)
     try:
         from .tbs_ep_port_visibility import on_sim_ep_count_combo_changed
 

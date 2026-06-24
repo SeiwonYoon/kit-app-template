@@ -227,6 +227,8 @@ class SimulationInitConfig:
     """
 
     ep_count: int = field(default_factory=_SIM_DEF.ep_count)
+    # True(기본): IN/OUT·BP 버퍼 포함. False: EP 포트만 (arrived_ep/removed_ep + FOUP).
+    ebs_enabled: bool = True
     initial_full_ports: Optional[List[str]] = None
     max_oht_lots: int = field(default_factory=lambda: int(_SIM_DEF.lot_count))
     # True면 공정(랜덤) 시간만 소모하고 애니 길이는 무시(UI에서 애니 스킵/중단과 연동)
@@ -380,9 +382,14 @@ class TBSSimulationEngine:
         self.env = simpy.Environment() if simpy else None
         ep_count = int(getattr(self._init_cfg, "ep_count", 2) or 2)
         ep_count = 3 if ep_count >= 3 else 2
+        self._ebs_enabled = bool(getattr(self._init_cfg, "ebs_enabled", True))
         self._ep_ports = EP_PORTS_MAX[:ep_count]
-        self._buffer_ports = BUFFER_PORTS_MAX if ep_count >= 3 else BUFFER_PORTS_MAX[:3]
-        self._all_ports = BASE_PORTS + tuple(self._buffer_ports) + self._ep_ports
+        if self._ebs_enabled:
+            self._buffer_ports = BUFFER_PORTS_MAX if ep_count >= 3 else BUFFER_PORTS_MAX[:3]
+            self._all_ports = BASE_PORTS + tuple(self._buffer_ports) + self._ep_ports
+        else:
+            self._buffer_ports = ()
+            self._all_ports = self._ep_ports
 
         self.ports: Dict[str, Optional[Lot]] = {p: None for p in self._all_ports}
         self.port_start_cd: Dict[str, str] = {p: "EMPTY" for p in self._all_ports}
@@ -1189,6 +1196,8 @@ class TBSSimulationEngine:
 
     def _step_bp1_to_buffer(self):
         """0) IN/OUT 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True."""
+        if not self._ebs_enabled:
+            return False
         if self.ports.get(INOUT_PORT) is not None and self._find_oldest_empty_buffer():
             yield self.env.process(self._move_bp1_to_buffer())
             return True
@@ -1225,7 +1234,7 @@ class TBSSimulationEngine:
                 yield self.env.process(self._load_lot_to_ep_direct(lot, ep_target))
                 return True
 
-        if self._oht_input_queue and self._can_load_to_bp1():
+        if self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1():
             lot = self._oht_input_queue.pop(0)
             self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
             yield self.env.process(self._load_lot_to_inout(lot))
@@ -1235,6 +1244,8 @@ class TBSSimulationEngine:
 
     def _step_buffer_to_ep(self):
         """3) 버퍼 → EP 1회 이송 가능하면 실행 후 True."""
+        if not self._ebs_enabled:
+            return False
         ep = self._find_empty_ep()
         bp = self._find_oldest_bp()
         if ep and bp:
@@ -1298,6 +1309,8 @@ class TBSSimulationEngine:
 
     def _can_load_to_bp1(self) -> bool:
         """OHT LOT을 IN/OUT에 넣을 수 있는지: IN/OUT 비어 있고 버퍼에 빈 슬롯이 있으며 적재 중 아님."""
+        if not self._ebs_enabled:
+            return False
         if self._port_faulty(INOUT_PORT):
             return False
         bp1_empty = self.ports[INOUT_PORT] is None
@@ -1308,7 +1321,7 @@ class TBSSimulationEngine:
 
     def _can_load_to_ep_direct(self) -> bool:
         """OHT 대기열 LOT을 EP로 직접 넣을 수 있는지(빈 EP 존재 + BP1 적재 중 아님)."""
-        if self._oht_loading_bp1:
+        if self._ebs_enabled and self._oht_loading_bp1:
             return False
         return self._find_empty_ep() is not None
 
