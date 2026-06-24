@@ -46,11 +46,11 @@ from .control_window import (
     refresh_object_list,
 )
 from .control_sim_bar_graph import (
-    BAR_STATE_COLORS_HEX,
     BAR_STATES,
     bar_graph_row_order,
     bar_state_from_seg,
     compute_duration_sec_by_row,
+    get_bar_state_colors_hex,
 )
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 from .tbs_data_paths import resolve_local_data_path
@@ -116,6 +116,7 @@ def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
         si = 1
     ep_idx = int(_ep_count_idx_for_port_panel(ext, si))
     row_order = bar_graph_row_order(ep_idx)
+    hex_colors = get_bar_state_colors_hex()
     base = {
         "t_now": 0.0,
         "total_est": 30.0,
@@ -123,7 +124,7 @@ def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
         "empty_acc": {k: 0.0 for k in row_order},
         "row_order": row_order,
         "states": list(BAR_STATES),
-        "colors": dict(BAR_STATE_COLORS_HEX),
+        "colors": dict(hex_colors),
         "duration_sec_by_row": {k: {} for k in row_order},
         "has_prerun": False,
     }
@@ -166,7 +167,7 @@ def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
                         "dur_sec": dur,
                         "dur": dur,
                         "empty": st_name == "empty",
-                        "color": BAR_STATE_COLORS_HEX.get(st_name, "#888888"),
+                        "color": hex_colors.get(st_name, "#888888"),
                     }
                 )
             rows_out[rk] = row_segs
@@ -188,7 +189,7 @@ def _serialize_ep_timeline_for_screen(ext: Any, scr_key: str) -> Dict[str, Any]:
         "empty_acc": empty_acc,
         "row_order": row_order,
         "states": list(BAR_STATES),
-        "colors": dict(BAR_STATE_COLORS_HEX),
+        "colors": dict(hex_colors),
         "duration_sec_by_row": duration_sec_by_row,
         "has_prerun": bool(has_prerun),
     }

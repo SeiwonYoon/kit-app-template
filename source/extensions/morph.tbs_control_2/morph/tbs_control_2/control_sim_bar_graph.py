@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .control_sim_prerun_playback import (
@@ -38,22 +39,116 @@ BAR_STATES: Tuple[str, ...] = (
     BAR_STATE_DOWN,
 )
 
-# Kit UI 0xAARRGGBB
-BAR_STATE_COLORS: Dict[str, int] = {
-    BAR_STATE_EMPTY: 0xFFFFFF00,   # 노랑
-    BAR_STATE_LOAD: 0xFF00FF00,    # 초록
-    BAR_STATE_PROC: 0xFF3399FF,    # 파랑
-    BAR_STATE_UNLOAD: 0xFFCC66FF,   # 보라
-    BAR_STATE_DOWN: 0xFF0000FF,    # 빨강 (기존 empty 색과 동일 채널)
-}
-
-BAR_STATE_COLORS_HEX: Dict[str, str] = {
+# 기본값 — config/bar_graph_colors.json 없거나 키 누락 시 폴백 (#RRGGBB)
+_DEFAULT_BAR_STATE_COLORS_HEX: Dict[str, str] = {
     BAR_STATE_EMPTY: "#FFFF00",
     BAR_STATE_LOAD: "#00FF00",
     BAR_STATE_PROC: "#3399FF",
     BAR_STATE_UNLOAD: "#CC66FF",
     BAR_STATE_DOWN: "#FF0000",
 }
+
+_BAR_COLORS_KIT_CACHE: Optional[Dict[str, int]] = None
+_BAR_COLORS_HEX_CACHE: Optional[Dict[str, str]] = None
+_BAR_COLORS_MTIME: Optional[float] = None
+
+# 하위 호환 — get_bar_state_colors_*() 가 mtime 변경 시 갱신한다.
+BAR_STATE_COLORS: Dict[str, int] = {}
+BAR_STATE_COLORS_HEX: Dict[str, str] = {}
+
+
+def _extension_root_dir() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _bar_graph_colors_path() -> Path:
+    return _extension_root_dir() / "config" / "bar_graph_colors.json"
+
+
+def _normalize_hex_color(raw: str) -> str:
+    s = str(raw or "").strip().upper()
+    if not s:
+        return ""
+    if s.startswith("#"):
+        s = s[1:]
+    if len(s) != 6:
+        return ""
+    try:
+        int(s, 16)
+    except ValueError:
+        return ""
+    return f"#{s}"
+
+
+def hex_to_kit_ui_color(hex_rgb: str) -> int:
+    """#RRGGBB → omni.ui ``0xAABBGGRR``."""
+    norm = _normalize_hex_color(hex_rgb)
+    if not norm:
+        return 0xFF808080
+    s = norm[1:]
+    r = int(s[0:2], 16)
+    g = int(s[2:4], 16)
+    b = int(s[4:6], 16)
+    return int((0xFF << 24) | (b << 16) | (g << 8) | r)
+
+
+def _parse_bar_colors_file(data: Any) -> Dict[str, str]:
+    out: Dict[str, str] = dict(_DEFAULT_BAR_STATE_COLORS_HEX)
+    if not isinstance(data, dict):
+        return out
+    for st in BAR_STATES:
+        raw = data.get(st)
+        if raw is None:
+            continue
+        norm = _normalize_hex_color(str(raw))
+        if norm:
+            out[st] = norm
+    return out
+
+
+def _refresh_bar_color_caches(kit: Dict[str, int], hex_map: Dict[str, str]) -> None:
+    global BAR_STATE_COLORS, BAR_STATE_COLORS_HEX
+    BAR_STATE_COLORS = dict(kit)
+    BAR_STATE_COLORS_HEX = dict(hex_map)
+
+
+def get_bar_state_colors_hex() -> Dict[str, str]:
+    """config/bar_graph_colors.json 기준 #RRGGBB (mtime 캐시)."""
+    global _BAR_COLORS_HEX_CACHE, _BAR_COLORS_KIT_CACHE, _BAR_COLORS_MTIME
+    p = _bar_graph_colors_path()
+    mtime: Optional[float] = None
+    if p.is_file():
+        try:
+            mtime = float(p.stat().st_mtime)
+        except Exception:
+            mtime = None
+    if _BAR_COLORS_HEX_CACHE is not None and _BAR_COLORS_MTIME == mtime:
+        return dict(_BAR_COLORS_HEX_CACHE)
+    hex_map = dict(_DEFAULT_BAR_STATE_COLORS_HEX)
+    if p.is_file():
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            hex_map = _parse_bar_colors_file(data)
+        except Exception as ex:
+            print(f"[BAR] 색상 파일 로드 실패: {p} err={ex}", flush=True)
+    kit_map = {st: hex_to_kit_ui_color(hx) for st, hx in hex_map.items()}
+    _BAR_COLORS_HEX_CACHE = dict(hex_map)
+    _BAR_COLORS_KIT_CACHE = dict(kit_map)
+    _BAR_COLORS_MTIME = mtime
+    _refresh_bar_color_caches(kit_map, hex_map)
+    return dict(hex_map)
+
+
+def get_bar_state_colors_kit() -> Dict[str, int]:
+    get_bar_state_colors_hex()
+    if _BAR_COLORS_KIT_CACHE is None:
+        hex_map = get_bar_state_colors_hex()
+        return {st: hex_to_kit_ui_color(hx) for st, hx in hex_map.items()}
+    return dict(_BAR_COLORS_KIT_CACHE)
+
+
+# 모듈 import 시 1회 로드
+get_bar_state_colors_hex()
 
 PRERUN_EXPORT_VERSION = 1
 
@@ -87,7 +182,9 @@ def bar_state_from_seg(seg: Dict[str, Any]) -> str:
 
 
 def bar_state_color(state: str) -> int:
-    return int(BAR_STATE_COLORS.get(str(state or "").strip().lower(), BAR_STATE_COLORS[BAR_STATE_EMPTY]))
+    kit = get_bar_state_colors_kit()
+    st = str(state or "").strip().lower()
+    return int(kit.get(st, kit.get(BAR_STATE_EMPTY, hex_to_kit_ui_color("#FFFF00"))))
 
 
 def merge_bar_row_segments(segs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -535,6 +632,7 @@ def build_prerun_export_document(
     ep_count = 3 if ep_count_idx else 2
     row_order = list(bar.row_order) if bar.row_order else bar_graph_row_order(ep_count_idx)
 
+    hex_colors = get_bar_state_colors_hex()
     segments_out: Dict[str, List[Dict[str, Any]]] = {}
     for row_name in row_order:
         segs = bar.rows.get(row_name, []) if isinstance(bar.rows, dict) else []
@@ -542,7 +640,7 @@ def build_prerun_export_document(
             {
                 "state": bar_state_from_seg(s),
                 "dur_sec": round(float(s.get("dur", 0.0)), 4),
-                "color": BAR_STATE_COLORS_HEX.get(bar_state_from_seg(s), "#888888"),
+                "color": hex_colors.get(bar_state_from_seg(s), "#888888"),
             }
             for s in (segs or [])
             if isinstance(s, dict) and float(s.get("dur", 0.0)) > 1e-9
@@ -590,7 +688,7 @@ def build_prerun_export_document(
         },
         "bar_graph": {
             "states": list(BAR_STATES),
-            "colors": dict(BAR_STATE_COLORS_HEX),
+            "colors": dict(hex_colors),
             "row_order": row_order,
             "segments": segments_out,
             "duration_sec_by_row": dict(bar.duration_sec_by_row or {}),
@@ -611,6 +709,9 @@ __all__ = [
     "EpBarPrecomputed",
     "allocate_bar_segment_pixels",
     "bar_graph_row_order",
+    "get_bar_state_colors_hex",
+    "get_bar_state_colors_kit",
+    "hex_to_kit_ui_color",
     "bar_state_color",
     "bar_state_from_seg",
     "build_ep_bar_from_progress_items",

@@ -1,0 +1,8 @@
+{
+  "_comment": "막대그래프 5상태 색상 (#RRGGBB). Kit UI·웹 export·프리런 JSON 공통 출처.",
+  "empty": "#FFFF00",
+  "load": "#00FF00",
+  "proc": "#3399FF",
+  "unload": "#CC66FF",
+  "down": "#FF0000"
+}
