@@ -108,11 +108,6 @@ class ScreenPlaybackSession:
         if (now_wall - self.hb_prog_wall) >= _HB_PROG_INTERVAL:
             self.hb_prog_wall = float(now_wall)
             try:
-                by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
-                lp = by_lp.get(str(scr)) if isinstance(by_lp, dict) else None
-            except Exception:
-                lp = None
-            try:
                 te_val = float(self.prerun.final_sim_time)
             except Exception:
                 te_val = None
@@ -120,7 +115,7 @@ class ScreenPlaybackSession:
                 p3 = build_prog_payload(
                     scr,
                     float(tnow),
-                    lp if isinstance(lp, dict) else None,
+                    None,
                     ext,
                 )
                 if isinstance(te_val, (float, int)) and float(te_val) > 0.0:

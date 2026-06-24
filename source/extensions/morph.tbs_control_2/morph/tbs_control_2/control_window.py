@@ -297,6 +297,19 @@ from .control_sim_playback_gate import (
     json_wall_duration_sec,
     set_json_wall_busy,
 )
+from .progress_step_state import (
+    apply_engine_progress_payload,
+    bind_linked_anim_on_dispatch,
+    build_payload_from_step,
+    build_playback_tick_payload,
+    clear_progress_step_state,
+    format_progress_anim_footer,
+    notify_anim_finished,
+    notify_anim_queued,
+    notify_anim_started,
+    progress_dedupe_extra,
+    sync_anim_runtime_from_ext,
+)
 from .control_sim_multi_playback import (
     bootstrap_playback_after_prerun,
     get_playback_runtime,
@@ -955,6 +968,10 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 pass
             try:
+                notify_anim_started(ext, scr_i, str(job.get("file", "") or ""))
+            except Exception:
+                pass
+            try:
                 _halt_screen_json_anim(ext, scr_i, join_sec=3.0)
             except Exception:
                 pass
@@ -1197,7 +1214,11 @@ def _execute_mapped_sequence_stub(
                     except Exception:
                         pass
                     try:
-                        _refresh_sim_progress_from_last(ext)
+                        notify_anim_finished(ext, int(scr_i))
+                    except Exception:
+                        pass
+                    try:
+                        _refresh_sim_progress_from_last(ext, int(scr_i))
                     except Exception:
                         pass
 
@@ -1305,7 +1326,7 @@ def _execute_mapped_sequence_stub(
                 except Exception:
                     pass
             try:
-                _refresh_sim_progress_from_last(ext)
+                _refresh_sim_progress_from_last(ext, scr_i)
             except Exception:
                 pass
 
@@ -1351,6 +1372,16 @@ def _execute_mapped_sequence_stub(
         except Exception:
             is_spawn = False
         job["_priority"] = 0 if (is_spawn or is_pickup) else 10
+        try:
+            bind_linked_anim_on_dispatch(
+                ext,
+                _scr,
+                p.name,
+                event_seq=str(seq or ""),
+                sim_time=str(sim_time or ""),
+            )
+        except Exception:
+            pass
         # 화면별 runner의 busy 여부를 본다.
         runner_busy = False
         try:
@@ -1377,6 +1408,9 @@ def _execute_mapped_sequence_stub(
                 )
             except Exception:
                 pass
+            except Exception:
+                pass
+            pending_list: List[Any] = []
             try:
                 pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
                 if not isinstance(pending_by, dict):
@@ -1390,14 +1424,21 @@ def _execute_mapped_sequence_stub(
                 else:
                     pending.append(job)
                 pending_by[str(_scr)] = pending
+                pending_list = list(pending)
             except Exception:
-                pass
+                pending_list = []
             _append_anim_history_log(
                 ext,
                 f"[ANIM] 대기큐적재 | screen={_scr} | event={seq} | est={est_text} | action={action_text} | file={p.name}",
             )
             try:
-                _refresh_sim_progress_from_last(ext)
+                notify_anim_queued(
+                    ext, _scr, p.name, len(pending_list), p.name
+                )
+            except Exception:
+                pass
+            try:
+                _refresh_sim_progress_from_last(ext, _scr)
             except Exception:
                 pass
             return
@@ -4668,36 +4709,15 @@ def _build_playback_time_tick_payload(
     final_sim_time: Optional[float] = None,
     ext: Any = None,
 ) -> Dict[str, Any]:
-    """
-    프리런 재생 0.2s heartbeat 용 payload.
-
-    ``sim_time`` 과 공정 구간 기준 ``elapsed`` / ``percent`` 를 ``tnow`` 로 보간한다.
-    포트 점유·FOUP 등 상태 필드는 타임라인 emit 경로에서만 반영한다.
-    """
-    if isinstance(lp, dict) and str(lp.get("label", "") or "").strip():
-        p3: Dict[str, Any] = dict(lp)
-    else:
-        p3 = {
-            "tbs_sim_screen": str(scr),
-            "label": "대기",
-            "detail": "",
-            "status": "RUNNING",
-            "elapsed": "0.0",
-            "total": "0.0",
-            "percent": "0",
-        }
-    p3["tbs_sim_screen"] = str(scr)
-    p3["sim_time"] = f"{float(tnow):.2f}"
-    p3["playback_time_tick"] = "1"
-    if isinstance(final_sim_time, (float, int)) and float(final_sim_time) > 0.0:
-        p3["sim_total_est_sec"] = f"{float(final_sim_time):.2f}"
-    try:
-        _apply_playback_step_progress_from_sim(p3, float(tnow), ext=ext, screen=int(scr))
-    except Exception:
-        pass
-    for k in _PLAYBACK_TIME_TICK_STRIP_KEYS:
-        p3.pop(k, None)
-    return p3
+    """프리런 재생 heartbeat — ProgressStepState 기준 보간(lp 레거시 인자는 무시)."""
+    _ = lp
+    return build_playback_tick_payload(
+        ext,
+        int(scr),
+        float(tnow),
+        final_sim_time=final_sim_time,
+        apply_step_progress=_apply_playback_step_progress_from_sim,
+    )
 
 
 def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
@@ -4708,6 +4728,11 @@ def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
         scr = 1
     scr = max(1, scr)
     playback_tick = _is_playback_time_tick_payload(p)
+    if not playback_tick:
+        try:
+            apply_engine_progress_payload(ext, scr, p)
+        except Exception:
+            pass
     if not playback_tick:
         try:
             _flush_pending_post_anim_port_applies(ext, scr)
@@ -7345,51 +7370,38 @@ def _format_anim_status_footer(ext: Any) -> str:
 
 
 def _format_progress_anim_footer(ext: Any, payload: Dict[str, str]) -> str:
-    """
-    진행현황 하단: **현재 공정 단계**와 동일한 연계 JSON(엔진 ``linked_anim_json``)을 우선 표시하고,
-    필요할 때만 시퀀스 러너 줄을 붙인다.
-
-    러너의 ``_sim_anim_active`` 는 직전 시퀀스가 끝나기 전까지 이전 ``file`` 을 들고 있을 수 있어,
-    공정은 ``REMOVED``(removed_ep2)인데 ``애니메이션 파일: arrived_ep1`` 처럼 **연계와 다른 이름**이 나오면 생략한다.
-    대기 큐의 **다음** 항목이 연계 파일과 같으면 ``대기 — 다음 …`` 만 표시한다.
-    """
-    hint = str(payload.get("linked_anim_json") or "").strip()
-    if not hint:
-        return _format_anim_status_footer(ext)
-
-    parts: List[str] = []
-    rel = hint.replace("\\", "/")
-    if "/" not in rel:
-        rel = f"data/sim_sequences/{rel}"
+    """진행현황 하단 — ProgressStepState 단일 출처(러너는 보조 줄만)."""
     try:
-        p = _normalize_json_path(rel)
-        ex_lbl = "존재" if p.is_file() else "없음"
+        scr = int(str(payload.get("tbs_sim_screen", "1") or "1").strip() or "1")
     except Exception:
-        ex_lbl = "?"
-    bn = Path(hint.replace("\\", "/")).name
-    parts.append(f"이벤트 연계 JSON: {bn} ({ex_lbl})")
-
-    hint_key = bn.lower()
-    _, cur_file, q, next_f = _sim_anim_status_key(ext)
-    cur_key = Path((cur_file or "").replace("\\", "/")).name.lower() if cur_file else ""
-    next_key = Path((next_f or "").replace("\\", "/")).name.lower() if next_f else ""
-
-    if cur_key == hint_key:
-        runner = _format_anim_status_footer(ext).strip()
-        if runner and runner != "애니메이션 파일: 재생 없음":
-            parts.append(runner)
-    elif q > 0 and next_key == hint_key:
-        nf_disp = Path(next_f.replace("\\", "/")).name if next_f else ""
-        parts.append("애니메이션: 대기 — 다음 " + nf_disp + (f" (큐 {q}건)" if q > 1 else ""))
-
-    return "\n".join(parts)
+        scr = 1
+    return format_progress_anim_footer(ext, scr)
 
 
-def _refresh_sim_progress_from_last(ext: Any) -> None:
-    """애니 시작/종료 직후 마지막 공정 진행 payload로 패널만 다시 그린다."""
-    lp = getattr(ext, "_sim_progress_last_payload", None)
-    if isinstance(lp, dict):
-        _update_sim_progress(ext, lp)
+def _refresh_sim_progress_from_last(ext: Any, screen: Optional[int] = None) -> None:
+    """애니 런타임 변화 후 ProgressStepState 기준으로 패널만 다시 그린다."""
+    screens: List[int] = []
+    if screen is not None:
+        screens = [max(1, int(screen))]
+    else:
+        by = getattr(ext, "_sim_progress_step_by_screen", None)
+        if isinstance(by, dict) and by:
+            for k in by.keys():
+                try:
+                    screens.append(max(1, int(str(k).strip() or "1")))
+                except Exception:
+                    continue
+        if not screens:
+            screens = [1]
+    for scr in screens:
+        try:
+            sync_anim_runtime_from_ext(ext, scr)
+        except Exception:
+            pass
+        p = build_payload_from_step(ext, scr)
+        if isinstance(p, dict):
+            p["_force_progress_ui"] = "1"
+            _update_sim_progress(ext, p)
 
 
 def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
@@ -7476,8 +7488,20 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     total = str(payload.get("total", "0.0"))
     sim_time = str(payload.get("sim_time", "0.00"))
     detail = str(payload.get("detail", ""))
+    try:
+        panel_slot = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
+    except Exception:
+        panel_slot = "1"
     event_seq = str(payload.get("event_seq") or payload.get("sequence_name") or "").strip()
     linked_anim = str(payload.get("linked_anim_json") or "").strip()
+    try:
+        st_p = build_payload_from_step(ext, int(panel_slot))
+        if isinstance(st_p, dict):
+            la = str(st_p.get("linked_anim_json") or "").strip()
+            if la:
+                linked_anim = la
+    except Exception:
+        pass
     proc_sec = str(payload.get("proc_sec", "")).strip()
     anim_sec = str(payload.get("anim_sec", "")).strip()
     proc_pri = str(payload.get("process_time_priority", "")).strip()
@@ -7485,10 +7509,6 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     all_ep_empty = str(payload.get("all_ep_empty", "")).strip()
 
     anim_key = _sim_anim_status_key(ext)
-    try:
-        panel_slot = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
-    except Exception:
-        panel_slot = "1"
 
     # FOUP 공정 진행은 EP 포트별로 "줄을 다르게 고정"한 라벨에만 갱신한다.
     # - 단일 라벨에 다른 EP/단계 텍스트가 덮어써져 깜빡이는 문제를 근본적으로 차단.
@@ -7648,6 +7668,12 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     if status == "RUNNING":
         try:
             last_key = getattr(ext, "_sim_progress_last_key", None)
+            step_id, disp_rev = progress_dedupe_extra(payload if isinstance(payload, dict) else {})
+            force_ui = str(payload.get("_force_progress_ui", "")).strip().lower() in (
+                "1",
+                "true",
+                "on",
+            )
             # 진행현황 디듀프 키에는 실제 표시 문자열에 영향을 주는 값들을 포함해야 한다.
             # (proc_sec/anim_sec/priority가 바뀌었는데도 elapsed/total이 같으면 UI가 갱신되지 않는 문제 방지)
             key = (
@@ -7665,10 +7691,16 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 proc_sec,
                 anim_sec,
                 proc_pri,
+                int(step_id),
+                int(disp_rev),
                 # 총 시간(총=XXXs)은 header에 직접 반영되므로 키에 포함
                 str(payload.get("sim_total_est_sec", "") or "").strip(),
             )
-            if isinstance(last_key, dict) and last_key.get(dedupe_key) == key:
+            if (
+                not force_ui
+                and isinstance(last_key, dict)
+                and last_key.get(dedupe_key) == key
+            ):
                 return
             if isinstance(last_key, dict):
                 last_key[dedupe_key] = key
@@ -10577,6 +10609,10 @@ def on_sim_reset_clicked(ext: Any) -> None:
     # 진행현황(텍스트용) 마지막 payload도 초기화(리셋 후 DONE/총시간 잔상 방지)
     try:
         ext._sim_progress_last_payload_by_screen = {}
+    except Exception:
+        pass
+    try:
+        clear_progress_step_state(ext)
     except Exception:
         pass
     # 프리런/재생 상태도 초기화(리셋 후 이전 결과 잔상 방지)

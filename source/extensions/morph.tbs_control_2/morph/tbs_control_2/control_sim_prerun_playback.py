@@ -859,6 +859,20 @@ class SimTimelinePlayer:
                     emitted += 1
                     i += 1
                     event_emitted_this_tick = True
+                    # 동일 sim_time 의 progress(공정 단계)는 같은 틱에 함께 emit — 연계 JSON 표시 어긋남 방지
+                    if (
+                        i < len(items)
+                        and str(items[i].kind) == "progress"
+                        and abs(float(items[i].t) - float(it.t)) <= 1e-9
+                        and emitted < max_n
+                    ):
+                        it_p = items[i]
+                        try:
+                            self._emit(it_p.kind, it_p.payload, int(scr))
+                        except Exception:
+                            pass
+                        emitted += 1
+                        i += 1
                     break
                 try:
                     self._emit(it.kind, it.payload, int(scr))
