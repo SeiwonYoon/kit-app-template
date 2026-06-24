@@ -441,6 +441,13 @@ class Extension(omni.ext.IExt):
         except Exception:
             pass
         try:
+            fp = getattr(self, "_fix_proc_window", None)
+            if fp is not None:
+                fp.destroy()
+                self._fix_proc_window = None
+        except Exception:
+            pass
+        try:
             tt = getattr(self, "_sim_timetable_window", None)
             if tt is not None:
                 tt.destroy()

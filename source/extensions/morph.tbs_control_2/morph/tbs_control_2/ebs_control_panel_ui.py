@@ -15,6 +15,7 @@ _AUX_KIT_WINDOW_SPECS: tuple[tuple[str, str, str], ...] = (
     ("_ui_show_tbs_sequence_model", "시퀀스", "sequence"),
     ("_ui_show_tbs_timetable_model", "타임테이블", "timetable"),
     ("_ui_show_tbs_sim_monitor_model", "시뮬 모니터", "monitor"),
+    ("_ui_show_tbs_fix_proc_model", "fix 공정 입력", "fix_proc"),
     ("_ui_show_ebs_control_model", "EBS 제어창", "ebs"),
 )
 
@@ -44,6 +45,8 @@ def _resolve_aux_kit_window(ext: Any, which: str) -> Any:
         return getattr(ext, "_sim_timetable_window", None)
     if which == "monitor":
         return getattr(ext, "_sim_monitor_window", None)
+    if which == "fix_proc":
+        return getattr(ext, "_fix_proc_window", None)
     if which == "ebs":
         return getattr(ext, "_control_window", None)
     return None
@@ -245,6 +248,7 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_monitor_split_host = None
     ext._sim_monitor_split_inner = None
     ext._sim_timetable_window = None
+    ext._fix_proc_window = None
     ext._sim_timetable_user_dismissed = False
     ext._sim_timetable_split_host = None
     ext._sim_timetable_split_inner = None

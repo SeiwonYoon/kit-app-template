@@ -879,6 +879,12 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # 1d) fix 공정 입력 창
+        try:
+            _set_visible(getattr(ext, "_fix_proc_window", None), not hide)
+        except Exception:
+            pass
+
         # 2) 시퀀스 편집기(SequenceEditorWindow 내부 _window)
         try:
             sw = getattr(ext, "_sequence_window", None)

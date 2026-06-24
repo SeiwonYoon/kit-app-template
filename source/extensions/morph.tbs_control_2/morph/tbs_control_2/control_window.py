@@ -276,6 +276,8 @@ from .control_sim_bar_graph import (
     write_prerun_export_json,
 )
 from .control_sim_bar_graph import _aggregate_all_ep_state  # noqa: PLC2701 — UI live 막대 ALL_EP 집계
+from .control_sim_fix_proc_ui import build_fix_proc_window
+from .sim_lot_fix_proc import lot_id_from_payload, read_lot_fix_proc_at_start
 from .control_sim_prerun_playback import (
     PlaybackEngine,
     SimPreRunResult,
@@ -288,7 +290,12 @@ from .control_sim_prerun_playback import (
     prerun_engine_to_timeline,
     resolve_seek_through_index,
 )
-from .ebs_control_panel_ui import build_ebs_control_panel_content, get_sim_ep_count_idx, init_ebs_control_models
+from .ebs_control_panel_ui import (
+    build_ebs_control_panel_content,
+    get_sim_ep_count_idx,
+    init_ebs_control_models,
+    sync_aux_kit_window_visibility,
+)
 from .control_sim_playback_gate import (
     can_emit_timeline_event,
     clear_playback_gate_state,
@@ -883,7 +890,7 @@ def _execute_mapped_sequence_stub(
     else:
         route = "port=미상"
     base_desc = desc if desc else "동작설명 없음"
-    lot_id = str(payload.get("lot_id", "")).strip() or "-"
+    lot_id = lot_id_from_payload(payload) or "-"
     action_text = f"{base_desc} ({route} | lot={lot_id})"
     sim_time = str(payload.get("sim_time", "")).strip()
     # 스토리-JSON 요약(애니 실행이력 창) 기록: "실행/스킵/실패" 모두 남겨야 누적이 끊기지 않는다.
@@ -1474,7 +1481,7 @@ def _execute_mapped_sequence_stub(
     if verbose:
         print(
             f"[ANIM MAP] 이벤트={seq} -> JSON 준비완료: {p} "
-            f"(runner={runner}, rule={rule_name or '-'}, lot={payload.get('lot_id','')}, port={payload.get('port_id','')}, "
+            f"(runner={runner}, rule={rule_name or '-'}, lot={lot_id_from_payload(payload)}, port={payload.get('port_id','')}, "
             f"from={payload.get('from_port_id','')}, to={payload.get('to_port_id','')})",
             flush=True,
         )
@@ -1890,6 +1897,13 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
         process_time_priority=proc_pri,
     )
     return timing, init
+
+
+def _inject_lot_fix_proc_into_init(ext: Any, init_cfg: SimulationInitConfig) -> None:
+    """fix 공정 입력 창이 비어 있으면 ``init_cfg`` 를 그대로 둔다 (기존 랜덤 동작)."""
+    rows = read_lot_fix_proc_at_start(ext)
+    if rows:
+        init_cfg.lot_fix_proc_rows = rows
 
 
 def notify_tbs_composed_usd_ready_for_split(ext: Any, usd_path: str = "") -> None:
@@ -3095,6 +3109,11 @@ def build_control_window(ext: Any) -> None:
                 build_ebs_control_panel_content(ext, compact=False)
     build_sim_monitor_window(ext)
     build_sim_timetable_window(ext)
+    build_fix_proc_window(ext)
+    try:
+        sync_aux_kit_window_visibility(ext)
+    except Exception:
+        pass
     try:
         _rebuild_all_sim_ui_panels(ext)
     except Exception:
@@ -8055,7 +8074,7 @@ def _on_sim_event(ext: Any, payload: Dict[str, str]) -> None:
     if not seq_raw:
         return
     seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
-    lot_id = payload.get("lot_id", "")
+    lot_id = lot_id_from_payload(payload)
     sim_time = payload.get("sim_time", "")
 
     try:
@@ -8508,7 +8527,7 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
     seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
     # 2-B) payload 에서 자주 쓰는 필드 미리 추출(가독성/로그용)
     sim_time = payload.get("sim_time", "")
-    lot_id = payload.get("lot_id", "")
+    lot_id = lot_id_from_payload(payload)
     from_port_txt = str(payload.get("from_port_id", ""))
     to_port_txt = str(payload.get("to_port_id", ""))
     port_txt = str(payload.get("port_id", ""))
@@ -8948,6 +8967,7 @@ def on_sim_start_clicked(ext: Any) -> None:
         snap_1 = dict(s0) if isinstance(s0, dict) else dict(cap1)
         try:
             timing, init_cfg = _timing_and_init_from_snapshot(ext, snap_1)
+            _inject_lot_fix_proc_into_init(ext, init_cfg)
         except Exception:
             pass
         try:
@@ -9324,7 +9344,7 @@ def on_sim_start_clicked(ext: Any) -> None:
 
         seq_raw = str(payload.get("seq", ""))
         seq = SIM_SEQ_ALIAS.get(seq_raw, seq_raw)
-        lot = str(payload.get("lot_id", ""))
+        lot = lot_id_from_payload(payload)
         est = str(payload.get("est_sec", ""))
         fr = str(payload.get("from_port_id", ""))
         to = str(payload.get("to_port_id", ""))
@@ -9498,6 +9518,7 @@ def on_sim_start_clicked(ext: Any) -> None:
                 else:
                     snap_i = copy.deepcopy(cap)
             timing_i, init_i = _timing_and_init_from_snapshot(ext, snap_i)
+            _inject_lot_fix_proc_into_init(ext, init_i)
             screen_tag = str(i + 1)
             snap_frozen = copy.deepcopy(snap_i)
             ep_i = int(getattr(init_i, "ep_count", 2) or 2)

@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .sim_lot_fix_proc import format_fix_meta_block, format_lot_id_display
+
 
 @dataclass(frozen=True)
 class SimTimelineItem:
@@ -188,7 +190,7 @@ def format_timetable_display_line(row: Dict[str, Any]) -> str:
     anim_file = _s_val(row.get("anim"))
     ptp = _s_val(row.get("process_time_priority")).lower() in ("1", "true", "on", "yes")
 
-    omit_keys = frozenset({"kind", "detail", "proc_sec", "anim_sec"})
+    omit_keys = frozenset({"kind", "detail", "proc_sec", "anim_sec", "lot_fix_label"})
     disp: Dict[str, Any] = {}
     for k, v in row.items():
         if k in omit_keys:
@@ -200,6 +202,15 @@ def format_timetable_display_line(row: Dict[str, Any]) -> str:
         if k == "anim":
             disp[k] = anim_file.replace("\\", "/").rsplit("/", 1)[-1] if anim_file else ""
             continue
+        if k == "lot_id":
+            lid = str(row.get("lot_id_display") or "").strip() or format_lot_id_display(
+                str(v), str(row.get("lot_fix_label") or "")
+            )
+            if lid:
+                disp["lot_id"] = lid
+            continue
+        if k in ("fix_oht_ep", "fix_ep_oht", "lot_id_display"):
+            continue
         disp[k] = v
 
     parts: List[str] = []
@@ -209,6 +220,33 @@ def format_timetable_display_line(row: Dict[str, Any]) -> str:
         parts.append(str(disp))
 
     if kind == "step":
+        fix_oht = row.get("fix_oht_ep")
+        fix_ep = row.get("fix_ep_oht")
+        fix_block = ""
+        if fix_oht is not None and str(fix_oht).strip():
+            try:
+                fix_block = format_fix_meta_block(
+                    lot_id_display=str(disp.get("lot_id") or ""),
+                    fix_oht_ep=float(fix_oht),
+                )
+            except Exception:
+                fix_block = format_fix_meta_block(
+                    lot_id_display=str(disp.get("lot_id") or ""),
+                    fix_oht_ep=fix_oht,
+                )
+        elif fix_ep is not None and str(fix_ep).strip():
+            try:
+                fix_block = format_fix_meta_block(
+                    lot_id_display=str(disp.get("lot_id") or ""),
+                    fix_ep_oht=float(fix_ep),
+                )
+            except Exception:
+                fix_block = format_fix_meta_block(
+                    lot_id_display=str(disp.get("lot_id") or ""),
+                    fix_ep_oht=fix_ep,
+                )
+        if fix_block:
+            parts.append(fix_block)
         parts.append(_format_timetable_proc_line_ko(proc_sec, anim_sec, process_time_priority=ptp))
         parts.append(_format_timetable_anim_line_ko(anim_file, anim_sec))
 
@@ -599,7 +637,18 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
             if not seq:
                 continue
             row: Dict[str, Any] = {"t": t_val, "screen": si, "kind": "event", "event": seq}
-            for k in ("port_id", "from_port_id", "to_port_id", "lot_id", "foup_id", "lot_seq"):
+            for k in (
+                "port_id",
+                "from_port_id",
+                "to_port_id",
+                "lot_id",
+                "lot_id_display",
+                "lot_fix_label",
+                "foup_id",
+                "lot_seq",
+                "fix_oht_ep",
+                "fix_ep_oht",
+            ):
                 v = _s_val(p.get(k))
                 if v:
                     row[k] = v
@@ -613,6 +662,9 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
             if not ev:
                 continue
             row = {"t": t_val, "screen": si, "kind": "step", "event": ev}
+            lid = _s_val(p.get("lot_id"))
+            if lid:
+                row["lot_id"] = lid
             pid = _s_val(p.get("port_id"))
             if pid:
                 row["port_id"] = pid
@@ -628,6 +680,10 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
             ptp = _s_val(p.get("process_time_priority"))
             if ptp:
                 row["process_time_priority"] = ptp
+            for fk in ("lot_id_display", "lot_fix_label", "fix_oht_ep", "fix_ep_oht"):
+                fv = _s_val(p.get(fk))
+                if fv:
+                    row[fk] = fv
             rows_data.append(row)
 
     if not rows_data:
