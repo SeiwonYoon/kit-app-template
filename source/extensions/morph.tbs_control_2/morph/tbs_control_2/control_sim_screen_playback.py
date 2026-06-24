@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from .control_sim_playback_gate import can_emit_timeline_event, clear_playback_gate_state
+from .control_sim_playback_speed import (
+    clear_playback_step_speed_locks,
+    make_playback_speed_supplier,
+)
 from .control_sim_prerun_playback import SimPreRunResult, SimTimelinePlayer
 
 EmitFn = Callable[[str, Any, int], None]
@@ -148,6 +152,7 @@ class SimPlaybackRuntime:
 
         try:
             clear_playback_gate_state(ext)
+            clear_playback_step_speed_locks(ext)
         except Exception:
             pass
 
@@ -162,7 +167,7 @@ class SimPlaybackRuntime:
             player = SimTimelinePlayer(
                 results_by_screen={scr_i: res},
                 emit_fn=emit_fn,
-                speed_supplier=speed_fn,
+                speed_supplier=make_playback_speed_supplier(ext, scr_i),
                 event_emit_allowed=gate_fn,
             )
             player.start()

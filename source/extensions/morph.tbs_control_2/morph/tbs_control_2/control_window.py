@@ -304,6 +304,12 @@ from .control_sim_playback_gate import (
     json_wall_duration_sec,
     set_json_wall_busy,
 )
+from .control_sim_playback_speed import (
+    clear_playback_step_speed_locks,
+    ensure_step_speed_locked,
+    lock_playback_step_speed,
+    unlock_playback_step_speed,
+)
 from .progress_step_state import (
     apply_engine_progress_payload,
     bind_linked_anim_on_dispatch,
@@ -1053,9 +1059,12 @@ def _execute_mapped_sequence_stub(
 
             sp = 1.0
             try:
-                m = getattr(ext, "_sim_speed_model", None)
-                if m is not None:
-                    sp = max(0.1, float(m.get_value_as_float()))
+                if bool(getattr(ext, "_sim_playback_started", False)):
+                    sp = float(ensure_step_speed_locked(ext, scr_i))
+                else:
+                    m = getattr(ext, "_sim_speed_model", None)
+                    if m is not None:
+                        sp = max(0.1, float(m.get_value_as_float()))
             except Exception:
                 sp = 1.0
             proc_sec_job = 0.0
@@ -4468,6 +4477,7 @@ def _prepare_playback_emit_environment(ext: Any, results: Dict[int, Any]) -> Non
     """
     try:
         clear_playback_gate_state(ext)
+        clear_playback_step_speed_locks(ext)
     except Exception:
         pass
     try:
@@ -4540,6 +4550,15 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
     if kind == "progress" and isinstance(payload, dict):
         p = dict(payload)
         p["tbs_sim_screen"] = str(scr)
+        try:
+            st = str(p.get("status", "") or "").upper()
+            el = float(str(p.get("elapsed", "0") or "0").strip() or "0")
+        except Exception:
+            st, el = "", 0.0
+        if st == "RUNNING" and el <= 1e-9:
+            lock_playback_step_speed(ext, scr)
+        elif st == "DONE":
+            unlock_playback_step_speed(ext, scr)
         try:
             _sim_ui_sink_progress(ext, p)
         except Exception:

@@ -95,6 +95,10 @@ def clear_playback_gate_state(ext: Any) -> None:
         ext._sim_playback_proc_gate_by_screen = {}
     except Exception:
         pass
+    try:
+        clear_playback_step_speed_locks(ext)
+    except Exception:
+        pass
 
 
 def clear_proc_gates(ext: Any) -> None:
