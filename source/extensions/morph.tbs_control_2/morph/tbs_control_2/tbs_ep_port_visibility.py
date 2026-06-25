@@ -253,10 +253,29 @@ def _set_visible_on_stage(stage: Any, path: str, visible: bool, *, scope_key: st
     return _apply_token_on_stage(stage, path, "inherited" if visible else "invisible")
 
 
-def _unique_paths(paths: Tuple[str, ...]) -> List[str]:
+def _coerce_path_tuple(obj: Any) -> Tuple[str, ...]:
+    """
+    EpPortLayout hide_prims/show_prims → 경로 튜플.
+
+    ``("/World/x")`` 처럼 쉼표 없이 쓰면 Python 에서 str 이 되므로
+    문자 단위 순회를 막기 위해 str 은 경로 1개 튜플로 본다.
+    """
+    if isinstance(obj, str):
+        s = str(obj).strip()
+        return (s,) if s else ()
+    if obj is None:
+        return ()
+    try:
+        return tuple(obj)
+    except TypeError:
+        s = str(obj).strip()
+        return (s,) if s else ()
+
+
+def _unique_paths(paths: Any) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
-    for raw in paths:
+    for raw in _coerce_path_tuple(paths):
         p = str(raw or "").strip()
         if not p or p in seen:
             continue
@@ -400,7 +419,13 @@ def schedule_apply_ep_port_layout(
             return
         layout = _layout_for_ep_count(ep_count)
         ebs_layout = _layout_for_ebs(ep_count, ebs_flag)
-        paths = _unique_paths(layout.hide_prims + layout.show_prims + ebs_layout.hide_prims + ebs_layout.show_prims)
+        paths = _unique_paths(
+            _coerce_path_tuple(layout.hide_prims)
+            + _coerce_path_tuple(layout.show_prims)
+            + _coerce_path_tuple(ebs_layout.hide_prims)
+            + _coerce_path_tuple(ebs_layout.show_prims)
+        )
+
         if paths:
             stage = _get_stage()
             if stage is None:
