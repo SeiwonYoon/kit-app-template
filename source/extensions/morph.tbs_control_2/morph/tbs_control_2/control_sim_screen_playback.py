@@ -230,6 +230,12 @@ class SimPlaybackRuntime:
             return
         for sess in playing:
             sess.advance_clock_only()
+        try:
+            from .control_window import _poll_playback_sim_aligned_json_starts
+
+            _poll_playback_sim_aligned_json_starts(ext)
+        except Exception:
+            pass
         for sess in playing:
             sess.emit_due_and_sync(
                 max_emits=max_emits_per_screen,

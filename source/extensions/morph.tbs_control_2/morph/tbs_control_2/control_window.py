@@ -1006,10 +1006,12 @@ def _execute_mapped_sequence_stub(
                 notify_anim_started(ext, scr_i, str(job.get("file", "") or ""))
             except Exception:
                 pass
-            try:
-                _halt_screen_json_anim(ext, scr_i, join_sec=3.0)
-            except Exception:
-                pass
+            _playback = bool(getattr(ext, "_sim_playback_started", False))
+            if not _playback:
+                try:
+                    _halt_screen_json_anim(ext, scr_i, join_sec=3.0)
+                except Exception:
+                    pass
             try:
                 runners = getattr(ext, "_sim_runners_by_screen", None)
                 if not isinstance(runners, dict):
@@ -1091,7 +1093,7 @@ def _execute_mapped_sequence_stub(
                 sp = 1.0
             proc_sec_job = 0.0
             try:
-                proc_sec_job = float(job.get("proc_sec", 0.0) or 0.0)
+                proc_sec_job = float(str(job.get("proc_sec", "") or "").strip() or "0")
             except Exception:
                 proc_sec_job = 0.0
             est_total_job = job.get("est_total", None)
@@ -1101,10 +1103,32 @@ def _execute_mapped_sequence_stub(
                     est_total_f = float(est_total_job)
             except Exception:
                 est_total_f = 0.0
+            parsed_steps = job.get("parsed", []) or []
+            if est_total_f <= 1e-9 and isinstance(parsed_steps, list) and parsed_steps:
+                try:
+                    est_total_f = float(
+                        _estimate_sequence_total_duration_sec_for_log(parsed_steps, speed_scale=1.0) or 0.0
+                    )
+                except Exception:
+                    pass
+            if proc_sec_job <= 1e-9:
+                try:
+                    from .json_playback_timing import timing_from_progress
+
+                    _tm_ps = timing_from_progress(
+                        {
+                            "proc_sec": job.get("proc_sec"),
+                            "anim_sec": est_total_f if est_total_f > 0 else job.get("anim_sec"),
+                            "event_start_sim_time": job.get("t") or job.get("sim_time"),
+                        },
+                        steps=list(parsed_steps) if isinstance(parsed_steps, list) else None,
+                    )
+                    proc_sec_job = float(_tm_ps.get("proc") or proc_sec_job)
+                except Exception:
+                    pass
             eff_sp = compute_json_effective_speed(sp, proc_sec_job, est_total_f)
             json_wall_sec = json_wall_duration_sec(est_total_f, eff_sp)
 
-            parsed_steps = job.get("parsed", []) or []
             has_renewal = bool(job.get("has_renewal"))
             renewal_off = job.get("renewal_offset_sec")
             json_lead = 0.0
@@ -1121,7 +1145,18 @@ def _execute_mapped_sequence_stub(
             lead_wall = max(0.0, float(json_lead)) / max(0.1, float(sp))
             json_run_start_wall = float(started_wall) + float(lead_wall)
             total_wall_busy = float(lead_wall) + float(json_wall_sec)
+            try:
+                t0_sim = float(str(job.get("t") or job.get("sim_time") or "0").strip() or "0")
+            except Exception:
+                t0_sim = 0.0
+            json_run_start_sim = float(t0_sim) + float(json_lead)
             active = dict(job)
+            active["proc_sec"] = float(proc_sec_job)
+            active["anim_sec"] = float(est_total_f)
+            active["_event_start_sim"] = float(t0_sim)
+            active["_json_run_start_sim"] = float(json_run_start_sim)
+            active["_json_pending_sim_start"] = bool(_playback)
+            active["_json_sequence_started"] = False
             active["_started_wall"] = started_wall
             active["_eff_sp"] = float(eff_sp)
             active["has_renewal"] = bool(has_renewal)
@@ -1373,6 +1408,34 @@ def _execute_mapped_sequence_stub(
             _ctx_run = _usd_context_name_for_sim_screen(ext, scr_i)
 
             def _run_json_sequence() -> None:
+                if bool(active.get("_json_sequence_started")):
+                    return
+                active["_json_sequence_started"] = True
+                try:
+                    if isinstance(active_by, dict):
+                        active_by[str(scr_i)] = active
+                except Exception:
+                    pass
+                run_wall = time.monotonic()
+                active["_json_run_start_wall"] = float(run_wall)
+                try:
+                    by_src = getattr(ext, "_sim_post_anim_src_by_screen", None)
+                    if isinstance(by_src, dict) and isinstance(by_src.get(str(scr_i)), dict):
+                        snap_live = dict(by_src[str(scr_i)])
+                        snap_live["_json_run_start_wall"] = float(run_wall)
+                        snap_live["_json_end_wall"] = float(run_wall) + float(json_wall_sec)
+                        if has_renewal and renewal_off is not None:
+                            snap_live["_port_sync_wall"] = float(run_wall) + float(renewal_off) / max(
+                                0.1, float(eff_sp)
+                            )
+                        by_src[str(scr_i)] = snap_live
+                except Exception:
+                    pass
+                if _playback:
+                    try:
+                        _halt_screen_json_anim(ext, scr_i, join_sec=0.25)
+                    except Exception:
+                        pass
                 # 위치·TBS_OFFSET·TIMESAMPLES — JSON **시작** 시점에 초기화 (back-align lead 이후).
                 try:
                     _reset_sim_motion_before_json_run(ext, job, runner_obj=runner_obj)
@@ -1419,6 +1482,8 @@ def _execute_mapped_sequence_stub(
                     except Exception:
                         pass
 
+            active["_json_run_fn"] = _run_json_sequence
+
             # 배속>1일 때: 단일 화면에서만 애니·sim tick 동기를 위해 pause 사용.
             # 분할 N>1에서는 한 화면 애니가 다른 화면 엔진 틱까지 멈추어 공정시간·막대가 끊겨 보이므로 적용하지 않는다.
             if (
@@ -1432,7 +1497,14 @@ def _execute_mapped_sequence_stub(
                 except Exception:
                     pass
 
-            if lead_wall > 1e-6:
+            if _playback:
+                try:
+                    _pl = get_sim_playback_player(ext, scr_i)
+                    if _pl is not None and float(_pl.sim_now(scr_i)) + 1e-9 >= float(json_run_start_sim):
+                        _run_json_sequence()
+                except Exception:
+                    pass
+            elif lead_wall > 1e-6:
                 threading.Timer(float(lead_wall), _run_json_sequence).start()
             else:
                 _run_json_sequence()
@@ -4699,7 +4771,15 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
                 try:
                     from .control_sim_playback_gate import is_screen_runner_busy
 
-                    if (not is_screen_runner_busy(ext, scr)) and (not _screen_anim_worker_has_pending(ext, scr)):
+                    active = _screen_active_json_job(ext, scr)
+                    in_lead = (
+                        isinstance(active, dict)
+                        and bool(active.get("_json_pending_sim_start"))
+                        and not bool(active.get("_json_sequence_started"))
+                    )
+                    if (not in_lead) and (not is_screen_runner_busy(ext, scr)) and (
+                        not _screen_anim_worker_has_pending(ext, scr)
+                    ):
                         set_json_wall_busy(ext, scr, False)
                 except Exception:
                     pass
@@ -4929,64 +5009,67 @@ def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
         except Exception:
             pass
     if not playback_tick:
-        if not _should_defer_port_occ_sync_for_renewal(ext, scr):
+        if (
+            (not _should_defer_port_occ_sync_for_renewal(ext, scr))
+            and _json_playback_wall_started(ext, scr)
+        ):
             try:
                 _flush_pending_post_anim_port_applies(ext, scr)
             except Exception:
                 pass
-        # fail-safe: renewal 시각 또는(renewal 없을 때) json_end sim 경과 후 1회 갱신
+        # fail-safe(비-renewal): JSON wall 시작 후 + sim json_end 경과 시 1회.
+        # renewal 포트 갱신은 ``on_renewal_step`` / ``_maybe_queue_post_anim_port_by_wall_clock`` 만.
         try:
             if str(p.get("status", "")).strip().upper() == "RUNNING":
                 ev = _normalize_anim_event_seq(str(p.get("event_seq") or p.get("sequence_name") or ""))
                 if ev in _ANIM_PORT_UPDATE_SEQS:
-                    elapsed = float(str(p.get("elapsed") or "0").strip() or "0")
                     ctx = _active_json_timing_context(ext, scr)
-                    defer = _should_defer_port_occ_sync_for_renewal(ext, scr)
-                    try:
-                        from .json_playback_timing import timing_from_progress
+                    if bool(ctx.get("has_renewal")):
+                        pass
+                    elif not _json_playback_wall_started(ext, scr):
+                        pass
+                    else:
+                        elapsed = float(str(p.get("elapsed") or "0").strip() or "0")
+                        try:
+                            from .json_playback_timing import timing_from_progress
 
-                        info = timing_from_progress(
-                            dict(p),
-                            json_path=ctx.get("json_path"),
-                            steps=ctx.get("steps") if isinstance(ctx.get("steps"), list) else None,
-                        )
-                        t0 = float(info.get("t0", 0.0))
-                        t_sync = info.get("t_port_sync")
-                        sync_elapsed = (
-                            float(t_sync) - float(t0) if t_sync is not None else float(
-                                str(p.get("anim_sec") or "0").strip() or "0"
+                            info = timing_from_progress(
+                                dict(p),
+                                json_path=ctx.get("json_path"),
+                                steps=ctx.get("steps") if isinstance(ctx.get("steps"), list) else None,
                             )
-                        )
-                    except Exception:
-                        sync_elapsed = float(str(p.get("anim_sec") or "0").strip() or "0")
-                    if defer:
+                            t0 = float(info.get("t0", 0.0))
+                            t_sync = info.get("t_port_sync")
+                            sync_elapsed = (
+                                float(t_sync) - float(t0)
+                                if t_sync is not None
+                                else float(str(p.get("anim_sec") or "0").strip() or "0")
+                            )
+                        except Exception:
+                            sync_elapsed = float(str(p.get("anim_sec") or "0").strip() or "0")
                         if sync_elapsed > 1e-6 and elapsed + 1e-6 >= sync_elapsed:
-                            src: Dict[str, Any] = dict(p)
+                            src = dict(p)
                             src["event"] = ev
                             src["event_start_sim_time"] = str(
                                 p.get("event_start_sim_time") or p.get("t") or ""
                             ).strip()
-                            src["_from_renewal_step"] = True
-                            _clear_renewal_port_defer(ext, scr)
                             _queue_post_anim_port_apply(ext, scr, src)
                             _flush_pending_post_anim_port_applies(ext, scr)
-                    elif sync_elapsed > 1e-6 and elapsed + 1e-6 >= sync_elapsed:
-                        src = dict(p)
-                        src["event"] = ev
-                        src["event_start_sim_time"] = str(
-                            p.get("event_start_sim_time") or p.get("t") or ""
-                        ).strip()
-                        _queue_post_anim_port_apply(ext, scr, src)
-                        _flush_pending_post_anim_port_applies(ext, scr)
         except Exception:
             pass
     _update_sim_progress(ext, p)
     if playback_tick:
         return
-    # progress payload의 ports_occupancy — renewal JSON 재생 중에는 renewal 전까지 엔진값으로 덮어쓰지 않음.
+    # progress payload의 ports_occupancy — 재생 중 애니 단계·renewal 전에는 엔진값으로 덮어쓰지 않음.
     occ = p.get("ports_occupancy", {})
+    _skip_prog_occ = False
+    if bool(getattr(ext, "_sim_playback_started", False)):
+        _ev_po = _normalize_anim_event_seq(str(p.get("event_seq") or p.get("sequence_name") or ""))
+        if _ev_po in _ANIM_PORT_UPDATE_SEQS:
+            _skip_prog_occ = True
     if (
-        isinstance(occ, dict)
+        (not _skip_prog_occ)
+        and isinstance(occ, dict)
         and occ
         and any((k in occ) for k in _PANEL_PORT_KEYS)
         and (not _should_defer_port_occ_sync_for_renewal(ext, scr))
@@ -5241,6 +5324,9 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
         pass
 
     if seq_u == "PORT_OCC_REFRESH":
+        # 프리런 재생: 포트·visibility 는 JSON renewal/종료(post-anim)만. 엔진 OCC 는 무시.
+        if bool(getattr(ext, "_sim_playback_started", False)):
+            return
         _clear_post_anim_port_applied(ext, scr)
         _clear_renewal_port_defer(ext, scr)
         ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
@@ -5262,7 +5348,11 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
     # 일반 애니: JSON 매핑·실행 후 renewal 이 아니면 패널만 동기화(visibility 는 renewal/종료 시)
     verbose = panel_mode != SimLogPanelMode.PROGRESS_ONLY
     handle_sim_event_for_animation(ext, p, verbose=verbose)
-    if _is_anim_port_event(seq_u) and (not _should_defer_port_occ_sync_for_renewal(ext, scr)):
+    if (
+        _is_anim_port_event(seq_u)
+        and (not _should_defer_port_occ_sync_for_renewal(ext, scr))
+        and (not bool(getattr(ext, "_sim_playback_started", False)))
+    ):
         try:
             _sync_port_panel_from_engine_occ(
                 ext,
@@ -5648,6 +5738,74 @@ def _clear_renewal_port_defer(ext: Any, screen: int) -> None:
     _set_renewal_port_defer(ext, int(screen), False)
 
 
+def _screen_active_json_job(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(active_by, dict):
+            active = active_by.get(str(max(1, int(screen))))
+            if isinstance(active, dict) and active:
+                return active
+    except Exception:
+        pass
+    return None
+
+
+def _json_playback_wall_started(ext: Any, screen: int) -> bool:
+    """
+    back-align lead 구간이 끝나 JSON 러너가 실제 시작된 뒤에만 True.
+
+    sim 축 ``_json_run_start_sim`` 과 ``_json_sequence_started`` 로 판정한다.
+    """
+    active = _screen_active_json_job(ext, int(screen))
+    if not isinstance(active, dict) or not active:
+        return True
+    try:
+        if float(active.get("json_lead_sec") or 0.0) <= 1e-6:
+            return True
+    except Exception:
+        pass
+    return bool(active.get("_json_sequence_started"))
+
+
+def _poll_playback_sim_aligned_json_starts(ext: Any) -> None:
+    """프리런 재생 — ``sim_now >= t0+json_lead`` 일 때 JSON 러너를 시작한다 (wall Timer 대신)."""
+    if not bool(getattr(ext, "_sim_playback_started", False)):
+        return
+    active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+    if not isinstance(active_by, dict) or not active_by:
+        return
+    for scr_s, active in list(active_by.items()):
+        if not isinstance(active, dict) or not active:
+            continue
+        if bool(active.get("_json_sequence_started")):
+            continue
+        if not bool(active.get("_json_pending_sim_start")):
+            continue
+        try:
+            scr_i = int(scr_s)
+        except Exception:
+            continue
+        try:
+            t_start = float(active.get("_json_run_start_sim", 0.0))
+        except Exception:
+            t_start = 0.0
+        player = get_sim_playback_player(ext, scr_i)
+        if player is None:
+            continue
+        try:
+            t_now = float(player.sim_now(scr_i))
+        except Exception:
+            t_now = 0.0
+        if t_now + 1e-9 < t_start:
+            continue
+        run_fn = active.get("_json_run_fn")
+        if callable(run_fn):
+            try:
+                run_fn()
+            except Exception:
+                pass
+
+
 def _should_defer_port_occ_sync_for_renewal(ext: Any, screen: int) -> bool:
     """
     renewal JSON 재생 중 포트 갱신 전 — 엔진 occ·visibility 로 덮어쓰지 않는다.
@@ -5866,6 +6024,8 @@ def _maybe_queue_post_anim_port_by_wall_clock(ext: Any) -> None:
                 port_sync_wall = None
             if has_renewal:
                 if port_sync_wall is None or now + 0.02 < float(port_sync_wall):
+                    continue
+                if not _json_playback_wall_started(ext, int(scr_s)):
                     continue
                 dedupe = _post_anim_port_dedupe_key(src)
                 applied_by = getattr(ext, "_sim_post_anim_port_applied_by_screen", None)
