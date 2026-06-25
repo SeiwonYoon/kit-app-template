@@ -1,0 +1,207 @@
+.api-tester-page {
+  max-width: 1100px;
+}
+
+.api-tester-header h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  color: #bfe7ff;
+}
+
+.api-tester-lead {
+  font-size: 13px;
+  color: #888;
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.api-tester-toolbar {
+  margin-bottom: 16px;
+}
+
+.api-tester-link {
+  font-size: 13px;
+  color: #7ec8ff;
+  margin-left: auto;
+}
+
+.api-tester-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.api-tester-tabs .tab {
+  background: #2a3140;
+  border: 1px solid #4a5568;
+  color: #ccc;
+  padding: 8px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.api-tester-tabs .tab.active {
+  background: #3d5a80;
+  color: #fff;
+  border-color: #6a9fd8;
+}
+
+.api-tester-panel.hidden {
+  display: none;
+}
+
+.api-tester-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.api-cmd-card {
+  background: #1e2530;
+  border: 1px solid #3a4555;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.api-cmd-card.planned {
+  opacity: 0.65;
+  border-style: dashed;
+}
+
+.api-cmd-card h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  color: #bfe7ff;
+}
+
+.api-cmd-card h3 code {
+  color: #ffe082;
+}
+
+.api-cmd-meta {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+.api-cmd-meta span {
+  display: inline-block;
+  margin-right: 12px;
+}
+
+.api-cmd-card textarea {
+  width: 100%;
+  min-height: 72px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  background: #0d0f12;
+  color: #e8e8e8;
+  border: 1px solid #4a5568;
+  border-radius: 4px;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.api-cmd-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.api-cmd-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #2d4a2d;
+  color: #a8e6c8;
+}
+
+.api-cmd-badge.planned {
+  background: #4a3d2d;
+  color: #f5d4a0;
+}
+
+.api-tester-split {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 800px) {
+  .api-tester-split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.api-tester-field-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 12px;
+  max-height: 480px;
+  overflow: auto;
+}
+
+.api-tester-field-list li {
+  padding: 6px 8px;
+  border-bottom: 1px solid #333;
+  cursor: pointer;
+}
+
+.api-tester-field-list li:hover,
+.api-tester-field-list li.selected {
+  background: #2a3545;
+}
+
+.api-tester-field-list .key {
+  color: #7ec8ff;
+  font-family: Consolas, monospace;
+}
+
+.api-tester-pre {
+  background: #0d0f12;
+  border: 1px solid #4a5568;
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 11px;
+  color: #e8e8e8;
+  overflow: auto;
+  max-height: 520px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.api-tester-log {
+  min-height: 200px;
+  max-height: 70vh;
+}
+
+.api-tester-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.api-tester-table th,
+.api-tester-table td {
+  border: 1px solid #3a4555;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.api-tester-table th {
+  background: #252b36;
+  color: #bfe7ff;
+}
+
+.api-tester-table code {
+  color: #ffe082;
+}
+
+.api-tester-hint {
+  font-size: 12px;
+  color: #888;
+  margin-bottom: 12px;
+}

@@ -1,7 +1,18 @@
 # TBS 확장 API → 웹(control-tab) 적용 흐름 가이드
 
 > **대상:** `TbsControlTab.tsx` 를 읽을 때 「버튼을 누면 Kit에서 실제로 무슨 일이 일어나는지」를 따라가기 위한 문서  
-> **관련 코드:** `kit_remote_http_bridge.py`, `control_window.py`, `web/streaming_ui/TbsControlTab.tsx`
+> **관련 코드:** `kit_remote_http_bridge.py`, `control_window.py`, `web/streaming_ui/TbsControlTab.tsx`  
+> **기능별 API 가이드:** [`docs/tbs_web_api_user_guide_ko.md`](docs/tbs_web_api_user_guide_ko.md)
+
+---
+
+## Kit 웹 접속 URL (Kit 실행 후)
+
+| URL | 설명 |
+|-----|------|
+| http://127.0.0.1:8720/api_tester.html | **API 테스터 (권장)** |
+| http://127.0.0.1:8720/api/registry | **레지스트리 JSON** |
+| http://127.0.0.1:8720/ | **제어 패널** |
 
 ---
 

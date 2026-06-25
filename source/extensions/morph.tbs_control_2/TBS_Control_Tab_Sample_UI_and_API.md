@@ -2,6 +2,7 @@
 
 > **전제:** 좌측 `control-tab` 안에 **Kit TBS 제어창과 동일한 기능**이 들어간다고 가정한다.  
 > **상태:** 샘플·참조용 — 회사 피드백(OQ) 확정 후 [`TBS_Web_Streaming_Control_Tab_Integration.md`](TBS_Web_Streaming_Control_Tab_Integration.md) 와 함께 구현.  
+> **기능별 웹 적용:** [`docs/tbs_web_api_user_guide_ko.md`](docs/tbs_web_api_user_guide_ko.md) (권장)  
 > **참조 구현:** `web/streaming_ui/TbsSimulation.tsx` (가장 완전), `web/tbs_kit_remote/index.html` (구형·일부 필드 누락), `morph/tbs_control_1/kit_remote_http_bridge.py`
 
 ---
@@ -31,6 +32,14 @@
 | Vite 프록시 | `/api` → `127.0.0.1:8720` (`web/streaming_ui/vite.config.snippet.txt`) |
 | env | `VITE_TBS_KIT_API_BASE=` (비우면 same-origin `/api`) |
 | 폴링 | `GET /api/state` **400ms** 권장 (`POLL_MS`) |
+
+**Kit 웹 접속 URL (Kit 실행 후 브라우저)**
+
+| URL | 설명 |
+|-----|------|
+| http://127.0.0.1:8720/api_tester.html | **API 테스터 (권장)** |
+| http://127.0.0.1:8720/api/registry | **레지스트리 JSON** |
+| http://127.0.0.1:8720/ | **제어 패널** |
 
 **스트리밍 모드 권장 초기화 (페이지 mount 시 1회)**
 

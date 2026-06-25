@@ -52,6 +52,7 @@ from .control_sim_bar_graph import (
     compute_duration_sec_by_row,
     get_bar_state_colors_hex,
 )
+from .kit_web_api_registry import build_registry_document, get_command_meta
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 from .tbs_ep_port_visibility import ebs_enabled_for_screen
 from .tbs_data_paths import resolve_local_data_path
@@ -896,7 +897,10 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
 
         return {"ok": True, "hide": hide}
 
-    return {"ok": False, "error": f"unknown cmd: {cmd}"}
+    meta = get_command_meta(cmd)
+    if meta is not None and not meta.exposed:
+        return {"ok": False, "error": f"planned cmd (not wired yet): {cmd}", "hint": "GET /api/registry"}
+    return {"ok": False, "error": f"unknown cmd: {cmd}", "hint": "GET /api/registry"}
 
 
 def _resources_json() -> Dict[str, Any]:
@@ -941,6 +945,13 @@ class _TbsRemoteHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         global _ext_ref
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if path == "/api/registry":
+            try:
+                body = json.dumps(build_registry_document(), ensure_ascii=False).encode("utf-8")
+                self._send(200, body, "application/json; charset=utf-8", cors=True)
+            except Exception as e:
+                self._send(500, json.dumps({"error": str(e)}).encode("utf-8"), "application/json; charset=utf-8", cors=True)
+            return
         if path == "/api/state":
             if _ext_ref is None:
                 self._send(503, b'{"error":"ext not ready"}', "application/json; charset=utf-8", cors=True)
