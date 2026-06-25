@@ -2033,10 +2033,10 @@ class SequenceRunner:
                 # 예상 duration 기반 스케줄링으로 두 스텝이 겹치면 "이동하면서 회전"처럼 보이므로,
                 # ROTATE 시작 시점에 해당 prim의 이동 애니메이션을 확실히 중지해 충돌을 방지한다.
                 try:
-                    stop_prim_translate_animation(p)
+                    stop_prim_translate_animation(p, getattr(self, "_usd_context_name", None))
                 except Exception:
                     pass
-                stop_prim_rotate_animation(p)
+                stop_prim_rotate_animation(p, getattr(self, "_usd_context_name", None))
 
             # 자동 모드(권장): "프림 로컬 중심점"을 월드로 변환한 pivot_world를 고정한 뒤,
             # 월드 피봇 회전(orbit matrix)을 적용하면 해당 점이 월드에서 고정되어 "제자리 회전"처럼 보인다.

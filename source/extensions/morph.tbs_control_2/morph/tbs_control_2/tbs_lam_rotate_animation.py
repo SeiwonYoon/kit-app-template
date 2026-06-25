@@ -10,7 +10,7 @@ REQ-002 0줄 변경 원칙(USD_Timeline_Spec.md §12) 으로 본 모듈은 `morp
 않아 2026-05-12 에 제거되었다. 외부 모듈이 import 하는
 `stop_world_pivot_rotate_animation` 은 호환을 위해 no-op 으로 남겨 둔다.
 
-LAM 은 default 컨텍스트(`""`) 만 사용한다.
+LAM ROTATE 상태는 **USD 컨텍스트 + prim 경로** 로 격리한다 (분할 N>1).
 """
 
 from __future__ import annotations
@@ -34,6 +34,18 @@ _rot_animations: Dict[str, Dict[str, Any]] = {}
 _update_sub = None
 
 
+def _resolve_ctx(usd_context_name: Optional[str]) -> Optional[str]:
+    if usd_context_name is not None:
+        cn = str(usd_context_name).strip()
+        return cn if cn else None
+    try:
+        from .tbs_usd_stage_context import get_current_usd_context_name
+
+        return get_current_usd_context_name()
+    except Exception:
+        return None
+
+
 # ----------------------------------------------------------------- helpers
 
 def _stage():
@@ -47,17 +59,14 @@ def is_rotate_animation_running() -> bool:
 
 
 def is_prim_rotate_animation_running(prim_path: str, usd_context_name: Optional[str] = None) -> bool:
-    """지정 prim 에 대한 TBS_OFFSET rotate 보간이 진행 중인지."""
+    """지정 prim·USD 컨텍스트에서 TBS_OFFSET rotate 보간이 진행 중인지."""
     from .tbs_usd_stage_context import anim_key
 
-    if not prim_path:
+    pp = str(prim_path or "").strip()
+    if not pp:
         return False
-    if usd_context_name is not None:
-        return anim_key(prim_path, usd_context_name) in _rot_animations
-    if prim_path in _rot_animations:
-        return True
-    suffix = f"\x00{prim_path}"
-    return any(str(k).endswith(suffix) for k in _rot_animations)
+    ctx = _resolve_ctx(usd_context_name)
+    return anim_key(pp, ctx) in _rot_animations
 
 
 def _get_or_create_offset_rotate_op(prim):
@@ -107,15 +116,27 @@ def _set_prim_rotate_xyz(prim, euler_deg_xyz) -> None:
         pass
 
 
-def zero_tbs_offset_rotate_at_path(prim_path: str) -> None:
-    """`TBS_OFFSET` RotateXYZOp 을 (0,0,0) 으로 설정(Run(reset) / Return 시 초기 자세 복귀)."""
-    stage = _stage()
-    if not stage:
-        return
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return
-    _set_prim_rotate_xyz(prim, Gf.Vec3f(0.0, 0.0, 0.0))
+def zero_tbs_offset_rotate_at_path(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+) -> None:
+    """``TBS_OFFSET`` RotateXYZOp 을 (0,0,0) — **지정 USD 컨텍스트만**."""
+    ctx = _resolve_ctx(usd_context_name)
+    from .tbs_usd_stage_context import pop_usd_context_name, push_usd_context_name
+
+    prev = push_usd_context_name(ctx)
+    try:
+        stage = _stage()
+        if not stage:
+            return
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return
+        stop_prim_rotate_animation(prim_path, ctx)
+        _set_prim_rotate_xyz(prim, Gf.Vec3f(0.0, 0.0, 0.0))
+    finally:
+        pop_usd_context_name(prev)
 
 
 def read_tbs_offset_rotate_xyz_deg(prim_path: str) -> tuple[float, float, float]:
@@ -162,56 +183,62 @@ def run_prim_rotate_animation(
     loop: bool = False,
     on_completed: Optional[Callable[[], None]] = None,
     speed_ref: float = 1.0,
+    *,
+    usd_context_name: Optional[str] = None,
 ) -> None:
     """simple 모드 — TBS_OFFSET RotateXYZ 에 (rx,ry,rz) 누적 보간."""
     global _rot_animations
-    from .tbs_usd_stage_context import anim_key, get_current_usd_context_name
+    from .tbs_usd_stage_context import anim_key, pop_usd_context_name, push_usd_context_name
 
     if not segments:
         return
-    ctx_nm = get_current_usd_context_name()
-    stage = _stage()
-    if not stage:
-        return
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        print(f"{_PRINT_PREFIX} prim not found: {prim_path} ctx={ctx_nm!r}", flush=True)
-        return
+    ctx_nm = _resolve_ctx(usd_context_name)
+    prev = push_usd_context_name(ctx_nm)
+    try:
+        stage = _stage()
+        if not stage:
+            return
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            print(f"{_PRINT_PREFIX} prim not found: {prim_path} ctx={ctx_nm!r}", flush=True)
+            return
 
-    start_rot = _get_prim_local_rotate_xyz(prim)
-    normalized: List[Dict[str, Any]] = []
-    for seg in segments:
-        d = seg.get("delta")
-        if d is None or not (isinstance(d, (list, tuple)) and len(d) >= 3):
-            continue
-        duration = float(seg.get("duration", 0.0) or 0.0)
-        if duration <= 0:
-            continue
-        normalized.append(
-            {"duration": duration, "delta": (float(d[0]), float(d[1]), float(d[2]))}
-        )
-    if not normalized:
-        if on_completed:
-            try:
-                on_completed()
-            except Exception:
-                pass
-        return
+        start_rot = _get_prim_local_rotate_xyz(prim)
+        normalized: List[Dict[str, Any]] = []
+        for seg in segments:
+            d = seg.get("delta")
+            if d is None or not (isinstance(d, (list, tuple)) and len(d) >= 3):
+                continue
+            duration = float(seg.get("duration", 0.0) or 0.0)
+            if duration <= 0:
+                continue
+            normalized.append(
+                {"duration": duration, "delta": (float(d[0]), float(d[1]), float(d[2]))}
+            )
+        if not normalized:
+            if on_completed:
+                try:
+                    on_completed()
+                except Exception:
+                    pass
+            return
 
-    key = anim_key(prim_path, ctx_nm)
-    _rot_animations[key] = {
-        "kind": "simple",
-        "prim_path": prim_path,
-        "usd_context_name": ctx_nm,
-        "start_rot": Gf.Vec3f(start_rot[0], start_rot[1], start_rot[2]),
-        "segments": normalized,
-        "segment_index": 0,
-        "elapsed_in_segment": 0.0,
-        "loop": loop,
-        "on_completed": on_completed,
-        "speed_ref": float(max(0.01, speed_ref or 1.0)),
-    }
-    _ensure_update_sub()
+        key = anim_key(prim_path, ctx_nm)
+        _rot_animations[key] = {
+            "kind": "simple",
+            "prim_path": prim_path,
+            "usd_context_name": ctx_nm,
+            "start_rot": Gf.Vec3f(start_rot[0], start_rot[1], start_rot[2]),
+            "segments": normalized,
+            "segment_index": 0,
+            "elapsed_in_segment": 0.0,
+            "loop": loop,
+            "on_completed": on_completed,
+            "speed_ref": float(max(0.01, speed_ref or 1.0)),
+        }
+        _ensure_update_sub()
+    finally:
+        pop_usd_context_name(prev)
 
 
 def stop_world_pivot_rotate_animation() -> None:
@@ -223,21 +250,33 @@ def stop_prim_rotate_animation(prim_path: str, usd_context_name: Optional[str] =
     global _rot_animations
     from .tbs_usd_stage_context import anim_key
 
-    key = anim_key(prim_path, usd_context_name)
+    pp = str(prim_path or "").strip()
+    if not pp:
+        return False
+    ctx = _resolve_ctx(usd_context_name)
+    key = anim_key(pp, ctx)
     if key in _rot_animations:
         _rot_animations.pop(key, None)
         _maybe_release_update_sub()
         return True
-    if usd_context_name is None:
-        removed = False
-        for k in list(_rot_animations.keys()):
-            if k.endswith(f"\x00{prim_path}"):
-                _rot_animations.pop(k, None)
-                removed = True
-        if removed:
-            _maybe_release_update_sub()
-        return removed
     return False
+
+
+def stop_prim_rotate_animation_all_contexts(prim_path: str) -> int:
+    """동일 prim_path 의 모든 USD 컨텍스트 rotate 애니 제거 (의도적 전역 stop 전용)."""
+    global _rot_animations
+    pp = str(prim_path or "").strip()
+    if not pp:
+        return 0
+    suffix = f"\x00{pp}"
+    removed = 0
+    for k in list(_rot_animations.keys()):
+        if str(k) == pp or str(k).endswith(suffix):
+            _rot_animations.pop(k, None)
+            removed += 1
+    if removed:
+        _maybe_release_update_sub()
+    return removed
 
 
 def stop_all_rotate_animations() -> None:
@@ -394,6 +433,7 @@ __all__ = [
     "run_prim_rotate_animation",
     "stop_world_pivot_rotate_animation",
     "stop_prim_rotate_animation",
+    "stop_prim_rotate_animation_all_contexts",
     "stop_all_rotate_animations",
     "stop_rotate_animations_for_context",
     "zero_tbs_offset_rotate_at_path",

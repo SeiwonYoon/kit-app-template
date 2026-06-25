@@ -301,8 +301,10 @@ from .control_sim_playback_gate import (
     clear_playback_gate_state,
     clear_proc_gates,
     compute_json_effective_speed,
+    is_screen_runner_busy,
     json_wall_duration_sec,
     set_json_wall_busy,
+    try_release_json_wall_when_idle,
 )
 from .control_sim_playback_speed import (
     clear_playback_step_speed_locks,
@@ -991,7 +993,7 @@ def _execute_mapped_sequence_stub(
         if not isinstance(getattr(ext, "_sim_anim_pending", None), list):
             ext._sim_anim_pending = []
 
-        def _start_job(job: Dict[str, Any]) -> None:
+        def _start_job_impl(job: Dict[str, Any]) -> None:
             # 화면별 runner/active/pending/pause로 분리한다(멀티에서 덮어쓰기/간섭 방지).
             try:
                 scr_i = int(str(job.get("tbs_sim_screen", "1") or "1").strip() or "1")
@@ -1273,7 +1275,7 @@ def _execute_mapped_sequence_stub(
                             )
                         except Exception:
                             pass
-                        _start_job(nxt)
+                        _dispatch_json_anim_job(ext, nxt)
                         return
                     try:
                         from . import sim_multi_diag as _mdiag
@@ -1305,9 +1307,12 @@ def _execute_mapped_sequence_stub(
                     except Exception:
                         pass
                     try:
-                        set_json_wall_busy(ext, scr_i, False)
+                        try_release_json_wall_when_idle(ext, int(scr_i))
                     except Exception:
-                        pass
+                        try:
+                            set_json_wall_busy(ext, scr_i, False)
+                        except Exception:
+                            pass
                     try:
                         _clear_renewal_port_defer(ext, int(scr_i))
                     except Exception:
@@ -1513,6 +1518,11 @@ def _execute_mapped_sequence_stub(
                 _refresh_sim_progress_from_last(ext, scr_i)
             except Exception:
                 pass
+
+        ext._sim_json_start_fn = _start_job_impl
+
+        def _start_job(job: Dict[str, Any]) -> None:
+            _dispatch_json_anim_job(ext, job)
 
         try:
             _scr = int(str(payload.get("tbs_sim_screen", "1") or "1").strip() or "1")
@@ -4710,6 +4720,10 @@ def _prepare_playback_emit_environment(ext: Any, results: Dict[int, Any]) -> Non
     except Exception:
         pass
     try:
+        _clear_playback_json_job_queues(ext)
+    except Exception:
+        pass
+    try:
         ext._sim_foup_playback_last_by_screen = {}
     except Exception:
         pass
@@ -4723,7 +4737,11 @@ def _prepare_playback_emit_environment(ext: Any, results: Dict[int, Any]) -> Non
         except Exception:
             pass
         try:
-            _halt_screen_json_anim(ext, scr_i, join_sec=0.5)
+            _halt_screen_json_anim(
+                ext,
+                scr_i,
+                join_sec=0.15 if is_multi_playback_instances(ext) else 0.5,
+            )
         except Exception:
             pass
         try:
@@ -4780,7 +4798,7 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
                     if (not in_lead) and (not is_screen_runner_busy(ext, scr)) and (
                         not _screen_anim_worker_has_pending(ext, scr)
                     ):
-                        set_json_wall_busy(ext, scr, False)
+                        try_release_json_wall_when_idle(ext, scr)
                 except Exception:
                     pass
         return
@@ -7576,6 +7594,93 @@ def _is_multi_viewport_sim(ext: Any) -> bool:
 
 
 _ANIM_SCREEN_WORKER_STOP = object()
+
+
+def _playback_json_job_queue(ext: Any, screen: int):
+    from collections import deque
+
+    by = getattr(ext, "_sim_playback_json_jobs_by_screen", None)
+    if not isinstance(by, dict):
+        by = {}
+        ext._sim_playback_json_jobs_by_screen = by
+    key = str(max(1, int(screen)))
+    q = by.get(key)
+    if not isinstance(q, deque):
+        q = deque()
+        by[key] = q
+    return q
+
+
+def _clear_playback_json_job_queues(ext: Any) -> None:
+    try:
+        ext._sim_playback_json_jobs_by_screen = {}
+    except Exception:
+        pass
+
+
+def _enqueue_playback_json_job(ext: Any, job: Dict[str, Any]) -> None:
+    """N>1 프리런 — emit sink 는 즉시 반환, ``tick_all`` 에서 ``_start_job_impl`` 실행."""
+    try:
+        scr = int(str(job.get("tbs_sim_screen", "1") or "1").strip() or "1")
+    except Exception:
+        scr = 1
+    _playback_json_job_queue(ext, scr).append(dict(job))
+
+
+def _dispatch_json_anim_job(ext: Any, job: Dict[str, Any]) -> None:
+    if bool(getattr(ext, "_sim_playback_started", False)) and is_multi_playback_instances(ext):
+        _enqueue_playback_json_job(ext, job)
+        return
+    fn = getattr(ext, "_sim_json_start_fn", None)
+    if callable(fn):
+        try:
+            fn(dict(job))
+        except Exception:
+            pass
+
+
+def _drain_playback_json_job_queues(ext: Any) -> None:
+    """N>1 — 화면별 대기 job 을 runner idle 일 때 1건씩 시작."""
+    if not bool(getattr(ext, "_sim_playback_started", False)):
+        return
+    if not is_multi_playback_instances(ext):
+        return
+    fn = getattr(ext, "_sim_json_start_fn", None)
+    if not callable(fn):
+        return
+    by = getattr(ext, "_sim_playback_json_jobs_by_screen", None)
+    if not isinstance(by, dict) or not by:
+        return
+    for key in sorted(by.keys(), key=lambda x: int(x)):
+        q = by.get(key)
+        if q is None:
+            continue
+        try:
+            scr = int(key)
+        except Exception:
+            continue
+        if is_screen_runner_busy(ext, scr):
+            continue
+        try:
+            job = q.popleft()
+        except Exception:
+            continue
+        if isinstance(job, dict):
+            try:
+                fn(job)
+            except Exception:
+                pass
+
+
+def _try_release_all_playback_json_walls(ext: Any) -> None:
+    rt = get_playback_runtime(ext)
+    if rt is None:
+        return
+    for scr in list(rt.sessions.keys()):
+        try:
+            try_release_json_wall_when_idle(ext, int(scr))
+        except Exception:
+            pass
 
 
 def _anim_screen_worker_name(screen_idx: int) -> str:

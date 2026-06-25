@@ -72,6 +72,65 @@ def is_screen_runner_busy(ext: Any, screen: int) -> bool:
         return False
 
 
+def _usd_context_for_screen(ext: Any, screen: int) -> Any:
+    scr = max(1, int(screen))
+    if scr <= 1:
+        return None
+    try:
+        names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+        if len(names) >= scr - 1:
+            nm = str(names[scr - 2] or "").strip()
+            if nm:
+                return nm
+    except Exception:
+        pass
+    return f"morph_tbs_split_aux_{scr - 1}"
+
+
+def _registry_for_screen(ext: Any, screen: int) -> Any:
+    try:
+        from .tbs_split_composed_loader import get_split_runtime_for_screen
+
+        rt = get_split_runtime_for_screen(ext, int(screen))
+        if rt is not None:
+            return rt.registry
+    except Exception:
+        pass
+    return None
+
+
+def is_screen_channel_motion_busy(ext: Any, screen: int) -> bool:
+    """해당 화면 USD 컨텍스트에서 MOVE/ROTATE/replay 가 진행 중이면 True."""
+    try:
+        from .sim_channel_scope import is_channel_motion_busy
+
+        return bool(
+            is_channel_motion_busy(
+                _usd_context_for_screen(ext, int(screen)),
+                _registry_for_screen(ext, int(screen)),
+            )
+        )
+    except Exception:
+        return False
+
+
+def try_release_json_wall_when_idle(ext: Any, screen: int) -> bool:
+    """
+    runner·motion 모두 idle 이면 ``json_wall_busy`` 해제.
+
+    Returns: 해제 후(또는 원래 idle) True — 여전히 busy 면 False.
+    """
+    scr = max(1, int(screen))
+    if not is_json_wall_busy(ext, scr):
+        return True
+    if is_screen_runner_busy(ext, scr):
+        return False
+    if is_screen_channel_motion_busy(ext, scr):
+        return False
+    set_json_wall_busy(ext, scr, False)
+    return True
+
+
 def can_emit_timeline_event(ext: Any, screen: int) -> bool:
     """
     타임라인 ``kind=event`` emit 허용.
@@ -85,6 +144,8 @@ def can_emit_timeline_event(ext: Any, screen: int) -> bool:
     if is_json_wall_busy(ext, scr):
         return False
     if is_screen_runner_busy(ext, scr):
+        return False
+    if is_screen_channel_motion_busy(ext, scr):
         return False
     return True
 
@@ -111,7 +172,9 @@ __all__ = [
     "clear_proc_gates",
     "compute_json_effective_speed",
     "is_json_wall_busy",
+    "is_screen_channel_motion_busy",
     "is_screen_runner_busy",
     "json_wall_duration_sec",
     "set_json_wall_busy",
+    "try_release_json_wall_when_idle",
 ]

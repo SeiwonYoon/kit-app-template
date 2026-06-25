@@ -30,6 +30,7 @@ BuildProgPayloadFn = Callable[[int, float, Optional[Dict[str, Any]], Any], Dict[
 # 1화면 정상 동작과 동일한 heartbeat 주기
 _HB_EP_INTERVAL = 0.10
 _HB_PROG_INTERVAL = 0.20
+_HB_PROG_INTERVAL_MULTI = 0.0
 
 
 @dataclass
@@ -79,11 +80,13 @@ class ScreenPlaybackSession:
         progress_sink: ProgressSinkFn,
         timeline_only_sink: TimelineOnlySinkFn,
         build_prog_payload: BuildProgPayloadFn,
+        prog_hb_interval: Optional[float] = None,
     ) -> None:
         if not self.is_playing():
             return
         scr = int(self.screen)
         tnow = self.sim_now()
+        prog_iv = _HB_PROG_INTERVAL if prog_hb_interval is None else float(prog_hb_interval)
 
         if (now_wall - self.hb_ep_wall) >= _HB_EP_INTERVAL:
             self.hb_ep_wall = float(now_wall)
@@ -109,7 +112,7 @@ class ScreenPlaybackSession:
             except Exception:
                 pass
 
-        if (now_wall - self.hb_prog_wall) >= _HB_PROG_INTERVAL:
+        if prog_iv <= 1e-9 or (now_wall - self.hb_prog_wall) >= prog_iv:
             self.hb_prog_wall = float(now_wall)
             try:
                 te_val = float(self.prerun.final_sim_time)
@@ -228,29 +231,52 @@ class SimPlaybackRuntime:
         playing = [s for s in self.sessions.values() if s.is_playing()]
         if not playing:
             return
+        multi = len(playing) > 1
+        prog_iv = _HB_PROG_INTERVAL_MULTI if multi else _HB_PROG_INTERVAL
         for sess in playing:
             sess.advance_clock_only()
         try:
-            from .control_window import _poll_playback_sim_aligned_json_starts
+            from .control_window import (
+                _drain_playback_json_job_queues,
+                _poll_playback_sim_aligned_json_starts,
+                _try_release_all_playback_json_walls,
+            )
 
+            _try_release_all_playback_json_walls(ext)
             _poll_playback_sim_aligned_json_starts(ext)
+            if multi:
+                _drain_playback_json_job_queues(ext)
+                _poll_playback_sim_aligned_json_starts(ext)
         except Exception:
             pass
+        now_wall = time.perf_counter()
+        if multi:
+            for sess in playing:
+                sess.refresh_playback_ui(
+                    ext,
+                    now_wall=now_wall,
+                    progress_sink=progress_sink,
+                    timeline_only_sink=timeline_only_sink,
+                    build_prog_payload=build_prog_payload,
+                    prog_hb_interval=prog_iv,
+                )
         for sess in playing:
             sess.emit_due_and_sync(
                 max_emits=max_emits_per_screen,
                 sync_engine_now=sync_engine_now,
                 ext=ext,
             )
-        now_wall = time.perf_counter()
-        for sess in playing:
-            sess.refresh_playback_ui(
-                ext,
-                now_wall=now_wall,
-                progress_sink=progress_sink,
-                timeline_only_sink=timeline_only_sink,
-                build_prog_payload=build_prog_payload,
-            )
+        if not multi:
+            now_wall = time.perf_counter()
+            for sess in playing:
+                sess.refresh_playback_ui(
+                    ext,
+                    now_wall=now_wall,
+                    progress_sink=progress_sink,
+                    timeline_only_sink=timeline_only_sink,
+                    build_prog_payload=build_prog_payload,
+                    prog_hb_interval=prog_iv,
+                )
         if on_after_tick is not None:
             try:
                 on_after_tick(ext)

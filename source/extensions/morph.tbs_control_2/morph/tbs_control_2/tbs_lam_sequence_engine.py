@@ -404,8 +404,8 @@ def _reset_tbs_offset_ops_for_paths(
         except Exception:
             pass
         try:
-            _ltx.zero_tbs_offset_translate_at_path(p)
-            _lrx.zero_tbs_offset_rotate_at_path(p)
+            _ltx.zero_tbs_offset_translate_at_path(p, usd_context_name=ctx)
+            _lrx.zero_tbs_offset_rotate_at_path(p, usd_context_name=ctx)
         except Exception as exc:
             _seq_log(f"{_PRINT_PREFIX} zero TBS_OFFSET failed path={p}: {exc}", flush=True)
 
@@ -551,7 +551,12 @@ class TbsLamSequenceRunner:
                     flush=True,
                 )
                 try:
-                    _dispatch_main_wait(lambda: _reset_tbs_offset_ops_for_paths(rpaths), timeout=15.0)
+                    _dispatch_main_wait(
+                        lambda paths=rpaths, c=self._usd_context_name: _reset_tbs_offset_ops_for_paths(
+                            paths, usd_context_name=c
+                        ),
+                        timeout=15.0,
+                    )
                 except Exception as exc:
                     _seq_log(f"{_PRINT_PREFIX} reset TBS_OFFSET failed: {exc}", flush=True)
 
@@ -1406,6 +1411,7 @@ class TbsLamSequenceRunner:
                         [{"duration": duration, "delta": seg_delta}],
                         loop=False,
                         speed_ref=sp,
+                        usd_context_name=ctx_nm,
                     )
                     if from_initial:
                         _seq_log(
@@ -1522,6 +1528,7 @@ class TbsLamSequenceRunner:
                         [{"duration": duration, "delta": (drx, dry, drz)}],
                         loop=False,
                         speed_ref=sp,
+                        usd_context_name=ctx_nm,
                     )
                 if from_initial:
                     _seq_log(
