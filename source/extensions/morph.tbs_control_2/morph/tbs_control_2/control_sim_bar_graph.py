@@ -166,14 +166,22 @@ class EpBarPrecomputed:
     fault_ports: Tuple[str, ...] = ()
 
 
+def normalize_bar_graph_row_order(row_order: List[str]) -> List[str]:
+    """ALL_EP 를 항상 최상단(첫 행)으로 둔다. 나머지 행의 상대 순서는 유지."""
+    rows = [str(r).strip() for r in (row_order or []) if str(r).strip()]
+    if "ALL_EP" not in rows:
+        return rows
+    return ["ALL_EP"] + [r for r in rows if r != "ALL_EP"]
+
+
 def bar_graph_row_order(ep_count_idx: int, *, ebs_enabled: bool = True) -> List[str]:
-    """EP 개수·EBS 적용 여부에 따른 막대 행 순서."""
+    """EP 개수·EBS 적용 여부에 따른 막대 행 순서 (ALL_EP 최상단)."""
     idx = 1 if int(ep_count_idx) else 0
     eps = ["EP1", "EP2"] + (["EP3"] if idx else [])
     if not bool(ebs_enabled):
-        return list(eps) + ["ALL_EP"]
+        return ["ALL_EP"] + list(eps)
     bps = ["BP1", "BP2", "BP3"] + (["BP4"] if idx else [])
-    return list(eps) + ["ALL_EP", "INOUT"] + bps
+    return ["ALL_EP"] + list(eps) + ["INOUT"] + bps
 
 
 def bar_state_from_seg(seg: Dict[str, Any]) -> str:
@@ -649,7 +657,11 @@ def build_prerun_export_document(
     snap = dict(sim_snapshot or {})
     ep_count_idx = int(snap.get("ep_count_idx", 0) or 0)
     ep_count = 3 if ep_count_idx else 2
-    row_order = list(bar.row_order) if bar.row_order else bar_graph_row_order(ep_count_idx)
+    row_order = (
+        normalize_bar_graph_row_order(list(bar.row_order))
+        if bar.row_order
+        else bar_graph_row_order(ep_count_idx)
+    )
 
     hex_colors = get_bar_state_colors_hex()
     segments_out: Dict[str, List[Dict[str, Any]]] = {}
@@ -728,6 +740,7 @@ __all__ = [
     "EpBarPrecomputed",
     "allocate_bar_segment_pixels",
     "bar_graph_row_order",
+    "normalize_bar_graph_row_order",
     "get_bar_state_colors_hex",
     "get_bar_state_colors_kit",
     "hex_to_kit_ui_color",

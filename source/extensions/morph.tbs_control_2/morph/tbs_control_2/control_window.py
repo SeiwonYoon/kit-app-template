@@ -267,6 +267,7 @@ from .control_sim_bar_graph import (
     EpBarPrecomputed,
     allocate_bar_segment_pixels,
     bar_graph_row_order,
+    normalize_bar_graph_row_order,
     bar_state_color,
     bar_state_from_seg,
     build_ep_bar_from_progress_items,
@@ -4203,7 +4204,7 @@ def _update_ep_timeline_under_port_state(ext: Any, ch: Dict[str, Any], occ: Dict
     ebs_on = bool(snap.get("ebs_enabled", True)) if snap else True
     rows = list(bar_graph_row_order(ep_idx, ebs_enabled=ebs_on))
     if use_precomputed and bar_pre is not None and bar_pre.row_order:
-        rows = list(bar_pre.row_order)
+        rows = normalize_bar_graph_row_order(list(bar_pre.row_order))
 
     ep_count = 3 if ep_idx else 2
     fault_ports = _fault_ports_from_snapshot(snap, ep_count) if snap else set()
@@ -8470,7 +8471,7 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
     if use_pre and bar_pre is not None:
         rows_state = truncate_bar_rows_at_t(bar_pre.rows, float(sim_time))
         eps_pre = [r for r in (bar_pre.row_order or ()) if str(r).startswith("EP")]
-        rows = list(eps_pre) + (["ALL_EP"] if "ALL_EP" in (bar_pre.row_order or ()) else [])
+        rows = (["ALL_EP"] if "ALL_EP" in (bar_pre.row_order or ()) else []) + list(eps_pre)
     else:
         st_by = getattr(ext, "_sim_ep_timeline_state_by_screen", None)
         if not isinstance(st_by, dict):
@@ -8508,7 +8509,7 @@ def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: D
         eps = sorted(eps, key=lambda x: int(str(x).upper().replace("EP", "") or "0"))
         if not eps:
             eps = ["EP1", "EP2"]
-        rows = list(eps) + ["ALL_EP"]
+        rows = ["ALL_EP"] + list(eps)
 
         rows_state = st.get("rows", {})
         if not isinstance(rows_state, dict):

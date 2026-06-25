@@ -890,7 +890,7 @@ function EpTimelinePanel({ tl }: { tl: EpTimelineSnap }) {
 
   for (let i = 0; i <= nTicks; i++) tickLabels.push(Math.round(i * tickStep));
 
-  const rowOrder = Array.isArray(tl.row_order) && tl.row_order.length ? tl.row_order : ["EP1", "EP2", "ALL_EP"];
+  const rowOrder = Array.isArray(tl.row_order) && tl.row_order.length ? tl.row_order : ["ALL_EP", "EP1", "EP2"];
 
 
 
