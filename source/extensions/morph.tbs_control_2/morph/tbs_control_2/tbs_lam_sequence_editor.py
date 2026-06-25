@@ -184,6 +184,13 @@ def _coerce_loaded_step(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """파일/JSON 텍스트의 step dict → canonical step (알 수 없는 type 은 None)."""
     if not isinstance(raw, dict):
         return None
+    try:
+        from .sequence_renewal import is_renewal_marker, normalize_renewal_step
+
+        if is_renewal_marker(raw):
+            return normalize_renewal_step(raw)
+    except Exception:
+        pass
     raw_type = str(raw.get("type", "")).upper()
     canonical = _LOAD_TYPE_ALIASES.get(raw_type, raw_type)
     if canonical not in STEP_TYPES:

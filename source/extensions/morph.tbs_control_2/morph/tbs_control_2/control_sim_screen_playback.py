@@ -378,13 +378,65 @@ def stop_legacy_players(ext: Any) -> None:
             pass
 
 
+# UI 프레임 예산 — 재생 중에도 ANIM/GATE/PROGRESS 는 FIFO 유지(순서 깨면 JSON·진행률 어긋남)
+SIM_LOG_UI_DRAIN_MAX_IDLE = 200
+SIM_LOG_UI_DRAIN_MAX_PLAYBACK = 200
+SIM_LOG_UI_DRAIN_HISTORY_MAX_PLAYBACK = 24
+
+
+def iter_tbs_evaluators(ext: Any):
+    """메인 + 분할 화면 보조 evaluator (중복 제외)."""
+    seen: set[int] = set()
+    candidates = [getattr(ext, "_tbs_evaluator", None)]
+    by = getattr(ext, "_tbs_split_runtime_by_screen", None)
+    if isinstance(by, dict):
+        for rt in by.values():
+            if rt is not None:
+                candidates.append(getattr(rt, "evaluator", None))
+    for ev in candidates:
+        if ev is None:
+            continue
+        key = id(ev)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield ev
+
+
+def set_sim_playback_active(ext: Any, active: bool) -> None:
+    """프리런 재생 플래그 — 타임라인 게이트·heartbeat 등이 참조한다."""
+    try:
+        ext._sim_playback_started = bool(active)
+    except Exception:
+        pass
+
+
+def sim_log_ui_drain_limit(ext: Any) -> int:
+    if bool(getattr(ext, "_sim_playback_started", False)):
+        return int(SIM_LOG_UI_DRAIN_MAX_PLAYBACK)
+    return int(SIM_LOG_UI_DRAIN_MAX_IDLE)
+
+
+def sim_log_ui_history_drain_limit(ext: Any) -> int:
+    if bool(getattr(ext, "_sim_playback_started", False)):
+        return int(SIM_LOG_UI_DRAIN_HISTORY_MAX_PLAYBACK)
+    return int(SIM_LOG_UI_DRAIN_MAX_IDLE)
+
+
 __all__ = [
     "ScreenPlaybackSession",
     "SimPlaybackRuntime",
+    "SIM_LOG_UI_DRAIN_HISTORY_MAX_PLAYBACK",
+    "SIM_LOG_UI_DRAIN_MAX_IDLE",
+    "SIM_LOG_UI_DRAIN_MAX_PLAYBACK",
     "bootstrap_playback_after_prerun",
     "get_playback_runtime",
     "get_sim_playback_player",
     "is_multi_playback_instances",
     "iter_sim_playback_players",
+    "iter_tbs_evaluators",
+    "set_sim_playback_active",
+    "sim_log_ui_drain_limit",
+    "sim_log_ui_history_drain_limit",
     "stop_playback_runtime",
 ]

@@ -338,6 +338,7 @@ def reset_timetable_channel_to_idle(
     ch["timetable_row_heights"] = []
     ch["_timetable_row_style_cache"] = {}
     ch["_timetable_highlight_t"] = None
+    ch["_timetable_highlight_idx"] = None
     ch["_tt_scroll_y"] = 0.0
     if host is None:
         return
@@ -389,6 +390,7 @@ def set_timetable_busy_label(
     ch["timetable_row_heights"] = []
     ch["_timetable_row_style_cache"] = {}
     ch["_timetable_highlight_t"] = None
+    ch["_timetable_highlight_idx"] = None
     ch["_tt_scroll_y"] = 0.0
     if host is not None:
         if ext is not None:
@@ -432,6 +434,7 @@ def mount_interactive_timetable(
     ch["timetable_row_bgs"] = []
     ch["_timetable_row_style_cache"] = {}
     ch["_timetable_highlight_t"] = None
+    ch["_timetable_highlight_idx"] = None
     _clear_timetable_host_content(ch, ext, force=True)
     ch["timetable_busy_widget"] = None
     _hide_history_label(ch)
@@ -606,8 +609,13 @@ def refresh_timetable_row_highlight(ext: Any, *, screen: int, sim_now: float) ->
             bgs = []
             ch["timetable_row_bgs"] = bgs
         active_t = resolve_active_timetable_bucket(metas, float(sim_now))
-        ch["_timetable_highlight_t"] = active_t
         active_idx = _active_row_indices_for_bucket(metas, active_t)
+        prev_t = ch.get("_timetable_highlight_t")
+        prev_idx = ch.get("_timetable_highlight_idx")
+        if prev_t == active_t and prev_idx == active_idx:
+            return
+        ch["_timetable_highlight_t"] = active_t
+        ch["_timetable_highlight_idx"] = active_idx
         for idx in range(len(metas)):
             want_active = int(idx) in active_idx
             _apply_row_highlight(idx, want_active=want_active, pairs=pairs, bgs=bgs)

@@ -377,7 +377,7 @@ def predict_ports_occupancy_after_anim(occ_base: Dict[str, Any], src: Dict[str, 
 
 
 def anim_json_end_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
-    """애니 포트 이벤트 RUNNING progress 의 JSON 종료 sim 시각."""
+    """애니 포트 이벤트 RUNNING progress 의 JSON 종료 sim 시각 (back-align)."""
     if not isinstance(progress_p, dict):
         return None
     if _s_val(progress_p.get("status")).upper() != "RUNNING":
@@ -388,7 +388,32 @@ def anim_json_end_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
     t0 = _f_val(progress_p.get("event_start_sim_time"), -1.0)
     if t0 < 0.0:
         return None
-    return _json_end_sim_time_from_progress(progress_p, fallback_t=float(t0))
+    try:
+        from .json_playback_timing import json_end_sim_time_from_progress
+
+        return json_end_sim_time_from_progress(progress_p, fallback_t=float(t0))
+    except Exception:
+        return _json_end_sim_time_from_progress(progress_p, fallback_t=float(t0))
+
+
+def anim_json_port_sync_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
+    """포트·막대 갱신 sim 시각 (renewal 우선)."""
+    if not isinstance(progress_p, dict):
+        return None
+    if _s_val(progress_p.get("status")).upper() != "RUNNING":
+        return None
+    ev = _normalize_anim_event_seq(_s_val(progress_p.get("event_seq") or progress_p.get("sequence_name")))
+    if ev not in _ANIM_PORT_UPDATE_SEQS:
+        return None
+    t0 = _f_val(progress_p.get("event_start_sim_time"), -1.0)
+    if t0 < 0.0:
+        return None
+    try:
+        from .json_playback_timing import port_sync_sim_time_from_progress
+
+        return port_sync_sim_time_from_progress(progress_p, fallback_t=float(t0))
+    except Exception:
+        return anim_json_end_sim_time(progress_p)
 
 
 def effective_ports_occupancy_at_t(
@@ -404,10 +429,10 @@ def effective_ports_occupancy_at_t(
     occ = dict(occ_base or {})
     if not isinstance(progress_p, dict):
         return occ
-    anim_end = anim_json_end_sim_time(progress_p)
-    if anim_end is None:
+    sync_t = anim_json_port_sync_sim_time(progress_p)
+    if sync_t is None:
         return occ
-    if float(at_t) + 1e-9 < float(anim_end):
+    if float(at_t) + 1e-9 < float(sync_t):
         return occ
     return predict_ports_occupancy_after_anim(occ, _post_anim_src_from_progress(progress_p))
 
@@ -427,14 +452,14 @@ def interval_occ_parts(
         if isinstance(po, dict) and po:
             return [(dt_total, {str(k): str(v or "") for k, v in po.items()})]
     occ0 = dict(occ_engine or {})
-    anim_end = anim_json_end_sim_time(progress_p)
-    if anim_end is None or anim_end <= float(t0) + 1e-9 or anim_end >= float(t1) - 1e-9:
+    sync_t = anim_json_port_sync_sim_time(progress_p)
+    if sync_t is None or sync_t <= float(t0) + 1e-9 or sync_t >= float(t1) - 1e-9:
         return [(dt_total, effective_ports_occupancy_at_t(occ0, progress_p, t1))]
     src = _post_anim_src_from_progress(progress_p)
     occ_after = predict_ports_occupancy_after_anim(dict(occ0), src)
     return [
-        (float(anim_end) - float(t0), dict(occ0)),
-        (float(t1) - float(anim_end), occ_after),
+        (float(sync_t) - float(t0), dict(occ0)),
+        (float(t1) - float(sync_t), occ_after),
     ]
 
 
@@ -477,8 +502,8 @@ def commit_bar_ep_occ_from_interval(
         for ep in ep_list:
             bar_ep_occ[ep] = str(occ_eff.get(ep, "") or "")
         return
-    anim_end = anim_json_end_sim_time(progress_p)
-    if anim_end is None or float(t_end) + 1e-9 < float(anim_end):
+    sync_t = anim_json_port_sync_sim_time(progress_p)
+    if sync_t is None or float(t_end) + 1e-9 < float(sync_t):
         return
     ev = _normalize_anim_event_seq(_s_val(progress_p.get("event_seq") or progress_p.get("sequence_name")))
     src = _post_anim_src_from_progress(progress_p)
@@ -537,7 +562,13 @@ def _push_bar_rows_from_occ(
 
 
 def _json_end_sim_time_from_progress(p: Dict[str, Any], *, fallback_t: float = 0.0) -> Optional[float]:
-    """step progress 기준 JSON 종료 sim 시각."""
+    """step progress 기준 JSON 종료 sim 시각 (back-align)."""
+    try:
+        from .json_playback_timing import json_end_sim_time_from_progress
+
+        return json_end_sim_time_from_progress(p, fallback_t=float(fallback_t))
+    except Exception:
+        pass
     try:
         t0 = float(str(p.get("event_start_sim_time", "")).strip() or "0.0")
     except Exception:

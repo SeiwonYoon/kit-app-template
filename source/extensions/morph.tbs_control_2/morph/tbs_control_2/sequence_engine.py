@@ -56,6 +56,21 @@ class SequenceRunner(_LegacySequenceRunner):
         self._lam_running = False
         self._lam_last_steps: List[Dict[str, Any]] = []
         self._last_usd_context_name: Optional[str] = None
+        self._on_renewal_step: Optional[Callable[[int, dict], None]] = None
+
+    @property
+    def on_renewal_step(self) -> Optional[Callable[[int, dict], None]]:
+        return self._on_renewal_step
+
+    @on_renewal_step.setter
+    def on_renewal_step(self, cb: Optional[Callable[[int, dict], None]]) -> None:
+        self._on_renewal_step = cb
+        lam = self._lam_runner
+        if lam is not None:
+            try:
+                lam.on_renewal_step = cb
+            except Exception:
+                pass
 
     def is_running(self) -> bool:
         if self._lam_running:
@@ -154,6 +169,7 @@ class SequenceRunner(_LegacySequenceRunner):
         self._lam_runner = TbsLamSequenceRunner(
             self._tbs_registry,
             self._tbs_scheduler,
+            on_renewal_step=self._on_renewal_step,
             usd_context_name=ctx_nm,
         )
         self._lam_runner._diag_ext = getattr(self, "_diag_ext", None)  # type: ignore[attr-defined]

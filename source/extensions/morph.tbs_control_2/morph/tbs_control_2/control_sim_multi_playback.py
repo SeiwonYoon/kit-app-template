@@ -12,6 +12,9 @@ from .control_sim_screen_playback import (
     get_sim_playback_player,
     is_multi_playback_instances,
     iter_sim_playback_players,
+    set_sim_playback_active,
+    sim_log_ui_drain_limit,
+    sim_log_ui_history_drain_limit,
     stop_playback_runtime,
 )
 

@@ -310,6 +310,12 @@ def compute_duration_sec_by_row(rows: Dict[str, List[Dict[str, Any]]]) -> Dict[s
 
 def _json_end_sim_time_from_progress(p: Dict[str, Any], *, fallback_t: float = 0.0) -> Optional[float]:
     try:
+        from .json_playback_timing import json_end_sim_time_from_progress
+
+        return json_end_sim_time_from_progress(p, fallback_t=float(fallback_t))
+    except Exception:
+        pass
+    try:
         t0 = float(str(p.get("event_start_sim_time", "")).strip() or "0.0")
     except Exception:
         t0 = float(fallback_t)
@@ -495,15 +501,23 @@ def build_ep_bar_from_timeline_replay(
             ev = _normalize_anim_event_seq(_s_val(p.get("event_seq") or p.get("sequence_name")))
             if ev not in _ANIM_PORT_UPDATE_SEQS:
                 continue
-            t_json_end = _json_end_sim_time_from_progress(
-                p,
-                fallback_t=_f_val(p.get("sim_time", it.t), t_ev),
-            )
-            if t_json_end is None:
+            try:
+                from .json_playback_timing import port_sync_sim_time_from_progress
+
+                t_port_sync = port_sync_sim_time_from_progress(
+                    p,
+                    fallback_t=_f_val(p.get("sim_time", it.t), t_ev),
+                )
+            except Exception:
+                t_port_sync = _json_end_sim_time_from_progress(
+                    p,
+                    fallback_t=_f_val(p.get("sim_time", it.t), t_ev),
+                )
+            if t_port_sync is None:
                 continue
             milestones.append(
                 (
-                    float(t_json_end),
+                    float(t_port_sync),
                     seq_i,
                     "occ",
                     (_post_anim_src_from_progress(p), dict(panel_occ)),

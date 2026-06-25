@@ -455,12 +455,14 @@ class TbsLamSequenceRunner:
         registry: AnimationInstanceRegistry,
         scheduler: PlaybackScheduler,
         on_step_resolved: Optional[Callable[[int, dict, ResolveResult], None]] = None,
+        on_renewal_step: Optional[Callable[[int, dict], None]] = None,
         *,
         usd_context_name: Optional[str] = None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
         self._on_step_resolved = on_step_resolved
+        self._on_renewal_step = on_renewal_step
         self._usd_context_name: Optional[str] = (
             str(usd_context_name).strip() if usd_context_name else None
         ) or None
@@ -978,7 +980,25 @@ class TbsLamSequenceRunner:
             elif step_kind_is_prim_visibility(t):
                 duration = self._start_set_prim_visibility(idx, step, speed_scale)
             else:
-                _seq_log(f"{_PRINT_PREFIX} step[{idx}] unknown type={t!r}", flush=True)
+                try:
+                    from .sequence_renewal import is_renewal_marker
+
+                    if is_renewal_marker(step):
+                        duration = 0.0
+                        _seq_log(
+                            f"{_PRINT_PREFIX} step[{idx}] RENEWAL marker "
+                            f"(port/bar sync — playback duration 0)",
+                            flush=True,
+                        )
+                        if self._on_renewal_step is not None:
+                            try:
+                                self._on_renewal_step(idx, step)
+                            except Exception:
+                                pass
+                    else:
+                        _seq_log(f"{_PRINT_PREFIX} step[{idx}] unknown type={t!r}", flush=True)
+                except Exception:
+                    _seq_log(f"{_PRINT_PREFIX} step[{idx}] unknown type={t!r}", flush=True)
         except Exception as exc:
             _seq_log(f"{_PRINT_PREFIX} step[{idx}] {t} failed: {exc}", flush=True)
         finally:
