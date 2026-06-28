@@ -349,6 +349,132 @@ def _playback_ports_at_sim(
     return _ensure_panel_occ_keys(dict(occ))
 
 
+# ── REMOVED JSON: 포트 패널은 renewal, 3D prim 숨김만 proc_end 까지 보류 ─────
+
+def _removed_prim_hide_holds(ext: Any, screen: int) -> Dict[str, Dict[str, Any]]:
+    by = getattr(ext, "_sim_playback_removed_prim_hold_by_screen", None)
+    if not isinstance(by, dict):
+        by = {}
+        ext._sim_playback_removed_prim_hold_by_screen = by
+    sk = str(int(screen))
+    holds = by.get(sk)
+    if not isinstance(holds, dict):
+        holds = {}
+        by[sk] = holds
+    return holds
+
+
+def _register_removed_prim_hide_hold_for_renewal(
+    ext: Any,
+    screen: int,
+    src: Dict[str, Any],
+    sched: Any,
+) -> None:
+    """
+    REMOVED renewal — 패널은 비우되 FOUP prim 은 공정 종료(proc_end) 까지 보이게 hold 등록.
+    """
+    if not bool(getattr(ext, "_sim_playback_started", False)):
+        return
+    try:
+        from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
+    except Exception:
+        return
+    ev = _normalize_anim_event_seq(_s_val(src.get("event") or src.get("event_seq") or src.get("seq")))
+    if ev != "REMOVED":
+        return
+    port = _canon_port(src.get("port_id") or src.get("event_port_id") or src.get("to_port_id"))
+    lot = str(src.get("lot_id") or "").strip()
+    if not port or not lot:
+        return
+    proc_end: Optional[float] = None
+    if sched is not None:
+        try:
+            from .playback_schedule import find_scheduled_step_for_anim_src
+
+            step = find_scheduled_step_for_anim_src(sched, dict(src))
+            if step is not None:
+                proc_end = float(step.t_proc_end or 0.0)
+        except Exception:
+            proc_end = None
+    if proc_end is None or proc_end <= 1e-9:
+        try:
+            t0 = float(
+                str(
+                    src.get("event_start_sim_time")
+                    or src.get("_event_start_sim")
+                    or src.get("t")
+                    or src.get("sim_time")
+                    or "0"
+                ).strip()
+                or "0"
+            )
+            proc = float(str(src.get("proc_sec") or "0").strip() or "0")
+            if proc > 1e-9:
+                proc_end = float(t0) + float(proc)
+        except Exception:
+            proc_end = None
+    if proc_end is None or proc_end <= 1e-9:
+        return
+    holds = _removed_prim_hide_holds(ext, int(screen))
+    holds[str(port).strip().upper()] = {"lot": str(lot), "proc_end_t": float(proc_end)}
+
+
+def prim_occ_for_playback_visibility(
+    ext: Any,
+    screen: int,
+    panel_occ: Dict[str, str],
+) -> Dict[str, str]:
+    """
+    재생 중 3D prim 가시성용 occ — REMOVED hold 가 있으면 해당 포트 lot 을 유지(보임).
+    패널 occ(``panel_occ``) 와 분리해서 쓴다.
+    """
+    if not bool(getattr(ext, "_sim_playback_started", False)):
+        return _ensure_panel_occ_keys(dict(panel_occ))
+    out = _ensure_panel_occ_keys(dict(panel_occ))
+    holds = _removed_prim_hide_holds(ext, int(screen))
+    if not holds:
+        return out
+    try:
+        sim_now = float(_sim_now_for_screen(ext, int(screen), None))
+    except Exception:
+        sim_now = 0.0
+    expired: List[str] = []
+    for port, hold in list(holds.items()):
+        if not isinstance(hold, dict):
+            expired.append(str(port))
+            continue
+        lot = str(hold.get("lot") or "").strip()
+        try:
+            proc_end = float(hold.get("proc_end_t", 0.0) or 0.0)
+        except Exception:
+            proc_end = 0.0
+        pu = str(port).strip().upper()
+        if not lot or proc_end <= 1e-9:
+            expired.append(pu)
+            continue
+        if float(sim_now) + 1e-6 < proc_end:
+            if pu in out:
+                out[pu] = lot
+        else:
+            expired.append(pu)
+    for pu in expired:
+        holds.pop(pu, None)
+    return out
+
+
+def clear_removed_prim_hide_holds(ext: Any, screen: Optional[int] = None) -> None:
+    try:
+        by = getattr(ext, "_sim_playback_removed_prim_hold_by_screen", None)
+        if not isinstance(by, dict):
+            return
+        if screen is None:
+            by.clear()
+        else:
+            by.pop(str(int(screen)), None)
+    except Exception:
+        pass
+
+
 def get_stored_playback_schedule_for_screen(ext: Any, screen: int) -> Optional[PlaybackSchedule]:
     try:
         by = getattr(ext, "_sim_playback_schedule_by_screen", None)
@@ -509,11 +635,16 @@ def sync_playback_ui_at_sim(ext: Any, screen: int, t_sim: float, *, force: bool 
     axes = resolve_playback_ui_axes(ext, int(screen), float(t_sim))
     t_lookup = float(axes.t_plan)
     occ = _playback_ports_at_sim(ext, snap, int(screen), float(t_lookup))
+    prim_occ = prim_occ_for_playback_visibility(ext, int(screen), dict(occ))
 
     last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
     last = last_by.get(sk) if isinstance(last_by, dict) else None
+    last_prim_by = getattr(ext, "_sim_last_prim_ports_occupancy_by_screen", None)
+    last_prim = last_prim_by.get(sk) if isinstance(last_prim_by, dict) else None
     if (not force) and isinstance(last, dict) and _occ_dicts_equal(dict(last), occ):
-        return False
+        # REMOVED prim hide hold: 패널 occ 는 같아도 proc_end 이후 prim occ 가 바뀌면 갱신.
+        if isinstance(last_prim, dict) and _occ_dicts_equal(last_prim, prim_occ):
+            return False
 
     return _apply_plan_ports_to_panel(
         ext,
@@ -549,6 +680,7 @@ def clear_playback_plan_runtime_state(ext: Any) -> None:
             hold_by.clear()
     except Exception:
         pass
+    clear_removed_prim_hide_holds(ext)
 
 
 def rebuild_plan_snapshot_for_screen(ext: Any, screen: int) -> Optional[PlaybackPlanSnapshot]:
@@ -994,9 +1126,8 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
     # ── 단일 writer 원칙 ──────────────────────────────────────────────
     # wall 은 패널에 직접 쓰지 않는다. renewal occ 를 hold 에만 넣고, 패널 반영은
     # heartbeat 경로(refresh_playback_display_at_sim → _playback_ports_at_sim →
-    # _renewal_occ_for_playback_sync) 단 하나로만 한다. 이렇게 해야 "wall 이 쓴 값"과
-    # "heartbeat 이 쓴 값" 이 인접 프레임에 충돌해 포트가 깜빡이는(사라졌다 다시 뜨는)
-    # 사이드이펙트가 구조적으로 사라진다.
+    # _renewal_occ_for_playback_sync) 단 하나로만 한다.
+    _register_removed_prim_hide_hold_for_renewal(ext, scr, dict(src), sched)
     _set_renewal_occ_hold(ext, scr, dict(occ), float(sync_t))
 
     refresh_playback_display_at_sim(ext, scr, force=True)
@@ -1098,6 +1229,7 @@ __all__ = [
     "apply_playback_renewal_from_wall",
     "clear_plan_replay_floors",
     "clear_playback_plan_runtime_state",
+    "clear_removed_prim_hide_holds",
     "clear_renewal_occ_hold",
     "ensure_plan_snapshot",
     "ensure_playback_plans_for_results",
@@ -1110,6 +1242,7 @@ __all__ = [
     "install_playback_renewal_handlers",
     "plan_lookup_sim_t",
     "playback_plan_active",
+    "prim_occ_for_playback_visibility",
     "refresh_playback_display_at_sim",
     "rebuild_plan_snapshot_for_screen",
     "reset_plan_replay_floor",

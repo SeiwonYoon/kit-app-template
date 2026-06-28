@@ -6853,13 +6853,22 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
     occ = payload.get("ports_occupancy", {})
     if not isinstance(occ, dict):
         occ = {}
+    occ_panel = dict(occ)
+    occ_prims = dict(occ)
+    if bool(getattr(ext, "_sim_playback_started", False)):
+        try:
+            from .control_sim_playback_plan import prim_occ_for_playback_visibility
+
+            occ_prims = prim_occ_for_playback_visibility(ext, scr, dict(occ_panel))
+        except Exception:
+            occ_prims = dict(occ_panel)
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
     active_ep = _remember_foup_active_ep(ext, scr, payload)
     try:
-        apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
+        apply_port_lot_prim_visibility_for_context(ctx_nm, occ_prims)
     except Exception:
         try:
-            apply_port_lot_prim_visibility(occ)
+            apply_port_lot_prim_visibility(occ_prims)
         except Exception:
             pass
     try:
@@ -6871,12 +6880,21 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
         if not isinstance(by_prev, dict):
             by_prev = {}
             ext._sim_last_ports_occupancy_by_screen = by_prev
-        if occ:
-            by_prev[str(scr)] = dict(occ)
+        if occ_panel:
+            by_prev[str(scr)] = dict(occ_panel)
     except Exception:
         pass
+    if bool(getattr(ext, "_sim_playback_started", False)):
+        try:
+            by_prim = getattr(ext, "_sim_last_prim_ports_occupancy_by_screen", None)
+            if not isinstance(by_prim, dict):
+                by_prim = {}
+                ext._sim_last_prim_ports_occupancy_by_screen = by_prim
+            by_prim[str(scr)] = dict(occ_prims)
+        except Exception:
+            pass
     try:
-        _update_port_occupancy_panel(ext, occ, str(payload.get("sim_time", "")), screen=scr)
+        _update_port_occupancy_panel(ext, occ_panel, str(payload.get("sim_time", "")), screen=scr)
     except Exception:
         pass
 
