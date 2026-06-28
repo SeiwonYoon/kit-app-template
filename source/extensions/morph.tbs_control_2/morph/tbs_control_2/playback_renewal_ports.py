@@ -23,6 +23,17 @@ from .sim_sequence_json import (
     resolve_sim_sequence_json_path,
 )
 
+_DEFAULT_PANEL_PORTS: Tuple[str, ...] = (
+    "INOUT",
+    "BP1",
+    "BP2",
+    "BP3",
+    "BP4",
+    "EP1",
+    "EP2",
+    "EP3",
+)
+
 
 def json_step_linked_basename(step: PlaybackScheduledStep) -> str:
     p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
@@ -132,9 +143,11 @@ def renewal_playback_port_sync_for_step(step: PlaybackScheduledStep) -> Optional
     except Exception:
         t0s = float(step.t_event or 0.0)
 
+    # renewal 마커는 확정됐는데 offset 산출이 실패/0 이면 → JSON 시작(t0+lead)에 적용.
+    # (offset=None 으로 return None 하면 milestone 자체가 안 생겨 MOVE/REMOVED 가
+    #  "갱신 안됨 → 다음 이벤트에 이전 것 갱신" 으로 한 박자 밀린다.)
     off = _renewal_offset_sec_for_step(step)
-    if off is None or float(off) <= 1e-9:
-        return None
+    off_eff = 0.0 if (off is None or float(off) <= 1e-9) else float(off)
 
     try:
         from .json_playback_timing import playback_port_sync_sim_time, resolve_playback_proc_anim
@@ -149,7 +162,7 @@ def renewal_playback_port_sync_for_step(step: PlaybackScheduledStep) -> Optional
             float(proc_pb),
             float(anim_pb),
             has_renewal=True,
-            renewal_offset_sec=float(off),
+            renewal_offset_sec=float(off_eff),
         )
     except Exception:
         return None
@@ -180,12 +193,54 @@ def renewal_port_occ_pairs_for_step(
     return panel_occ_tuple_from_dict({**panel_start, **pred}, ports)
 
 
+def renewal_full_panel_occ_for_step(
+    step: PlaybackScheduledStep,
+    *,
+    base_occ: Optional[Dict[str, str]] = None,
+    panel_ports: Optional[List[str]] = None,
+) -> Optional[Dict[str, str]]:
+    """
+    renewal step 의 **전체 패널** occ — base(이전 milestone) + step SSOT.
+
+    ``ports_occ_panel_renewal`` 이 비어 있거나 fallback predict 가 빈 panel 기준이면
+    EP1 등 이전 포트가 사라지거나 INOUT/BP 갱신이 plan 에 안 들어가는 문제를 막는다.
+    """
+    ports = [str(p).strip().upper() for p in (panel_ports or _DEFAULT_PANEL_PORTS) if str(p).strip()]
+    if not ports:
+        ports = list(_DEFAULT_PANEL_PORTS)
+    out: Dict[str, str] = {p: "" for p in ports}
+    if isinstance(base_occ, dict):
+        for k, v in base_occ.items():
+            ku = str(k).strip().upper()
+            if ku in out:
+                out[ku] = str(v or "")
+
+    pairs = renewal_port_occ_pairs_for_step(step, panel_ports=ports)
+    if pairs:
+        for k, v in pairs:
+            ku = str(k).strip().upper()
+            if ku in out:
+                out[ku] = str(v or "")
+        return dict(out)
+
+    p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
+    ep = step.event_payload if isinstance(step.event_payload, dict) else {}
+    src = _post_anim_src_from_progress_and_event(p, ep)
+    pred = predict_ports_occupancy_after_anim(dict(out), src)
+    for k, v in (pred or {}).items():
+        ku = str(k).strip().upper()
+        if ku in out:
+            out[ku] = str(v or "")
+    return dict(out)
+
+
 def renewal_port_milestone_for_step(
     step: PlaybackScheduledStep,
     *,
     panel_ports: Optional[List[str]] = None,
+    base_occ: Optional[Dict[str, str]] = None,
 ) -> Optional[Tuple[float, Dict[str, str]]]:
-    """``(sync_sim_t, partial_occ_dict)`` — renewal JSON 전용."""
+    """``(sync_sim_t, full_panel_occ_dict)`` — renewal JSON 전용."""
     if str(step.kind or "").strip().lower() != "json_step":
         return None
     if not step_json_has_renewal_marker(step):
@@ -193,11 +248,14 @@ def renewal_port_milestone_for_step(
     sync_t = renewal_playback_port_sync_for_step(step)
     if sync_t is None:
         return None
-    pairs = renewal_port_occ_pairs_for_step(step, panel_ports=panel_ports)
-    if not pairs:
+    occ = renewal_full_panel_occ_for_step(
+        step,
+        base_occ=base_occ,
+        panel_ports=panel_ports,
+    )
+    if not occ:
         return None
-    occ = {str(k).strip().upper(): str(v or "") for k, v in pairs if str(k).strip()}
-    return float(sync_t), occ
+    return float(sync_t), dict(occ)
 
 
 def renewal_json_engine_occ_block_windows(
@@ -236,6 +294,7 @@ def engine_occ_blocked_for_renewal_json(
 __all__ = [
     "engine_occ_blocked_for_renewal_json",
     "json_step_linked_basename",
+    "renewal_full_panel_occ_for_step",
     "renewal_json_engine_occ_block_windows",
     "renewal_playback_port_sync_for_step",
     "renewal_port_milestone_for_step",

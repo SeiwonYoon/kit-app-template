@@ -12,8 +12,29 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def _renewal_debug_on(ext: Any) -> bool:
+    # 1) ext 별 명시적 OFF/ON 우선
+    flag = getattr(ext, "_sim_renewal_debug", None)
+    if flag is not None:
+        return bool(flag)
+    # 2) 환경변수
+    env = str(os.environ.get("TBS_RENEWAL_DEBUG", "") or "").strip()
+    if env not in ("", "0", "false", "False"):
+        return True
+    if env in ("0", "false", "False"):
+        return False
+    # 3) 기본값 — sim_control_defaults.SIM_RENEWAL_DEBUG (상시 ON)
+    try:
+        from .sim_control_defaults import SIM_RENEWAL_DEBUG
+
+        return bool(SIM_RENEWAL_DEBUG)
+    except Exception:
+        return False
 
 from .playback_plan import PlaybackPlanSnapshot
 from .playback_schedule import PlaybackSchedule
@@ -105,6 +126,192 @@ def _clear_renewal_occ_hold(ext: Any, screen: int) -> None:
         pass
 
 
+def clear_renewal_occ_hold(ext: Any, screen: int) -> None:
+    """renewal JSON 종료·재생 정지 시 hold 해제."""
+    _clear_renewal_occ_hold(ext, int(screen))
+
+
+def _resolve_renewal_sync_t_for_playback(
+    ext: Any,
+    screen: int,
+    src: Dict[str, Any],
+) -> Optional[float]:
+    """renewal 포트 sync sim 시각 — 프리런 스케줄 SSOT 우선, 없으면 runtime 계산."""
+    if not isinstance(src, dict):
+        return None
+    try:
+        t0 = float(
+            str(
+                src.get("event_start_sim_time")
+                or src.get("_event_start_sim")
+                or src.get("t")
+                or src.get("sim_time")
+                or "0"
+            ).strip()
+            or "0"
+        )
+    except Exception:
+        t0 = 0.0
+    ev = str(src.get("event") or src.get("event_seq") or src.get("seq") or "").strip().upper()
+    file_bn = str(src.get("file") or "").strip().lower()
+
+    sched = get_stored_playback_schedule_for_screen(ext, int(screen))
+    if sched is not None:
+        try:
+            from .playback_renewal_ports import (
+                renewal_playback_port_sync_for_step,
+                step_json_has_renewal_marker,
+            )
+
+            for step in sched.steps or ():
+                if str(step.kind or "").strip().lower() != "json_step":
+                    continue
+                if not bool(step.has_renewal) and not step_json_has_renewal_marker(step):
+                    continue
+                if abs(float(step.t_event or 0.0) - float(t0)) > 0.25:
+                    continue
+                if ev and str(step.event_seq or "").strip().upper() not in ("", ev):
+                    continue
+                step_bn = str(step.json_basename or "").strip().lower()
+                if file_bn and step_bn and file_bn != step_bn:
+                    continue
+                st = step.t_playback_port_sync
+                if st is None:
+                    st = renewal_playback_port_sync_for_step(step)
+                if st is not None and float(st) > 1e-9:
+                    return float(st)
+        except Exception:
+            pass
+
+    try:
+        proc = float(str(src.get("proc_sec") or "0").strip() or "0")
+        anim = float(str(src.get("anim_sec") or "0").strip() or "0")
+        est = float(str(src.get("est_total") or src.get("json_est_sec") or "0").strip() or "0")
+        off = src.get("renewal_offset_sec")
+        if off is None:
+            parsed = src.get("parsed")
+            if isinstance(parsed, list) and parsed:
+                from .json_playback_timing import renewal_info_from_steps
+
+                _hr, off = renewal_info_from_steps(list(parsed))
+        from .json_playback_timing import playback_port_sync_sim_time, resolve_playback_proc_anim
+
+        proc_pb, anim_pb = resolve_playback_proc_anim(proc, anim, json_est_sec=float(est))
+        if off is not None and float(off) > 1e-9:
+            return playback_port_sync_sim_time(
+                float(t0),
+                float(proc_pb),
+                float(anim_pb),
+                has_renewal=True,
+                renewal_offset_sec=float(off),
+            )
+    except Exception:
+        pass
+    return None
+
+
+_MOVE_FAMILY: Tuple[str, ...] = ("MOVE", "MOVE_TRANSFERING", "MOVE_REQ")
+
+
+def _canon_port(p: Any) -> str:
+    o = str(p or "").strip().upper()
+    if o in ("IN/OUT", "INOUT"):
+        return "INOUT"
+    return o
+
+
+def _find_wall_renewal_step(sched: Any, src: Dict[str, Any]) -> Optional[Any]:
+    """
+    renewal wall 이 가리키는 "이 이벤트의 JSON step" 을 robust 하게 찾는다.
+
+    ``find_scheduled_step_for_anim_src`` 와 달리 ``t_playback_port_sync`` 유무에 의존하지 않고,
+    MOVE 계열(MOVE/MOVE_TRANSFERING/MOVE_REQ)을 한 family 로 취급한다. event+t0+to/port+lot+파일명
+    으로 매칭해 renewal step 만 반환한다.
+    """
+    if sched is None or not isinstance(src, dict):
+        return None
+    try:
+        from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
+        from .playback_renewal_ports import step_json_has_renewal_marker
+        from .playback_schedule import PlaybackScheduledStep
+    except Exception:
+        return None
+
+    ev = _normalize_anim_event_seq(
+        _s_val(src.get("event") or src.get("event_seq") or src.get("seq"))
+    )
+    if not ev:
+        return None
+    try:
+        t0 = float(
+            str(
+                src.get("event_start_sim_time")
+                or src.get("_event_start_sim")
+                or src.get("t")
+                or src.get("sim_time")
+                or "0"
+            ).strip()
+            or "0"
+        )
+    except Exception:
+        t0 = 0.0
+    src_to = _canon_port(src.get("to_port_id") or src.get("port_id"))
+    src_lot = str(src.get("lot_id") or "").strip()
+    src_bn = ""
+    for cand in (src.get("path"), src.get("file")):
+        cs = str(cand or "").strip()
+        if cs:
+            src_bn = cs.split("/")[-1].split("\\")[-1].strip().lower()
+            break
+
+    ev_is_move = ev in _MOVE_FAMILY
+    best: Optional[Any] = None
+    best_dt = 1e18
+    for step in getattr(sched, "steps", None) or ():
+        if not isinstance(step, PlaybackScheduledStep):
+            continue
+        if str(step.kind or "").strip().lower() != "json_step":
+            continue
+        if not (bool(step.has_renewal) or step_json_has_renewal_marker(step)):
+            continue
+        p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
+        step_ev = _normalize_anim_event_seq(
+            _s_val(p.get("event_seq") or p.get("sequence_name") or step.event_seq)
+        )
+        ev_ok = (step_ev == ev) or (ev_is_move and step_ev in _MOVE_FAMILY)
+        if not ev_ok:
+            continue
+        try:
+            step_t0 = float(
+                str(
+                    p.get("event_start_sim_time")
+                    or p.get("sim_time")
+                    or step.t_event
+                    or "0"
+                ).strip()
+                or "0"
+            )
+        except Exception:
+            step_t0 = float(step.t_event or 0.0)
+        dt = abs(step_t0 - t0)
+        if dt > 0.3:
+            continue
+        ep = step.event_payload if isinstance(step.event_payload, dict) else {}
+        step_to = _canon_port(ep.get("to_port_id") or ep.get("port_id"))
+        if src_to and step_to and src_to != step_to:
+            continue
+        step_lot = str(ep.get("lot_id") or p.get("lot_id") or "").strip()
+        if src_lot and step_lot and src_lot != step_lot:
+            continue
+        step_bn = str(step.json_basename or "").strip().lower()
+        if src_bn and step_bn and src_bn != step_bn:
+            continue
+        if dt < best_dt:
+            best_dt = dt
+            best = step
+    return best
+
+
 def _renewal_occ_for_playback_sync(
     ext: Any,
     screen: int,
@@ -113,16 +320,33 @@ def _renewal_occ_for_playback_sync(
 ) -> Tuple[Dict[str, str], float]:
     """
     wall 이 sim 보다 앞서 renewal 을 적용한 뒤 — sim 이 sync_t 에 도달할 때까지 hold occ 유지.
+
+    heartbeat 가 ``ports_at(sim_now)`` 로 pre-renewal 상태를 덮어쓰며 깜빡이는 것을 막는다.
     """
     hold = _get_renewal_occ_hold(ext, int(screen))
     if not hold:
-        return dict(plan_occ), float(sim_now)
+        return _ensure_panel_occ_keys(dict(plan_occ)), float(sim_now)
     sync_t = float(hold.get("sync_t", 0.0) or 0.0)
-    if float(sim_now) + 1e-6 >= sync_t:
-        _clear_renewal_occ_hold(ext, int(screen))
-        return dict(plan_occ), float(sim_now)
-    occ_h = _ensure_panel_occ_keys(dict(hold.get("occ") or {}))
-    return dict(occ_h), max(float(sim_now), sync_t)
+    held_occ = _ensure_panel_occ_keys(dict(hold.get("occ") or {}))
+    if float(sim_now) + 1e-6 < sync_t:
+        # 아직 sim 이 renewal 시점에 도달하지 않음 — wall 이 적용한 renewal occ 유지(깜빡임 방지).
+        return dict(held_occ), float(sim_now)
+    # sim 이 sync_t 를 지났다 → plan ports_at(sim_now) 가 이미 renewal milestone 을 포함하므로
+    # 그대로 사용한다(과거 occ merge 금지: 회수·이동으로 비워진 포트가 되살아나는 버그 방지).
+    _clear_renewal_occ_hold(ext, int(screen))
+    return _ensure_panel_occ_keys(dict(plan_occ)), float(sim_now)
+
+
+def _playback_ports_at_sim(
+    ext: Any,
+    snap: PlaybackPlanSnapshot,
+    screen: int,
+    t_sim: float,
+) -> Dict[str, str]:
+    """plan.lookup(t) + renewal hold (포트·막대 공통)."""
+    occ = _ensure_panel_occ_keys(dict(snap.ports_at(float(t_sim))))
+    occ, _ = _renewal_occ_for_playback_sync(ext, int(screen), float(t_sim), occ)
+    return _ensure_panel_occ_keys(dict(occ))
 
 
 def get_stored_playback_schedule_for_screen(ext: Any, screen: int) -> Optional[PlaybackSchedule]:
@@ -231,7 +455,7 @@ def get_plan_ports_at_sim(
         t_lookup = float(t_sim)
     else:
         t_lookup = resolve_playback_ui_axes(ext, int(screen), float(t_sim)).t_plan
-    return dict(snap.ports_at(float(t_lookup)))
+    return _playback_ports_at_sim(ext, snap, int(screen), float(t_lookup))
 
 
 def _occ_dicts_equal(a: Dict[str, str], b: Dict[str, str]) -> bool:
@@ -284,12 +508,7 @@ def sync_playback_ui_at_sim(ext: Any, screen: int, t_sim: float, *, force: bool 
     sk = str(int(screen))
     axes = resolve_playback_ui_axes(ext, int(screen), float(t_sim))
     t_lookup = float(axes.t_plan)
-    occ = _ensure_panel_occ_keys(dict(snap.ports_at(t_lookup)))
-
-    # renewal wall 이 sim 보다 앞서 적용된 경우 — sim 이 sync_t 에 도달할 때까지 held occ 유지
-    # (JSON wall 동안 sim_now 가 멈춰 있어 plan ports_at(sim_now) 가 pre-renewal 로 되돌리는 깜빡임 방지).
-    occ, _ = _renewal_occ_for_playback_sync(ext, int(screen), float(t_lookup), occ)
-    occ = _ensure_panel_occ_keys(dict(occ))
+    occ = _playback_ports_at_sim(ext, snap, int(screen), float(t_lookup))
 
     last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
     last = last_by.get(sk) if isinstance(last_by, dict) else None
@@ -428,7 +647,7 @@ def resolve_playback_ui_at_sim(
     scr = int(screen)
     axes = resolve_playback_ui_axes(ext, scr, t_sim, explicit=bool(explicit))
     t_lookup = float(axes.t_plan)
-    ports = _ensure_panel_occ_keys(dict(snap.ports_at(t_lookup)))
+    ports = _playback_ports_at_sim(ext, snap, scr, float(t_lookup))
 
     preview_full = False
     try:
@@ -570,6 +789,97 @@ def resolve_playback_ui_at_sim(
     )
 
 
+def _find_plan_renewal_milestone_for_event(
+    snap: PlaybackPlanSnapshot,
+    src: Dict[str, Any],
+    sim_now: float,
+) -> Optional[Tuple[float, Dict[str, str]]]:
+    """
+    이 이벤트가 만들어내는 **plan occ milestone** 을 직접 찾는다 (sync_t 재계산 금지).
+
+    wall 이 자체 계산한 sync_t 가 plan milestone 시각과 어긋나면(예: resolve fallback)
+    hold 가 즉시 해제되어 이전 상태가 보이는 버그가 난다. plan milestone 은 이미 정확하므로
+    이벤트 결과(ARRIVED/MOVE → ``to==lot``, REMOVED → ``port==''``)와 일치하고 ``sim_now`` 에
+    가장 가까운(>= sim_now - 1.0) milestone 을 그대로 채택한다.
+    """
+    try:
+        from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
+    except Exception:
+        return None
+
+    ev = _normalize_anim_event_seq(
+        _s_val(src.get("event") or src.get("event_seq") or src.get("seq"))
+    )
+    if not ev:
+        return None
+    lot = str(src.get("lot_id") or "").strip()
+    to = _canon_port(src.get("to_port_id") or src.get("port_id"))
+    port = _canon_port(src.get("port_id") or src.get("event_port_id") or src.get("to_port_id"))
+
+    def _matches(occ: Dict[str, str]) -> bool:
+        if ev in _MOVE_FAMILY:
+            if not to:
+                return False
+            return str(occ.get(to, "") or "").strip() == lot and lot != ""
+        if ev == "ARRIVED":
+            dest = to or port
+            if not dest:
+                return False
+            return str(occ.get(dest, "") or "").strip() == lot and lot != ""
+        if ev == "REMOVED":
+            tgt = port or to
+            if not tgt:
+                return False
+            return str(occ.get(tgt, "") or "").strip() == ""
+        return False
+
+    lo = float(sim_now) - 1.0
+    best: Optional[Tuple[float, Dict[str, str]]] = None
+    for m in snap.milestones or ():
+        if str(getattr(m, "kind", "")) != "occ_full":
+            continue
+        t_ms = float(getattr(m, "t_sim", 0.0) or 0.0)
+        if t_ms < lo:
+            continue
+        data = getattr(m, "data", None)
+        if not isinstance(data, dict):
+            continue
+        if not _matches(data):
+            continue
+        if best is None or t_ms < best[0]:
+            best = (t_ms, _ensure_panel_occ_keys(dict(data)))
+    return best
+
+
+def _dump_plan_milestones_once(ext: Any, screen: int, snap: PlaybackPlanSnapshot) -> None:
+    """디버그 — 화면별 plan occ 마일스톤을 1회만 콘솔에 덤프."""
+    try:
+        done = getattr(ext, "_sim_renewal_dbg_dumped_screens", None)
+        if not isinstance(done, set):
+            done = set()
+            ext._sim_renewal_dbg_dumped_screens = done
+        if int(screen) in done:
+            return
+        done.add(int(screen))
+        print(f"[RENEWAL_DBG] --- plan occ milestones (scr={int(screen)}) ---", flush=True)
+        for m in snap.milestones or ():
+            if str(getattr(m, "kind", "")) not in ("occ_full", "occ_snap", "occ_plan"):
+                continue
+            data = getattr(m, "data", None)
+            if isinstance(data, dict):
+                nz = {k: v for k, v in data.items() if str(v or "").strip()}
+            else:
+                nz = data
+            print(
+                f"[RENEWAL_DBG]   t={float(getattr(m, 't_sim', 0.0)):7.2f} "
+                f"ord={getattr(m, 'order', 0)} {getattr(m, 'kind', '')}: {nz}",
+                flush=True,
+            )
+        print("[RENEWAL_DBG] --- end milestones ---", flush=True)
+    except Exception:
+        pass
+
+
 def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any]) -> bool:
     """
     재생 — LAM renewal wall 시 plan milestone(renewal sync sim) 을 패널에 즉시 반영.
@@ -588,62 +898,109 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
     if snap is None:
         return False
 
-    sync_t: Optional[float] = None
+    sched = get_stored_playback_schedule_for_screen(ext, scr)
+
     try:
-        t0 = float(
-            str(
-                src.get("event_start_sim_time")
-                or src.get("_event_start_sim")
-                or src.get("t")
-                or src.get("sim_time")
-                or "0"
-            ).strip()
-            or "0"
-        )
-        proc = float(str(src.get("proc_sec") or "0").strip() or "0")
-        anim = float(str(src.get("anim_sec") or "0").strip() or "0")
-        est = float(str(src.get("est_total") or src.get("json_est_sec") or "0").strip() or "0")
-        off = src.get("renewal_offset_sec")
-        if off is None:
-            parsed = src.get("parsed")
-            if isinstance(parsed, list) and parsed:
-                from .json_playback_timing import renewal_info_from_steps
-
-                _hr, off = renewal_info_from_steps(list(parsed))
-        from .json_playback_timing import playback_port_sync_sim_time, resolve_playback_proc_anim
-
-        proc_pb, anim_pb = resolve_playback_proc_anim(proc, anim, json_est_sec=float(est))
-        if off is not None and float(off) > 1e-9:
-            sync_t = playback_port_sync_sim_time(
-                float(t0),
-                float(proc_pb),
-                float(anim_pb),
-                has_renewal=True,
-                renewal_offset_sec=float(off),
-            )
+        sim_now_match = _sim_now_for_screen(ext, scr, None)
     except Exception:
-        sync_t = None
+        sim_now_match = 0.0
+
+    sync_t: Optional[float] = None
+    occ: Optional[Dict[str, str]] = None
+    occ_src = "none"
+    matched = "none"
+
+    # ── 1순위(SSOT 직결): 이 이벤트가 만드는 plan occ milestone 을 그대로 채택. ──
+    # wall 이 sync_t 를 재계산하지 않고 plan 과 "동일한 milestone(t_sim, occ)" 을 쓰므로
+    # wall sync_t < sim_now < plan milestone 으로 hold 가 조기 해제되던 버그(MOVE/REMOVED
+    # 갱신 안됨·이전 것 적용)가 원천 차단된다.
+    ms = _find_plan_renewal_milestone_for_event(snap, dict(src), float(sim_now_match))
+    if ms is not None:
+        sync_t, occ = float(ms[0]), _ensure_panel_occ_keys(dict(ms[1]))
+        matched = "plan_milestone"
+        occ_src = "plan_milestone"
+
+    # 2순위: step 기반 sync_t (renewal_playback_port_sync_for_step) — plan 빌드와 동일 함수.
+    if sync_t is None:
+        step = _find_wall_renewal_step(sched, dict(src))
+        if step is None and sched is not None:
+            try:
+                from .playback_schedule import find_scheduled_step_for_anim_src
+
+                step = find_scheduled_step_for_anim_src(sched, dict(src))
+            except Exception:
+                step = None
+        if step is not None:
+            try:
+                from .playback_renewal_ports import (
+                    renewal_full_panel_occ_for_step,
+                    renewal_playback_port_sync_for_step,
+                )
+
+                st_t = renewal_playback_port_sync_for_step(step)
+                if st_t is not None:
+                    sync_t = float(st_t)
+                    matched = "step_milestone"
+                    base_occ = _ensure_panel_occ_keys(
+                        dict(snap.ports_at(max(0.0, float(sync_t) - 0.01)))
+                    )
+                    occ_step = renewal_full_panel_occ_for_step(
+                        step,
+                        base_occ=dict(base_occ),
+                        panel_ports=list(_PANEL_OCC_KEYS),
+                    )
+                    if isinstance(occ_step, dict) and occ_step:
+                        occ = _ensure_panel_occ_keys(dict(occ_step))
+                        occ_src = "step_full"
+            except Exception:
+                sync_t = None
+
+    # 3순위: src 단독 runtime 계산.
+    if sync_t is None:
+        sync_t = _resolve_renewal_sync_t_for_playback(ext, scr, src)
+        if sync_t is not None:
+            matched = "runtime"
 
     if sync_t is None:
+        if _renewal_debug_on(ext):
+            print(
+                f"[RENEWAL_DBG] scr={scr} NO_SYNC ev={src.get('event')} "
+                f"to={src.get('to_port_id') or src.get('port_id')} lot={src.get('lot_id')} "
+                f"path={src.get('path') or src.get('file')}",
+                flush=True,
+            )
         return False
 
-    occ = _ensure_panel_occ_keys(dict(snap.ports_at(float(sync_t))))
-    axes = resolve_playback_ui_axes(ext, scr)
+    if occ is None:
+        occ = _ensure_panel_occ_keys(dict(snap.ports_at(float(sync_t))))
+        occ_src = "ports_at"
 
-    # JSON wall 동안 sim_now 는 멈춰 있다 → renewal 적용 후 sim 이 sync_t 에 도달할 때까지
-    # heartbeat(plan ports_at(sim_now)) 가 pre-renewal 로 되돌리지 못하게 hold 를 건다.
-    try:
-        if float(axes.t_plan) + 1e-6 < float(sync_t):
-            _set_renewal_occ_hold(ext, scr, dict(occ), float(sync_t))
-    except Exception:
-        pass
+    if _renewal_debug_on(ext):
+        try:
+            sim_now = _sim_now_for_screen(ext, scr, None)
+        except Exception:
+            sim_now = -1.0
+        nz = {k: v for k, v in occ.items() if str(v or "").strip()}
+        nz_plan = {k: v for k, v in snap.ports_at(float(sync_t)).items() if str(v or "").strip()}
+        print(
+            f"[RENEWAL_DBG] scr={scr} ev={src.get('event')} "
+            f"to={src.get('to_port_id') or src.get('port_id')} lot={src.get('lot_id')} "
+            f"match={matched} occ_src={occ_src} sync_t={float(sync_t):.2f} sim_now={float(sim_now):.2f} "
+            f"occ={nz} plan_at_sync={nz_plan}",
+            flush=True,
+        )
+        _dump_plan_milestones_once(ext, scr, snap)
 
-    return _apply_plan_ports_to_panel(
-        ext,
-        scr,
-        occ,
-        t_display=float(axes.t_display),
-    )
+    # ── 단일 writer 원칙 ──────────────────────────────────────────────
+    # wall 은 패널에 직접 쓰지 않는다. renewal occ 를 hold 에만 넣고, 패널 반영은
+    # heartbeat 경로(refresh_playback_display_at_sim → _playback_ports_at_sim →
+    # _renewal_occ_for_playback_sync) 단 하나로만 한다. 이렇게 해야 "wall 이 쓴 값"과
+    # "heartbeat 이 쓴 값" 이 인접 프레임에 충돌해 포트가 깜빡이는(사라졌다 다시 뜨는)
+    # 사이드이펙트가 구조적으로 사라진다.
+    _set_renewal_occ_hold(ext, scr, dict(occ), float(sync_t))
+
+    refresh_playback_display_at_sim(ext, scr, force=True)
+    return True
 
 
 def refresh_playback_display_at_sim(
@@ -741,6 +1098,7 @@ __all__ = [
     "apply_playback_renewal_from_wall",
     "clear_plan_replay_floors",
     "clear_playback_plan_runtime_state",
+    "clear_renewal_occ_hold",
     "ensure_plan_snapshot",
     "ensure_playback_plans_for_results",
     "get_plan_ports_at_sim",

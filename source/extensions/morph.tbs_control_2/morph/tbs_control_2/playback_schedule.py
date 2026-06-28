@@ -180,19 +180,9 @@ def _apply_renewal_fields_for_json_step(
                 except Exception:
                     pass
 
-        if renewal_off is None:
-            return (
-                True,
-                None,
-                None,
-                ports_panel_renewal,
-                ports_after,
-                None,
-                (),
-                jp,
-            )
-
-        off = float(renewal_off)
+        # renewal 마커는 확정됐으나 offset 산출 실패/0 → JSON 시작(t0+lead)에 적용.
+        # None 으로 milestone 을 비우면 MOVE/REMOVED 가 한 박자 밀리므로 0 으로 보정한다.
+        off = 0.0 if (renewal_off is None or float(renewal_off) <= 1e-9) else float(renewal_off)
         t_playback_sync = playback_port_sync_sim_time(
             float(t0),
             float(proc),

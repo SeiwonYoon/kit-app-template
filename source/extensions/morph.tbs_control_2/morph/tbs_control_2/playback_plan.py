@@ -179,9 +179,14 @@ def _collect_schedule_port_occ_points(
     - 그 외 anim JSON: 공정 종료 1회.
     """
     from .playback_renewal_ports import (
+        renewal_full_panel_occ_for_step,
+        renewal_playback_port_sync_for_step,
         renewal_port_milestone_for_step,
         step_json_has_renewal_marker,
     )
+
+    panel_ports = ["INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"]
+    running: Dict[str, str] = {p: "" for p in panel_ports}
 
     out: List[Tuple[float, int, Dict[str, str]]] = []
     for step in schedule.steps or ():
@@ -193,12 +198,33 @@ def _collect_schedule_port_occ_points(
 
         is_renewal_json = bool(step.has_renewal) or step_json_has_renewal_marker(step)
         if is_renewal_json:
-            ms = renewal_port_milestone_for_step(step)
-            if ms is not None:
-                sync_t, occ_r = ms
-                if occ_r:
-                    out.append((float(sync_t), 50000 + int(step.index), dict(occ_r)))
-            # renewal JSON — proc_end·ports_occ_panel 경로 금지 (milestone 없어도 skip).
+            sync_t = renewal_playback_port_sync_for_step(step)
+            if sync_t is None:
+                sync_t = step.t_playback_port_sync
+            occ_r: Optional[Dict[str, str]] = None
+            if sync_t is not None:
+                ms = renewal_port_milestone_for_step(
+                    step,
+                    panel_ports=panel_ports,
+                    base_occ=dict(running),
+                )
+                if ms is not None:
+                    _, occ_r = ms
+                else:
+                    occ_r = renewal_full_panel_occ_for_step(
+                        step,
+                        base_occ=dict(running),
+                        panel_ports=panel_ports,
+                    )
+            if sync_t is not None and occ_r:
+                out.append((float(sync_t), 50000 + int(step.index), dict(occ_r)))
+                for k in panel_ports:
+                    running[k] = str(occ_r.get(k, "") or "")
+            elif step.ports_occ_after:
+                for k, v in step.ports_occ_after:
+                    ku = str(k).strip().upper()
+                    if ku in running:
+                        running[ku] = str(v or "")
             continue
 
         panel_pairs = step.ports_occ_panel if step.ports_occ_panel else step.ports_occ_after
@@ -218,6 +244,9 @@ def _collect_schedule_port_occ_points(
         if not occ_d:
             continue
         out.append((float(sync_t), 10000 + int(step.index), dict(occ_d)))
+        for k in panel_ports:
+            if k in occ_d:
+                running[k] = str(occ_d.get(k, "") or "")
     return out
 
 
