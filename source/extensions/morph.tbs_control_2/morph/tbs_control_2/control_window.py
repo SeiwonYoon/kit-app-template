@@ -7226,7 +7226,14 @@ def _drain_sim_log_queue(ext: Any) -> None:
         try:
             ev = getattr(ext, "_sim_prerun_done_evt", None)
             started = bool(getattr(ext, "_sim_playback_started", False))
-            if (not started) and ev is not None and hasattr(ev, "is_set") and ev.is_set():
+            playback_done = bool(getattr(ext, "_sim_playback_done", False))
+            if (
+                (not started)
+                and (not playback_done)
+                and ev is not None
+                and hasattr(ev, "is_set")
+                and ev.is_set()
+            ):
                 results = getattr(ext, "_sim_prerun_results_by_screen", None)
                 if isinstance(results, dict) and results:
                     try:
@@ -7509,6 +7516,15 @@ def _finalize_playback_if_done(ext: Any) -> None:
             except Exception:
                 pass
         ext._sim_playback_ui_sub = None
+    except Exception:
+        pass
+    # 재생 1회 완료 후 drain 이 프리런→재생 bootstrap 을 다시 타지 않게 정리(시뮬 로직·결과 표시는 유지).
+    try:
+        ev = getattr(ext, "_sim_prerun_done_evt", None)
+        if ev is not None and hasattr(ev, "clear"):
+            ev.clear()
+        ext._sim_prerun_results_by_screen = None
+        ext._sim_playback_schedule_by_screen = None
     except Exception:
         pass
 
@@ -11297,6 +11313,8 @@ def on_sim_reset_clicked(ext: Any) -> None:
         ext._sim_playback_runtime = None
         set_sim_playback_active(ext, False)
         ext._sim_playback_done = False
+        ext._sim_ep_bar_prerun_by_screen = {}
+        ext._sim_prerun_export_json_by_screen = {}
     except Exception:
         pass
     try:
