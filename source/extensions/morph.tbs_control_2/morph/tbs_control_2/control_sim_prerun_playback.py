@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .sim_lot_fix_proc import format_fix_meta_block, format_lot_id_display
 
@@ -353,6 +353,24 @@ def _post_anim_src_from_progress(p: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _post_anim_src_from_progress_and_event(
+    progress_p: Dict[str, Any],
+    event_p: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """progress + event payload 병합 — INOUT/BP 이동 lot·port 누락 방지."""
+    src = dict(_post_anim_src_from_progress(progress_p if isinstance(progress_p, dict) else {}))
+    ev = dict(event_p or {}) if isinstance(event_p, dict) else {}
+    if ev:
+        if not _s_val(src.get("event") or src.get("event_seq")):
+            src["event"] = _normalize_anim_event_seq(
+                _s_val(ev.get("seq") or ev.get("event_seq") or ev.get("sequence_name"))
+            )
+        for key in ("lot_id", "from_port_id", "to_port_id", "port_id", "event_port_id"):
+            if not _s_val(src.get(key)) and _s_val(ev.get(key)):
+                src[key] = _s_val(ev.get(key))
+    return src
+
+
 def predict_ports_occupancy_after_anim(occ_base: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
     """JSON(이동·안착·회수) 종료 직후 기대되는 ports_occupancy."""
     occ_pred = dict(occ_base or {})
@@ -376,6 +394,52 @@ def predict_ports_occupancy_after_anim(occ_base: Dict[str, Any], src: Dict[str, 
     return occ_pred
 
 
+def predict_ports_occupancy_at_playback_sync(
+    occ_base: Dict[str, Any],
+    progress_p: Dict[str, Any],
+    event_p: Optional[Dict[str, Any]] = None,
+    *,
+    at_t: float,
+    parsed_steps: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """
+    재생 sim 축 ``at_t`` 시점 panel occ (renewal wall 포함).
+
+    ``at_t >= playback_port_sync`` 이면 JSON 이벤트 post-anim predict 적용.
+    INOUT·EP 공통 — renewal wall 에서 ARRIVED/MOVE 반영.
+    """
+    occ = dict(occ_base or {})
+    src = _post_anim_src_from_progress_and_event(
+        progress_p if isinstance(progress_p, dict) else {},
+        event_p if isinstance(event_p, dict) else None,
+    )
+    try:
+        from .json_playback_timing import playback_port_sync_sim_time_from_progress
+
+        t_sync = playback_port_sync_sim_time_from_progress(
+            progress_p if isinstance(progress_p, dict) else {},
+            steps=parsed_steps,
+        )
+    except Exception:
+        t_sync = None
+    if t_sync is None:
+        return predict_ports_occupancy_after_anim(occ, src)
+    if float(at_t) + 1e-9 >= float(t_sync):
+        return predict_ports_occupancy_after_anim(occ, src)
+    return occ
+
+
+def panel_occ_tuple_from_dict(
+    occ: Mapping[str, str],
+    panel_ports: Sequence[str],
+) -> Tuple[Tuple[str, str], ...]:
+    return tuple(
+        (str(k).strip().upper(), str(occ.get(k, "") or ""))
+        for k in panel_ports
+        if str(k).strip()
+    )
+
+
 def anim_json_end_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
     """애니 포트 이벤트 RUNNING progress 의 JSON 종료 sim 시각 (back-align)."""
     if not isinstance(progress_p, dict):
@@ -397,7 +461,7 @@ def anim_json_end_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
 
 
 def anim_json_port_sync_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
-    """포트·막대 갱신 sim 시각 (renewal 우선)."""
+    """포트·막대 갱신 sim 시각 — 재생 축 ``playback_port_sync`` (renewal 우선)."""
     if not isinstance(progress_p, dict):
         return None
     if _s_val(progress_p.get("status")).upper() != "RUNNING":
@@ -408,10 +472,28 @@ def anim_json_port_sync_sim_time(progress_p: Dict[str, Any]) -> Optional[float]:
     t0 = _f_val(progress_p.get("event_start_sim_time"), -1.0)
     if t0 < 0.0:
         return None
-    try:
-        from .json_playback_timing import port_sync_sim_time_from_progress
+    json_path: Optional[str] = None
+    steps: Optional[List[Any]] = None
+    linked = str(progress_p.get("linked_anim_json") or "").strip()
+    if linked:
+        try:
+            from .sim_sequence_json import load_sim_sequence_steps, resolve_sim_sequence_json_path
 
-        return port_sync_sim_time_from_progress(progress_p, fallback_t=float(t0))
+            jp = resolve_sim_sequence_json_path(linked)
+            if jp is not None:
+                json_path = str(jp)
+                steps = load_sim_sequence_steps(str(jp))
+        except Exception:
+            pass
+    try:
+        from .json_playback_timing import playback_port_sync_sim_time_from_progress
+
+        return playback_port_sync_sim_time_from_progress(
+            progress_p,
+            fallback_t=float(t0),
+            json_path=json_path,
+            steps=steps if isinstance(steps, list) else None,
+        )
     except Exception:
         return anim_json_end_sim_time(progress_p)
 

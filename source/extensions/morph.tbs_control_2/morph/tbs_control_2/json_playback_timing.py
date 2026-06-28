@@ -1,11 +1,16 @@
 """
-JSON 재생 sim 축 타이밍 — back-align · renewal 포트 동기 시각 (SSOT).
+JSON 재생 sim 축 타이밍 — back-align · renewal 포트 동기 시각.
 
-규칙:
-  - anim <= proc: 앞 대기 후 끝 맞춤  → t_json_start = t0 + max(0, proc - anim)
-  - anim > proc:  t0 에서 시작, eff_sp 로 proc 안에 종료
-  - renewal 있음: 포트·막대 갱신은 renewal sim 시각 (첫 번째만)
-  - renewal 없음: JSON 종료 sim 시각
+두 축:
+  **back-align (``port_sync_sim_time``)** — 스케줄·Seek fail-safe·``effective_ports_occupancy_at_t``
+    - t_json_start = t0 + max(0, proc - anim)
+    - renewal: t_json_start + renewal_offset
+    - 그 외: t_json_end = t0 + proc
+
+  **재생 (``playback_port_sync_sim_time``)** — ``SimTimelinePlayer.sim_now`` · 프리런 막대 truncate
+    - JSON 러너는 sim ``t0 + json_lead`` 에 시작 (``_poll_playback_sim_aligned_json_starts``)
+    - renewal: t0 + json_lead + renewal_offset (포트 ``on_renewal_step`` 와 동일 sim 위치)
+    - 그 외: t0 + json_lead + min(anim, proc − json_lead) (= t0 + proc when anim ≤ proc)
 """
 
 from __future__ import annotations
@@ -14,7 +19,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .sequence_renewal import find_first_renewal_index, is_renewal_marker
+from .sequence_renewal import find_first_renewal_index, is_renewal_marker, is_renewal_marker
 
 
 def _f(x: Any, default: float = 0.0) -> float:
@@ -44,6 +49,39 @@ def json_lead_sec(proc_sec: float, anim_sec: float) -> float:
     if proc <= 1e-9:
         return 0.0
     return max(0.0, proc - anim)
+
+
+def resolve_playback_anim_sec(
+    proc_sec: float,
+    anim_sec: float,
+    *,
+    json_est_sec: float = 0.0,
+) -> float:
+    """
+    재생 sim 축 JSON 길이 — progress ``anim_sec`` 가 0 이면 프리런 JSON 추정치 사용.
+
+    ``anim_sec=0`` + ``proc>0`` 이면 ``lead=proc`` 가 되어 renewal sync 가 공정 종료 *이후*로
+    밀리는 버그를 막는다.
+    """
+    anim = max(0.0, float(anim_sec))
+    est = max(0.0, float(json_est_sec))
+    if anim <= 1e-9 and est > 1e-9:
+        anim = float(est)
+    return float(anim)
+
+
+def resolve_playback_proc_anim(
+    proc_sec: float,
+    anim_sec: float,
+    *,
+    json_est_sec: float = 0.0,
+) -> Tuple[float, float]:
+    """재생 sim 축 ``(proc, anim)`` — anim 추정 후 proc 보정."""
+    anim = resolve_playback_anim_sec(proc_sec, anim_sec, json_est_sec=json_est_sec)
+    proc = max(0.0, float(proc_sec))
+    if proc <= 1e-9 and anim > 1e-9:
+        proc = float(anim)
+    return float(proc), float(anim)
 
 
 def estimate_prefix_duration_sec(steps: List[Any], end_exclusive: int) -> float:
@@ -107,12 +145,57 @@ def estimate_prefix_duration_sec(steps: List[Any], end_exclusive: int) -> float:
     return max(0.0, float(t_cursor))
 
 
+def renewal_offset_fallback_from_steps(steps: List[Any]) -> Optional[float]:
+    """``control_window`` 없이 JSON step duration 만으로 renewal 전 1배속 경과."""
+    ri = find_first_renewal_index(list(steps or []))
+    if ri is None or int(ri) <= 0:
+        return None
+    total = 0.0
+    for i in range(int(ri)):
+        st = steps[i] if isinstance(steps[i], dict) else {}
+        if is_renewal_marker(st):
+            continue
+        dur = 0.0
+        for key in ("_runtime_duration", "duration"):
+            try:
+                v = float(st.get(key) or 0.0)
+                if v > 1e-9:
+                    dur = float(v)
+                    break
+            except Exception:
+                pass
+        if dur <= 1e-9:
+            try:
+                t_u = str(st.get("type") or "").strip().upper()
+                if t_u in ("USD_TIMELINE", "TIMESAMPLES_REPLAY"):
+                    sf = int(st.get("start_frame") or 0)
+                    ef = int(st.get("end_frame") or 0)
+                    if ef > sf:
+                        sp = float(st.get("speed_scale") or 1.0)
+                        dur = max(0.0, float(ef - sf) / 30.0 / max(0.01, sp))
+            except Exception:
+                pass
+        try:
+            if i > 0:
+                dur += max(0.0, int(st.get("step_delay_ms", 0)) / 1000.0)
+        except Exception:
+            pass
+        total += max(0.0, float(dur))
+    return float(total) if total > 1e-6 else None
+
+
 def renewal_info_from_steps(steps: List[Any]) -> Tuple[bool, Optional[float]]:
     """``(has_renewal, offset_sec_1x)`` — renewal 전까지 JSON 내 1배속 경과."""
     ri = find_first_renewal_index(list(steps or []))
     if ri is None:
         return False, None
     off = estimate_prefix_duration_sec(list(steps or []), int(ri))
+    if off is None or float(off) <= 1e-9:
+        off_fb = renewal_offset_fallback_from_steps(list(steps or []))
+        if off_fb is not None:
+            off = float(off_fb)
+    if off is None or float(off) <= 1e-9:
+        return True, None
     return True, float(off)
 
 
@@ -131,6 +214,40 @@ def renewal_info_from_json_path(json_path: Optional[str]) -> Tuple[bool, Optiona
         return False, None
 
 
+def playback_port_sync_sim_time(
+    t0: float,
+    proc_sec: float,
+    anim_sec: float,
+    *,
+    has_renewal: bool = False,
+    renewal_offset_sec: Optional[float] = None,
+) -> Optional[float]:
+    """
+    재생 sim 축 occ 마일스톤 — ``SimTimelinePlayer.sim_now`` truncate 와 동일.
+
+    JSON 러너는 ``t0 + json_lead`` 에 시작; renewal 은 그 이후 JSON 내 offset.
+    """
+    t0 = float(t0)
+    proc = max(0.0, float(proc_sec))
+    anim = max(0.0, float(anim_sec))
+    if proc <= 1e-9 and anim <= 1e-9:
+        return None
+    if proc <= 1e-9 and anim > 1e-9:
+        proc = anim
+    lead = json_lead_sec(proc, anim)
+    if has_renewal:
+        off = 0.0 if renewal_offset_sec is None else float(renewal_offset_sec)
+        return float(t0) + float(lead) + max(0.0, off)
+    if proc > 1e-9:
+        tail = float(anim) if anim > 1e-9 else float(proc)
+        if anim > 1e-9:
+            tail = min(float(anim), max(0.0, float(proc) - float(lead)))
+        return float(t0) + float(lead) + float(tail)
+    if anim > 1e-9:
+        return float(t0) + float(anim)
+    return None
+
+
 def port_sync_sim_time(
     t0: float,
     proc_sec: float,
@@ -139,10 +256,11 @@ def port_sync_sim_time(
     has_renewal: bool = False,
     renewal_offset_sec: Optional[float] = None,
 ) -> Optional[float]:
-    """포트·막대 갱신 sim 시각."""
+    """back-align 스케줄 축 포트·Seek fail-safe sim 시각."""
     t_start, t_end = compute_json_sim_window(t0, proc_sec, anim_sec)
-    if has_renewal and renewal_offset_sec is not None:
-        return float(t_start) + max(0.0, float(renewal_offset_sec))
+    if has_renewal:
+        off = 0.0 if renewal_offset_sec is None else float(renewal_offset_sec)
+        return float(t_start) + max(0.0, off)
     if t_end <= t_start + 1e-9 and anim_sec <= 1e-9:
         return None
     return float(t_end)
@@ -153,6 +271,7 @@ def timing_from_progress(
     *,
     json_path: Optional[str] = None,
     steps: Optional[List[Any]] = None,
+    json_est_sec: float = 0.0,
 ) -> Dict[str, Any]:
     """
     progress payload + JSON → 타이밍 dict.
@@ -164,8 +283,7 @@ def timing_from_progress(
     t0 = _f(p.get("event_start_sim_time"), _f(p.get("sim_time"), _f(p.get("t"), 0.0)))
     proc = _f(p.get("proc_sec"), 0.0)
     anim = _f(p.get("anim_sec"), 0.0)
-    if proc <= 1e-9 and anim > 1e-9:
-        proc = anim
+    proc, anim = resolve_playback_proc_anim(proc, anim, json_est_sec=float(json_est_sec))
     t_start, t_end = compute_json_sim_window(t0, proc, anim)
     lead = json_lead_sec(proc, anim)
 
@@ -230,7 +348,7 @@ def port_sync_sim_time_from_progress(
     fallback_t: float = 0.0,
     json_path: Optional[str] = None,
 ) -> Optional[float]:
-    """renewal 우선 포트·막대 갱신 sim 시각."""
+    """back-align 축 — renewal 우선 (Seek·fail-safe)."""
     p = dict(progress_p or {})
     ev_status = str(p.get("status") or "").strip().upper()
     if ev_status and ev_status != "RUNNING":
@@ -242,13 +360,48 @@ def port_sync_sim_time_from_progress(
     return info.get("t_port_sync")
 
 
+def playback_port_sync_sim_time_from_progress(
+    progress_p: Dict[str, Any],
+    *,
+    fallback_t: float = 0.0,
+    json_path: Optional[str] = None,
+    steps: Optional[List[Any]] = None,
+    json_est_sec: float = 0.0,
+) -> Optional[float]:
+    """재생 sim 축 — 프리런 막대 occ 마일스톤 (``sim_now`` truncate 와 동일)."""
+    p = dict(progress_p or {})
+    t0 = _f(p.get("event_start_sim_time"), _f(p.get("sim_time"), float(fallback_t)))
+    if t0 < 0.0:
+        t0 = float(fallback_t)
+    est = float(json_est_sec)
+    if est <= 1e-9 and json_path:
+        try:
+            from .playback_schedule import _estimate_json_sec
+
+            est = float(_estimate_json_sec(json_path))
+        except Exception:
+            est = 0.0
+    info = timing_from_progress(p, json_path=json_path, steps=steps, json_est_sec=float(est))
+    return playback_port_sync_sim_time(
+        t0,
+        float(info.get("proc", 0.0)),
+        float(info.get("anim", 0.0)),
+        has_renewal=bool(info.get("has_renewal")),
+        renewal_offset_sec=info.get("renewal_offset_sec"),
+    )
+
+
 __all__ = [
     "compute_json_sim_window",
     "estimate_prefix_duration_sec",
     "json_end_sim_time_from_progress",
     "json_lead_sec",
+    "playback_port_sync_sim_time",
+    "playback_port_sync_sim_time_from_progress",
     "port_sync_sim_time",
     "port_sync_sim_time_from_progress",
+    "resolve_playback_anim_sec",
+    "resolve_playback_proc_anim",
     "renewal_info_from_json_path",
     "renewal_info_from_steps",
     "timing_from_progress",

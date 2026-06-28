@@ -20,6 +20,7 @@ from .control_sim_prerun_playback import (
     _f_val,
     _normalize_anim_event_seq,
     _post_anim_src_from_progress,
+    _post_anim_src_from_progress_and_event,
     _progress_event_affects_ep,
     _s_val,
     predict_ports_occupancy_after_anim,
@@ -287,16 +288,18 @@ def _push_bar_rows_for_interval(
 ) -> None:
     if dt <= 1e-9:
         return
-    ep_states: List[str] = []
+    # ALL_EP 가 row_order 최상단이어도 EP 상태를 먼저 모아 집계한다.
+    ep_states: List[str] = [
+        _resolve_port_bar_state(ep, occ, foup_phase, fault_ports) for ep in ep_list
+    ]
+    all_ep_st = _aggregate_all_ep_state(ep_states)
     for row_name in row_order:
         if row_name not in rows:
             rows[row_name] = []
         if row_name == "ALL_EP":
-            st = _aggregate_all_ep_state(ep_states)
+            st = all_ep_st
         else:
             st = _resolve_port_bar_state(row_name, occ, foup_phase, fault_ports)
-            if row_name in ep_list:
-                ep_states.append(st)
         _push_bar_seg_state(rows[row_name], st, dt, cap_segments=cap_segments)
 
 
@@ -314,6 +317,39 @@ def compute_duration_sec_by_row(rows: Dict[str, List[Dict[str, Any]]]) -> Dict[s
                 pass
         out[str(row_name)] = {k: round(float(v), 4) for k, v in acc.items() if float(v) > 1e-9}
     return out
+
+
+_BAR_STATE_SUMMARY_LABEL: Dict[str, str] = {
+    BAR_STATE_EMPTY: "empty",
+    BAR_STATE_LOAD: "load",
+    BAR_STATE_PROC: "proc",
+    BAR_STATE_UNLOAD: "unload",
+    BAR_STATE_DOWN: "down",
+}
+
+
+def format_row_state_duration_summary(segs: List[Dict[str, Any]]) -> str:
+    """막대 1행 — 5상태별 누적 초 (0초 상태는 생략). 예: ``empty:12s proc:5s load:3s``."""
+    acc = {s: 0.0 for s in BAR_STATES}
+    for seg in segs or ():
+        if not isinstance(seg, dict):
+            continue
+        st = bar_state_from_seg(seg)
+        try:
+            acc[st] = float(acc.get(st, 0.0)) + float(seg.get("dur", 0.0))
+        except Exception:
+            pass
+    parts: List[str] = []
+    for st in BAR_STATES:
+        sec = float(acc.get(st, 0.0) or 0.0)
+        if sec <= 0.05:
+            continue
+        lbl = _BAR_STATE_SUMMARY_LABEL.get(st, st)
+        if abs(sec - round(sec)) < 0.05:
+            parts.append(f"{lbl}:{int(round(sec))}s")
+        else:
+            parts.append(f"{lbl}:{sec:.1f}s")
+    return " ".join(parts) if parts else "empty:0s"
 
 
 def _json_end_sim_time_from_progress(p: Dict[str, Any], *, fallback_t: float = 0.0) -> Optional[float]:
@@ -440,6 +476,412 @@ def truncate_bar_rows_at_t(rows: Dict[str, List[Dict[str, Any]]], t_cut: float) 
     return out
 
 
+def overlay_bar_rows_tip_from_occ(
+    rows_state: Dict[str, List[Dict[str, Any]]],
+    row_order: List[str],
+    ep_list: List[str],
+    occ: Dict[str, str],
+    *,
+    fault_ports: Optional[Set[str]] = None,
+    foup_active_ep: str = "",
+) -> None:
+    """
+    renewal lead 등 ``sim_now < plan sync`` 구간 — 막대 끝 색만 plan occ 로 보정 (시간축은 sim_now).
+    """
+    faults = fault_ports or set()
+    foup_phase: Dict[str, str] = {}
+    ep_active = str(foup_active_ep or "").strip().upper()
+    if ep_active.startswith("EP"):
+        foup_phase[ep_active] = BAR_STATE_PROC
+    ep_states = [
+        _resolve_port_bar_state(ep, occ, foup_phase, faults) for ep in ep_list
+    ]
+    all_ep_st = _aggregate_all_ep_state(ep_states)
+    tip_dur = 1e-6
+    for row_name in row_order:
+        want = all_ep_st if row_name == "ALL_EP" else _resolve_port_bar_state(
+            row_name, occ, foup_phase, faults
+        )
+        segs = rows_state.get(row_name)
+        if not isinstance(segs, list):
+            segs = []
+            rows_state[row_name] = segs
+        if not segs:
+            if want != BAR_STATE_EMPTY:
+                segs.append({"state": want, "dur": tip_dur})
+            continue
+        if bar_state_from_seg(segs[-1]) != want:
+            segs.append({"state": want, "dur": tip_dur})
+
+
+def _collect_foup_milestones_from_items(
+    sorted_items: Tuple[SimTimelineItem, ...],
+    seq_start: int = 0,
+) -> List[Tuple[float, int, str, Any]]:
+    """FOUP START/END 마일스톤 (event sim 시각)."""
+    out: List[Tuple[float, int, str, Any]] = []
+    seq_i = int(seq_start)
+    for it in sorted_items or ():
+        kind = str(it.kind or "").strip().lower()
+        if kind != "event" or not isinstance(it.payload, dict):
+            continue
+        try:
+            t_ev = float(getattr(it, "t", 0.0) or 0.0)
+        except Exception:
+            t_ev = 0.0
+        p = dict(it.payload)
+        seq_u = _s_val(p.get("seq")).upper()
+        port = _canonical_sim_port_key(_s_val(p.get("port_id")))
+        if seq_u == "FOUP_PROCESS_START" and port.startswith("EP"):
+            out.append((float(t_ev), seq_i, "foup_start", port))
+            seq_i += 1
+        elif seq_u == "FOUP_PROCESS_END" and port.startswith("EP"):
+            out.append((float(t_ev), seq_i, "foup_end", port))
+            seq_i += 1
+    return out
+
+
+def _collect_port_occ_snap_milestones_from_items(
+    sorted_items: Tuple[SimTimelineItem, ...],
+    seq_start: int = 0,
+) -> List[Tuple[float, int, str, Any]]:
+    """
+    progress/event 의 ``ports_occupancy`` 를 해당 sim 시각 t 에 즉시 반영.
+    JSON 종료 시각(occ)과 별도 — EP2·INOUT·BP 등 비-애니 이벤트 점유도 막대에 반영.
+    """
+    out: List[Tuple[float, int, str, Any]] = []
+    seq_i = int(seq_start)
+    last_sig = ""
+    for it in sorted_items or ():
+        kind = str(it.kind or "").strip().lower()
+        if kind not in ("event", "progress") or not isinstance(it.payload, dict):
+            continue
+        try:
+            t_ev = float(getattr(it, "t", 0.0) or 0.0)
+        except Exception:
+            t_ev = 0.0
+        p = dict(it.payload)
+        if kind == "progress":
+            st = _s_val(p.get("status")).upper()
+            el = _f_val(p.get("elapsed"), 0.0)
+            if st != "RUNNING" or abs(el) > 1e-9:
+                continue
+        po = p.get("ports_occupancy")
+        if not isinstance(po, dict) or not po:
+            continue
+        occ_d = {
+            str(k).strip().upper(): str(v or "")
+            for k, v in po.items()
+            if str(k).strip()
+        }
+        if not occ_d:
+            continue
+        sig = f"{t_ev:.4f}|{sorted(occ_d.items())}"
+        if sig == last_sig:
+            continue
+        last_sig = sig
+        out.append((float(t_ev), seq_i, "occ_snap", dict(occ_d)))
+        seq_i += 1
+    return out
+
+
+def _port_ui_milestones_from_tuples(
+    milestones: List[Tuple[float, int, str, Any]],
+) -> Tuple[Any, ...]:
+    """finalize 튜플 → ``PlaybackUIMilestone`` (occ replay SSOT)."""
+    try:
+        from .playback_plan import PlaybackUIMilestone
+
+        ms_list: List[Any] = []
+        for t, o, k, d in milestones or ():
+            kk = str(k)
+            if kk == "occ_full":
+                ms_list.append(
+                    PlaybackUIMilestone(t_sim=float(t), order=int(o), kind="occ_full", data=d)
+                )
+            elif kk == "occ_snap":
+                ms_list.append(
+                    PlaybackUIMilestone(t_sim=float(t), order=int(o), kind="occ_snap", data=d)
+                )
+            elif kk == "occ_plan":
+                ms_list.append(
+                    PlaybackUIMilestone(t_sim=float(t), order=int(o), kind="occ_plan", data=d)
+                )
+            elif kk == "occ" and isinstance(d, tuple) and len(d) >= 2:
+                src, panel_occ = d[0], d[1]
+                if isinstance(src, dict):
+                    occ_pred = predict_ports_occupancy_after_anim(
+                        dict(panel_occ or {}) if isinstance(panel_occ, dict) else {},
+                        dict(src),
+                    )
+                    ms_list.append(
+                        PlaybackUIMilestone(
+                            t_sim=float(t),
+                            order=int(o),
+                            kind="occ_plan",
+                            data=(dict(src), dict(occ_pred)),
+                        )
+                    )
+        return tuple(ms_list)
+    except Exception:
+        return ()
+
+
+def replay_bar_rows_at_t(
+    milestones: List[Tuple[float, int, str, Any]],
+    *,
+    sorted_items: Tuple[SimTimelineItem, ...],
+    t_cut: float,
+    row_order: List[str],
+    ep_list: List[str],
+    all_ports: List[str],
+    faults: Set[str],
+    plan_ports_at_t: Optional[Dict[str, str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    plan UI 마일스톤 + ``plan_ports_at_t`` SSOT → 막대 rows @ ``t_cut``.
+
+    포트 ``snap.ports_at(t_plan)`` 과 동일 occ 를 막대 끝(tip)에 맞춘다.
+    truncate(precomputed) 대신 재생 중 이 함수만 사용하면 포트·막대 불일치가 사라진다.
+    """
+    ms_sorted = sorted(
+        list(milestones or ()),
+        key=lambda m: (float(m[0]), int(m[1])),
+    )
+    rows: Dict[str, List[Dict[str, Any]]] = {r: [] for r in row_order}
+    init_occ = _initial_bar_occ_at_t0(sorted_items, all_ports)
+    bar_occ = dict(init_occ)
+    foup_phase: Dict[str, str] = {}
+    t_cur = 0.0
+    t_final = max(0.0, float(t_cut))
+    port_ui_ms = _port_ui_milestones_from_tuples(ms_sorted)
+
+    def _sync_bar_occ_from_plan(t_sim: float, *, at_final: bool = False) -> None:
+        nonlocal bar_occ
+        if at_final and plan_ports_at_t is not None:
+            for p in all_ports:
+                if p in plan_ports_at_t:
+                    bar_occ[p] = str(plan_ports_at_t.get(p, "") or "")
+            for ep in ep_list:
+                if not str(bar_occ.get(ep, "") or "").strip():
+                    foup_phase.pop(ep, None)
+            return
+        if not port_ui_ms:
+            return
+        try:
+            from .playback_plan import replay_ports_occ_at_t
+
+            replayed = replay_ports_occ_at_t(
+                port_ui_ms,
+                t_sim=float(t_sim),
+                all_ports=all_ports,
+                initial_occ=init_occ,
+            )
+            if isinstance(replayed, dict) and replayed:
+                bar_occ = dict(replayed)
+        except Exception:
+            pass
+        for ep in ep_list:
+            if not str(bar_occ.get(ep, "") or "").strip():
+                foup_phase.pop(ep, None)
+
+    def _apply_interval(t_end: float) -> None:
+        nonlocal t_cur
+        t_apply = min(float(t_end), float(t_final))
+        if t_apply > t_cur + 1e-9:
+            _push_bar_rows_for_interval(
+                rows,
+                row_order,
+                ep_list,
+                bar_occ,
+                foup_phase,
+                faults,
+                t_apply - t_cur,
+                cap_segments=None,
+            )
+            t_cur = t_apply
+
+    for t_m, _ord, kind, data in ms_sorted:
+        if float(t_m) > float(t_final) + 1e-9:
+            break
+        _apply_interval(float(t_m))
+        if kind == "foup_start":
+            ep = str(data or "").strip().upper()
+            if ep:
+                foup_phase[ep] = BAR_STATE_PROC
+        elif kind == "foup_end":
+            ep = str(data or "").strip().upper()
+            if ep:
+                foup_phase[ep] = BAR_STATE_UNLOAD
+        elif kind == "occ_full":
+            _sync_bar_occ_from_plan(float(t_m), at_final=False)
+        elif kind == "occ_snap":
+            _sync_bar_occ_from_plan(float(t_m), at_final=False)
+        elif kind in ("occ", "occ_plan"):
+            _sync_bar_occ_from_plan(float(t_m), at_final=False)
+            src = data[0] if isinstance(data, tuple) and len(data) >= 1 else {}
+            if isinstance(src, dict):
+                ev = _normalize_anim_event_seq(_s_val(src.get("event") or src.get("event_seq")))
+                if ev == "REMOVED":
+                    port = _canonical_sim_port_key(_s_val(src.get("port_id")))
+                    if port.startswith("EP"):
+                        foup_phase.pop(port, None)
+
+    _sync_bar_occ_from_plan(float(t_final), at_final=True)
+    if float(t_final) > float(t_cur) + 1e-9:
+        _push_bar_rows_for_interval(
+            rows,
+            row_order,
+            ep_list,
+            bar_occ,
+            foup_phase,
+            faults,
+            float(t_final) - float(t_cur),
+            cap_segments=None,
+        )
+    elif plan_ports_at_t is not None:
+        _push_bar_rows_for_interval(
+            rows,
+            row_order,
+            ep_list,
+            bar_occ,
+            foup_phase,
+            faults,
+            1e-6,
+            cap_segments=None,
+        )
+
+    for r in row_order:
+        rows[r] = merge_bar_row_segments(rows.get(r, []))
+    return rows
+
+
+def _finalize_ep_bar_from_milestones(
+    milestones: List[Tuple[float, int, str, Any]],
+    *,
+    sorted_items: Tuple[SimTimelineItem, ...],
+    final_sim_time: float,
+    total_est: float,
+    row_order: List[str],
+    ep_list: List[str],
+    all_ports: List[str],
+    buffer_ports: Tuple[str, ...],
+    faults: Set[str],
+) -> EpBarPrecomputed:
+    t_final = max(0.0, float(final_sim_time))
+    plan_occ: Optional[Dict[str, str]] = None
+    try:
+        from .playback_plan import replay_ports_occ_at_t
+
+        port_ui_ms = _port_ui_milestones_from_tuples(list(milestones or ()))
+        if port_ui_ms:
+            plan_occ = replay_ports_occ_at_t(
+                port_ui_ms,
+                t_sim=float(t_final),
+                all_ports=all_ports,
+                initial_occ=_initial_bar_occ_at_t0(sorted_items, all_ports),
+            )
+    except Exception:
+        plan_occ = None
+
+    rows = replay_bar_rows_at_t(
+        list(milestones or ()),
+        sorted_items=sorted_items,
+        t_cut=float(t_final),
+        row_order=row_order,
+        ep_list=ep_list,
+        all_ports=all_ports,
+        faults=faults,
+        plan_ports_at_t=plan_occ,
+    )
+
+    te = float(total_est)
+    if te <= 0.0:
+        te = max(30.0, t_final)
+
+    dur_by = compute_duration_sec_by_row(rows)
+    return EpBarPrecomputed(
+        total_est=float(te),
+        rows=rows,
+        ep_ports=tuple(ep_list),
+        buffer_ports=buffer_ports,
+        row_order=tuple(row_order),
+        duration_sec_by_row=dur_by,
+        fault_ports=tuple(sorted(faults)),
+    )
+
+
+def build_ep_bar_from_playback_schedule(
+    schedule: Any,
+    items: Tuple[SimTimelineItem, ...],
+    *,
+    final_sim_time: float,
+    ep_ports: Optional[List[str]] = None,
+    ep_count_idx: int = 0,
+    ebs_enabled: bool = True,
+    fault_ports: Optional[Set[str]] = None,
+) -> EpBarPrecomputed:
+    """
+    프리런 ``PlaybackSchedule.ui_milestones`` SSOT → 5상태 막대 (포트와 동일 마일스톤).
+    """
+    total_est = max(0.0, float(final_sim_time))
+    faults = {str(p).strip().upper() for p in (fault_ports or set()) if str(p).strip()}
+    row_order = bar_graph_row_order(int(ep_count_idx), ebs_enabled=bool(ebs_enabled))
+    ep_list = [r for r in row_order if r.startswith("EP")]
+    if isinstance(ep_ports, list) and ep_ports:
+        ep_list = [str(x).strip().upper() for x in ep_ports if str(x).strip().upper().startswith("EP")]
+    if not ep_list:
+        ep_list = ["EP1", "EP2"] + (["EP3"] if int(ep_count_idx) else [])
+    buffer_ports = tuple(r for r in row_order if r.startswith("BP"))
+    all_ports = [r for r in row_order if r != "ALL_EP"]
+
+    sorted_items = _sorted_timeline_items_for_bar(items)
+
+    milestones: List[Tuple[float, int, str, Any]] = []
+    ui_ms = getattr(schedule, "ui_milestones", None) or ()
+    if ui_ms:
+        try:
+            from .playback_plan import milestones_to_finalize_tuples
+
+            milestones = milestones_to_finalize_tuples(ui_ms)
+        except Exception:
+            milestones = []
+    if not milestones:
+        return build_ep_bar_from_timeline_replay(
+            items,
+            final_sim_time=float(final_sim_time),
+            ep_ports=ep_ports,
+            ep_count_idx=int(ep_count_idx),
+            ebs_enabled=bool(ebs_enabled),
+            fault_ports=fault_ports,
+        )
+
+    return _finalize_ep_bar_from_milestones(
+        milestones,
+        sorted_items=sorted_items,
+        final_sim_time=float(final_sim_time),
+        total_est=float(total_est),
+        row_order=row_order,
+        ep_list=ep_list,
+        all_ports=all_ports,
+        buffer_ports=buffer_ports,
+        faults=faults,
+    )
+
+
+def _sorted_timeline_items_for_bar(items: Tuple[SimTimelineItem, ...]) -> Tuple[SimTimelineItem, ...]:
+    kind_prio = {"log": 0, "event": 1, "progress": 2}
+    try:
+        return tuple(
+            sorted(
+                (it for it in (items or ()) if isinstance(it, SimTimelineItem)),
+                key=lambda it: (float(getattr(it, "t", 0.0) or 0.0), int(kind_prio.get(str(it.kind), 9))),
+            )
+        )
+    except Exception:
+        return ()
+
+
 def build_ep_bar_from_timeline_replay(
     items: Tuple[SimTimelineItem, ...],
     *,
@@ -452,7 +894,9 @@ def build_ep_bar_from_timeline_replay(
     """
     프리런 타임라인 → 5상태 막대 사전 계산 (EP + ALL_EP + INOUT + BP).
 
-  JSON 종료 시점에 ports_occupancy 반영, FOUP START/END 로 proc/unload 구간 표시.
+    occ 마일스톤: ``occ_snap`` (이벤트 sim 시각 ports_occupancy),
+    ``playback_port_sync_sim_time_from_progress`` (JSON 종료·renewal 축).
+    FOUP START/END 는 event sim 시각 그대로.
     """
     total_est = max(0.0, float(final_sim_time))
     faults = {str(p).strip().upper() for p in (fault_ports or set()) if str(p).strip()}
@@ -476,9 +920,35 @@ def build_ep_bar_from_timeline_replay(
     except Exception:
         sorted_items = ()
 
+    event_by_t: Dict[float, Dict[str, Any]] = {}
+    for it in sorted_items:
+        if str(it.kind or "").strip().lower() != "event" or not isinstance(it.payload, dict):
+            continue
+        try:
+            t_e = float(getattr(it, "t", 0.0) or 0.0)
+        except Exception:
+            t_e = 0.0
+        event_by_t[float(t_e)] = dict(it.payload)
+
+    def _event_payload_at_t(t_sim: float) -> Optional[Dict[str, Any]]:
+        ep = event_by_t.get(float(t_sim))
+        if isinstance(ep, dict):
+            return ep
+        best: Optional[Dict[str, Any]] = None
+        best_d = 1e9
+        for t_k, cand in event_by_t.items():
+            d = abs(float(t_k) - float(t_sim))
+            if d <= 1e-4 and d < best_d:
+                best_d = d
+                best = cand
+        return best
+
     Milestone = Tuple[float, int, str, Any]
     milestones: List[Milestone] = []
-    seq_i = 0
+    milestones.extend(_collect_foup_milestones_from_items(sorted_items, seq_start=0))
+    seq_i = len(milestones)
+    milestones.extend(_collect_port_occ_snap_milestones_from_items(sorted_items, seq_start=seq_i))
+    seq_i = len(milestones)
 
     panel_occ: Dict[str, str] = {}
     for it in sorted_items:
@@ -487,17 +957,7 @@ def build_ep_bar_from_timeline_replay(
             t_ev = float(getattr(it, "t", 0.0) or 0.0)
         except Exception:
             t_ev = 0.0
-        if kind == "event" and isinstance(it.payload, dict):
-            p = dict(it.payload)
-            seq_u = _s_val(p.get("seq")).upper()
-            port = _canonical_sim_port_key(_s_val(p.get("port_id")))
-            if seq_u == "FOUP_PROCESS_START" and port.startswith("EP"):
-                milestones.append((t_ev, seq_i, "foup_start", port))
-                seq_i += 1
-            elif seq_u == "FOUP_PROCESS_END" and port.startswith("EP"):
-                milestones.append((t_ev, seq_i, "foup_end", port))
-                seq_i += 1
-        elif kind == "progress" and isinstance(it.payload, dict):
+        if kind == "progress" and isinstance(it.payload, dict):
             p = dict(it.payload)
             po = p.get("ports_occupancy")
             if isinstance(po, dict) and po:
@@ -509,12 +969,27 @@ def build_ep_bar_from_timeline_replay(
             ev = _normalize_anim_event_seq(_s_val(p.get("event_seq") or p.get("sequence_name")))
             if ev not in _ANIM_PORT_UPDATE_SEQS:
                 continue
+            json_path: Optional[str] = None
             try:
-                from .json_playback_timing import port_sync_sim_time_from_progress
+                from .playback_schedule import resolve_json_path_for_timeline_event
 
-                t_port_sync = port_sync_sim_time_from_progress(
+                event_p = _event_payload_at_t(float(t_ev))
+                _, jp, _ = resolve_json_path_for_timeline_event(
+                    ev,
+                    event_p,
+                    _s_val(p.get("linked_anim_json")),
+                )
+                if jp:
+                    json_path = str(jp)
+            except Exception:
+                json_path = None
+            try:
+                from .json_playback_timing import playback_port_sync_sim_time_from_progress
+
+                t_port_sync = playback_port_sync_sim_time_from_progress(
                     p,
                     fallback_t=_f_val(p.get("sim_time", it.t), t_ev),
+                    json_path=json_path,
                 )
             except Exception:
                 t_port_sync = _json_end_sim_time_from_progress(
@@ -528,89 +1003,28 @@ def build_ep_bar_from_timeline_replay(
                     float(t_port_sync),
                     seq_i,
                     "occ",
-                    (_post_anim_src_from_progress(p), dict(panel_occ)),
+                    (
+                        _post_anim_src_from_progress_and_event(
+                            p, _event_payload_at_t(float(t_ev))
+                        ),
+                        dict(panel_occ),
+                    ),
                 )
             )
             seq_i += 1
 
     milestones.sort(key=lambda m: (float(m[0]), int(m[1])))
 
-    rows: Dict[str, List[Dict[str, Any]]] = {r: [] for r in row_order}
-    bar_occ = _initial_bar_occ_at_t0(sorted_items, all_ports)
-    foup_phase: Dict[str, str] = {}
-    t_cur = 0.0
-    t_final = max(0.0, float(final_sim_time))
-
-    def _apply_interval(t_end: float) -> None:
-        nonlocal t_cur
-        t_apply = min(float(t_end), float(t_final))
-        if t_apply > t_cur + 1e-9:
-            _push_bar_rows_for_interval(
-                rows,
-                row_order,
-                ep_list,
-                bar_occ,
-                foup_phase,
-                faults,
-                t_apply - t_cur,
-                cap_segments=None,
-            )
-            t_cur = t_apply
-
-    for t_m, _ord, kind, data in milestones:
-        _apply_interval(float(t_m))
-        if kind == "foup_start":
-            ep = str(data or "").strip().upper()
-            if ep:
-                foup_phase[ep] = BAR_STATE_PROC
-        elif kind == "foup_end":
-            ep = str(data or "").strip().upper()
-            if ep:
-                foup_phase[ep] = BAR_STATE_UNLOAD
-        elif kind == "occ":
-            src, occ_snap = data
-            occ_pred = predict_ports_occupancy_after_anim(dict(occ_snap), dict(src))
-            for port in all_ports:
-                if port in occ_pred:
-                    bar_occ[port] = str(occ_pred.get(port, "") or "")
-                elif port in occ_snap:
-                    bar_occ[port] = str(occ_pred.get(port, bar_occ.get(port, "")) or "")
-            ev = _normalize_anim_event_seq(_s_val(src.get("event") or src.get("event_seq")))
-            if ev == "REMOVED":
-                port = _canonical_sim_port_key(_s_val(src.get("port_id")))
-                if port.startswith("EP"):
-                    foup_phase.pop(port, None)
-            for ep in ep_list:
-                if not str(bar_occ.get(ep, "") or "").strip():
-                    foup_phase.pop(ep, None)
-
-    if t_final > t_cur + 1e-9:
-        _push_bar_rows_for_interval(
-            rows,
-            row_order,
-            ep_list,
-            bar_occ,
-            foup_phase,
-            faults,
-            t_final - t_cur,
-            cap_segments=None,
-        )
-
-    for r in row_order:
-        rows[r] = merge_bar_row_segments(rows.get(r, []))
-
-    if total_est <= 0.0:
-        total_est = max(30.0, t_final)
-
-    dur_by = compute_duration_sec_by_row(rows)
-    return EpBarPrecomputed(
+    return _finalize_ep_bar_from_milestones(
+        milestones,
+        sorted_items=sorted_items,
+        final_sim_time=float(final_sim_time),
         total_est=float(total_est),
-        rows=rows,
-        ep_ports=tuple(ep_list),
+        row_order=row_order,
+        ep_list=ep_list,
+        all_ports=all_ports,
         buffer_ports=buffer_ports,
-        row_order=tuple(row_order),
-        duration_sec_by_row=dur_by,
-        fault_ports=tuple(sorted(faults)),
+        faults=faults,
     )
 
 
@@ -747,10 +1161,14 @@ __all__ = [
     "bar_state_color",
     "bar_state_from_seg",
     "build_ep_bar_from_progress_items",
+    "build_ep_bar_from_playback_schedule",
     "build_ep_bar_from_timeline_replay",
     "build_prerun_export_document",
     "compute_duration_sec_by_row",
+    "format_row_state_duration_summary",
     "merge_bar_row_segments",
+    "replay_bar_rows_at_t",
     "truncate_bar_rows_at_t",
+    "overlay_bar_rows_tip_from_occ",
     "write_prerun_export_json",
 ]

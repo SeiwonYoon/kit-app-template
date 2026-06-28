@@ -364,6 +364,23 @@ def bootstrap_playback_after_prerun(
     gate_fn: Optional[GateFn] = None,
 ) -> SimPlaybackRuntime:
     """프리런 완료 후 재생 런타임 기동 (1·N 화면 공통)."""
+    try:
+        from .control_sim_playback_plan import ensure_playback_plans_for_results
+
+        ensure_playback_plans_for_results(ext, results)
+        try:
+            from .control_sim_playback_plan import refresh_playback_display_at_sim
+
+            for scr_k in (results or {}):
+                try:
+                    scr_i = int(scr_k)
+                except Exception:
+                    continue
+                refresh_playback_display_at_sim(ext, scr_i, 0.0, force=True)
+        except Exception:
+            pass
+    except Exception:
+        pass
     return SimPlaybackRuntime.start(ext, results, emit_fn, speed_fn, gate_fn)
 
 
