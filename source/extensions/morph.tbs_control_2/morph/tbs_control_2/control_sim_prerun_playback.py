@@ -940,6 +940,9 @@ class SimTimelinePlayer:
         self._sim_now_by_screen: Dict[int, float] = {}
         self._cursor_by_screen: Dict[int, int] = {}
         self._last_wall_by_screen: Dict[int, float] = {}
+        # gated 이벤트(JSON dispatch)가 막혀 커서가 고정된 동안, 그 뒤에서 먼저 내보낸
+        # non-gated 이벤트(FOUP_PROCESS_*/PORT_OCC_REFRESH) 인덱스. 커서가 따라오면 건너뛴다.
+        self._skipped_by_screen: Dict[int, set] = {}
 
     def start(self) -> None:
         with self._lock:
@@ -948,6 +951,7 @@ class SimTimelinePlayer:
             self._cursor_by_screen = {scr: 0 for scr in self._results.keys()}
             self._sim_now_by_screen = {scr: 0.0 for scr in self._results.keys()}
             self._last_wall_by_screen = {scr: now_wall for scr in self._results.keys()}
+            self._skipped_by_screen = {scr: set() for scr in self._results.keys()}
 
     def stop(self) -> None:
         with self._lock:
@@ -978,6 +982,7 @@ class SimTimelinePlayer:
             self._sim_now_by_screen[scr] = t
             self._cursor_by_screen[scr] = ic
             self._last_wall_by_screen[scr] = time.perf_counter()
+            self._skipped_by_screen[scr] = set()
             self._playing = True
 
     def advance_sim_clock(self) -> None:
@@ -999,56 +1004,126 @@ class SimTimelinePlayer:
                 self._sim_now_by_screen[scr] = float(t_sim)
                 self._last_wall_by_screen[scr] = float(now_wall)
 
+    @staticmethod
+    def _event_needs_json_gate(payload: Any) -> bool:
+        """JSON 시퀀스를 dispatch 하는 이벤트만 emit 게이트(러너 busy)를 받는다.
+
+        FOUP_PROCESS_START/END·PORT_OCC_REFRESH 는 SequenceRunner 를 거치지 않는
+        독립 동작이므로 게이트와 무관하게 자기 sim 시각에 바로 내보낸다.
+        """
+        if not isinstance(payload, dict):
+            return True
+        seq = str(payload.get("seq") or payload.get("event") or "").strip().upper()
+        if not seq:
+            return False
+        return seq not in ("PORT_OCC_REFRESH", "FOUP_PROCESS_START", "FOUP_PROCESS_END")
+
+    def _safe_emit(self, item: Any, scr: int) -> None:
+        try:
+            self._emit(item.kind, item.payload, int(scr))
+        except Exception:
+            pass
+
+    def _gate_open(self, scr: int) -> bool:
+        if self._event_emit_allowed is None:
+            return True
+        try:
+            return bool(self._event_emit_allowed(int(scr)))
+        except Exception:
+            return False
+
     def emit_due_items(self, *, max_emits: int = 24) -> int:
-        """``sim_now`` 이하 타임라인 항목 emit (프레임당 상한)."""
+        """``sim_now`` 이하 타임라인 항목 emit (프레임당 상한).
+
+        gated 이벤트(JSON dispatch)가 러너 busy 로 막히면 커서를 고정하되, 그 뒤의
+        non-gated 이벤트(FOUP_PROCESS_*/PORT_OCC_REFRESH)는 먼저 내보낸다. 이렇게 하면
+        2화면에서 한쪽 JSON 이 길어져도 FOUP 공정이 제 sim 시각에 시작된다.
+        """
         emitted = 0
         max_n = max(1, int(max_emits))
         for scr, res in self._results.items():
             t_sim = self.sim_now(scr)
-            i = 0
             with self._lock:
                 i = int(self._cursor_by_screen.get(scr, 0))
+                skipped = self._skipped_by_screen.get(scr)
+                if skipped is None:
+                    skipped = set()
+                    self._skipped_by_screen[scr] = skipped
             items = res.items
             event_emitted_this_tick = False
-            while i < len(items) and float(items[i].t) <= float(t_sim) + 1e-9 and emitted < max_n:
-                it = items[i]
-                if str(it.kind) == "event":
-                    if event_emitted_this_tick:
-                        break
-                    if self._event_emit_allowed is not None:
-                        try:
-                            if not bool(self._event_emit_allowed(int(scr))):
-                                break
-                        except Exception:
+            cursor_frozen = False
+            j = i
+            while j < len(items) and float(items[j].t) <= float(t_sim) + 1e-9 and emitted < max_n:
+                it = items[j]
+                # 앞서 out-of-order 로 이미 내보낸 항목 — 커서만 따라잡는다.
+                if j in skipped:
+                    if not cursor_frozen:
+                        skipped.discard(j)
+                        i = j + 1
+                    j += 1
+                    continue
+                kind = str(it.kind)
+                if kind == "event":
+                    needs_gate = self._event_needs_json_gate(it.payload)
+                    if needs_gate:
+                        # 앞의 gated 이벤트가 아직 안 나갔으면 뒤 gated 이벤트도 보류(JSON 순서 보존).
+                        if cursor_frozen or event_emitted_this_tick:
                             break
-                    try:
-                        self._emit(it.kind, it.payload, int(scr))
-                    except Exception:
-                        pass
-                    emitted += 1
-                    i += 1
-                    event_emitted_this_tick = True
-                    # 동일 sim_time 의 progress(공정 단계)는 같은 틱에 함께 emit — 연계 JSON 표시 어긋남 방지
-                    if (
-                        i < len(items)
-                        and str(items[i].kind) == "progress"
-                        and abs(float(items[i].t) - float(it.t)) <= 1e-9
-                        and emitted < max_n
-                    ):
-                        it_p = items[i]
-                        try:
-                            self._emit(it_p.kind, it_p.payload, int(scr))
-                        except Exception:
-                            pass
+                        if not self._gate_open(int(scr)):
+                            # 이 gated 이벤트는 보류 — 커서 고정, 뒤의 non-gated 만 계속 탐색.
+                            cursor_frozen = True
+                            j += 1
+                            continue
+                        self._safe_emit(it, int(scr))
                         emitted += 1
-                        i += 1
-                    break
-                try:
-                    self._emit(it.kind, it.payload, int(scr))
-                except Exception:
-                    pass
+                        event_emitted_this_tick = True
+                        i = j + 1
+                        j += 1
+                        # 동일 sim_time progress(공정 단계) 동반 emit — 연계 JSON 표시 어긋남 방지
+                        if (
+                            j < len(items)
+                            and str(items[j].kind) == "progress"
+                            and abs(float(items[j].t) - float(it.t)) <= 1e-9
+                            and emitted < max_n
+                            and j not in skipped
+                        ):
+                            self._safe_emit(items[j], int(scr))
+                            emitted += 1
+                            i = j + 1
+                            j += 1
+                        break
+                    # non-gated 이벤트: 게이트 무시하고 자기 sim 시각에 바로 emit
+                    self._safe_emit(it, int(scr))
+                    emitted += 1
+                    if cursor_frozen:
+                        skipped.add(j)
+                    else:
+                        i = j + 1
+                    cur_t = float(it.t)
+                    j += 1
+                    if (
+                        j < len(items)
+                        and str(items[j].kind) == "progress"
+                        and abs(float(items[j].t) - cur_t) <= 1e-9
+                        and emitted < max_n
+                        and j not in skipped
+                    ):
+                        self._safe_emit(items[j], int(scr))
+                        emitted += 1
+                        if cursor_frozen:
+                            skipped.add(j)
+                        else:
+                            i = j + 1
+                        j += 1
+                    continue
+                # log / progress
+                self._safe_emit(it, int(scr))
                 emitted += 1
-                i += 1
+                if cursor_frozen:
+                    skipped.add(j)
+                else:
+                    i = j + 1
+                j += 1
             with self._lock:
                 self._cursor_by_screen[scr] = int(i)
         return int(emitted)
