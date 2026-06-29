@@ -870,17 +870,29 @@ def _dispatch_command(ext: Any, data: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
-        # 1b) 시뮬 모니터 창
+        # 1b) 시뮬 모니터 창(화면별 N개)
         try:
-            _set_visible(getattr(ext, "_sim_monitor_window", None), not hide)
-        except Exception:
-            pass
+            from .control_window import _iter_sim_monitor_windows
 
-        # 1c) 타임테이블 창
-        try:
-            _set_visible(getattr(ext, "_sim_timetable_window", None), not hide)
+            for mon in _iter_sim_monitor_windows(ext):
+                _set_visible(mon, not hide)
         except Exception:
-            pass
+            try:
+                _set_visible(getattr(ext, "_sim_monitor_window", None), not hide)
+            except Exception:
+                pass
+
+        # 1c) 타임테이블 창(화면별 N개)
+        try:
+            from .control_window import _iter_sim_timetable_windows
+
+            for tt in _iter_sim_timetable_windows(ext):
+                _set_visible(tt, not hide)
+        except Exception:
+            try:
+                _set_visible(getattr(ext, "_sim_timetable_window", None), not hide)
+            except Exception:
+                pass
 
         # 1d) fix 공정 입력 창
         try:

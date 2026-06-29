@@ -2446,6 +2446,355 @@ def _sim_monitor_channel_count(ext: Any) -> int:
     return max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
 
 
+def _sim_use_per_screen_windows(ext: Any) -> bool:
+    """뷰포트 2분할 이상이면 모니터·타임테이블을 화면별 별도 ``ui.Window`` 로 분리한다."""
+    return _sim_monitor_channel_count(ext) >= 2
+
+
+def _sim_monitor_window_title(screen: int, n: int) -> str:
+    if int(n) <= 1:
+        return "TBS 시뮬 모니터"
+    return f"TBS 시뮬 모니터 (화면{int(screen)})"
+
+
+def _sim_timetable_window_title(screen: int, n: int) -> str:
+    if int(n) <= 1:
+        return "TBS 타임테이블"
+    return f"TBS 타임테이블 (화면{int(screen)})"
+
+
+def _destroy_workspace_window_by_title(title: str) -> None:
+    try:
+        ws = getattr(ui, "Workspace", None)
+        if ws is not None and hasattr(ws, "get_window"):
+            old = ws.get_window(str(title))
+            if old is not None:
+                try:
+                    old.destroy()
+                except Exception:
+                    try:
+                        old.visible = False
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def _screen_dict(ext: Any, attr: str) -> Dict[str, Any]:
+    by = getattr(ext, attr, None)
+    if not isinstance(by, dict):
+        by = {}
+        setattr(ext, attr, by)
+    return by
+
+
+def _iter_sim_monitor_windows(ext: Any) -> List[Any]:
+    n = _sim_monitor_channel_count(ext)
+    if _sim_use_per_screen_windows(ext):
+        by = _screen_dict(ext, "_sim_monitor_windows_by_screen")
+        out: List[Any] = []
+        for s in range(1, n + 1):
+            w = by.get(str(s))
+            if w is not None:
+                out.append(w)
+        return out
+    w = getattr(ext, "_sim_monitor_window", None)
+    return [w] if w is not None else []
+
+
+def _iter_sim_timetable_windows(ext: Any) -> List[Any]:
+    n = _sim_monitor_channel_count(ext)
+    if _sim_use_per_screen_windows(ext):
+        by = _screen_dict(ext, "_sim_timetable_windows_by_screen")
+        out: List[Any] = []
+        for s in range(1, n + 1):
+            w = by.get(str(s))
+            if w is not None:
+                out.append(w)
+        return out
+    w = getattr(ext, "_sim_timetable_window", None)
+    return [w] if w is not None else []
+
+
+def _ensure_sim_monitor_window_shell(ext: Any, screen: int) -> None:
+    """화면 ``screen`` 용 시뮬 모니터 ``ui.Window`` 셸(FOUP·split host)을 보장한다."""
+    key = str(int(screen))
+    wins = _screen_dict(ext, "_sim_monitor_windows_by_screen")
+    if wins.get(key) is not None:
+        return
+
+    n = _sim_monitor_channel_count(ext)
+    title = _sim_monitor_window_title(int(screen), n)
+    _destroy_workspace_window_by_title(title)
+
+    foup_hosts = _screen_dict(ext, "_sim_foup_outer_host_by_screen")
+    foup_inners = _screen_dict(ext, "_sim_foup_inner_stack_by_screen")
+    split_hosts = _screen_dict(ext, "_sim_monitor_split_host_by_screen")
+
+    win = ui.Window(title, width=300, height=620)
+    with win.frame:
+        with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
+            with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
+                with ui.VStack(padding=8, spacing=4, height=ui.Fraction(1.0)):
+                    if int(screen) == 1:
+                        with ui.HStack(spacing=8, height=28):
+                            ui.Label(
+                                "시뮬 진행 모니터",
+                                width=140,
+                                height=24,
+                                style={"color": 0xFFDDDDDD},
+                            )
+                            ui.Spacer()
+                            ui.Button(
+                                "진행현황+Sim로그 복사",
+                                width=180,
+                                clicked_fn=lambda: on_copy_sim_progress(ext),
+                            )
+                    foup_hdr = (
+                        "FOUP 공정"
+                        if n <= 1
+                        else f"FOUP 공정 · 화면{int(screen)}"
+                    )
+                    ui.Label(foup_hdr, height=18, style={"color": 0xFFBFE7FF})
+                    with ui.Frame(height=78, style={"background_color": 0xFF1A1E26, "border_width": 0}):
+                        foup_host = ui.VStack(spacing=2, height=74)
+                        with foup_host:
+                            foup_inner = ui.VStack(spacing=2)
+                    split_host = ui.Frame(
+                        height=ui.Fraction(1.0),
+                        style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
+                    )
+
+    wins[key] = win
+    foup_hosts[key] = foup_host
+    foup_inners[key] = foup_inner
+    split_hosts[key] = split_host
+
+    if int(screen) == 1:
+        ext._sim_monitor_window = win
+        ext._sim_foup_outer_host = foup_host
+        ext._sim_foup_inner_stack = foup_inner
+        ext._sim_monitor_split_host = split_host
+        try:
+            ext._sim_foup_layout_n = 0
+            ext._sim_foup_labels_by_screen = {}
+        except Exception:
+            pass
+        if getattr(ext, "_rebuild_sim_monitor_split_ui_fn", None) is None:
+            ext._rebuild_sim_monitor_split_ui_fn = lambda: _rebuild_all_sim_ui_panels(ext)
+        if getattr(ext, "_rebuild_sim_timetable_split_ui_fn", None) is None:
+            ext._rebuild_sim_timetable_split_ui_fn = lambda: _rebuild_all_sim_ui_panels(ext)
+        if getattr(ext, "_sim_port_state_label", None) is None:
+            ext._sim_port_state_label = ui.Label(
+                "", word_wrap=False, width=0, height=0, visible=False
+            )
+
+
+def _destroy_sim_monitor_window_shell(ext: Any, screen: int) -> None:
+    key = str(int(screen))
+    wins = _screen_dict(ext, "_sim_monitor_windows_by_screen")
+    win = wins.pop(key, None)
+    if win is not None:
+        try:
+            win.destroy()
+        except Exception:
+            pass
+    for attr in (
+        "_sim_foup_outer_host_by_screen",
+        "_sim_foup_inner_stack_by_screen",
+        "_sim_monitor_split_host_by_screen",
+        "_sim_monitor_split_inner_by_screen",
+    ):
+        d = getattr(ext, attr, None)
+        if isinstance(d, dict):
+            d.pop(key, None)
+
+
+def _sync_sim_monitor_window_shells(ext: Any) -> None:
+    """분할 수에 맞춰 모니터 창을 1개(단일) 또는 화면별 N개로 맞춘다."""
+    n = _sim_monitor_channel_count(ext)
+    if _sim_use_per_screen_windows(ext):
+        for s in range(1, n + 1):
+            _ensure_sim_monitor_window_shell(ext, s)
+        for s in range(n + 1, 5):
+            _destroy_sim_monitor_window_shell(ext, s)
+    else:
+        _ensure_sim_monitor_window_shell(ext, 1)
+        for s in range(2, 5):
+            _destroy_sim_monitor_window_shell(ext, s)
+
+
+def _ensure_sim_timetable_window_shell(ext: Any, screen: int) -> None:
+    """화면 ``screen`` 용 타임테이블 ``ui.Window`` 셸을 보장한다."""
+    key = str(int(screen))
+    wins = _screen_dict(ext, "_sim_timetable_windows_by_screen")
+    if wins.get(key) is not None:
+        return
+
+    n = _sim_monitor_channel_count(ext)
+    title = _sim_timetable_window_title(int(screen), n)
+    _destroy_workspace_window_by_title(title)
+
+    split_hosts = _screen_dict(ext, "_sim_timetable_split_host_by_screen")
+    hdr = (
+        "프리런 타임테이블 — 행 클릭으로 Seek"
+        if n <= 1
+        else f"프리런 타임테이블 · 화면{int(screen)} — 행 클릭으로 Seek"
+    )
+
+    win = ui.Window(title, width=300, height=560)
+    with win.frame:
+        with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
+            with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
+                with ui.VStack(padding=8, spacing=4, height=ui.Fraction(1.0)):
+                    ui.Label(hdr, height=22, style={"color": 0xFFBFE7FF, "font_size": 13})
+                    split_host = ui.Frame(
+                        height=ui.Fraction(1.0),
+                        style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
+                    )
+
+    wins[key] = win
+    split_hosts[key] = split_host
+    if int(screen) == 1:
+        ext._sim_timetable_window = win
+        ext._sim_timetable_split_host = split_host
+    _bind_sim_timetable_window_visibility(ext, win)
+
+
+def _destroy_sim_timetable_window_shell(ext: Any, screen: int) -> None:
+    key = str(int(screen))
+    wins = _screen_dict(ext, "_sim_timetable_windows_by_screen")
+    win = wins.pop(key, None)
+    if win is not None:
+        try:
+            win.destroy()
+        except Exception:
+            pass
+    for attr in ("_sim_timetable_split_host_by_screen", "_sim_timetable_split_inner_by_screen"):
+        d = getattr(ext, attr, None)
+        if isinstance(d, dict):
+            d.pop(key, None)
+
+
+def _sync_sim_timetable_window_shells(ext: Any) -> None:
+    """분할 수에 맞춰 타임테이블 창을 1개(단일) 또는 화면별 N개로 맞춘다."""
+    n = _sim_monitor_channel_count(ext)
+    if _sim_use_per_screen_windows(ext):
+        for s in range(1, n + 1):
+            _ensure_sim_timetable_window_shell(ext, s)
+        for s in range(n + 1, 5):
+            _destroy_sim_timetable_window_shell(ext, s)
+    else:
+        _ensure_sim_timetable_window_shell(ext, 1)
+        for s in range(2, 5):
+            _destroy_sim_timetable_window_shell(ext, s)
+
+
+def _monitor_split_host_for_screen(ext: Any, screen: int) -> Any:
+    if _sim_use_per_screen_windows(ext):
+        hosts = _screen_dict(ext, "_sim_monitor_split_host_by_screen")
+        return hosts.get(str(int(screen)))
+    return getattr(ext, "_sim_monitor_split_host", None)
+
+
+def _timetable_split_host_for_screen(ext: Any, screen: int) -> Any:
+    if _sim_use_per_screen_windows(ext):
+        hosts = _screen_dict(ext, "_sim_timetable_split_host_by_screen")
+        return hosts.get(str(int(screen)))
+    return getattr(ext, "_sim_timetable_split_host", None)
+
+
+def _clear_foup_inner_in_outer(outer: Any, inner: Any = None) -> Any:
+    """지정 FOUP outer VStack 아래 inner 를 비우고 반환한다(추적 inner 우선).
+
+    ``_clear_foup_inner_stack`` 과 동일 전략: 추적 중인 ``inner`` 를 그대로 ``clear()`` 한다.
+    ``inner`` 가 없거나 outer 아래 VStack 이 여러 개로 누적된 경우에만 outer 를 통째로
+    비우고 새 inner 를 만든다. (``outer.children[0]`` 재추정 금지 — 타이밍에 따라 새 inner 가
+    추가되어 기존 라벨이 destroy 되지 않고 누적되던 버그 방지.)
+    """
+    if outer is None:
+        return None
+    try:
+        kids = list(getattr(outer, "children", []) or [])
+        if inner is None or len(kids) > 1:
+            try:
+                outer.clear()
+            except Exception:
+                pass
+            inner = None
+    except Exception:
+        pass
+    if inner is None:
+        with outer:
+            inner = ui.VStack(spacing=2)
+    if inner is None:
+        return None
+    try:
+        inner.clear()
+    except Exception:
+        try:
+            for child in list(getattr(inner, "children", []) or []):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return inner
+
+
+def _clear_monitor_split_inner(ext: Any, host: Any, *, screen_key: Optional[str] = None) -> Any:
+    if screen_key is not None:
+        inners = _screen_dict(ext, "_sim_monitor_split_inner_by_screen")
+        inn = inners.pop(screen_key, None)
+    else:
+        inn = getattr(ext, "_sim_monitor_split_inner", None)
+        try:
+            ext._sim_monitor_split_inner = None
+        except Exception:
+            pass
+    if inn is not None:
+        try:
+            inn.destroy()
+        except Exception:
+            pass
+    if host is None:
+        return None
+    with host:
+        new_inner = ui.VStack(spacing=4, height=ui.Fraction(1.0))
+    if screen_key is not None:
+        _screen_dict(ext, "_sim_monitor_split_inner_by_screen")[screen_key] = new_inner
+    else:
+        ext._sim_monitor_split_inner = new_inner
+    return new_inner
+
+
+def _clear_timetable_split_inner(ext: Any, host: Any, *, screen_key: Optional[str] = None) -> Any:
+    if screen_key is not None:
+        inners = _screen_dict(ext, "_sim_timetable_split_inner_by_screen")
+        inn = inners.pop(screen_key, None)
+    else:
+        inn = getattr(ext, "_sim_timetable_split_inner", None)
+        try:
+            ext._sim_timetable_split_inner = None
+        except Exception:
+            pass
+    if inn is not None:
+        try:
+            inn.destroy()
+        except Exception:
+            pass
+    if host is None:
+        return None
+    with host:
+        new_inner = ui.VStack(spacing=4, height=ui.Fraction(1.0))
+    if screen_key is not None:
+        _screen_dict(ext, "_sim_timetable_split_inner_by_screen")[screen_key] = new_inner
+    else:
+        ext._sim_timetable_split_inner = new_inner
+    return new_inner
+
+
 def _snapshot_foup_label_state(ext: Any) -> Dict[int, Dict[str, Tuple[str, int]]]:
     """재빌드 전 화면별·EP별 FOUP 라벨 (text, color) 스냅샷."""
     out: Dict[int, Dict[str, Tuple[str, int]]] = {}
@@ -2676,12 +3025,51 @@ def _foup_layout_ready(ext: Any, channels: List[Dict[str, Any]]) -> bool:
 
 def _rebuild_sim_foup_outer_row(ext: Any, channels: List[Dict[str, Any]]) -> None:
     """
-    FOUP 공정 3줄을 ``_sim_monitor_split_host`` **밖** 고정 영역에 그린다.
+    FOUP 공정 3줄을 모니터 창 상단 고정 영역에 그린다.
 
-    모니터 재조립(시뮬 Start 등)마다 clear 하지 않고, **분할 수가 바뀔 때만** UI 를 다시 만든다.
+    단일 화면: 기존처럼 한 창에 배치. 2분할 이상: 화면별 모니터 창마다 해당 화면 FOUP 만 그린다.
     """
     if not channels:
         return
+    if _sim_use_per_screen_windows(ext):
+        # 레이아웃·라벨이 이미 준비되어 있으면 재생성 없이 재연결만(누적·깜빡임 방지).
+        layout_n = len(channels)
+        prev_n = int(getattr(ext, "_sim_foup_layout_n", 0) or 0)
+        if layout_n == prev_n and _foup_layout_ready(ext, channels):
+            _rebind_foup_labels_to_channels(ext, channels)
+            return
+        saved = _snapshot_foup_label_state(ext)
+        foup_hosts = _screen_dict(ext, "_sim_foup_outer_host_by_screen")
+        foup_inners = _screen_dict(ext, "_sim_foup_inner_stack_by_screen")
+        try:
+            ext._sim_foup_labels_by_screen = {}
+        except Exception:
+            pass
+        for ch in channels:
+            if not isinstance(ch, dict):
+                continue
+            try:
+                si = int(ch.get("screen", 1) or 1)
+            except Exception:
+                si = 1
+            key = str(si)
+            outer = foup_hosts.get(key)
+            if outer is None:
+                continue
+            inner = _clear_foup_inner_in_outer(outer, foup_inners.get(key))
+            if inner is None:
+                continue
+            foup_inners[key] = inner
+            with inner:
+                _create_foup_labels_in_vstack(ext, ch, si)
+        _restore_foup_label_state(channels, saved)
+        _rebind_foup_labels_to_channels(ext, channels)
+        try:
+            ext._sim_foup_layout_n = len(channels)
+        except Exception:
+            pass
+        return
+
     layout_n = len(channels)
     prev_n = int(getattr(ext, "_sim_foup_layout_n", 0) or 0)
     if layout_n == prev_n and _foup_layout_ready(ext, channels):
@@ -2961,67 +3349,73 @@ def _resolve_timetable_channel_for_screen(ext: Any, screen: int) -> Optional[Dic
 
 def _rebuild_sim_monitor_split_ui(ext: Any) -> None:
     """
-    뷰포트 분할 수(1~4)에 맞춰 제어창 하단 시뮼 모니터 영역을 다시 그린다.
+    뷰포트 분할 수(1~4)에 맞춰 시뮼 모니터 영역을 다시 그린다.
 
-    - 기존 ``_sim_monitor_split_inner`` 를 destroy 한 뒤 ``_sim_monitor_channel_count`` 만큼
-      ``_create_sim_monitor_channel_column`` 을 HStack/VStack 으로 배치한다.
-    - 분할 전 각 채널의 진행/이력 문자열은 ``_snapshot_monitor_channel_texts`` 로 백업 후 복원한다.
-    - 단일 채널일 때는 ``ext._sim_progress_label`` 등 레거시 단일 위젯 참조를 [0] 채널에 다시 연결한다.
+    - 1화면: 기존처럼 단일 ``TBS 시뮬 모니터`` 창.
+    - 2화면 이상: 화면별 별도 ``ui.Window`` 에 채널 1개씩 전담 배치.
     """
     if not _sim_ui_shell_rebuild_allowed(ext):
         return
-    host = getattr(ext, "_sim_monitor_split_host", None)
-    if host is None:
-        return
+    _sync_sim_monitor_window_shells(ext)
+    try:
+        from .ebs_control_panel_ui import sync_aux_kit_window_visibility
+
+        sync_aux_kit_window_visibility(ext)
+    except Exception:
+        pass
+
     saved_h, saved_p = _snapshot_monitor_channel_texts(ext)
-    inn = getattr(ext, "_sim_monitor_split_inner", None)
-    if inn is not None:
-        try:
-            inn.destroy()
-        except Exception:
-            pass
-        try:
-            ext._sim_monitor_split_inner = None
-        except Exception:
-            pass
     n = _sim_monitor_channel_count(ext)
     channels: List[Dict[str, Any]] = []
-    with host:
-        ext._sim_monitor_split_inner = ui.VStack(spacing=4, height=ui.Fraction(1.0))
-    inner = getattr(ext, "_sim_monitor_split_inner", None)
-    if inner is None:
-        return
-    with inner:
-        if n == 1:
-            channels.append(_create_sim_monitor_channel_column(ext, 1))
-        elif n == 2:
-            with ui.HStack(spacing=6, height=ui.Fraction(1.0)):
-                # width=0 은 HStack 자식에서 가로 공간을 못 받아 패널이 전부 0폭으로 사라질 수 있음 → 균등 분할
-                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                    channels.append(_create_sim_monitor_channel_column(ext, 1))
-                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                    channels.append(_create_sim_monitor_channel_column(ext, 2))
-        elif n == 3:
-            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
-                with ui.VStack(spacing=4, height=ui.Fraction(0.5)):
-                    channels.append(_create_sim_monitor_channel_column(ext, 1))
-                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        channels.append(_create_sim_monitor_channel_column(ext, 2))
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        channels.append(_create_sim_monitor_channel_column(ext, 3))
-        else:
-            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
-                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+    per_screen = _sim_use_per_screen_windows(ext)
+
+    if per_screen:
+        for screen in range(1, n + 1):
+            host = _monitor_split_host_for_screen(ext, screen)
+            if host is None:
+                continue
+            inner = _clear_monitor_split_inner(ext, host, screen_key=str(screen))
+            if inner is None:
+                continue
+            with inner:
+                channels.append(_create_sim_monitor_channel_column(ext, screen))
+    else:
+        host = getattr(ext, "_sim_monitor_split_host", None)
+        if host is None:
+            return
+        inner = _clear_monitor_split_inner(ext, host)
+        if inner is None:
+            return
+        with inner:
+            if n == 1:
+                channels.append(_create_sim_monitor_channel_column(ext, 1))
+            elif n == 2:
+                with ui.HStack(spacing=6, height=ui.Fraction(1.0)):
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 1))
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         channels.append(_create_sim_monitor_channel_column(ext, 2))
-                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        channels.append(_create_sim_monitor_channel_column(ext, 3))
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        channels.append(_create_sim_monitor_channel_column(ext, 4))
+            elif n == 3:
+                with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                    with ui.VStack(spacing=4, height=ui.Fraction(0.5)):
+                        channels.append(_create_sim_monitor_channel_column(ext, 1))
+                    with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            channels.append(_create_sim_monitor_channel_column(ext, 2))
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            channels.append(_create_sim_monitor_channel_column(ext, 3))
+            else:
+                with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                    with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            channels.append(_create_sim_monitor_channel_column(ext, 1))
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            channels.append(_create_sim_monitor_channel_column(ext, 2))
+                    with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            channels.append(_create_sim_monitor_channel_column(ext, 3))
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            channels.append(_create_sim_monitor_channel_column(ext, 4))
 
     for ch in channels:
         if not isinstance(ch, dict):
@@ -3215,29 +3609,21 @@ def _rebuild_sim_timetable_split_ui(ext: Any) -> None:
     """뷰포트 분할 수에 맞춰 타임테이블 전용 창 영역을 다시 그린다."""
     if not _sim_ui_shell_rebuild_allowed(ext):
         return
-    host = getattr(ext, "_sim_timetable_split_host", None)
-    if host is None:
-        return
+    _sync_sim_timetable_window_shells(ext)
+    try:
+        from .ebs_control_panel_ui import sync_aux_kit_window_visibility
+
+        sync_aux_kit_window_visibility(ext)
+    except Exception:
+        pass
+
     base_channels = getattr(ext, "_sim_monitor_channels", None)
     if not isinstance(base_channels, list) or not base_channels:
         return
-    inn = getattr(ext, "_sim_timetable_split_inner", None)
-    if inn is not None:
-        try:
-            inn.destroy()
-        except Exception:
-            pass
-        try:
-            ext._sim_timetable_split_inner = None
-        except Exception:
-            pass
+
     n = _sim_monitor_channel_count(ext)
     channels: List[Dict[str, Any]] = list(base_channels)
-    with host:
-        ext._sim_timetable_split_inner = ui.VStack(spacing=4, height=ui.Fraction(1.0))
-    inner = getattr(ext, "_sim_timetable_split_inner", None)
-    if inner is None:
-        return
+    per_screen = _sim_use_per_screen_windows(ext)
     ch_idx = 0
 
     def _next_ch(screen: int) -> Dict[str, Any]:
@@ -3249,37 +3635,53 @@ def _rebuild_sim_timetable_split_ui(ext: Any) -> None:
                 return ch
         return {"screen": int(screen)}
 
-    with inner:
-        if n == 1:
-            ch0 = _next_ch(1)
-            _mount_timetable_ui_on_channel(ch0, 1, ext)
-        elif n == 2:
-            with ui.HStack(spacing=6, height=ui.Fraction(1.0)):
-                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                    _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
-                with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                    _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
-        elif n == 3:
-            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
-                with ui.VStack(spacing=4, height=ui.Fraction(0.5)):
-                    _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
-                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(3), 3, ext)
-        else:
-            with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
-                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+    if per_screen:
+        for screen in range(1, n + 1):
+            host = _timetable_split_host_for_screen(ext, screen)
+            if host is None:
+                continue
+            inner = _clear_timetable_split_inner(ext, host, screen_key=str(screen))
+            if inner is None:
+                continue
+            with inner:
+                _mount_timetable_ui_on_channel(_next_ch(screen), screen, ext)
+    else:
+        host = getattr(ext, "_sim_timetable_split_host", None)
+        if host is None:
+            return
+        inner = _clear_timetable_split_inner(ext, host)
+        if inner is None:
+            return
+        with inner:
+            if n == 1:
+                _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
+            elif n == 2:
+                with ui.HStack(spacing=6, height=ui.Fraction(1.0)):
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
                     with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
                         _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
-                with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(3), 3, ext)
-                    with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
-                        _mount_timetable_ui_on_channel(_next_ch(4), 4, ext)
+            elif n == 3:
+                with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                    with ui.VStack(spacing=4, height=ui.Fraction(0.5)):
+                        _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
+                    with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            _mount_timetable_ui_on_channel(_next_ch(3), 3, ext)
+            else:
+                with ui.VStack(spacing=4, height=ui.Fraction(1.0)):
+                    with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            _mount_timetable_ui_on_channel(_next_ch(1), 1, ext)
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            _mount_timetable_ui_on_channel(_next_ch(2), 2, ext)
+                    with ui.HStack(spacing=6, height=ui.Fraction(0.5)):
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            _mount_timetable_ui_on_channel(_next_ch(3), 3, ext)
+                        with ui.VStack(spacing=4, width=ui.Fraction(1.0), height=ui.Fraction(1.0)):
+                            _mount_timetable_ui_on_channel(_next_ch(4), 4, ext)
 
     try:
         ext._sim_timetable_layout_n = n
@@ -3333,40 +3735,10 @@ def _bind_sim_timetable_window_visibility(ext: Any, win: Any) -> None:
 
 def build_sim_timetable_window(ext: Any) -> None:
     """프리런 타임테이블 전용 창 — 모니터 창과 분리해 스크롤·하이라이트 안정화."""
+    _ensure_sim_timetable_window_shell(ext, 1)
     existing = getattr(ext, "_sim_timetable_window", None)
     if existing is not None:
         _bind_sim_timetable_window_visibility(ext, existing)
-        return
-    try:
-        ws = getattr(ui, "Workspace", None)
-        if ws is not None and hasattr(ws, "get_window"):
-            old = ws.get_window("TBS 타임테이블")
-            if old is not None:
-                try:
-                    old.destroy()
-                except Exception:
-                    try:
-                        old.visible = False
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-
-    ext._sim_timetable_window = ui.Window("TBS 타임테이블", width=720, height=560)
-    with ext._sim_timetable_window.frame:
-        with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
-            with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
-                with ui.VStack(padding=8, spacing=4, height=ui.Fraction(1.0)):
-                    ui.Label(
-                        "프리런 타임테이블 — 행 클릭으로 Seek",
-                        height=22,
-                        style={"color": 0xFFBFE7FF, "font_size": 13},
-                    )
-                    ext._sim_timetable_split_host = ui.Frame(
-                        height=ui.Fraction(1.0),
-                        style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
-                    )
-    _bind_sim_timetable_window_visibility(ext, ext._sim_timetable_window)
 
 
 def build_sim_monitor_window(ext: Any) -> None:
@@ -3374,61 +3746,9 @@ def build_sim_monitor_window(ext: Any) -> None:
     시뮬 모니터 전용 창 — FOUP·포트·EP막대·진행현황.
 
     타임테이블은 ``build_sim_timetable_window`` 별도 창에서 표시한다.
+    2분할 이상이면 ``_sync_sim_monitor_window_shells`` 가 화면별 창을 추가한다.
     """
-    if getattr(ext, "_sim_monitor_window", None) is not None:
-        return
-    try:
-        ws = getattr(ui, "Workspace", None)
-        if ws is not None and hasattr(ws, "get_window"):
-            old = ws.get_window("TBS 시뮬 모니터")
-            if old is not None:
-                try:
-                    old.destroy()
-                except Exception:
-                    try:
-                        old.visible = False
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-
-    ext._sim_monitor_window = ui.Window("TBS 시뮬 모니터", width=710, height=620)
-    with ext._sim_monitor_window.frame:
-        with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
-            with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
-                with ui.VStack(padding=8, spacing=4, height=ui.Fraction(1.0)):
-                    with ui.HStack(spacing=8, height=28):
-                        ui.Label(
-                            "시뮬 진행 모니터",
-                            width=140,
-                            height=24,
-                            style={"color": 0xFFDDDDDD},
-                        )
-                        ui.Spacer()
-                        ui.Button(
-                            "진행현황+Sim로그 복사",
-                            width=180,
-                            clicked_fn=lambda: on_copy_sim_progress(ext),
-                        )
-                    ui.Label("FOUP 공정", height=18, style={"color": 0xFFBFE7FF})
-                    with ui.Frame(height=78, style={"background_color": 0xFF1A1E26, "border_width": 0}):
-                        ext._sim_foup_outer_host = ui.VStack(spacing=2, height=74)
-                        with ext._sim_foup_outer_host:
-                            ext._sim_foup_inner_stack = ui.VStack(spacing=2)
-                    try:
-                        ext._sim_foup_layout_n = 0
-                        ext._sim_foup_labels_by_screen = {}
-                    except Exception:
-                        pass
-                    ext._sim_monitor_split_host = ui.Frame(
-                        height=ui.Fraction(1.0),
-                        style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A},
-                    )
-                    ext._rebuild_sim_monitor_split_ui_fn = lambda: _rebuild_all_sim_ui_panels(ext)
-                    ext._rebuild_sim_timetable_split_ui_fn = lambda: _rebuild_all_sim_ui_panels(ext)
-                    ext._sim_port_state_label = ui.Label(
-                        "", word_wrap=False, width=0, height=0, visible=False
-                    )
+    _ensure_sim_monitor_window_shell(ext, 1)
 
 
 def build_control_window(ext: Any) -> None:
@@ -7819,8 +8139,9 @@ def _scroll_sim_monitor_to_timetable(ext: Any) -> None:
     """프리런 직후 타임테이블 전용 창을 앞으로 가져온다(사용자가 닫아 둔 경우 생략)."""
     if _sim_timetable_user_dismissed(ext):
         return
-    tw = getattr(ext, "_sim_timetable_window", None)
-    if tw is not None:
+    for tw in _iter_sim_timetable_windows(ext):
+        if tw is None:
+            continue
         try:
             tw.visible = True
             if hasattr(tw, "focus"):

@@ -514,10 +514,16 @@ class Extension(omni.ext.IExt):
             self._control_window.destroy()
             self._control_window = None
         try:
-            mon = getattr(self, "_sim_monitor_window", None)
-            if mon is not None:
-                mon.destroy()
-                self._sim_monitor_window = None
+            from .control_window import _iter_sim_monitor_windows, _iter_sim_timetable_windows
+
+            for mon in list(_iter_sim_monitor_windows(self)):
+                if mon is not None:
+                    try:
+                        mon.destroy()
+                    except Exception:
+                        pass
+            self._sim_monitor_window = None
+            self._sim_monitor_windows_by_screen = {}
         except Exception:
             pass
         try:
@@ -528,10 +534,16 @@ class Extension(omni.ext.IExt):
         except Exception:
             pass
         try:
-            tt = getattr(self, "_sim_timetable_window", None)
-            if tt is not None:
-                tt.destroy()
-                self._sim_timetable_window = None
+            from .control_window import _iter_sim_timetable_windows
+
+            for tt in list(_iter_sim_timetable_windows(self)):
+                if tt is not None:
+                    try:
+                        tt.destroy()
+                    except Exception:
+                        pass
+            self._sim_timetable_window = None
+            self._sim_timetable_windows_by_screen = {}
         except Exception:
             pass
         self._object_list_frame = None

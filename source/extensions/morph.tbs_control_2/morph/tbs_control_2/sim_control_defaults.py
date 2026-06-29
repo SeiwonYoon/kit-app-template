@@ -72,7 +72,7 @@ SHOW_VIEWPORT_EBS_CONTROL_HUD: bool = True
 #         화면2 에 default_aux_load_usd_path(별도 USD)를 dual-path 로 로드한다.
 #         (사용자가 분할 체크박스 "2" 를 누르는 것과 동일한, 검증된 경로를 그대로 사용)
 # False → 지금처럼 화면 1개로 시작.
-START_WITH_DUAL_SCREEN: bool = False
+START_WITH_DUAL_SCREEN: bool = True
 
 # 프리런(시작 직후, 실제 재생 전 전체 시뮬을 빠르게 돌리는 단계) 동안 엔진 로그를 콘솔에
 # print 할지 여부. LOT 수·공정시간이 크면 로그 줄 수가 폭증해 콘솔 출력(flush)만으로도

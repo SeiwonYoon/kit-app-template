@@ -35,21 +35,43 @@ def _set_kit_window_visible(win: Any, visible: bool) -> None:
         pass
 
 
-def _resolve_aux_kit_window(ext: Any, which: str) -> Any:
+def _resolve_aux_kit_windows(ext: Any, which: str) -> List[Any]:
+    """체크박스 1개가 제어하는 Kit 보조 창 목록 (2분할 시 모니터·타임테이블은 화면별 N개)."""
     if which == "usd":
-        return getattr(getattr(ext, "_tbs_usd_window", None), "_window", None)
+        w = getattr(getattr(ext, "_tbs_usd_window", None), "_window", None)
+        return [w] if w is not None else []
     if which == "sequence":
         editor = getattr(getattr(ext, "_sequence_window", None), "_editor", None)
-        return getattr(editor, "_window", None)
+        w = getattr(editor, "_window", None)
+        return [w] if w is not None else []
     if which == "timetable":
-        return getattr(ext, "_sim_timetable_window", None)
+        try:
+            from .control_window import _iter_sim_timetable_windows
+
+            return list(_iter_sim_timetable_windows(ext))
+        except Exception:
+            w = getattr(ext, "_sim_timetable_window", None)
+            return [w] if w is not None else []
     if which == "monitor":
-        return getattr(ext, "_sim_monitor_window", None)
+        try:
+            from .control_window import _iter_sim_monitor_windows
+
+            return list(_iter_sim_monitor_windows(ext))
+        except Exception:
+            w = getattr(ext, "_sim_monitor_window", None)
+            return [w] if w is not None else []
     if which == "fix_proc":
-        return getattr(ext, "_fix_proc_window", None)
+        w = getattr(ext, "_fix_proc_window", None)
+        return [w] if w is not None else []
     if which == "ebs":
-        return getattr(ext, "_control_window", None)
-    return None
+        w = getattr(ext, "_control_window", None)
+        return [w] if w is not None else []
+    return []
+
+
+def _resolve_aux_kit_window(ext: Any, which: str) -> Any:
+    wins = _resolve_aux_kit_windows(ext, which)
+    return wins[0] if wins else None
 
 
 def sync_aux_kit_window_visibility(ext: Any) -> None:
@@ -62,7 +84,8 @@ def sync_aux_kit_window_visibility(ext: Any) -> None:
             visible = bool(mdl.as_bool)
         except Exception:
             visible = True
-        _set_kit_window_visible(_resolve_aux_kit_window(ext, which), visible)
+        for win in _resolve_aux_kit_windows(ext, which):
+            _set_kit_window_visible(win, visible)
 
 
 def _on_aux_kit_window_visibility_changed(ext: Any, which: str, _model: Any = None) -> None:
@@ -76,7 +99,8 @@ def _on_aux_kit_window_visibility_changed(ext: Any, which: str, _model: Any = No
             visible = bool(mdl.as_bool)
         except Exception:
             visible = True
-        _set_kit_window_visible(_resolve_aux_kit_window(ext, which), visible)
+        for win in _resolve_aux_kit_windows(ext, which):
+            _set_kit_window_visible(win, visible)
         return
 
 
@@ -275,13 +299,21 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_history_frame = None
     ext._sim_anim_history_frame = None
     ext._sim_monitor_window = None
+    ext._sim_monitor_windows_by_screen = {}
     ext._sim_monitor_split_host = None
+    ext._sim_monitor_split_host_by_screen = {}
     ext._sim_monitor_split_inner = None
+    ext._sim_monitor_split_inner_by_screen = {}
     ext._sim_timetable_window = None
+    ext._sim_timetable_windows_by_screen = {}
     ext._fix_proc_window = None
     ext._sim_timetable_user_dismissed = False
     ext._sim_timetable_split_host = None
+    ext._sim_timetable_split_host_by_screen = {}
     ext._sim_timetable_split_inner = None
+    ext._sim_timetable_split_inner_by_screen = {}
+    ext._sim_foup_outer_host_by_screen = {}
+    ext._sim_foup_inner_stack_by_screen = {}
     ext._sim_timetable_layout_n = 1
     ext._sim_monitor_channels = []
     ext._sim_monitor_layout_n = 1
