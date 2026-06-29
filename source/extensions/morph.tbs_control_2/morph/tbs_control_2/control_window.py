@@ -4475,6 +4475,335 @@ def _append_bar_live_interval(
             rows_state[r] = merged
 
 
+# 막대 마스크 배경색 — 막대 영역 bg(0xFF1A1E26)와 동일하게 덮어 "아직 안 지난 구간"으로 보이게 한다.
+_BAR_MASK_BG = 0xFF1A1E26
+
+
+def _apply_bar_mask_widths(
+    st: Dict[str, Any],
+    rows: List[Any],
+    *,
+    bar_w: int,
+    playhead_px: int,
+    t_bar: float,
+    preview_full: bool,
+) -> None:
+    """행별 마스크 사각형의 offset/width(또는 visible)만 갱신한다. UI 트리 재생성 없음.
+
+    - 미리보기(preview_full) ON  → 마스크 숨김(막대 전체 노출)
+    - OFF → 마스크가 playhead~끝 구간을 덮어 진행분만 노출
+    값 라벨(누적 시간 요약)은 라벨 텍스트만 갱신(트리 재생성 아님).
+    """
+    masks = st.get("_mask_widgets") or {}
+    full_rows = st.get("_mask_full_rows") or {}
+    mask_w = max(0, int(bar_w) - int(playhead_px))
+
+    trunc = None
+    if not preview_full:
+        try:
+            trunc = truncate_bar_rows_at_t(full_rows, float(t_bar))
+        except Exception:
+            trunc = None
+
+    for r in rows:
+        rk = str(r)
+        ent = masks.get(rk)
+        if not ent:
+            continue
+        placer, rect, vlabel = ent
+        try:
+            if preview_full or mask_w <= 0:
+                rect.visible = False
+            else:
+                rect.visible = True
+                placer.offset_x = ui.Pixel(int(playhead_px))
+                rect.width = ui.Pixel(int(mask_w))
+        except Exception:
+            pass
+        if vlabel is not None:
+            try:
+                if preview_full:
+                    seg_v = full_rows.get(rk, []) or []
+                else:
+                    seg_v = (trunc or {}).get(rk, []) or []
+                vlabel.text = format_row_state_duration_summary(seg_v)
+            except Exception:
+                pass
+
+
+def _build_precomputed_bar_with_mask(
+    ext: Any,
+    ch: Dict[str, Any],
+    st: Dict[str, Any],
+    *,
+    screen: int,
+    rows: List[Any],
+    bar_pre: Any,
+    total_est: float,
+    playhead_px: int,
+    preview_full: bool,
+    layout: Tuple[int, int, int, int, int],
+) -> bool:
+    """막대를 1회만 정적으로 그리고 행마다 마스크 사각형 1개를 얹는다.
+
+    이후 heartbeat 에서는 ``_apply_bar_mask_widths`` 로 마스크 width/offset 만 바꾼다.
+    """
+    host = ch.get("ep_timeline_host")
+    if host is None:
+        return False
+
+    BAR_W, NAME_W, VAL_W, frame_pad, row_sp = layout
+    BAR_H = 14
+    inner_sp = 3
+    tick_h = 14
+    tick_step = max(10.0, float(int((((float(total_est) / 8.0) + 9.999) // 10.0) * 10.0)))
+    content_h = (
+        int(frame_pad) * 2
+        + tick_h
+        + inner_sp
+        + max(1, len(rows)) * BAR_H
+        + max(0, len(rows) - 1) * int(row_sp)
+        + 4
+    )
+
+    full_rows: Dict[str, List[Any]] = {
+        str(k): list(v) for k, v in (getattr(bar_pre, "rows", {}) or {}).items()
+    }
+    mask_w0 = max(0, int(BAR_W) - int(playhead_px))
+    masks: Dict[str, Any] = {}
+
+    def _color(state: str) -> int:
+        return bar_state_color(str(state or BAR_STATE_EMPTY))
+
+    _clear_ep_timeline_host_content(ch)
+    try:
+        with host:
+            root = ui.VStack(spacing=2, height=int(content_h))
+            ch["ep_timeline_widget"] = root
+            with root:
+                with ui.Frame(style={"padding": int(frame_pad)}):
+                    with ui.VStack(spacing=inner_sp):
+                        with ui.HStack(height=14, spacing=0):
+                            ui.Spacer(width=NAME_W)
+                            with ui.ZStack(width=BAR_W, height=14):
+                                ui.Rectangle(width=BAR_W, height=14, style={"background_color": 0x441A1E26})
+                                try:
+                                    ticks = max(1, int(float(total_est) // float(tick_step)))
+                                except Exception:
+                                    ticks = 1
+                                for i in range(ticks + 1):
+                                    try:
+                                        t_lbl = float(i) * float(tick_step)
+                                    except Exception:
+                                        t_lbl = 0.0
+                                    x = int(round((float(t_lbl) / float(total_est)) * float(BAR_W))) if total_est > 1e-9 else 0
+                                    x = max(0, min(BAR_W - 1, x))
+                                    with ui.Placer(offset_x=x, offset_y=0):
+                                        ui.Label(
+                                            f"{int(round(t_lbl))}",
+                                            width=36,
+                                            height=14,
+                                            style={"color": 0xFFE0E6F0, "font_size": 10},
+                                        )
+                            try:
+                                t_end_lbl = float(total_est)
+                                end_txt = (
+                                    f"{int(round(t_end_lbl))}"
+                                    if abs(float(t_end_lbl) - float(int(round(t_end_lbl)))) < 1e-6
+                                    else f"{float(t_end_lbl):.1f}"
+                                )
+                            except Exception:
+                                end_txt = f"{total_est:.1f}"
+                            ui.Spacer(width=6)
+                            ui.Label(
+                                end_txt,
+                                width=24,
+                                height=14,
+                                alignment=ui.Alignment.LEFT_CENTER,
+                                style={"color": 0xFFE0E6F0, "font_size": 10},
+                            )
+                        for r in rows:
+                            rk = str(r)
+                            seg_list = full_rows.get(rk, []) or []
+                            with ui.HStack(height=BAR_H, spacing=int(row_sp)):
+                                ui.Label(rk, width=NAME_W, height=BAR_H, style={"color": 0xFFBFC7D5, "font_size": 11})
+                                with ui.ZStack(width=BAR_W, height=BAR_H):
+                                    ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
+                                    # 막대는 항상 전체(total_est) 기준으로 1회 그린다.
+                                    rects = _bar_segment_rect_widths(
+                                        seg_list,
+                                        total_est=float(total_est),
+                                        bar_w=int(BAR_W),
+                                        t_cover=float(total_est),
+                                    )
+                                    with ui.HStack(height=BAR_H, spacing=0):
+                                        used = 0
+                                        for w, seg_st in rects:
+                                            used += int(w)
+                                            ui.Rectangle(
+                                                width=int(w),
+                                                height=BAR_H,
+                                                style={"background_color": _color(seg_st)},
+                                            )
+                                        if used < BAR_W:
+                                            ui.Spacer(width=(BAR_W - used))
+                                    # 진행 마스크(행당 1개) — 배경색으로 미래 구간을 덮는다.
+                                    placer = ui.Placer(offset_x=int(playhead_px), offset_y=0)
+                                    with placer:
+                                        mrect = ui.Rectangle(
+                                            width=ui.Pixel(max(1, int(mask_w0))),
+                                            height=BAR_H,
+                                            style={"background_color": _BAR_MASK_BG},
+                                        )
+                                    try:
+                                        mrect.visible = bool((not preview_full) and mask_w0 > 0)
+                                    except Exception:
+                                        pass
+                                # 값 라벨(누적 요약) — 텍스트만 추후 갱신
+                                if preview_full:
+                                    seg_v = seg_list
+                                else:
+                                    try:
+                                        seg_v = truncate_bar_rows_at_t({rk: seg_list}, float(playhead_px) / float(BAR_W) * float(total_est) if BAR_W else 0.0).get(rk, [])
+                                    except Exception:
+                                        seg_v = seg_list
+                                try:
+                                    dur_txt = format_row_state_duration_summary(seg_v)
+                                except Exception:
+                                    dur_txt = ""
+                                vlabel = ui.Label(
+                                    dur_txt,
+                                    width=int(VAL_W),
+                                    height=BAR_H,
+                                    word_wrap=True,
+                                    style={"color": 0xFFDDDDDD, "font_size": 11},
+                                )
+                                masks[rk] = (placer, mrect, vlabel)
+        st["_mask_widgets"] = masks
+        st["_mask_full_rows"] = full_rows
+        return True
+    except Exception as ex:
+        print(f"[SIM] EP 막대 마스크 렌더 실패(화면{screen}): {ex}", flush=True)
+        _clear_ep_timeline_host_content(ch)
+        st["_mask_widgets"] = {}
+        st["_mask_full_rows"] = {}
+        st["_mask_sig"] = None
+        return False
+
+
+def _render_or_update_precomputed_bar_mask(
+    ext: Any,
+    ch: Dict[str, Any],
+    st: Dict[str, Any],
+    *,
+    screen: int,
+    t_bar: float,
+    total_est: float,
+    preview_full: bool,
+    layout: Tuple[int, int, int, int, int],
+) -> bool:
+    """재생(프리런 사전계산) 막대를 정적 1회 렌더 + 행별 마스크로 갱신한다.
+
+    구조가 동일하면(같은 행/스케일/레이아웃/프리런) 마스크 width/offset 만 갱신하고,
+    구조가 바뀌면 1회 재빌드한다. 처리하면 True, 처리 못하면 False(레거시 경로로 폴백).
+    """
+    host = ch.get("ep_timeline_host")
+    if host is None:
+        return False
+
+    pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
+    bar_pre = pre_by.get(str(int(screen))) if isinstance(pre_by, dict) else None
+    if not isinstance(bar_pre, EpBarPrecomputed):
+        return False
+    if not isinstance(getattr(bar_pre, "rows", None), dict) or not bar_pre.rows:
+        return False
+    try:
+        total_est = float(total_est)
+    except Exception:
+        return False
+    if total_est <= 1e-9:
+        return False
+
+    # 행 순서 — 프리런 row_order 우선
+    rows: List[Any] = []
+    if getattr(bar_pre, "row_order", None):
+        try:
+            rows = normalize_bar_graph_row_order(list(bar_pre.row_order))
+        except Exception:
+            rows = []
+    if not rows:
+        try:
+            ep_idx = int(_ep_count_idx_for_port_panel(ext, int(screen)))
+            snap = _sim_snapshot_for_screen(ext, int(screen))
+            ebs_on = bool(snap.get("ebs_enabled", True)) if snap else True
+            rows = list(bar_graph_row_order(ep_idx, ebs_enabled=ebs_on))
+        except Exception:
+            rows = []
+    if not rows:
+        return False
+
+    BAR_W = int(layout[0])
+    try:
+        playhead_px = int(round((float(t_bar) / float(total_est)) * float(BAR_W)))
+    except Exception:
+        playhead_px = 0
+    playhead_px = max(0, min(int(BAR_W), playhead_px))
+
+    seg_ver = 0
+    try:
+        seg_ver = sum(len(bar_pre.rows.get(str(r), []) or []) for r in rows)
+    except Exception:
+        seg_ver = 0
+    sig = (
+        tuple(str(r) for r in rows),
+        round(float(total_est), 3),
+        tuple(int(x) for x in layout),
+        id(bar_pre),
+        int(seg_ver),
+    )
+
+    widget_alive = ch.get("ep_timeline_widget") is not None
+    masks = st.get("_mask_widgets")
+    cur_sig = st.get("_mask_sig")
+
+    if widget_alive and cur_sig == sig and isinstance(masks, dict) and masks:
+        # 변화 없음(dt=0 · preview 동일) → 아무 것도 안 함
+        same_t = abs(float(st.get("_mask_last_t", -1.0)) - float(t_bar)) < 1e-6
+        same_pv = bool(st.get("_mask_last_preview", None)) == bool(preview_full)
+        if same_t and same_pv:
+            return True
+        _apply_bar_mask_widths(
+            st,
+            rows,
+            bar_w=int(BAR_W),
+            playhead_px=int(playhead_px),
+            t_bar=float(t_bar),
+            preview_full=bool(preview_full),
+        )
+        st["_mask_last_t"] = float(t_bar)
+        st["_mask_last_preview"] = bool(preview_full)
+        return True
+
+    ok = _build_precomputed_bar_with_mask(
+        ext,
+        ch,
+        st,
+        screen=int(screen),
+        rows=rows,
+        bar_pre=bar_pre,
+        total_est=float(total_est),
+        playhead_px=int(playhead_px),
+        preview_full=bool(preview_full),
+        layout=layout,
+    )
+    if ok:
+        st["_mask_sig"] = sig
+        st["_mask_last_t"] = float(t_bar)
+        st["_mask_last_preview"] = bool(preview_full)
+        return True
+    return False
+
+
 def _update_ep_timeline_under_port_state(
     ext: Any,
     ch: Dict[str, Any],
@@ -4809,6 +5138,23 @@ def _update_ep_timeline_under_port_state(
     BAR_W, NAME_W, VAL_W, frame_pad, row_sp = _ep_occ_timeline_layout_dims(ext)
     cur_layout = (int(BAR_W), int(NAME_W), int(VAL_W), int(frame_pad), int(row_sp))
 
+    # ── 재생(프리런 사전계산) 막대: 정적 1회 렌더 + 행별 마스크 ──
+    # 기존에는 heartbeat 마다 막대 VStack 전체를 destroy/rebuild 하여 3D 뷰가 끊겼다.
+    # 막대는 한 번만 그리고, 행마다 배경색 마스크 1개의 offset/width 만 갱신한다.
+    # (미리보기 ON 이면 마스크 숨김 → 막대 전체 노출) 처리하면 즉시 반환.
+    if use_precomputed:
+        if _render_or_update_precomputed_bar_mask(
+            ext,
+            ch,
+            st,
+            screen=int(screen),
+            t_bar=float(t_bar),
+            total_est=float(total_est),
+            preview_full=bool(preview_full),
+            layout=cur_layout,
+        ):
+            return
+
     # 동일 시뮼 시각(dt=0)·막대 스케일·EP 점유가 같으면 VStack 전체 destroy/rebuild 생략.
     # (매 tick마다 트리를 갈아엎으면 단일 모니터에서 막대 영역 전체가 깜빡인다.)
     try:
@@ -4999,7 +5345,7 @@ def _update_ep_timeline_under_port_state(
                                     width=int(VAL_W),
                                     height=BAR_H,
                                     word_wrap=True,
-                                    style={"color": 0xFFDDDDDD, "font_size": 9},
+                                    style={"color": 0xFFDDDDDD, "font_size": 11},
                                 )
     except Exception as ex:
         print(f"[SIM] EP 막대 UI 렌더 실패(화면{screen}): {ex}", flush=True)

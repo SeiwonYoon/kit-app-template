@@ -262,14 +262,15 @@ def _resolve_port_bar_state(
 
 
 def _aggregate_all_ep_state(ep_states: List[str]) -> str:
+    """EP 포트 상태 중 최우선 1개를 ALL_EP 행에 반영 (proc > load > unload > empty > down)."""
     if not ep_states:
         return BAR_STATE_EMPTY
     if BAR_STATE_PROC in ep_states:
         return BAR_STATE_PROC
-    if BAR_STATE_UNLOAD in ep_states:
-        return BAR_STATE_UNLOAD
     if BAR_STATE_LOAD in ep_states:
         return BAR_STATE_LOAD
+    if BAR_STATE_UNLOAD in ep_states:
+        return BAR_STATE_UNLOAD
     if all(s == BAR_STATE_DOWN for s in ep_states):
         return BAR_STATE_DOWN
     return BAR_STATE_EMPTY
