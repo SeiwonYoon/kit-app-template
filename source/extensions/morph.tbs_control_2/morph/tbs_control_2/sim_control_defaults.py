@@ -63,4 +63,13 @@ SIM_CONTROL_DEFAULTS = SimControlDefaults()
 # True 면 [RENEWAL_DBG] 줄이 콘솔에 항상 찍힌다. 환경변수 TBS_RENEWAL_DEBUG 로도 켤 수 있음.
 SIM_RENEWAL_DEBUG: bool = True
 
-__all__ = ["SimControlDefaults", "SIM_CONTROL_DEFAULTS", "SIM_RENEWAL_DEBUG"]
+# Viewport 좌측 상단 EBS 2D 제어 패널 (``TbsViewportControlHud``) 앱 시작 시 표시 여부.
+# False 면 get_frame 레이어를 마운트하지 않는다.
+SHOW_VIEWPORT_EBS_CONTROL_HUD: bool = True
+
+__all__ = [
+    "SimControlDefaults",
+    "SIM_CONTROL_DEFAULTS",
+    "SIM_RENEWAL_DEBUG",
+    "SHOW_VIEWPORT_EBS_CONTROL_HUD",
+]

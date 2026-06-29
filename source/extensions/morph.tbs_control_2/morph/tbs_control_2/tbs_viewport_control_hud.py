@@ -6,8 +6,14 @@ from typing import Any, Optional
 
 _PRINT_PREFIX = "[TBS/EBS-HUD]"
 
-# True → 기본 Viewport 좌측 상단에 EBS 제어 패널 표시
-TBS_VIEWPORT_CONTROL_HUD_ENABLED = True
+
+def _viewport_control_hud_enabled() -> bool:
+    try:
+        from .sim_control_defaults import SHOW_VIEWPORT_EBS_CONTROL_HUD
+
+        return bool(SHOW_VIEWPORT_EBS_CONTROL_HUD)
+    except Exception:
+        return True
 
 _FRAME_SLOT = "morph.tbs_control_2:ebs_control_hud"
 _PANEL_W = 300
@@ -59,7 +65,7 @@ class TbsViewportControlHud:
         self._destroy_layer()
 
     def sync_layers(self, *, delay_frames: int = 8) -> None:
-        if not TBS_VIEWPORT_CONTROL_HUD_ENABLED:
+        if not _viewport_control_hud_enabled():
             self._destroy_layer()
             return
         self._sched_token += 1
