@@ -2531,7 +2531,7 @@ def _ensure_sim_monitor_window_shell(ext: Any, screen: int) -> None:
     foup_inners = _screen_dict(ext, "_sim_foup_inner_stack_by_screen")
     split_hosts = _screen_dict(ext, "_sim_monitor_split_host_by_screen")
 
-    win = ui.Window(title, width=300, height=620)
+    win = ui.Window(title, width=450, height=620)
     with win.frame:
         with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
             with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
@@ -2642,7 +2642,7 @@ def _ensure_sim_timetable_window_shell(ext: Any, screen: int) -> None:
         else f"프리런 타임테이블 · 화면{int(screen)} — 행 클릭으로 Seek"
     )
 
-    win = ui.Window(title, width=300, height=560)
+    win = ui.Window(title, width=450, height=560)
     with win.frame:
         with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
             with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
