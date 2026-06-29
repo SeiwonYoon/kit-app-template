@@ -7803,12 +7803,22 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
                 ch["timetable_interactive"] = False
                 if "[SIM] 타임테이블(프리런)" not in txt:
                     print(f"[SIM] 타임테이블(화면{si}): 표시할 event/step 항목 없음", flush=True)
+        # 프리런 타임테이블 JSON 콘솔 덤프 — SIM_PRERUN_CONSOLE_LOG 플래그로 함께 on/off.
+        # (UI 타임테이블 패널 적용은 위에서 이미 끝났고, 여기서는 콘솔 출력만 제어한다)
+        _prerun_console = True
         try:
-            print(header, flush=True)
-            for m in metas:
-                print(m.display_line, flush=True)
+            from .sim_control_defaults import SIM_PRERUN_CONSOLE_LOG
+
+            _prerun_console = bool(SIM_PRERUN_CONSOLE_LOG)
         except Exception:
-            pass
+            _prerun_console = True
+        if _prerun_console:
+            try:
+                print(header, flush=True)
+                for m in metas:
+                    print(m.display_line, flush=True)
+            except Exception:
+                pass
     try:
         ext._sim_ep_bar_prerun_by_screen = bar_by
         ext._sim_timetable_row_metas_by_screen = meta_by

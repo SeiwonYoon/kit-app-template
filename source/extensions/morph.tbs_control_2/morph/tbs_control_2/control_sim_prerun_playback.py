@@ -1179,6 +1179,22 @@ def prerun_engine_to_timeline(
     except Exception:
         pass
 
+    # 프리런 동안 콘솔 print 끄기(기본). on_log 수집은 유지되어 재생 로그 패널은 그대로.
+    # LOT 수·공정시간이 크면 줄 단위 print(flush) 가 시작을 크게 지연시키므로,
+    # sim_control_defaults.SIM_PRERUN_CONSOLE_LOG 가 False 면 프리런 구간만 콘솔을 끈다.
+    _prev_console_log: Optional[bool] = None
+    try:
+        from .sim_control_defaults import SIM_PRERUN_CONSOLE_LOG
+
+        if not bool(SIM_PRERUN_CONSOLE_LOG):
+            _prev_console_log = bool(getattr(engine, "_print_to_console", True))
+            if hasattr(engine, "set_console_logging_enabled"):
+                engine.set_console_logging_enabled(False)
+            else:
+                engine._print_to_console = False  # type: ignore[attr-defined]
+    except Exception:
+        _prev_console_log = None
+
     steps = 0
     while True:
         try:
@@ -1195,6 +1211,16 @@ def prerun_engine_to_timeline(
         steps += 1
         if steps >= int(max_tick_steps):
             break
+
+    # 프리런 종료 — 콘솔 로그 설정 원복(끈 경우에만).
+    if _prev_console_log is not None:
+        try:
+            if hasattr(engine, "set_console_logging_enabled"):
+                engine.set_console_logging_enabled(bool(_prev_console_log))
+            else:
+                engine._print_to_console = bool(_prev_console_log)  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
     try:
         final_sim = float(getattr(engine.env, "now", 0.0) or 0.0) if getattr(engine, "env", None) is not None else 0.0
