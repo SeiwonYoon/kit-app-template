@@ -98,6 +98,80 @@ except Exception:
 _PRINT_PREFIX = "[TBS]"
 
 
+def _start_with_dual_screen_enabled() -> bool:
+    """앱 시작 시 2분할로 시작할지 (``sim_control_defaults.START_WITH_DUAL_SCREEN``)."""
+    try:
+        from .sim_control_defaults import START_WITH_DUAL_SCREEN
+
+        return bool(START_WITH_DUAL_SCREEN)
+    except Exception:
+        return False
+
+
+def _maybe_start_with_dual_screen(ext: Any) -> None:
+    """
+    화면1 Master USD 가 열린 직후, 최초 1회만 2분할을 자동 적용한다.
+
+    - 사용자가 분할 체크박스 "2" 를 누르는 것과 동일한 ``apply_sim_viewport_split_layout``
+      경로를 그대로 사용하므로, 시뮬레이션 동작·분할 빌드 로직은 전혀 바뀌지 않는다.
+    - 화면2 USD 는 ``default_aux_load_usd_path`` (dual-path) 로 로드된다.
+    - master 재오픈마다 재실행되지 않도록 ``_tbs_auto_dual_split_done`` 가드로 1회만 동작.
+    """
+    if not _start_with_dual_screen_enabled():
+        return
+    if bool(getattr(ext, "_tbs_auto_dual_split_done", False)):
+        return
+    try:
+        ext._tbs_auto_dual_split_done = True
+    except Exception:
+        pass
+
+    async def _go() -> None:
+        kit_app = app.get_app()
+        # 메인 Viewport/DockSpace 가 자리 잡기 전에 분할하면 Dock 이 1:1 로 안 나뉘어
+        # 좌/우 폭이 크게 어긋난다(예: 566:1140). 시작 직후 충분히 양보한 뒤 적용한다.
+        try:
+            for _ in range(30):
+                await kit_app.next_update_async()
+        except Exception:
+            pass
+        try:
+            from . import sim_multi_view
+
+            sim_multi_view.apply_sim_viewport_split_layout(ext, 2)
+            print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN: 2분할 자동 적용", flush=True)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN apply failed: {exc}", flush=True)
+            return
+        # 분할 빌드(비동기) 가 끝나고 Dock 이 안정된 뒤 균등 재배치 패스를 한 번 더 돌린다.
+        # (수동 체크박스 클릭 후 크롬 변경 시 쓰는 검증된 재배치 경로를 그대로 사용)
+        try:
+            for _ in range(60):
+                await kit_app.next_update_async()
+        except Exception:
+            pass
+        try:
+            from . import sim_multi_view
+            from .kit_chrome_visibility import is_kit_chrome_hidden
+
+            sim_multi_view.schedule_split_layout_refresh_for_chrome_change(
+                ext, bool(is_kit_chrome_hidden(ext))
+            )
+            print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN: 레이아웃 균등 재배치 요청", flush=True)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN relayout failed: {exc}", flush=True)
+
+    try:
+        asyncio.ensure_future(_go())
+    except Exception:
+        try:
+            from . import sim_multi_view
+
+            sim_multi_view.apply_sim_viewport_split_layout(ext, 2)
+        except Exception:
+            pass
+
+
 def _log_extension_load_paths(ext_id: str) -> None:
     """hot-reload 진단: 실제 import 경로와 확장 루트를 콘솔에 남긴다."""
     try:
@@ -256,6 +330,12 @@ class Extension(omni.ext.IExt):
                     hud.sync_layers(delay_frames=12)
             except Exception:
                 pass
+            # 앱 시작 시 2분할 자동 적용 (START_WITH_DUAL_SCREEN=True 일 때, 최초 1회).
+            # 사용자가 분할 체크박스 "2" 를 누르는 것과 동일한 경로를 그대로 사용한다.
+            try:
+                _maybe_start_with_dual_screen(self)
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} auto dual-screen start failed: {exc}", flush=True)
 
         self._tbs_usd_window = TbsUsdWindow(
             self._tbs_registry,

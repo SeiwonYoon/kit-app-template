@@ -67,9 +67,17 @@ SIM_RENEWAL_DEBUG: bool = True
 # False 면 get_frame 레이어를 마운트하지 않는다.
 SHOW_VIEWPORT_EBS_CONTROL_HUD: bool = True
 
+# 앱 시작 시 2분할(화면2개)로 시작할지 여부.
+# True  → 화면1 Master USD(default_load_usd_path) 가 열린 직후 자동으로 2분할을 적용해
+#         화면2 에 default_aux_load_usd_path(별도 USD)를 dual-path 로 로드한다.
+#         (사용자가 분할 체크박스 "2" 를 누르는 것과 동일한, 검증된 경로를 그대로 사용)
+# False → 지금처럼 화면 1개로 시작.
+START_WITH_DUAL_SCREEN: bool = True
+
 __all__ = [
     "SimControlDefaults",
     "SIM_CONTROL_DEFAULTS",
     "SIM_RENEWAL_DEBUG",
     "SHOW_VIEWPORT_EBS_CONTROL_HUD",
+    "START_WITH_DUAL_SCREEN",
 ]
