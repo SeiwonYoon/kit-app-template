@@ -81,6 +81,11 @@ START_WITH_DUAL_SCREEN: bool = True
 # True        → 프리런 로그도 콘솔에 출력(디버그용).
 SIM_PRERUN_CONSOLE_LOG: bool = False
 
+# 막대그래프 "미리보기"(전체 막대 노출) 체크박스의 앱 시작 시 기본값.
+# True  → 시작부터 미리보기 ON(막대 전체가 보이고 진행 마스크 숨김).
+# False → 지금처럼 미리보기 OFF(재생 진행분만 보임).
+SIM_BAR_PREVIEW_DEFAULT: bool = True
+
 __all__ = [
     "SimControlDefaults",
     "SIM_CONTROL_DEFAULTS",
@@ -88,4 +93,5 @@ __all__ = [
     "SHOW_VIEWPORT_EBS_CONTROL_HUD",
     "START_WITH_DUAL_SCREEN",
     "SIM_PRERUN_CONSOLE_LOG",
+    "SIM_BAR_PREVIEW_DEFAULT",
 ]

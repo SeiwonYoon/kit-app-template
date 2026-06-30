@@ -4848,6 +4848,149 @@ def _bar_row_value_label_height(
     return max(int(bar_h), int(lines) * int(line_h))
 
 
+def _bar_playhead_arrow_offset_x(playhead_px: int, arrow_w: int = 12) -> int:
+    """재생 위치 화살표(▼)가 playhead 중앙에 오도록 Placer offset_x."""
+    return max(0, int(playhead_px) - int(arrow_w) // 2)
+
+
+def _resolve_timetable_row_index_for_sim_time(
+    ext: Any, screen: int, t_sim: float
+) -> Optional[int]:
+    """클릭 시각 t 에서 ``t <= t_sim`` 인 타임테이블 행 중 가장 늦은(큰 row_index) 행."""
+    metas_by = getattr(ext, "_sim_timetable_row_metas_by_screen", None)
+    metas: List[Any] = []
+    if isinstance(metas_by, dict):
+        metas = list(metas_by.get(str(int(screen)), []) or [])
+    if not metas:
+        results = getattr(ext, "_sim_prerun_results_by_screen", None)
+        if isinstance(results, dict):
+            res = results.get(int(screen))
+            if res is not None:
+                try:
+                    metas = build_timetable_row_metas(res)
+                except Exception:
+                    metas = []
+    if not metas:
+        return None
+    t_click = float(t_sim)
+    best_idx: Optional[int] = None
+    for m in metas:
+        try:
+            mt = float(getattr(m, "t", 0.0) or 0.0)
+            ri = int(getattr(m, "row_index", 0))
+        except Exception:
+            continue
+        if mt <= t_click + 1e-6:
+            if best_idx is None or ri > int(best_idx):
+                best_idx = ri
+    if best_idx is None:
+        return 0
+    return int(best_idx)
+
+
+def _on_bar_timeline_seek(ext: Any, screen: int, t_click: float) -> None:
+    """막대 시간축 클릭 → 타임테이블 행 seek 과 동일 경로로 재생."""
+    try:
+        row_idx = _resolve_timetable_row_index_for_sim_time(ext, int(screen), float(t_click))
+        if row_idx is None:
+            return
+        _on_timetable_row_seek(ext, int(screen), int(row_idx))
+        print(
+            f"[SIM] 막대 Seek 화면{int(screen)} t={float(t_click):.2f} → 행{int(row_idx)}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"[SIM] bar timeline seek 실패: {e}", flush=True)
+
+
+def _attach_bar_time_axis_scrubber(
+    ext: Any,
+    st: Dict[str, Any],
+    *,
+    screen: int,
+    bar_w: int,
+    total_est: float,
+    playhead_px: int,
+    tick_step: float,
+) -> None:
+    """막대 상단 시간축 — 눈금 + 재생 위치 ▼ 화살표 + 클릭 시크(구간 투명 버튼).
+
+    클릭 좌표(``screen_position_x``)는 omni.ui 버전에 따라 신뢰할 수 없어, 시간축 위에
+    고정 시간을 가진 투명 버튼 구간들을 깔아 클릭 위치→시간을 좌표 계산 없이 결정한다.
+    """
+    bw = int(bar_w)
+    te = float(total_est)
+    st["_bar_seek_total_est"] = te
+    st["_bar_seek_bar_w"] = bw
+    st["_bar_seek_screen"] = int(screen)
+    scr_i = int(screen)
+
+    ph_x = _bar_playhead_arrow_offset_x(int(playhead_px))
+    playhead_placer = None
+    playhead_lbl = None
+
+    tick_stack = ui.ZStack(width=bw, height=14)
+    with tick_stack:
+        ui.Rectangle(width=bw, height=14, style={"background_color": 0x441A1E26})
+        try:
+            ticks = max(1, int(te // float(tick_step)))
+        except Exception:
+            ticks = 1
+        for i in range(ticks + 1):
+            try:
+                t_lbl = float(i) * float(tick_step)
+            except Exception:
+                t_lbl = 0.0
+            x = int(round((float(t_lbl) / te) * float(bw))) if te > 1e-9 else 0
+            x = max(0, min(bw - 1, x))
+            with ui.Placer(offset_x=x, offset_y=0):
+                ui.Label(
+                    f"{int(round(t_lbl))}",
+                    width=36,
+                    height=14,
+                    style={"color": 0xFFE0E6F0, "font_size": 10},
+                )
+        playhead_placer = ui.Placer(offset_x=int(ph_x), offset_y=0)
+        with playhead_placer:
+            playhead_lbl = ui.Label(
+                "▼",
+                width=12,
+                height=14,
+                alignment=ui.Alignment.CENTER,
+                style={"color": 0xFFFFCC66, "font_size": 10},
+            )
+        # 최상위 레이어: 구간별 투명 클릭 영역(클릭 위치→고정 시간). 좌표 계산 불필요.
+        # (타임테이블 행과 동일하게 ZStack + set_mouse_pressed_fn 사용 — 검증된 패턴)
+        n_buckets = max(20, min(240, int(bw // 4) or 1))
+
+        def _mk_seek(t_val: float) -> Callable[[float, float, int, Any], None]:
+            def _press(_x: float, _y: float, button: int, _mods: Any) -> None:
+                if int(button) != 0:
+                    return
+                _on_bar_timeline_seek(ext, scr_i, float(t_val))
+
+            return _press
+
+        with ui.HStack(width=bw, height=14, spacing=0):
+            for bi in range(n_buckets):
+                seg_w = (bw // n_buckets) if bi < n_buckets - 1 else (bw - (bw // n_buckets) * (n_buckets - 1))
+                if seg_w <= 0:
+                    continue
+                t_center = ((float(bi) + 0.5) / float(n_buckets)) * te
+                seg = ui.ZStack(width=int(seg_w), height=14)
+                with seg:
+                    ui.Spacer()
+                try:
+                    seg.set_mouse_pressed_fn(_mk_seek(float(t_center)))
+                except Exception:
+                    pass
+
+    if playhead_placer is not None:
+        st["_bar_playhead_placer"] = playhead_placer
+    if playhead_lbl is not None:
+        st["_bar_playhead_label"] = playhead_lbl
+
+
 def _apply_bar_mask_widths(
     st: Dict[str, Any],
     rows: List[Any],
@@ -4898,6 +5041,19 @@ def _apply_bar_mask_widths(
                 vlabel.text = format_row_state_duration_summary(seg_v)
             except Exception:
                 pass
+
+    ph_placer = st.get("_bar_playhead_placer")
+    if ph_placer is not None:
+        try:
+            ph_placer.offset_x = ui.Pixel(_bar_playhead_arrow_offset_x(int(playhead_px)))
+        except Exception:
+            pass
+    ph_lbl = st.get("_bar_playhead_label")
+    if ph_lbl is not None:
+        try:
+            ph_lbl.visible = True
+        except Exception:
+            pass
 
 
 def _build_precomputed_bar_with_mask(
@@ -4969,26 +5125,15 @@ def _build_precomputed_bar_with_mask(
                     with ui.VStack(spacing=inner_sp):
                         with ui.HStack(height=14, spacing=0):
                             ui.Spacer(width=NAME_W)
-                            with ui.ZStack(width=BAR_W, height=14):
-                                ui.Rectangle(width=BAR_W, height=14, style={"background_color": 0x441A1E26})
-                                try:
-                                    ticks = max(1, int(float(total_est) // float(tick_step)))
-                                except Exception:
-                                    ticks = 1
-                                for i in range(ticks + 1):
-                                    try:
-                                        t_lbl = float(i) * float(tick_step)
-                                    except Exception:
-                                        t_lbl = 0.0
-                                    x = int(round((float(t_lbl) / float(total_est)) * float(BAR_W))) if total_est > 1e-9 else 0
-                                    x = max(0, min(BAR_W - 1, x))
-                                    with ui.Placer(offset_x=x, offset_y=0):
-                                        ui.Label(
-                                            f"{int(round(t_lbl))}",
-                                            width=36,
-                                            height=14,
-                                            style={"color": 0xFFE0E6F0, "font_size": 10},
-                                        )
+                            _attach_bar_time_axis_scrubber(
+                                ext,
+                                st,
+                                screen=int(screen),
+                                bar_w=int(BAR_W),
+                                total_est=float(total_est),
+                                playhead_px=int(playhead_px),
+                                tick_step=float(tick_step),
+                            )
                             try:
                                 t_end_lbl = float(total_est)
                                 end_txt = (
@@ -5078,6 +5223,9 @@ def _build_precomputed_bar_with_mask(
         st["_mask_widgets"] = {}
         st["_mask_full_rows"] = {}
         st["_mask_sig"] = None
+        st.pop("_bar_playhead_placer", None)
+        st.pop("_bar_playhead_label", None)
+        st.pop("_bar_seek_tick_stack", None)
         return False
 
 
@@ -5653,6 +5801,12 @@ def _update_ep_timeline_under_port_state(
     except Exception:
         pass
 
+    try:
+        legacy_playhead_px = int(round((float(t_bar) / float(total_est)) * float(BAR_W)))
+    except Exception:
+        legacy_playhead_px = 0
+    legacy_playhead_px = max(0, min(int(BAR_W), legacy_playhead_px))
+
     def _color(state: str) -> int:
         return bar_state_color(str(state or BAR_STATE_EMPTY))
 
@@ -5666,26 +5820,15 @@ def _update_ep_timeline_under_port_state(
                         # 시간 라벨(너무 촘촘하면 안 보이므로 최대 8개 정도만)
                         with ui.HStack(height=14, spacing=0):
                             ui.Spacer(width=NAME_W)
-                            with ui.ZStack(width=BAR_W, height=14):
-                                ui.Rectangle(width=BAR_W, height=14, style={"background_color": 0x441A1E26})
-                                try:
-                                    ticks = max(1, int(float(total_est) // float(tick_step)))
-                                except Exception:
-                                    ticks = 1
-                                for i in range(ticks + 1):
-                                    try:
-                                        t_lbl = float(i) * float(tick_step)
-                                    except Exception:
-                                        t_lbl = 0.0
-                                    x = int(round((float(t_lbl) / float(total_est)) * float(BAR_W))) if total_est > 1e-9 else 0
-                                    x = max(0, min(BAR_W - 1, x))
-                                    with ui.Placer(offset_x=x, offset_y=0):
-                                        ui.Label(
-                                            f"{int(round(t_lbl))}",
-                                            width=36,
-                                            height=14,
-                                            style={"color": 0xFFE0E6F0, "font_size": 10},
-                                        )
+                            _attach_bar_time_axis_scrubber(
+                                ext,
+                                st,
+                                screen=int(screen),
+                                bar_w=int(BAR_W),
+                                total_est=float(total_est),
+                                playhead_px=int(legacy_playhead_px),
+                                tick_step=float(tick_step),
+                            )
                             try:
                                 t_end_lbl = float(total_est)
                                 end_txt = (

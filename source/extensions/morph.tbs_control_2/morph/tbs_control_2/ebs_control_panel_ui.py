@@ -7,6 +7,7 @@ from typing import Any, List, Set
 import omni.ui as ui
 
 from .kit_chrome_visibility import KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH, apply_kit_chrome_hidden
+from .sim_control_defaults import SIM_BAR_PREVIEW_DEFAULT as _SIM_BAR_PREVIEW_DEFAULT
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 
 # Viewport HUD 체크박스 ↔ Kit 보조 창 (model_attr, 라벨, resolver key)
@@ -188,7 +189,7 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_speed_model = ui.SimpleFloatModel(float(_SIM_DEF.sim_speed))
     ext._sim_log_interval_model = ui.SimpleFloatModel(float(_SIM_DEF.log_interval_sec))
     ext._sim_confirm_each_step_model = ui.SimpleBoolModel(False)
-    ext._sim_bar_preview_model = ui.SimpleBoolModel(False)
+    ext._sim_bar_preview_model = ui.SimpleBoolModel(bool(_SIM_BAR_PREVIEW_DEFAULT))
     try:
         ext._sim_bar_preview_model.add_value_changed_fn(lambda *_a: _on_sim_bar_preview_toggled(ext))
     except Exception:
