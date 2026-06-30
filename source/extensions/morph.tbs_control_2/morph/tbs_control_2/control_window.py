@@ -2531,7 +2531,7 @@ def _ensure_sim_monitor_window_shell(ext: Any, screen: int) -> None:
     foup_inners = _screen_dict(ext, "_sim_foup_inner_stack_by_screen")
     split_hosts = _screen_dict(ext, "_sim_monitor_split_host_by_screen")
 
-    win = ui.Window(title, width=450, height=620)
+    win = ui.Window(title, width=650, height=620)
     with win.frame:
         with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
             with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
@@ -3156,14 +3156,14 @@ def _ep_occ_timeline_layout_dims(ext: Any) -> Tuple[int, int, int, int, int]:
         nsp = max(1, min(4, int(getattr(ext, "_sim_viewport_split_count", 1) or 1)))
     except Exception:
         nsp = 1
+    # BAR_W(막대 폭)는 2배. VAL_W(우측 값 라벨 최대 너비)는 1.5배(2줄 접힘 완화).
     if nsp <= 1:
-        return (270, 64, 128, 2, 3)
+        return (540, 64, 192, 2, 3)
     if nsp == 2:
-        # 약 ~270px 행 폭 목표(이름+막대+상태초+간격+프레임 여유)
-        return (168, 48, 108, 3, 4)
+        return (336, 48, 162, 3, 4)
     if nsp == 3:
-        return (120, 44, 96, 2, 3)
-    return (88, 40, 84, 2, 2)
+        return (240, 44, 144, 2, 3)
+    return (176, 40, 126, 2, 2)
 
 
 def _sim_channel_upper_height(ext: Any) -> int:
@@ -3199,7 +3199,7 @@ def _ep_timeline_host_height(ext: Any) -> int:
         ebs_on = True
     n_bars = len(bar_graph_row_order(idx, ebs_enabled=ebs_on))
     _, _, _, frame_pad, _ = _ep_occ_timeline_layout_dims(ext)
-    bar_h = 14
+    bar_h = 10
     tick_h = 14
     inner_sp = 3
     h = int(frame_pad) * 2 + tick_h + inner_sp + n_bars * bar_h + max(0, n_bars - 1) * inner_sp + 2
@@ -4801,6 +4801,53 @@ def _append_bar_live_interval(
 _BAR_MASK_BG = 0xFF1A1E26
 
 
+def _estimate_wrapped_line_count(text: str, avail_px: float, font_size: int = 11) -> int:
+    """``word_wrap`` 라벨이 차지할 대략적인 줄 수(공백 단위 그리디 줄바꿈 추정).
+
+    우측 상태별 초 요약(예: ``empty:12s proc:5s ...``)이 좁은 폭에서 2줄 이상으로
+    접힐 때를 미리 반영해, 막대 영역 높이를 내용에 맞춰 잡기 위한 추정값이다.
+    """
+    s = str(text or "").strip()
+    if not s:
+        return 1
+    try:
+        avail = max(1.0, float(avail_px))
+    except Exception:
+        avail = 1.0
+    char_px = max(1.0, float(font_size) * 0.62)
+    space_px = char_px
+    lines = 1
+    cur = 0.0
+    for part in s.split(" "):
+        if not part:
+            continue
+        w = len(part) * char_px
+        if cur <= 0.0:
+            cur = w
+        elif cur + space_px + w <= avail:
+            cur += space_px + w
+        else:
+            lines += 1
+            cur = w
+    return max(1, min(6, lines))
+
+
+def _bar_row_value_label_height(
+    seg_list: List[Any], *, val_w: int, bar_h: int, font_size: int = 11
+) -> int:
+    """행 우측 값 라벨이 필요로 하는 행 높이(막대 두께 ``bar_h`` 이상)를 반환한다."""
+    try:
+        txt = format_row_state_duration_summary(seg_list or [])
+    except Exception:
+        txt = ""
+    lines = _estimate_wrapped_line_count(txt, val_w, font_size)
+    if int(lines) <= 1:
+        return int(bar_h)
+    # 2줄 이상일 때만 행을 키우되, 줄 간격을 촘촘하게(폰트+2) 잡아 과도한 여백을 막는다.
+    line_h = int(font_size) + 2
+    return max(int(bar_h), int(lines) * int(line_h))
+
+
 def _apply_bar_mask_widths(
     st: Dict[str, Any],
     rows: List[Any],
@@ -4875,22 +4922,37 @@ def _build_precomputed_bar_with_mask(
         return False
 
     BAR_W, NAME_W, VAL_W, frame_pad, row_sp = layout
-    BAR_H = 14
+    BAR_H = 10
     inner_sp = 3
     tick_h = 14
     tick_step = max(10.0, float(int((((float(total_est) / 8.0) + 9.999) // 10.0) * 10.0)))
-    content_h = (
-        int(frame_pad) * 2
-        + tick_h
-        + inner_sp
-        + max(1, len(rows)) * BAR_H
-        + max(0, len(rows) - 1) * int(row_sp)
-        + 4
-    )
 
     full_rows: Dict[str, List[Any]] = {
         str(k): list(v) for k, v in (getattr(bar_pre, "rows", {}) or {}).items()
     }
+    # 행별 높이: 우측 값 라벨(최종 full 요약)이 2줄 이상이 되어도 잘리지 않도록 산정.
+    # full 요약은 재생 중 표시되는 텍스트의 최댓값이라, 한 번만 계산하면 재생 내내 안전하다.
+    row_h_map: Dict[str, int] = {
+        str(r): _bar_row_value_label_height(
+            full_rows.get(str(r), []) or [], val_w=int(VAL_W), bar_h=BAR_H
+        )
+        for r in rows
+    }
+    rows_total_h = sum(int(row_h_map.get(str(r), BAR_H)) for r in rows) if rows else BAR_H
+    content_h = (
+        int(frame_pad) * 2
+        + tick_h
+        + inner_sp
+        + rows_total_h
+        + max(0, len(rows) - 1) * int(row_sp)
+        + 4
+    )
+    # 막대 영역(호스트) 높이를 내용에 맞춰 자동 조절 → 2줄 라벨에도 스크롤/잘림 없음.
+    try:
+        host.height = ui.Pixel(int(content_h))
+    except Exception:
+        pass
+
     mask_w0 = max(0, int(BAR_W) - int(playhead_px))
     masks: Dict[str, Any] = {}
 
@@ -4947,40 +5009,45 @@ def _build_precomputed_bar_with_mask(
                         for r in rows:
                             rk = str(r)
                             seg_list = full_rows.get(rk, []) or []
-                            with ui.HStack(height=BAR_H, spacing=int(row_sp)):
-                                ui.Label(rk, width=NAME_W, height=BAR_H, style={"color": 0xFFBFC7D5, "font_size": 11})
-                                with ui.ZStack(width=BAR_W, height=BAR_H):
-                                    ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
-                                    # 막대는 항상 전체(total_est) 기준으로 1회 그린다.
-                                    rects = _bar_segment_rect_widths(
-                                        seg_list,
-                                        total_est=float(total_est),
-                                        bar_w=int(BAR_W),
-                                        t_cover=float(total_est),
-                                    )
-                                    with ui.HStack(height=BAR_H, spacing=0):
-                                        used = 0
-                                        for w, seg_st in rects:
-                                            used += int(w)
-                                            ui.Rectangle(
-                                                width=int(w),
-                                                height=BAR_H,
-                                                style={"background_color": _color(seg_st)},
-                                            )
-                                        if used < BAR_W:
-                                            ui.Spacer(width=(BAR_W - used))
-                                    # 진행 마스크(행당 1개) — 배경색으로 미래 구간을 덮는다.
-                                    placer = ui.Placer(offset_x=int(playhead_px), offset_y=0)
-                                    with placer:
-                                        mrect = ui.Rectangle(
-                                            width=ui.Pixel(max(1, int(mask_w0))),
-                                            height=BAR_H,
-                                            style={"background_color": _BAR_MASK_BG},
+                            row_h = int(row_h_map.get(rk, BAR_H))
+                            with ui.HStack(height=row_h, spacing=int(row_sp)):
+                                ui.Label(rk, width=NAME_W, height=row_h, alignment=ui.Alignment.LEFT_CENTER, style={"color": 0xFFBFC7D5, "font_size": 11})
+                                # 막대는 행 안에서 세로 중앙 정렬(2줄 라벨로 행이 커져도 위에 붙지 않게).
+                                with ui.VStack(width=BAR_W, height=row_h):
+                                    ui.Spacer()
+                                    with ui.ZStack(width=BAR_W, height=BAR_H):
+                                        ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
+                                        # 막대는 항상 전체(total_est) 기준으로 1회 그린다.
+                                        rects = _bar_segment_rect_widths(
+                                            seg_list,
+                                            total_est=float(total_est),
+                                            bar_w=int(BAR_W),
+                                            t_cover=float(total_est),
                                         )
-                                    try:
-                                        mrect.visible = bool((not preview_full) and mask_w0 > 0)
-                                    except Exception:
-                                        pass
+                                        with ui.HStack(height=BAR_H, spacing=0):
+                                            used = 0
+                                            for w, seg_st in rects:
+                                                used += int(w)
+                                                ui.Rectangle(
+                                                    width=int(w),
+                                                    height=BAR_H,
+                                                    style={"background_color": _color(seg_st)},
+                                                )
+                                            if used < BAR_W:
+                                                ui.Spacer(width=(BAR_W - used))
+                                        # 진행 마스크(행당 1개) — 배경색으로 미래 구간을 덮는다.
+                                        placer = ui.Placer(offset_x=int(playhead_px), offset_y=0)
+                                        with placer:
+                                            mrect = ui.Rectangle(
+                                                width=ui.Pixel(max(1, int(mask_w0))),
+                                                height=BAR_H,
+                                                style={"background_color": _BAR_MASK_BG},
+                                            )
+                                        try:
+                                            mrect.visible = bool((not preview_full) and mask_w0 > 0)
+                                        except Exception:
+                                            pass
+                                    ui.Spacer()
                                 # 값 라벨(누적 요약) — 텍스트만 추후 갱신
                                 if preview_full:
                                     seg_v = seg_list
@@ -4996,8 +5063,9 @@ def _build_precomputed_bar_with_mask(
                                 vlabel = ui.Label(
                                     dur_txt,
                                     width=int(VAL_W),
-                                    height=BAR_H,
+                                    height=row_h,
                                     word_wrap=True,
+                                    alignment=ui.Alignment.LEFT_CENTER,
                                     style={"color": 0xFFDDDDDD, "font_size": 11},
                                 )
                                 masks[rk] = (placer, mrect, vlabel)
@@ -5559,18 +5627,31 @@ def _update_ep_timeline_under_port_state(
         except Exception:
             rows = list(bar_graph_row_order(0, ebs_enabled=True))
 
-    BAR_H = 14
+    BAR_H = 10
     inner_sp = 3
     tick_h = 14
     tick_step = max(10.0, float(int((((float(total_est) / 8.0) + 9.999) // 10.0) * 10.0)))
+    # 행별 높이: 우측 값 라벨이 2줄 이상 접혀도 잘리지 않도록 현재 세그먼트 기준으로 산정.
+    row_h_map: Dict[str, int] = {
+        str(r): _bar_row_value_label_height(
+            rows_state.get(str(r), []) or [], val_w=int(VAL_W), bar_h=BAR_H
+        )
+        for r in rows
+    }
+    rows_total_h = sum(int(row_h_map.get(str(r), BAR_H)) for r in rows) if rows else BAR_H
     content_h = (
         int(frame_pad) * 2
         + tick_h
         + inner_sp
-        + max(1, len(rows)) * BAR_H
+        + rows_total_h
         + max(0, len(rows) - 1) * int(row_sp)
         + 4
     )
+    # 막대 영역(호스트) 높이를 내용에 맞춰 자동 조절 → 2줄 라벨에도 스크롤/잘림 없음.
+    try:
+        host.height = ui.Pixel(int(content_h))
+    except Exception:
+        pass
 
     def _color(state: str) -> int:
         return bar_state_color(str(state or BAR_STATE_EMPTY))
@@ -5623,41 +5704,46 @@ def _update_ep_timeline_under_port_state(
                                 style={"color": 0xFFE0E6F0, "font_size": 10},
                             )
                         for r in rows:
-                            with ui.HStack(height=BAR_H, spacing=int(row_sp)):
-                                ui.Label(r, width=NAME_W, height=BAR_H, style={"color": 0xFFBFC7D5, "font_size": 11})
-                                with ui.ZStack(width=BAR_W, height=BAR_H):
-                                    ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
-                                    segs = rows_state.get(r, []) or []
-                                    seg_list = segs if isinstance(segs, list) else []
-                                    try:
-                                        t_cover = sum(
-                                            float(s.get("dur", 0.0))
-                                            for s in seg_list
-                                            if isinstance(s, dict)
-                                        )
-                                    except Exception:
-                                        t_cover = float(t_bar)
-                                    if use_precomputed and bool(preview_full):
-                                        t_cover = float(total_est)
-                                    elif use_precomputed or playback_lock:
-                                        t_cover = min(float(t_bar), float(t_cover))
-                                    rects = _bar_segment_rect_widths(
-                                        seg_list,
-                                        total_est=float(total_est),
-                                        bar_w=int(BAR_W),
-                                        t_cover=float(t_cover),
-                                    )
-                                    with ui.HStack(height=BAR_H, spacing=0):
-                                        used = 0
-                                        for w, seg_st in rects:
-                                            used += int(w)
-                                            ui.Rectangle(
-                                                width=int(w),
-                                                height=BAR_H,
-                                                style={"background_color": _color(seg_st)},
+                            row_h = int(row_h_map.get(str(r), BAR_H))
+                            with ui.HStack(height=row_h, spacing=int(row_sp)):
+                                ui.Label(r, width=NAME_W, height=row_h, alignment=ui.Alignment.LEFT_CENTER, style={"color": 0xFFBFC7D5, "font_size": 11})
+                                # 막대는 행 안에서 세로 중앙 정렬(2줄 라벨로 행이 커져도 위에 붙지 않게).
+                                with ui.VStack(width=BAR_W, height=row_h):
+                                    ui.Spacer()
+                                    with ui.ZStack(width=BAR_W, height=BAR_H):
+                                        ui.Rectangle(width=BAR_W, height=BAR_H, style={"background_color": 0xFF1A1E26})
+                                        segs = rows_state.get(r, []) or []
+                                        seg_list = segs if isinstance(segs, list) else []
+                                        try:
+                                            t_cover = sum(
+                                                float(s.get("dur", 0.0))
+                                                for s in seg_list
+                                                if isinstance(s, dict)
                                             )
-                                        if used < BAR_W:
-                                            ui.Spacer(width=(BAR_W - used))
+                                        except Exception:
+                                            t_cover = float(t_bar)
+                                        if use_precomputed and bool(preview_full):
+                                            t_cover = float(total_est)
+                                        elif use_precomputed or playback_lock:
+                                            t_cover = min(float(t_bar), float(t_cover))
+                                        rects = _bar_segment_rect_widths(
+                                            seg_list,
+                                            total_est=float(total_est),
+                                            bar_w=int(BAR_W),
+                                            t_cover=float(t_cover),
+                                        )
+                                        with ui.HStack(height=BAR_H, spacing=0):
+                                            used = 0
+                                            for w, seg_st in rects:
+                                                used += int(w)
+                                                ui.Rectangle(
+                                                    width=int(w),
+                                                    height=BAR_H,
+                                                    style={"background_color": _color(seg_st)},
+                                                )
+                                            if used < BAR_W:
+                                                ui.Spacer(width=(BAR_W - used))
+                                    ui.Spacer()
                                 try:
                                     dur_txt = format_row_state_duration_summary(seg_list)
                                 except Exception:
@@ -5665,8 +5751,9 @@ def _update_ep_timeline_under_port_state(
                                 ui.Label(
                                     dur_txt,
                                     width=int(VAL_W),
-                                    height=BAR_H,
+                                    height=row_h,
                                     word_wrap=True,
+                                    alignment=ui.Alignment.LEFT_CENTER,
                                     style={"color": 0xFFDDDDDD, "font_size": 11},
                                 )
     except Exception as ex:
@@ -11087,7 +11174,7 @@ def on_sim_start_clicked(ext: Any) -> None:
         _clear_sim_timetable_storage(ext)
     except Exception:
         pass
-    on_sim_stop_clicked(ext)
+    on_sim_stop_clicked(ext, freeze_ep_timeline=False)
     try:
         _restore_all_sim_channels_prim_motion(ext)
     except Exception:
@@ -12341,9 +12428,13 @@ def _restore_sim_prim_motion_to_initial(
         print(f"[TBS/SIM] restore motion failed: {exc}", flush=True)
 
 
-def on_sim_stop_clicked(ext: Any) -> None:
+def on_sim_stop_clicked(ext: Any, *, freeze_ep_timeline: bool = True) -> None:
     """
     시뮬레이션 중지(Stop).
+
+    ``freeze_ep_timeline`` (기본 True):
+    - True  → 정지 버튼/웹/종료 경로. EP 막대그래프를 **현 상태 그대로 동결**(위젯·렌더 상태 유지).
+    - False → start/reset 내부 호출. 막대그래프 위젯·상태를 초기화(다음 실행을 깨끗이 시작).
 
     목표(요구사항):
     - 멀티 화면에서 화면별 runner/큐/인터럽트/일시정지(pause) 상태가 남아
@@ -12623,14 +12714,16 @@ def on_sim_stop_clicked(ext: Any) -> None:
     except Exception:
         pass
     # EP 타임라인 그래프 상태/위젯 초기화(리셋/정지 후 누적 잔상 방지)
-    try:
-        ext._sim_ep_timeline_state_by_screen = {}
-    except Exception:
-        pass
-    try:
-        ext._sim_ep_occ_timeline_state_by_screen = {}
-    except Exception:
-        pass
+    # freeze 시(정지 버튼)에는 막대그래프 렌더 상태를 그대로 두어 현 상태로 동결한다.
+    if not freeze_ep_timeline:
+        try:
+            ext._sim_ep_timeline_state_by_screen = {}
+        except Exception:
+            pass
+        try:
+            ext._sim_ep_occ_timeline_state_by_screen = {}
+        except Exception:
+            pass
     try:
         ext._sim_last_ports_occupancy_by_screen = {}
     except Exception:
@@ -12661,32 +12754,35 @@ def on_sim_stop_clicked(ext: Any) -> None:
         ext._sim_ep_timeline_ui_sub = None
     except Exception:
         pass
-    try:
-        ext._sim_ep_timeline_virtual_time_by_screen = {}
-    except Exception:
-        pass
-    try:
-        chans = getattr(ext, "_sim_monitor_channels", None)
-        if isinstance(chans, list):
-            for ch in chans:
-                if not isinstance(ch, dict):
-                    continue
-                w = ch.get("progress_ep_timeline_widget", None)
-                if w is not None:
-                    try:
-                        w.destroy()
-                    except Exception:
-                        pass
-                    ch["progress_ep_timeline_widget"] = None
-                w2 = ch.get("ep_timeline_widget", None)
-                if w2 is not None:
-                    try:
-                        w2.destroy()
-                    except Exception:
-                        pass
-                    ch["ep_timeline_widget"] = None
-    except Exception:
-        pass
+    if not freeze_ep_timeline:
+        try:
+            ext._sim_ep_timeline_virtual_time_by_screen = {}
+        except Exception:
+            pass
+    # freeze 시에는 EP 막대그래프 위젯을 destroy 하지 않고 현 상태로 둔다(빈 영역 방지).
+    if not freeze_ep_timeline:
+        try:
+            chans = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chans, list):
+                for ch in chans:
+                    if not isinstance(ch, dict):
+                        continue
+                    w = ch.get("progress_ep_timeline_widget", None)
+                    if w is not None:
+                        try:
+                            w.destroy()
+                        except Exception:
+                            pass
+                        ch["progress_ep_timeline_widget"] = None
+                    w2 = ch.get("ep_timeline_widget", None)
+                    if w2 is not None:
+                        try:
+                            w2.destroy()
+                        except Exception:
+                            pass
+                        ch["ep_timeline_widget"] = None
+        except Exception:
+            pass
     try:
         ext._sim_engines = []
     except Exception:
@@ -12714,7 +12810,7 @@ def on_sim_reset_clicked(ext: Any) -> None:
         _clear_sim_timetable_storage(ext)
     except Exception:
         pass
-    on_sim_stop_clicked(ext)
+    on_sim_stop_clicked(ext, freeze_ep_timeline=False)
     try:
         _restore_all_sim_channels_prim_motion(ext)
     except Exception:
