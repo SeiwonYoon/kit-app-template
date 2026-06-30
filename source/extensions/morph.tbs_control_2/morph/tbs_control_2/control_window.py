@@ -3836,6 +3836,8 @@ def build_control_window(ext: Any) -> None:
             getattr(ext, "_sim_bp_ep_max_model", None),
             getattr(ext, "_sim_ep_oht_min_model", None),
             getattr(ext, "_sim_ep_oht_max_model", None),
+            getattr(ext, "_sim_foup_proc_min_model", None),
+            getattr(ext, "_sim_foup_proc_max_model", None),
             getattr(ext, "_sim_init_inout_model", None),
             getattr(ext, "_sim_init_bp1_model", None),
             getattr(ext, "_sim_init_bp2_model", None),
