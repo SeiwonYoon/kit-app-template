@@ -10513,10 +10513,16 @@ def _schedule_foup_label_reset(ext: Any, screen_idx: int, ep_id: str, delay_sec:
             pass
 
 
-def _schedule_foup_inprogress_unmark(ext: Any, prim_path: str, delay_sec: float = 1.05) -> None:
+def _schedule_foup_inprogress_unmark(
+    ext: Any,
+    prim_path: str,
+    delay_sec: float = 1.05,
+    *,
+    usd_context_name: Optional[str] = None,
+) -> None:
     """
     FOUP_PROCESS_END 가 발생하면 -Y 복귀 애니가 끝나는 시점(약 1초 후)에
-    port_lot_visibility 의 FOUP 진행중 표시를 해제한다.
+    port_lot_visibility 의 FOUP 진행중 표시를 (해당 화면 컨텍스트에서) 해제한다.
 
     동작:
     - 1회성 update event subscription 으로 deadline 도달 시 unmark + self-unsubscribe.
@@ -10543,7 +10549,9 @@ def _schedule_foup_inprogress_unmark(ext: Any, prim_path: str, delay_sec: float 
                     return
                 sub_holder["done"] = True
                 try:
-                    port_lot_visibility.mark_foup_in_progress(p, False)
+                    port_lot_visibility.mark_foup_in_progress(
+                        p, False, usd_context_name=usd_context_name
+                    )
                 except Exception:
                     pass
                 try:
@@ -10574,7 +10582,9 @@ def _schedule_foup_inprogress_unmark(ext: Any, prim_path: str, delay_sec: float 
             pass
     except Exception:
         try:
-            port_lot_visibility.mark_foup_in_progress(p, False)
+            port_lot_visibility.mark_foup_in_progress(
+                p, False, usd_context_name=usd_context_name
+            )
         except Exception:
             pass
 
@@ -10644,7 +10654,7 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
         try:
             from . import port_lot_visibility as _plv  # type: ignore
             if seq_u0 == "FOUP_PROCESS_START":
-                _plv.mark_foup_in_progress(prim_path, True)
+                _plv.mark_foup_in_progress(prim_path, True, usd_context_name=ctx_nm)
                 _remember_foup_active_ep(ext, scr, {"foup_proc_active_ep": port_id})
                 try:
                     runners = getattr(ext, "_sim_runners_by_screen", None)
@@ -10658,9 +10668,11 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
                 except Exception:
                     pass
             else:  # FOUP_PROCESS_END
-                _plv.mark_foup_lifted(prim_path, False)
+                _plv.mark_foup_lifted(prim_path, False, usd_context_name=ctx_nm)
                 _remember_foup_active_ep(ext, scr, {"foup_proc_active_ep": ""})
-                _schedule_foup_inprogress_unmark(ext, prim_path, delay_sec=1.05)
+                _schedule_foup_inprogress_unmark(
+                    ext, prim_path, delay_sec=1.05, usd_context_name=ctx_nm
+                )
         except Exception:
             pass
         # 1-D-2) Material 바인딩(요청 사양):
@@ -12227,8 +12239,10 @@ def _restore_sim_prim_motion_to_initial(
             from . import port_lot_visibility as _plv
 
             if not preserve_foup_offsets:
-                _plv.clear_foup_in_progress()
-                _plv.clear_foup_lifted()
+                # 화면(USD 컨텍스트)별 독립: 이 화면의 FOUP 공정 상태만 비운다.
+                # (전역 비우기를 하면 다른 화면에서 공정 중인 FOUP 의 lift 상태가 풀려 함께 내려간다.)
+                _plv.clear_foup_in_progress(usd_context_name=usd_context_name)
+                _plv.clear_foup_lifted(usd_context_name=usd_context_name)
                 _plv.restore_port_lot_prims_to_authoring(
                     usd_context_name=usd_context_name,
                     foup_proc_active_ep=str(foup_proc_active_ep or ""),

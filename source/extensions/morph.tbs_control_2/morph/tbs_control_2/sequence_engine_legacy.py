@@ -1487,9 +1487,9 @@ class SequenceRunner:
     def _restore_baseline(self, exclude_paths: Optional[set] = None) -> None:
         """baseline으로 transform을 되돌림. (실행을 항상 초기값부터 재현하기 위함)
 
-        공정 중 prim 처리 규칙(port_lot_visibility 와 동일):
-        - plateau(_FOUP_LIFTED_PATHS): baseline 이 아니라 baseline + (0, foup_proc_y_lift, 0) 으로 set.
-        - +Y / -Y 애니 진행 중(_FOUP_IN_PROGRESS_PATHS 이고 lifted 아님): 건드리지 않는다.
+        공정 중 prim 처리 규칙(port_lot_visibility 와 동일, 화면 컨텍스트별 상태):
+        - plateau(lifted): baseline 이 아니라 baseline + (0, foup_proc_y_lift, 0) 으로 set.
+        - +Y / -Y 애니 진행 중(in-progress 이고 lifted 아님): 건드리지 않는다.
         """
         stage = self._stage()
         if not stage:
@@ -1500,7 +1500,8 @@ class SequenceRunner:
             _plv = None
         # exclude_paths는 "현재 위치부터 시작" 부분 적용을 위한 선택적 복원 예외 목록.
         active_ep = str(getattr(self, "_foup_proc_active_ep", "") or "").strip().upper()
-        sim_ctx = getattr(self, "_usd_context_name", None) is not None
+        runner_ctx = getattr(self, "_usd_context_name", None)
+        sim_ctx = runner_ctx is not None
         port_lot_paths: set = set()
         if _plv is not None:
             try:
@@ -1516,6 +1517,7 @@ class SequenceRunner:
                 if _plv is not None:
                     if _plv.should_skip_port_lot_baseline_reset(
                         path,
+                        usd_context_name=runner_ctx,
                         foup_proc_active_ep=active_ep,
                     ):
                         continue
@@ -1523,6 +1525,7 @@ class SequenceRunner:
                         lifted_t = _plv.get_foup_restore_translate(
                             path,
                             foup_proc_active_ep=active_ep,
+                            usd_context_name=runner_ctx,
                         )
                     except Exception:
                         lifted_t = None
@@ -1533,22 +1536,22 @@ class SequenceRunner:
                             _set_rotate_xyz(prim, r)
                         continue
                     try:
-                        if _plv.is_foup_in_progress(path):
+                        if _plv.is_foup_in_progress(path, usd_context_name=runner_ctx):
                             try:
                                 from .translate_animation import is_prim_translate_animation_running
 
-                                if is_prim_translate_animation_running(path):
+                                if is_prim_translate_animation_running(path, runner_ctx):
                                     continue
                             except Exception:
                                 pass
-                            sign = _plv.get_foup_lift_sign(path)
+                            sign = _plv.get_foup_lift_sign(path, usd_context_name=runner_ctx)
                             if sign > 0 or (active_ep and _plv._port_id_for_prim_path(path) == active_ep):
                                 tgt = _plv.foup_lifted_target_translate(path)
                                 if tgt is not None:
                                     prim = stage.GetPrimAtPath(path)
                                     if prim and prim.IsValid():
                                         _set_translate(prim, tgt)
-                                        _plv.mark_foup_lifted(path, True)
+                                        _plv.mark_foup_lifted(path, True, usd_context_name=runner_ctx)
                                 continue
                             if sign < 0:
                                 base = _plv.foup_authoring_baseline_translate(path)

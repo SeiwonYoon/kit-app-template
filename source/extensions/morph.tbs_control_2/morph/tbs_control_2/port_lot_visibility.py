@@ -32,27 +32,59 @@ _CACHE: Optional[Dict[str, str]] = None
 _MTIME: Optional[float] = None
 
 # 포트별 LOT 표현 prim의 "기준 자세"(최초 캡처). 애니 시작 시 이 값으로 복원한다(가시성 로직은 별도).
+# - baseline(원위치)·lift 크기는 모든 화면에서 동일(같은 USD authoring)하므로 prim 경로 단일 키로 둔다.
 _PORT_LOT_AUTHORING: Dict[str, Tuple[Gf.Vec3f, Gf.Vec3f]] = {}
 
-# FOUP 공정이 진행 중인 prim 경로 집합.
+# ─────────────────────────────────────────────────────────────────────────────
+# FOUP 공정 "상태 플래그"는 화면(USD 컨텍스트)별로 독립이어야 한다.
+#   화면1·화면2 가 동일 prim 경로 문자열을 공유하므로(별도 stage), 경로만 키로 쓰면
+#   한 화면의 공정중 lift 상태가 다른 화면 동일 포트로 전이된다(위치 초기화 시 +Y 누적).
+#   → (컨텍스트, prim 경로) 로 분리한다. 화면1 = "" (기본 컨텍스트), 화면2+ = 명명 컨텍스트.
+# 단, baseline(_PORT_LOT_AUTHORING)·lift 크기·material 은 화면 독립이라 그대로 둔다.
+# ─────────────────────────────────────────────────────────────────────────────
+# FOUP 공정이 진행 중인 prim 경로 집합(컨텍스트별).
 # - FOUP_PROCESS_START 시 등록(+Y 오프셋 보호 시작)
 # - FOUP_PROCESS_END 의 -Y 복귀 애니가 끝난 뒤(약 1초 후) 해제
 # - 이 집합에 포함된 path 는 restore_port_lot_prims_to_authoring() 에서 baseline 복원을 건너뛴다.
-#   이렇게 하면 FOUP 가 +Y 위치에 있는 동안 다른 시퀀스가 시작해도 prim 이 원위치로 튀지 않는다.
-_FOUP_IN_PROGRESS_PATHS: Set[str] = set()
+_FOUP_IN_PROGRESS_BY_CTX: Dict[str, Set[str]] = {}
 
-# FOUP plateau(=+Y 1초 애니가 끝난 시점 ~ -Y 시작 직전) prim 경로 집합.
+# FOUP plateau(=+Y 1초 애니가 끝난 시점 ~ -Y 시작 직전) prim 경로 집합(컨텍스트별).
 # - 의미: prim 이 baseline+(0, foup_proc_y_lift, 0) 자리에 머물러야 하는 구간.
-# - 사용처: "포트 초기화" 가 발생하는 두 경로
-#   (1) restore_port_lot_prims_to_authoring()
-#   (2) SequenceRunner._restore_baseline()
-#   양쪽 모두 이 집합에 들어있는 prim 은 baseline 이 아니라 baseline+Y lift 로 set 한다.
-# - 마킹/해제는 control_window 의 FOUP 분기에서 한다.
-#   START 의 +Y 1초 애니 ``on_completed`` 콜백에서 add,
-#   END 이벤트 진입 시 즉시 discard(이후 -Y 복귀 애니 진행은 _FOUP_IN_PROGRESS_PATHS 의 skip 로 보호).
-_FOUP_LIFTED_PATHS: Set[str] = set()
-# +Y 진행(+1) / -Y 진행(-1). 애니가 끊긴 뒤 restore 가 어느 쪽으로 맞출지 결정.
-_FOUP_LIFT_SIGN: Dict[str, int] = {}
+_FOUP_LIFTED_BY_CTX: Dict[str, Set[str]] = {}
+# +Y 진행(+1) / -Y 진행(-1). 애니가 끊긴 뒤 restore 가 어느 쪽으로 맞출지 결정(컨텍스트별).
+_FOUP_LIFT_SIGN_BY_CTX: Dict[str, Dict[str, int]] = {}
+
+
+def _ctx_key(usd_context_name: Optional[str]) -> str:
+    """USD 컨텍스트 이름 정규화 키 (None/빈 문자열 → 기본 컨텍스트 "")."""
+    return str(usd_context_name or "").strip()
+
+
+def _foup_in_progress_set(usd_context_name: Optional[str]) -> Set[str]:
+    return _FOUP_IN_PROGRESS_BY_CTX.setdefault(_ctx_key(usd_context_name), set())
+
+
+def _foup_lifted_set(usd_context_name: Optional[str]) -> Set[str]:
+    return _FOUP_LIFTED_BY_CTX.setdefault(_ctx_key(usd_context_name), set())
+
+
+def _foup_lift_sign_map(usd_context_name: Optional[str]) -> Dict[str, int]:
+    return _FOUP_LIFT_SIGN_BY_CTX.setdefault(_ctx_key(usd_context_name), {})
+
+
+def _is_foup_in_progress_any_ctx(prim_path: str) -> bool:
+    """어느 화면 컨텍스트에서든 공정 진행중이면 True.
+
+    ``_PORT_LOT_AUTHORING`` baseline 은 화면 공통이므로, 어느 한 화면에서라도
+    +Y lift 된 상태면 그 stage 의 현재 위치를 baseline 으로 잘못 캡처하지 않도록 보호한다.
+    """
+    p = str(prim_path or "").strip()
+    if not p:
+        return False
+    for s in _FOUP_IN_PROGRESS_BY_CTX.values():
+        if p in s:
+            return True
+    return False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FOUP material 경로 (한 곳에서만 수정하면 전체에 반영됩니다)
@@ -167,7 +199,9 @@ def should_skip_port_lot_baseline_reset(
     p = str(prim_path or "").strip()
     if not p or not is_port_lot_mapped_prim(p):
         return False
-    if is_foup_port_lot_active(p, foup_proc_active_ep=foup_proc_active_ep):
+    if is_foup_port_lot_active(
+        p, foup_proc_active_ep=foup_proc_active_ep, usd_context_name=usd_context_name
+    ):
         return True
     try:
         from .translate_animation import is_prim_translate_animation_running
@@ -182,7 +216,7 @@ def should_skip_port_lot_baseline_reset(
             usd_context_name=usd_context_name,
             foup_proc_active_ep=foup_proc_active_ep,
         ):
-            mark_foup_lifted(p, True)
+            mark_foup_lifted(p, True, usd_context_name=usd_context_name)
             return True
     except Exception:
         pass
@@ -192,16 +226,19 @@ def should_skip_port_lot_baseline_reset(
 def clear_port_lot_authoring_cache() -> None:
     """시뮬 리셋 등에서 다음 애니 시작 시 authoring을 다시 잡을 수 있게 캐시를 비운다.
     함께 FOUP 진행중 보호 집합도 초기화하여, 잔여 플래그로 인해 다음 시뮬에서 복원이 막히지 않게 한다.
+    (시작/리셋 안전망 — 모든 화면 컨텍스트 일괄 초기화)
     """
     _PORT_LOT_AUTHORING.clear()
-    _FOUP_IN_PROGRESS_PATHS.clear()
-    _FOUP_LIFTED_PATHS.clear()
-    _FOUP_LIFT_SIGN.clear()
+    _FOUP_IN_PROGRESS_BY_CTX.clear()
+    _FOUP_LIFTED_BY_CTX.clear()
+    _FOUP_LIFT_SIGN_BY_CTX.clear()
 
 
-def mark_foup_in_progress(prim_path: str, in_progress: bool) -> None:
+def mark_foup_in_progress(
+    prim_path: str, in_progress: bool, *, usd_context_name: Optional[str] = None
+) -> None:
     """
-    특정 prim 경로의 FOUP 공정 진행 여부를 등록/해제한다.
+    특정 prim 경로의 FOUP 공정 진행 여부를 (화면 컨텍스트별로) 등록/해제한다.
     이 집합에 포함된 prim 은 ``restore_port_lot_prims_to_authoring()`` 에서 baseline 복원을 건너뛴다.
 
     - FOUP_PROCESS_START → True 로 등록(+Y 오프셋 유지)
@@ -210,48 +247,70 @@ def mark_foup_in_progress(prim_path: str, in_progress: bool) -> None:
     p = str(prim_path or "").strip()
     if not p:
         return
+    s = _foup_in_progress_set(usd_context_name)
     if in_progress:
-        _FOUP_IN_PROGRESS_PATHS.add(p)
+        s.add(p)
     else:
-        _FOUP_IN_PROGRESS_PATHS.discard(p)
+        s.discard(p)
 
 
-def clear_foup_in_progress() -> None:
-    """모든 FOUP 진행중 표시를 비운다(시뮬 시작/리셋/정지 시 안전망용)."""
-    _FOUP_IN_PROGRESS_PATHS.clear()
-    _FOUP_LIFTED_PATHS.clear()
-    _FOUP_LIFT_SIGN.clear()
+def clear_foup_in_progress(*, usd_context_name: Optional[str] = None) -> None:
+    """FOUP 진행중 표시를 비운다(시뮬 시작/리셋/정지 시 안전망용).
 
-
-def is_foup_in_progress(prim_path: str) -> bool:
-    """디버그/조회용. 해당 path 가 FOUP 진행중으로 표시되어 있는지 반환."""
-    return str(prim_path or "").strip() in _FOUP_IN_PROGRESS_PATHS
-
-
-def mark_foup_lifted(prim_path: str, lifted: bool) -> None:
+    ``usd_context_name`` 미지정(None) → 모든 화면 컨텍스트 일괄 초기화(기존 동작).
+    지정 시 해당 컨텍스트만 초기화.
     """
-    FOUP plateau 표시(+Y lift 자리에 머물러야 하는 상태) 등록/해제.
+    if usd_context_name is None:
+        _FOUP_IN_PROGRESS_BY_CTX.clear()
+        _FOUP_LIFTED_BY_CTX.clear()
+        _FOUP_LIFT_SIGN_BY_CTX.clear()
+        return
+    key = _ctx_key(usd_context_name)
+    _FOUP_IN_PROGRESS_BY_CTX.pop(key, None)
+    _FOUP_LIFTED_BY_CTX.pop(key, None)
+    _FOUP_LIFT_SIGN_BY_CTX.pop(key, None)
+
+
+def is_foup_in_progress(prim_path: str, *, usd_context_name: Optional[str] = None) -> bool:
+    """디버그/조회용. 해당 path 가 (해당 컨텍스트에서) FOUP 진행중으로 표시되어 있는지 반환."""
+    return str(prim_path or "").strip() in _foup_in_progress_set(usd_context_name)
+
+
+def mark_foup_lifted(
+    prim_path: str, lifted: bool, *, usd_context_name: Optional[str] = None
+) -> None:
+    """
+    FOUP plateau 표시(+Y lift 자리에 머물러야 하는 상태)를 (화면 컨텍스트별로) 등록/해제.
     - +Y 1초 애니가 끝났을 때 True
-    - FOUP_PROCESS_END 이벤트 진입 즉시 False(이후 -Y 복귀 애니는 _FOUP_IN_PROGRESS_PATHS 의 skip 로 보호)
+    - FOUP_PROCESS_END 이벤트 진입 즉시 False(이후 -Y 복귀 애니는 in-progress skip 로 보호)
     """
     p = str(prim_path or "").strip()
     if not p:
         return
+    s = _foup_lifted_set(usd_context_name)
     if lifted:
-        _FOUP_LIFTED_PATHS.add(p)
+        s.add(p)
     else:
-        _FOUP_LIFTED_PATHS.discard(p)
+        s.discard(p)
 
 
-def clear_foup_lifted() -> None:
-    """모든 plateau 표시를 비운다(시뮬 시작/리셋/정지 시 안전망용)."""
-    _FOUP_LIFTED_PATHS.clear()
-    _FOUP_LIFT_SIGN.clear()
+def clear_foup_lifted(*, usd_context_name: Optional[str] = None) -> None:
+    """plateau 표시를 비운다(시뮬 시작/리셋/정지 시 안전망용).
+
+    ``usd_context_name`` 미지정(None) → 모든 컨텍스트 일괄 초기화(기존 동작).
+    """
+    if usd_context_name is None:
+        _FOUP_LIFTED_BY_CTX.clear()
+        _FOUP_LIFT_SIGN_BY_CTX.clear()
+        return
+    key = _ctx_key(usd_context_name)
+    _FOUP_LIFTED_BY_CTX.pop(key, None)
+    _FOUP_LIFT_SIGN_BY_CTX.pop(key, None)
 
 
-def is_foup_lifted(prim_path: str) -> bool:
-    """해당 path 가 FOUP plateau(+Y lift 자리) 상태인지 반환."""
-    return str(prim_path or "").strip() in _FOUP_LIFTED_PATHS
+def is_foup_lifted(prim_path: str, *, usd_context_name: Optional[str] = None) -> bool:
+    """해당 path 가 (해당 컨텍스트에서) FOUP plateau(+Y lift 자리) 상태인지 반환."""
+    return str(prim_path or "").strip() in _foup_lifted_set(usd_context_name)
 
 
 def foup_proc_y_lift() -> float:
@@ -316,8 +375,10 @@ def is_prim_at_foup_lifted_position(
     p = str(prim_path or "").strip()
     if not p:
         return False
-    target = get_foup_restore_translate(p, foup_proc_active_ep=foup_proc_active_ep)
-    if target is None and (p in _FOUP_LIFTED_PATHS or is_foup_lifted(p)):
+    target = get_foup_restore_translate(
+        p, foup_proc_active_ep=foup_proc_active_ep, usd_context_name=usd_context_name
+    )
+    if target is None and is_foup_lifted(p, usd_context_name=usd_context_name):
         rec = _PORT_LOT_AUTHORING.get(p)
         if rec is None:
             return False
@@ -351,8 +412,10 @@ def snap_foup_prim_to_lifted(
     active_ep = str(foup_proc_active_ep or "").strip().upper()
     port_id = _port_id_for_prim_path(p)
     if active_ep and port_id == active_ep:
-        mark_foup_lifted(p, True)
-    target = get_foup_restore_translate(p, foup_proc_active_ep=active_ep)
+        mark_foup_lifted(p, True, usd_context_name=usd_context_name)
+    target = get_foup_restore_translate(
+        p, foup_proc_active_ep=active_ep, usd_context_name=usd_context_name
+    )
     if target is None:
         rec = _PORT_LOT_AUTHORING.get(p)
         if rec is None:
@@ -363,7 +426,7 @@ def snap_foup_prim_to_lifted(
             return False
         lift = float(foup_proc_y_lift())
         target = Gf.Vec3f(float(rec[0][0]), float(rec[0][1]) + lift, float(rec[0][2]))
-        mark_foup_lifted(p, True)
+        mark_foup_lifted(p, True, usd_context_name=usd_context_name)
     stage = _get_stage_for_context(usd_context_name)
     ensure_port_lot_authoring_captured(stage)
     if not stage:
@@ -379,7 +442,7 @@ def snap_foup_prim_to_lifted(
         base_r = _PORT_LOT_AUTHORING.get(p, (target, Gf.Vec3f(0, 0, 0)))[1]
         _set_translate(prim, target)
         _set_rotate_xyz(prim, base_r)
-        mark_foup_lifted(p, True)
+        mark_foup_lifted(p, True, usd_context_name=usd_context_name)
         return True
     except Exception:
         return False
@@ -410,39 +473,46 @@ def snap_foup_prim_to_baseline(
         t, r = rec
         _set_translate(prim, t)
         _set_rotate_xyz(prim, r)
-        mark_foup_lifted(p, False)
+        mark_foup_lifted(p, False, usd_context_name=usd_context_name)
         return True
     except Exception:
         return False
 
 
-def set_foup_lift_sign(prim_path: str, sign: int) -> None:
+def set_foup_lift_sign(
+    prim_path: str, sign: int, *, usd_context_name: Optional[str] = None
+) -> None:
     p = str(prim_path or "").strip()
     if not p:
         return
+    m = _foup_lift_sign_map(usd_context_name)
     s = int(sign)
     if s > 0:
-        _FOUP_LIFT_SIGN[p] = 1
+        m[p] = 1
     elif s < 0:
-        _FOUP_LIFT_SIGN[p] = -1
+        m[p] = -1
     else:
-        _FOUP_LIFT_SIGN.pop(p, None)
+        m.pop(p, None)
 
 
-def get_foup_lift_sign(prim_path: str) -> int:
-    return int(_FOUP_LIFT_SIGN.get(str(prim_path or "").strip(), 0) or 0)
+def get_foup_lift_sign(prim_path: str, *, usd_context_name: Optional[str] = None) -> int:
+    m = _foup_lift_sign_map(usd_context_name)
+    return int(m.get(str(prim_path or "").strip(), 0) or 0)
 
 
 def is_foup_port_lot_active(
     prim_path: str,
     *,
     foup_proc_active_ep: str = "",
+    usd_context_name: Optional[str] = None,
 ) -> bool:
-    """공정 중(plateau·±Y·active EP)인 FOUP prim 인지."""
+    """공정 중(plateau·±Y·active EP)인 FOUP prim 인지 (해당 컨텍스트 기준)."""
     p = str(prim_path or "").strip()
     if not p:
         return False
-    if p in _FOUP_IN_PROGRESS_PATHS or p in _FOUP_LIFTED_PATHS:
+    if p in _foup_in_progress_set(usd_context_name) or p in _foup_lifted_set(
+        usd_context_name
+    ):
         return True
     active_ep = str(foup_proc_active_ep or "").strip().upper()
     if active_ep and _port_id_for_prim_path(p) == active_ep:
@@ -524,11 +594,11 @@ def run_foup_smooth_y_anim(
     dy = float(target[1]) - float(cur[1])
     if abs(dy) <= eps:
         if toward_lifted:
-            mark_foup_lifted(p, True)
-            set_foup_lift_sign(p, 0)
+            mark_foup_lifted(p, True, usd_context_name=usd_context_name)
+            set_foup_lift_sign(p, 0, usd_context_name=usd_context_name)
         else:
-            mark_foup_lifted(p, False)
-            set_foup_lift_sign(p, 0)
+            mark_foup_lifted(p, False, usd_context_name=usd_context_name)
+            set_foup_lift_sign(p, 0, usd_context_name=usd_context_name)
         if callable(on_completed):
             try:
                 on_completed()
@@ -536,19 +606,19 @@ def run_foup_smooth_y_anim(
                 pass
         return False
     if toward_lifted:
-        mark_foup_in_progress(p, True)
-        set_foup_lift_sign(p, 1)
+        mark_foup_in_progress(p, True, usd_context_name=usd_context_name)
+        set_foup_lift_sign(p, 1, usd_context_name=usd_context_name)
         active_ep = str(foup_proc_active_ep or "").strip().upper()
         if active_ep and _port_id_for_prim_path(p) == active_ep:
-            mark_foup_lifted(p, True)
+            mark_foup_lifted(p, True, usd_context_name=usd_context_name)
     else:
-        mark_foup_lifted(p, False)
-        set_foup_lift_sign(p, -1)
+        mark_foup_lifted(p, False, usd_context_name=usd_context_name)
+        set_foup_lift_sign(p, -1, usd_context_name=usd_context_name)
 
     def _done() -> None:
         if toward_lifted:
-            mark_foup_lifted(p, True)
-        set_foup_lift_sign(p, 0)
+            mark_foup_lifted(p, True, usd_context_name=usd_context_name)
+        set_foup_lift_sign(p, 0, usd_context_name=usd_context_name)
         if callable(on_completed):
             try:
                 on_completed()
@@ -594,9 +664,11 @@ def get_foup_restore_translate(
     prim_path: str,
     *,
     foup_proc_active_ep: str = "",
+    usd_context_name: Optional[str] = None,
 ) -> Optional[Gf.Vec3f]:
     """
     포트 위치 복원 시 공정 중 EP 는 baseline+Y lift, 그 외는 ``None``(통상 baseline 복원).
+    공정 상태(in-progress/lifted/sign)는 **화면 컨텍스트별**로 판단한다.
 
     - +Y/-Y 애니 진행 중(lifted 아님): ``None`` — 애니가 끝날 때까지 건드리지 않음.
     - plateau 플래그 또는 엔진 ``foup_proc_active_ep`` 와 매칭되는 EP prim: offset 위치 반환.
@@ -606,16 +678,18 @@ def get_foup_restore_translate(
         return None
     active_ep = str(foup_proc_active_ep or "").strip().upper()
     port_id = _port_id_for_prim_path(p)
+    in_progress = p in _foup_in_progress_set(usd_context_name)
+    lifted = p in _foup_lifted_set(usd_context_name)
     should_offset = False
-    if p in _FOUP_IN_PROGRESS_PATHS and p not in _FOUP_LIFTED_PATHS:
+    if in_progress and not lifted:
         try:
             from .translate_animation import is_prim_translate_animation_running
 
-            if is_prim_translate_animation_running(p):
+            if is_prim_translate_animation_running(p, usd_context_name):
                 return None
         except Exception:
             pass
-        sign = get_foup_lift_sign(p)
+        sign = get_foup_lift_sign(p, usd_context_name=usd_context_name)
         if sign > 0 or (active_ep and port_id == active_ep):
             should_offset = True
         elif sign < 0:
@@ -623,10 +697,10 @@ def get_foup_restore_translate(
         else:
             return None
     if not should_offset:
-        should_offset = p in _FOUP_LIFTED_PATHS
+        should_offset = lifted
     if not should_offset and active_ep and port_id == active_ep:
         should_offset = True
-        mark_foup_lifted(p, True)
+        mark_foup_lifted(p, True, usd_context_name=usd_context_name)
     if not should_offset:
         return None
     rec = _PORT_LOT_AUTHORING.get(p)
@@ -644,9 +718,13 @@ def get_foup_restore_translate(
         return None
 
 
-def get_foup_lifted_translate(prim_path: str) -> Optional[Gf.Vec3f]:
+def get_foup_lifted_translate(
+    prim_path: str, *, usd_context_name: Optional[str] = None
+) -> Optional[Gf.Vec3f]:
     """레거시 호출부 — plateau 플래그만 보고 offset 위치를 반환."""
-    return get_foup_restore_translate(prim_path, foup_proc_active_ep="")
+    return get_foup_restore_translate(
+        prim_path, foup_proc_active_ep="", usd_context_name=usd_context_name
+    )
 
 
 def ensure_port_lot_authoring_captured(stage: Any = None) -> None:
@@ -657,7 +735,7 @@ def ensure_port_lot_authoring_captured(stage: Any = None) -> None:
     중요(잘못된 baseline 캡처 방지):
     - FOUP 공정이 진행 중인 prim 은 +Y lift 이동된 상태일 수 있다.
       이 시점에 baseline 으로 잡히면 이후 plateau 복원 시 잘못된 기준으로 점프할 수 있다.
-    - 따라서 `_FOUP_IN_PROGRESS_PATHS` 에 들어있는 prim 은 이번 캡처 호출에서는 건너뛴다.
+    - 따라서 어느 화면에서든 공정 진행중(_FOUP_IN_PROGRESS_BY_CTX)인 prim 은 이번 캡처 호출에서 건너뛴다.
       (시뮬 시작 직전에 강제 캡처를 미리 해두면, 공정 진행 중에는 이 분기를 거치지 않는다.)
     """
     try:
@@ -671,7 +749,7 @@ def ensure_port_lot_authoring_captured(stage: Any = None) -> None:
     for path in _iter_unique_mapped_prim_paths():
         if path in _PORT_LOT_AUTHORING:
             continue
-        if path in _FOUP_IN_PROGRESS_PATHS:
+        if _is_foup_in_progress_any_ctx(path):
             # 공정 중인 prim 의 현재 위치는 baseline 이 아니다(잘못 잡으면 lift 누적 위험).
             continue
         try:
@@ -707,7 +785,9 @@ def restore_port_lot_prims_to_authoring(
         return
     active_ep = str(foup_proc_active_ep or "").strip().upper()
     for path in _iter_unique_mapped_prim_paths():
-        lifted_t = get_foup_restore_translate(path, foup_proc_active_ep=active_ep)
+        lifted_t = get_foup_restore_translate(
+            path, foup_proc_active_ep=active_ep, usd_context_name=usd_context_name
+        )
         if lifted_t is not None:
             try:
                 prim = stage.GetPrimAtPath(path)
@@ -725,7 +805,7 @@ def restore_port_lot_prims_to_authoring(
                 try:
                     from .translate_animation import is_prim_translate_animation_running
 
-                    if is_prim_translate_animation_running(path):
+                    if is_prim_translate_animation_running(path, usd_context_name):
                         continue
                 except Exception:
                     pass
@@ -746,15 +826,15 @@ def restore_port_lot_prims_to_authoring(
             except Exception:
                 continue
             continue
-        if path in _FOUP_IN_PROGRESS_PATHS:
+        if path in _foup_in_progress_set(usd_context_name):
             try:
                 from .translate_animation import is_prim_translate_animation_running
 
-                if is_prim_translate_animation_running(path):
+                if is_prim_translate_animation_running(path, usd_context_name):
                     continue
             except Exception:
                 pass
-            sign = get_foup_lift_sign(path)
+            sign = get_foup_lift_sign(path, usd_context_name=usd_context_name)
             if sign > 0 or (active_ep and _port_id_for_prim_path(path) == active_ep):
                 tgt = foup_lifted_target_translate(path)
                 if tgt is not None:
@@ -762,7 +842,7 @@ def restore_port_lot_prims_to_authoring(
                         prim = stage.GetPrimAtPath(path)
                         if prim and prim.IsValid():
                             _set_translate(prim, tgt)
-                            mark_foup_lifted(path, True)
+                            mark_foup_lifted(path, True, usd_context_name=usd_context_name)
                     except Exception:
                         pass
             elif sign < 0:

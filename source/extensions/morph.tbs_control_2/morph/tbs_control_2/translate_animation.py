@@ -303,7 +303,7 @@ def stop_translate_animations_for_context(
             if _plv is not None:
                 try:
                     path = str(state.get("prim_path") or "").strip()
-                    if path and _plv.is_foup_in_progress(path):
+                    if path and _plv.is_foup_in_progress(path, usd_context_name=ctx):
                         continue
                 except Exception:
                     pass
@@ -346,7 +346,8 @@ def stop_all_translate_animations(preserve_foup_port_lot_prims: bool = False) ->
             for k, state in list(_animations.items()):
                 try:
                     path = str(state.get("prim_path") or "").strip()
-                    if path and _plv.is_foup_in_progress(path):
+                    ctx = str(state.get("usd_context_name") or "").strip()
+                    if path and _plv.is_foup_in_progress(path, usd_context_name=ctx):
                         continue
                 except Exception:
                     pass
