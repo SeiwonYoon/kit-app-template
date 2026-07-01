@@ -384,6 +384,140 @@ def bootstrap_playback_after_prerun(
     return SimPlaybackRuntime.start(ext, results, emit_fn, speed_fn, gate_fn)
 
 
+def any_playback_still_active(ext: Any) -> bool:
+    """한 화면이라도 재생 중이면 True."""
+    rt = get_playback_runtime(ext)
+    if rt is not None:
+        try:
+            if rt.any_playing():
+                return True
+        except Exception:
+            pass
+    for _scr, p in iter_sim_playback_players(ext):
+        try:
+            if p is not None and bool(p.is_playing()):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def cleanup_playback_subscription_if_idle(ext: Any) -> None:
+    """모든 화면 재생이 끝났으면 UI tick 구독·플래그를 정리한다."""
+    if any_playback_still_active(ext):
+        return
+    try:
+        sub = getattr(ext, "_sim_playback_ui_sub", None)
+        if sub is not None:
+            try:
+                sub.unsubscribe()
+            except Exception:
+                pass
+        ext._sim_playback_ui_sub = None
+    except Exception:
+        pass
+    try:
+        set_sim_playback_active(ext, False)
+    except Exception:
+        pass
+    rt = get_playback_runtime(ext)
+    if rt is not None:
+        try:
+            if not rt.sessions:
+                ext._sim_playback_runtime = None
+                ext._sim_playback_players_by_screen = None
+                ext._sim_playback_player = None
+        except Exception:
+            pass
+
+
+def stop_playback_for_screen(ext: Any, screen: int) -> bool:
+    """단일 화면 프리런 재생만 정지(다른 화면 재생은 유지)."""
+    try:
+        sc = int(screen)
+    except Exception:
+        return False
+    stopped = False
+    rt = get_playback_runtime(ext)
+    if rt is not None:
+        sess = rt.session(sc)
+        if sess is not None:
+            try:
+                sess.player.stop()
+            except Exception:
+                pass
+            try:
+                rt.sessions.pop(sc, None)
+            except Exception:
+                pass
+            stopped = True
+        try:
+            by = getattr(ext, "_sim_playback_players_by_screen", None)
+            if isinstance(by, dict):
+                by.pop(sc, None)
+                if not by:
+                    ext._sim_playback_players_by_screen = None
+        except Exception:
+            pass
+        if sc == 1:
+            try:
+                ext._sim_playback_player = None
+            except Exception:
+                pass
+        if not rt.sessions:
+            try:
+                rt.stop()
+            except Exception:
+                pass
+            try:
+                ext._sim_playback_runtime = None
+            except Exception:
+                pass
+            try:
+                from .tbs_main_dispatch import set_multi_instance_dispatch_mode
+
+                set_multi_instance_dispatch_mode(False)
+            except Exception:
+                pass
+        elif len(rt.sessions) == 1:
+            try:
+                from .tbs_main_dispatch import set_multi_instance_dispatch_mode
+
+                set_multi_instance_dispatch_mode(False)
+            except Exception:
+                pass
+    else:
+        by = getattr(ext, "_sim_playback_players_by_screen", None)
+        if isinstance(by, dict) and sc in by:
+            p = by.get(sc)
+            if p is not None and hasattr(p, "stop"):
+                try:
+                    p.stop()
+                except Exception:
+                    pass
+            try:
+                by.pop(sc, None)
+                if not by:
+                    ext._sim_playback_players_by_screen = None
+            except Exception:
+                pass
+            stopped = True
+        if sc == 1:
+            p1 = getattr(ext, "_sim_playback_player", None)
+            if p1 is not None and hasattr(p1, "stop"):
+                try:
+                    p1.stop()
+                except Exception:
+                    pass
+                try:
+                    ext._sim_playback_player = None
+                except Exception:
+                    pass
+                stopped = True
+    cleanup_playback_subscription_if_idle(ext)
+    return stopped
+
+
 def stop_playback_runtime(ext: Any) -> None:
     rt = get_playback_runtime(ext)
     if rt is not None:
@@ -408,6 +542,7 @@ def stop_playback_runtime(ext: Any) -> None:
         set_multi_instance_dispatch_mode(False)
     except Exception:
         pass
+    cleanup_playback_subscription_if_idle(ext)
 
 
 def stop_legacy_players(ext: Any) -> None:
@@ -487,5 +622,8 @@ __all__ = [
     "set_sim_playback_active",
     "sim_log_ui_drain_limit",
     "sim_log_ui_history_drain_limit",
+    "any_playback_still_active",
+    "cleanup_playback_subscription_if_idle",
+    "stop_playback_for_screen",
     "stop_playback_runtime",
 ]

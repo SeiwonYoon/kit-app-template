@@ -15,6 +15,7 @@ from .control_sim_screen_playback import (
     set_sim_playback_active,
     sim_log_ui_drain_limit,
     sim_log_ui_history_drain_limit,
+    stop_playback_for_screen,
     stop_playback_runtime,
 )
 
@@ -50,5 +51,6 @@ __all__ = [
     "iter_sim_playback_players",
     "start_multi_playback_instances",
     "stop_multi_playback_instances",
+    "stop_playback_for_screen",
     "tick_multi_playback",
 ]

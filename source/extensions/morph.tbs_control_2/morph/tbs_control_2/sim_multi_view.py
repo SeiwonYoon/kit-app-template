@@ -256,12 +256,18 @@ def sim_viewport_split_3d_enabled() -> bool:
 
 
 def channel_count_for_split(split_n: int) -> int:
-    """활성 시뮼 채널 수(1~4)."""
+    """활성 시뮼 채널 수(1~``MAX_VIEWPORT_SPLIT_COUNT``)."""
+    try:
+        from .sim_control_defaults import MAX_VIEWPORT_SPLIT_COUNT
+
+        hi = max(1, int(MAX_VIEWPORT_SPLIT_COUNT))
+    except Exception:
+        hi = 2
     try:
         n = int(split_n)
     except Exception:
         n = 1
-    return min(4, max(1, n))
+    return min(hi, max(1, n))
 
 
 def split_layout_description(split_n: int) -> str:
@@ -1099,7 +1105,7 @@ def schedule_deferred_aux_usd_load_after_master(ext: Any) -> None:
         pass
 
     async def _go() -> None:
-        for _ in range(2):
+        for _ in range(6):
             await kit_app.get_app().next_update_async()
         try:
             n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
@@ -1513,6 +1519,27 @@ def _named_usd_context(name: str) -> Optional[Any]:
     return None
 
 
+def _close_usd_context_stage(ctx: Any) -> None:
+    """같은 USD 컨텍스트에 다른 루트를 열기 전에 기존 스테이지를 닫는다."""
+    if ctx is None:
+        return
+    for op in ("close_stage", "unload_stage"):
+        fn = getattr(ctx, op, None)
+        if callable(fn):
+            try:
+                fn()
+                return
+            except Exception:
+                pass
+
+
+async def _prepare_aux_context_for_stage_swap(ctx: Any, *, frame_wait: int = 4) -> None:
+    """shell·이전 스테이지가 Hydra 에 묶인 채 재오픈하면 GPU crash → 닫고 몇 프레임 대기."""
+    _close_usd_context_stage(ctx)
+    for _ in range(max(1, int(frame_wait))):
+        await kit_app.get_app().next_update_async()
+
+
 def _release_usd_context_names(names: List[str]) -> None:
     if not names:
         return
@@ -1527,13 +1554,7 @@ def _release_usd_context_names(names: List[str]) -> None:
             ctx = None
         if ctx is None:
             continue
-        for op in ("close_stage", "unload_stage"):
-            fn = getattr(ctx, op, None)
-            if callable(fn):
-                try:
-                    fn()
-                except Exception:
-                    pass
+        _close_usd_context_stage(ctx)
         rel = getattr(ou, "release_context", None)
         if callable(rel):
             try:
@@ -2064,7 +2085,25 @@ def _restore_single_viewport_after_dock_teardown(ext: Any) -> None:
     _bring_kit_chrome_visible(ext)
 
 
-def _restore_viewport_after_split_teardown(ext: Any) -> None:
+def _bump_split_teardown_restore_generation(ext: Any) -> int:
+    """지연 Viewport 1화면 복원 코루틴을 무효화한다(확장 핫리로드 시 ext 인스턴스 무관)."""
+    global _split_viewport_restore_gen
+    try:
+        _split_viewport_restore_gen = int(_split_viewport_restore_gen) + 1
+    except Exception:
+        _split_viewport_restore_gen = 1
+    try:
+        ext._tbs_split_restore_gen = int(_split_viewport_restore_gen)
+    except Exception:
+        pass
+    return int(_split_viewport_restore_gen)
+
+
+def _cancel_pending_split_viewport_restore(ext: Any) -> None:
+    _bump_split_teardown_restore_generation(ext)
+
+
+def _restore_viewport_after_split_teardown(ext: Any, *, schedule_deferred_restore: bool = True) -> None:
     """1분할 복귀 — Dock 분할이었으면 좌표 복원 없이, 격자였으면 Viewport 만 복원."""
     used_dock = bool(getattr(ext, "_tbs_split_used_dock_layout", False))
     if used_dock:
@@ -2076,15 +2115,19 @@ def _restore_viewport_after_split_teardown(ext: Any) -> None:
         ext._tbs_split_used_dock_layout = False
     except Exception:
         pass
-    _schedule_deferred_single_viewport_restore(ext, used_dock=used_dock)
+    if schedule_deferred_restore:
+        _schedule_deferred_single_viewport_restore(ext, used_dock=used_dock)
 
 
 def _schedule_deferred_single_viewport_restore(ext: Any, *, used_dock: bool) -> None:
     """보조 창 제거·Dock 재배치가 끝난 뒤 Viewport 해상도만 다시 맞춘다."""
+    gen = _bump_split_teardown_restore_generation(ext)
 
     async def _go() -> None:
         for _ in range(14):
             await kit_app.get_app().next_update_async()
+        if int(_split_viewport_restore_gen) != int(gen):
+            return
         if used_dock:
             _restore_single_viewport_after_dock_teardown(ext)
         else:
@@ -2129,16 +2172,20 @@ def _destroy_stale_split_workspace_window(win_name: str) -> None:
         pass
 
 
-def teardown_sim_multi_viewports(ext: Any) -> None:
+def teardown_sim_multi_viewports(ext: Any, *, skip_deferred_restore: bool = False) -> None:
     """분할 뷰·보조 USD 컨텍스트를 정리하고 기본 Viewport 를 복원한다."""
+    _cancel_pending_split_viewport_restore(ext)
     _clear_viewport_layout_sync_caches()
     _cancel_split_aux_navigation_hold(ext)
     used_dock = bool(getattr(ext, "_tbs_split_used_dock_layout", False))
-    if used_dock:
-        for ti in range(1, 5):
-            _undock_workspace_window(_split_window_name(ti))
     for ti in range(1, 5):
-        _destroy_stale_split_workspace_window(_split_window_name(ti))
+        wname = _split_window_name(ti)
+        try:
+            if ui.Workspace.get_window(wname) is not None:
+                _undock_workspace_window(wname)
+        except Exception:
+            pass
+        _destroy_stale_split_workspace_window(wname)
     try:
         from .tbs_split_composed_loader import release_aux_split_runtimes
 
@@ -2166,10 +2213,16 @@ def teardown_sim_multi_viewports(ext: Any) -> None:
             _destroy_viewport_window(ent.get("window"))
     for ent in entries:
         if ent.get("kind") == "main_viewport":
-            _restore_viewport_after_split_teardown(ext)
+            _restore_viewport_after_split_teardown(
+                ext,
+                schedule_deferred_restore=not bool(skip_deferred_restore),
+            )
             break
     else:
-        _restore_viewport_after_split_teardown(ext)
+        _restore_viewport_after_split_teardown(
+            ext,
+            schedule_deferred_restore=not bool(skip_deferred_restore),
+        )
     try:
         ext._sim_multi_viewport_entries = []
     except Exception:
@@ -2202,12 +2255,49 @@ def teardown_sim_multi_viewports(ext: Any) -> None:
     _workspace_show_named_window("Viewport", True)
 
 
+def split_layout_needs_reapply(ext: Any) -> bool:
+    """Dock·보조 타일이 실제로 살아 있지 않으면 분할 레이아웃 전체 재적용이 필요하다."""
+    try:
+        n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+    except Exception:
+        n = 1
+    if n <= 1:
+        try:
+            from .sim_control_defaults import default_viewport_split_count
+
+            n = channel_count_for_split(int(default_viewport_split_count()))
+        except Exception:
+            n = 1
+    if n <= 1:
+        return False
+    if not _split_aux_layout_healthy(ext, n):
+        return True
+    if not bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+        return True
+    return False
+
+
 def schedule_split_rebuild_after_master_reload(ext: Any) -> None:
     """
     Master USD 재로드 후 분할 수>1 이면 **뷰포트는 유지**하고 스테이지만 빠르게 갱신한다.
 
-    전체 teardown+Flatten 재빌드(수 초) 대신 clone+reopen+hydrate 만 수행.
+    Dock/타일이 깨져 있으면 ``apply_sim_viewport_split_layout`` 로 전체 재적용한다.
     """
+    if split_layout_needs_reapply(ext):
+        try:
+            n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+        except Exception:
+            n = 1
+        if n <= 1:
+            try:
+                from .sim_control_defaults import default_viewport_split_count
+
+                n = channel_count_for_split(int(default_viewport_split_count()))
+            except Exception:
+                n = 1
+        if n > 1:
+            apply_sim_viewport_split_layout(ext, n)
+            return
     invalidate_split_layout_cache(ext)
     try:
         n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
@@ -2232,6 +2322,7 @@ def schedule_split_rebuild_after_master_reload(ext: Any) -> None:
 
 
 _VP_TILE_MIN_PX = 128
+_split_viewport_restore_gen: int = 0
 
 # 분할 수 변경 시: 티어다운 직후 Hydra/뷰를 다시 만들기 전 짧은 settle (GPU 크래시 완화).
 _SPLIT_REBUILD_SETTLE_SEC_FIRST = 0.05
@@ -3295,6 +3386,7 @@ async def _refresh_aux_split_stages_async(ext: Any, n: int, token: int, usd_path
             release_split_runtime_for_screen(ext, ti + 1)
         except Exception:
             pass
+        await _prepare_aux_context_for_stage_swap(ctx, frame_wait=4)
         ok_open, _err = await _open_aux_stage_with_unique_session(
             ctx,
             aux_usd,
@@ -3595,28 +3687,39 @@ async def _load_aux_split_stages_background(
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
 
-    use_composed = _use_split_composed_export(ext)
-    composed_shared: Optional[str] = None
+    dual_path = False
     try:
         from .tbs_split_composed_loader import (
             ext_has_composed_instances,
             resolve_composed_snapshot_for_split_async,
+            split_dual_usd_paths_enabled,
         )
 
-        need_composed = ext_has_composed_instances(ext)
-        if need_composed:
-            composed_shared = await resolve_composed_snapshot_for_split_async(ext, token)
-            use_composed = bool(composed_shared)
-            try:
-                print(
-                    f"[TBS multi-sim] bg load: composed={use_composed} "
-                    f"snapshot={'ready' if composed_shared else 'none'}",
-                    flush=True,
-                )
-            except Exception:
-                pass
+        dual_path = split_dual_usd_paths_enabled(ext)
     except Exception:
-        need_composed = False
+        ext_has_composed_instances = None  # type: ignore
+        resolve_composed_snapshot_for_split_async = None  # type: ignore
+
+    use_composed = False if dual_path else _use_split_composed_export(ext)
+    composed_shared: Optional[str] = None
+    if use_composed:
+        try:
+            need_composed = bool(ext_has_composed_instances(ext)) if ext_has_composed_instances else False
+            if need_composed and resolve_composed_snapshot_for_split_async is not None:
+                composed_shared = await resolve_composed_snapshot_for_split_async(ext, token)
+                use_composed = bool(composed_shared)
+        except Exception:
+            use_composed = False
+            composed_shared = None
+    try:
+        mode = "dual-path" if dual_path else ("composed" if use_composed else "clone")
+        print(
+            f"[TBS multi-sim] bg load: mode={mode} "
+            f"snapshot={'ready' if composed_shared else 'none'}",
+            flush=True,
+        )
+    except Exception:
+        pass
 
     clone_map = await _clone_aux_paths_parallel(
         usd_path,
@@ -3645,6 +3748,21 @@ async def _load_aux_split_stages_background(
         ctx = _named_usd_context(ctx_name)
         if ctx is None:
             continue
+        wname = _split_window_name(ti)
+        stage_pending = False
+        for ent in entries:
+            try:
+                if int(ent.get("cell_index", -1)) == ti:
+                    stage_pending = bool(ent.get("stage_load_pending"))
+                    break
+            except Exception:
+                pass
+        if stage_pending:
+            try:
+                _workspace_show_named_window(wname, False)
+            except Exception:
+                pass
+            await _prepare_aux_context_for_stage_swap(ctx, frame_wait=6)
         ok_open, err_open = await _open_aux_stage_with_unique_session(
             ctx,
             aux_usd,
@@ -3673,6 +3791,12 @@ async def _load_aux_split_stages_background(
             ent["composed_hydrate"] = composed_used
             ent["hydrate_pending"] = True
             break
+        if stage_pending:
+            try:
+                _workspace_show_named_window(wname, True)
+                _sync_viewport_resolution_from_workspace_window(wname)
+            except Exception:
+                pass
         await kit_app.get_app().next_update_async()
 
     try:
@@ -3988,6 +4112,7 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str, 
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
 
+    _cancel_pending_split_viewport_restore(ext)
     _capture_kit_layout_before_split(ext)
     fracs = _split_cell_layout_fracs(n)
     vx, vy, vw, vh = _capture_split_tile_bbox(ext)
@@ -4165,6 +4290,9 @@ def _apply_sim_viewport_split_layout_impl(ext: Any, n: int) -> None:
         prev_n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
     except Exception:
         prev_n = 1
+    # UI·defaults 만 2이고 실제 타일이 없으면 1→n 최초 분할 경로를 탄다.
+    if n > 1 and not _split_aux_layout_healthy(ext, n):
+        prev_n = 1
 
     if n <= 1:
         teardown_sim_multi_viewports(ext)
@@ -4273,7 +4401,7 @@ def _apply_sim_viewport_split_layout_impl(ext: Any, n: int) -> None:
             else:
                 asyncio.ensure_future(_grow_split_async(ext, n, prev_n, tok, usd_path))
         except Exception:
-            teardown_sim_multi_viewports(ext)
+            teardown_sim_multi_viewports(ext, skip_deferred_restore=True)
             try:
                 asyncio.ensure_future(_post_teardown_rebuild_split(ext, n, tok, usd_path, prev_n=prev_n))
             except Exception:
@@ -4291,7 +4419,7 @@ def _apply_sim_viewport_split_layout_impl(ext: Any, n: int) -> None:
         try:
             asyncio.ensure_future(_build_multi_split_async(ext, n, tok, usd_path, prev_n=prev_n))
         except Exception:
-            teardown_sim_multi_viewports(ext)
+            teardown_sim_multi_viewports(ext, skip_deferred_restore=True)
             try:
                 asyncio.ensure_future(_post_teardown_rebuild_split(ext, n, tok, usd_path, prev_n=prev_n))
             except Exception:
@@ -4299,7 +4427,7 @@ def _apply_sim_viewport_split_layout_impl(ext: Any, n: int) -> None:
         notify_sim_split_ui_sync(ext)
         return
 
-    teardown_sim_multi_viewports(ext)
+    teardown_sim_multi_viewports(ext, skip_deferred_restore=True)
     try:
         asyncio.ensure_future(_post_teardown_rebuild_split(ext, n, tok, usd_path, prev_n=prev_n))
     except Exception:
@@ -4310,6 +4438,7 @@ def apply_sim_viewport_split_layout(ext: Any, split_n: int) -> None:
     """분할 수 변경 시: 다음 업데이트 이후 레이아웃 적용(경합 방지)."""
     n = channel_count_for_split(split_n)
     # ``_sim_viewport_split_count`` 는 impl/빌드 성공 여부에 맞춰만 갱신(단일 소스).
+    _cancel_pending_split_viewport_restore(ext)
     tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) + 1
     try:
         ext._sim_multi_view_apply_token = tok

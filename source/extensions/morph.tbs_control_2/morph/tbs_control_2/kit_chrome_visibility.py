@@ -41,6 +41,9 @@ import omni.ui as ui
 _PROTECTED_TITLES = frozenset(
     {
         "TBS 제어창",
+        "EBS제어창(CASE A)",
+        "EBS제어창(CASE B)",
+        "EBS 제어창",
         "TBS 시퀀스 편집기",
         "Viewport",
     }

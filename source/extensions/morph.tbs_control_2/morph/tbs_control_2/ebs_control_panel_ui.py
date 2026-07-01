@@ -65,8 +65,12 @@ def _resolve_aux_kit_windows(ext: Any, which: str) -> List[Any]:
         w = getattr(ext, "_fix_proc_window", None)
         return [w] if w is not None else []
     if which == "ebs":
-        w = getattr(ext, "_control_window", None)
-        return [w] if w is not None else []
+        wins: List[Any] = []
+        for attr in ("_control_window", "_control_window_b"):
+            w = getattr(ext, attr, None)
+            if w is not None:
+                wins.append(w)
+        return wins
     return []
 
 
@@ -187,7 +191,6 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_pickup_evt_min_model = ui.SimpleFloatModel(float(_SIM_DEF.pickup_min))
     ext._sim_pickup_evt_max_model = ui.SimpleFloatModel(float(_SIM_DEF.pickup_max))
     ext._sim_speed_model = ui.SimpleFloatModel(float(_SIM_DEF.sim_speed))
-    ext._sim_log_interval_model = ui.SimpleFloatModel(float(_SIM_DEF.log_interval_sec))
     ext._sim_confirm_each_step_model = ui.SimpleBoolModel(False)
     ext._sim_bar_preview_model = ui.SimpleBoolModel(bool(_SIM_BAR_PREVIEW_DEFAULT))
     try:
@@ -264,6 +267,9 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_progress_last_key = {}
     ext._sim_engine = None
     ext._sim_engines = []
+    from .sim_control_defaults import default_viewport_split_count
+
+    ext._sim_viewport_split_target = int(default_viewport_split_count())
     ext._sim_viewport_split_count = 1
     ext._sync_sim_multi_split_ui_fn = None
     ext._tbs_multi_split_usd_ready = False
@@ -283,12 +289,19 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_split_cb_models = []
     ext._sim_split_stage_sub = None
     ext._sim_multi_split_row = None
+    from .ebs_case_models import init_ebs_case_b_models
+
+    init_ebs_case_b_models(ext)
+    ext._ebs_b_init_ebs_rows = []
+    ext._ebs_b_fault_ebs_rows = []
+    ext._ebs_b_init_bp4_rows = []
+    ext._ebs_b_fault_bp4_rows = []
+    ext._ebs_b_init_ep3_rows = []
+    ext._ebs_b_fault_ep3_rows = []
+    ext._control_window_b = None
     ext._sim_per_screen_snapshots = [None, None, None, None]
     ext._sim_snapshot_sync_guard = False
-    ext._sim_per_screen_block = None
-    ext._sim_per_screen_row_hstacks = []
-    ext._sim_per_screen_status_labels = []
-    ext._sync_sim_per_screen_rows_fn = None
+    ext._sync_sim_per_screen_rows_fn = lambda *a, **k: None
     ext._sim_update_sub = None
     ext._sim_thread = None
     ext._sim_tick_threads = []
@@ -344,7 +357,7 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_gate_dialog = None
     ext._kit_chrome_hide_model = ui.SimpleBoolModel(KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH)
     for model_attr, _label, which in _AUX_KIT_WINDOW_SPECS:
-        setattr(ext, model_attr, ui.SimpleBoolModel(True))
+        setattr(ext, model_attr, ui.SimpleBoolModel(False))
         try:
             getattr(ext, model_attr).add_value_changed_fn(
                 lambda m, w=which: _on_aux_kit_window_visibility_changed(ext, w, m)
@@ -383,17 +396,16 @@ def _on_faulty_port_changed(ext: Any, _m: Any = None) -> None:
             pass
 
 
-def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
+def build_ebs_control_panel_content(ext: Any, *, compact: bool = False, case_id: int = 1) -> None:
     """
-    EBS 시뮬레이션 제어 패널(주석 처리된 XML·prim 목록 등 제외).
+    EBS 시뮬레이션 제어 패널.
 
-    ``compact=True`` 는 Viewport 좌측 HUD(~300px)용 세로형 레이아웃.
+    ``compact=True``  → Viewport HUD (CASE A 모델, 전역 시작/정지).
+    ``compact=False`` → ``EBS제어창(CASE A|B)`` 본문.
     """
     from .control_window import (
         CHECKBOX_WHITE_STYLE,
-        _on_save_sim_settings_to_screen,
         _on_sim_split_choice_changed,
-        _refresh_sim_per_screen_rows,
         _sync_ep3_port_cell_visibility,
         _sync_sim_split_checkboxes_from_ext_count,
         on_sim_ep_count_changed,
@@ -411,245 +423,14 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False) -> None:
             on_sim_stop_clicked=on_sim_stop_clicked,
             on_sim_reset_clicked=on_sim_reset_clicked,
             _sync_ep3_port_cell_visibility=_sync_ep3_port_cell_visibility,
+            _on_sim_split_choice_changed=_on_sim_split_choice_changed,
+            _sync_sim_split_checkboxes_from_ext_count=_sync_sim_split_checkboxes_from_ext_count,
         )
         return
 
-    cb_style = CHECKBOX_WHITE_STYLE
-    with ui.Frame(style={"background_color": 0xFF1E2530}):
-        with ui.VStack(padding=8, spacing=6):
-            with ui.HStack(spacing=10, height=28):
-                ui.Label(
-                    "시뮬레이션 (simpy)",
-                    width=150,
-                    height=24,
-                    style={"color": 0xFFDDDDDD},
-                )
-                ext._sim_multi_split_row = ui.HStack(spacing=8, height=26)
-                ext._sim_multi_split_row.visible = False
-                with ext._sim_multi_split_row:
-                    ui.Label(
-                        "시뮬 화면(USD 로드 시)",
-                        width=130,
-                        height=22,
-                        style={"color": 0xFF9AA4B2},
-                    )
-                    ext._sim_split_cb_models = []
-                    for i in range(1, 5):
-                        m = ui.SimpleBoolModel(i == 1)
-                        ext._sim_split_cb_models.append(m)
-                        ui.Label(f"{i}화면", width=40, height=22, style={"color": 0xFFDDDDDD})
-                        ui.CheckBox(model=m, width=22, style=cb_style)
-                        try:
-                            m.add_value_changed_fn(lambda md, ii=i: _on_sim_split_choice_changed(ext, ii, md))
-                        except Exception:
-                            pass
-                    ext._sync_sim_multi_split_ui_fn = lambda: _sync_sim_split_checkboxes_from_ext_count(ext)
+    from .ebs_case_panel_ui import build_ebs_case_window_panel
 
-            with ui.HStack(spacing=8, height=28):
-                ui.Label("EBS 적용여부", width=100)
-                ui.CheckBox(model=ext._sim_ebs_enabled_model, width=30, style=cb_style)
-
-            with ui.HStack(spacing=8, height=28):
-                ui.Label("LOT 수", width=80)
-                ui.IntField(model=ext._sim_lot_count_model, width=80)
-                ui.Label("EP 개수", width=55)
-                _bind_ep_count_combo(ext, ui.ComboBox(int(get_sim_ep_count_idx(ext)), "2", "3"))
-
-            with ui.HStack(spacing=8, height=28):
-                ui.Label("LOT생성간격", width=100)
-                ui.FloatField(model=ext._sim_lot_spawn_min_model, width=65)
-                ui.Label("~", width=10)
-                ui.FloatField(model=ext._sim_lot_spawn_max_model, width=65)
-                ui.Label("회수간격", width=60)
-                ui.FloatField(model=ext._sim_pickup_evt_min_model, width=55)
-                ui.Label("~", width=10)
-                ui.FloatField(model=ext._sim_pickup_evt_max_model, width=55)
-
-            with ui.HStack(spacing=8, height=28):
-                ui.Label("FOUP공정(EP)", width=100)
-                ui.FloatField(model=ext._sim_foup_proc_min_model, width=65)
-                ui.Label("~", width=10)
-                ui.FloatField(model=ext._sim_foup_proc_max_model, width=65)
-                ui.Label("초", width=20, style={"color": 0xFF9AA4B2})
-
-            ui.Label("초기 LOT 적재 포트 (체크 시 시작 시점에 FULL)", height=20)
-            init_buffer_row = ui.HStack(spacing=8, height=26)
-            ext._sim_init_buffer_row = init_buffer_row
-            ext._sim_init_ebs_rows.append(init_buffer_row)
-            with init_buffer_row:
-                ui.Label("IN/OUT", width=55)
-                ui.CheckBox(model=ext._sim_init_inout_model, width=30, style=cb_style)
-                ui.Label("BP1", width=30)
-                ui.CheckBox(model=ext._sim_init_bp1_model, width=30, style=cb_style)
-                ui.Label("BP2", width=30)
-                ui.CheckBox(model=ext._sim_init_bp2_model, width=30, style=cb_style)
-                ui.Label("BP3", width=30)
-                ui.CheckBox(model=ext._sim_init_bp3_model, width=30, style=cb_style)
-                bp4_row = ui.HStack(spacing=8, height=26)
-                ext._sim_init_bp4_rows.append(bp4_row)
-                ext._sim_init_ebs_rows.append(bp4_row)
-                ext._sim_init_bp4_row = bp4_row
-                with bp4_row:
-                    ui.Label("BP4", width=30)
-                    ui.CheckBox(model=ext._sim_init_bp4_model, width=30, style=cb_style)
-            with ui.HStack(spacing=8, height=26):
-                ui.Label("EP1", width=30)
-                ui.CheckBox(model=ext._sim_init_ep1_model, width=30, style=cb_style)
-                ui.Label("EP2", width=30)
-                ui.CheckBox(model=ext._sim_init_ep2_model, width=30, style=cb_style)
-                ep3_row = ui.HStack(spacing=8, height=26)
-                ext._sim_init_ep3_rows.append(ep3_row)
-                ext._sim_init_ep3_row = ep3_row
-                with ep3_row:
-                    ui.Label("EP3", width=30)
-                    ui.CheckBox(model=ext._sim_init_ep3_model, width=30, style=cb_style)
-
-            try:
-                ext._sim_init_ep3_model.add_value_changed_fn(lambda m: on_sim_ep_count_changed(ext))
-            except Exception:
-                pass
-            for mdl in (
-                ext._sim_init_inout_model,
-                ext._sim_init_bp1_model,
-                ext._sim_init_bp2_model,
-                ext._sim_init_bp3_model,
-                ext._sim_init_bp4_model,
-                ext._sim_init_ep1_model,
-                ext._sim_init_ep2_model,
-                ext._sim_init_ep3_model,
-            ):
-                try:
-                    mdl.add_value_changed_fn(lambda m: _sync_ep3_port_cell_visibility(ext))
-                except Exception:
-                    pass
-            on_sim_ep_count_changed(ext)
-            try:
-                from .control_window import _sync_ebs_control_visibility
-
-                _sync_ebs_control_visibility(ext)
-            except Exception:
-                pass
-
-            ui.Spacer(height=2)
-            ui.Label(
-                "고장(비가동) 포트 (체크 시 해당 포트는 라우팅에서 제외, 실행 중에도 즉시 반영)",
-                height=20,
-            )
-            fault_buffer_row = ui.HStack(spacing=8, height=26)
-            ext._sim_fault_buffer_row = fault_buffer_row
-            ext._sim_fault_ebs_rows.append(fault_buffer_row)
-            with fault_buffer_row:
-                ui.Label("IN/OUT", width=55)
-                ui.CheckBox(model=ext._sim_fault_inout_model, width=30, style=cb_style)
-                ui.Label("BP1", width=30)
-                ui.CheckBox(model=ext._sim_fault_bp1_model, width=30, style=cb_style)
-                ui.Label("BP2", width=30)
-                ui.CheckBox(model=ext._sim_fault_bp2_model, width=30, style=cb_style)
-                ui.Label("BP3", width=30)
-                ui.CheckBox(model=ext._sim_fault_bp3_model, width=30, style=cb_style)
-                f_bp4 = ui.HStack(spacing=8, height=26)
-                ext._sim_fault_bp4_rows.append(f_bp4)
-                ext._sim_fault_ebs_rows.append(f_bp4)
-                ext._sim_fault_bp4_row = f_bp4
-                with f_bp4:
-                    ui.Label("BP4", width=30)
-                    ui.CheckBox(model=ext._sim_fault_bp4_model, width=30, style=cb_style)
-            with ui.HStack(spacing=8, height=26):
-                ui.Label("EP1", width=30)
-                ui.CheckBox(model=ext._sim_fault_ep1_model, width=30, style=cb_style)
-                ui.Label("EP2", width=30)
-                ui.CheckBox(model=ext._sim_fault_ep2_model, width=30, style=cb_style)
-                f_ep3 = ui.HStack(spacing=8, height=26)
-                ext._sim_fault_ep3_rows.append(f_ep3)
-                ext._sim_fault_ep3_row = f_ep3
-                with f_ep3:
-                    ui.Label("EP3", width=30)
-                    ui.CheckBox(model=ext._sim_fault_ep3_model, width=30, style=cb_style)
-            for mdl in (
-                ext._sim_fault_inout_model,
-                ext._sim_fault_bp1_model,
-                ext._sim_fault_bp2_model,
-                ext._sim_fault_bp3_model,
-                ext._sim_fault_bp4_model,
-                ext._sim_fault_ep1_model,
-                ext._sim_fault_ep2_model,
-                ext._sim_fault_ep3_model,
-            ):
-                try:
-                    mdl.add_value_changed_fn(lambda m: _on_faulty_port_changed(ext, m))
-                except Exception:
-                    pass
-
-            with ui.HStack(spacing=8, height=28):
-                ext._sim_oht_timing_label = ui.Label("OHT→IN/OUT/EP", width=100)
-                ui.FloatField(model=ext._sim_oht_bp1_min_model, width=70)
-                ui.Label("~", width=10)
-                ui.FloatField(model=ext._sim_oht_bp1_max_model, width=70)
-                inout_bp_block = ui.HStack(spacing=8, height=28)
-                ext._sim_timing_inout_bp_block = inout_bp_block
-                with inout_bp_block:
-                    ui.Label("IN/OUT->BP", width=60)
-                    ui.FloatField(model=ext._sim_bp1_bp_min_model, width=55)
-                    ui.Label("~", width=10)
-                    ui.FloatField(model=ext._sim_bp1_bp_max_model, width=55)
-            bp_ep_row = ui.HStack(spacing=8, height=28)
-            ext._sim_timing_bp_ep_row = bp_ep_row
-            with bp_ep_row:
-                ui.Label("BP->EP", width=80)
-                ui.FloatField(model=ext._sim_bp_ep_min_model, width=70)
-                ui.Label("~", width=10)
-                ui.FloatField(model=ext._sim_bp_ep_max_model, width=70)
-                ui.Label("EP->OHT", width=60)
-                ui.FloatField(model=ext._sim_ep_oht_min_model, width=55)
-                ui.Label("~", width=10)
-                ui.FloatField(model=ext._sim_ep_oht_max_model, width=55)
-            with ui.HStack(spacing=8, height=28):
-                ui.Label("시뮬 속도배율", width=100)
-                ui.FloatField(model=ext._sim_speed_model, width=80)
-                ui.Label("로그주기(s)", width=70)
-                ui.FloatField(model=ext._sim_log_interval_model, width=70)
-            with ui.HStack(spacing=8, height=28):
-                ui.CheckBox(
-                    model=ext._sim_process_time_priority_model,
-                    width=30,
-                    style=cb_style,
-                    visible=False,
-                )
-                ui.Label("공정설정 시간 우선", width=120, visible=False)
-                ui.CheckBox(model=ext._sim_bar_preview_model, width=30, style=cb_style)
-                ui.Label("결과 미리보기", width=90)
-                ui.Spacer(width=8)
-                start_btn = ui.Button("시작", width=72, clicked_fn=lambda: on_sim_start_clicked(ext))
-                ext._sim_start_buttons.append(start_btn)
-                ext._sim_start_button = start_btn
-                ui.Button("정지", width=72, clicked_fn=lambda: on_sim_stop_clicked(ext))
-                ui.Button("리셋", width=72, clicked_fn=lambda: on_sim_reset_clicked(ext))
-
-            ext._sim_per_screen_block = ui.VStack(spacing=4, visible=False)
-            with ext._sim_per_screen_block:
-                ui.Label(
-                    "2~4분할 시: 화면별로 아래에서 「현재 설정 저장」을 누르면 LOT·간격·적재/고장·시간 값이 "
-                    "해당 화면에 고정됩니다. 저장 안 한 화면은 시뮬 시작 시 제어창 값으로 자동 채웁니다.",
-                    word_wrap=True,
-                    width=0,
-                    style={"color": 0xFF9AA4B2},
-                )
-                ext._sim_per_screen_row_hstacks = []
-                ext._sim_per_screen_status_labels = []
-                for si in range(1, 5):
-                    row = ui.HStack(spacing=8, height=26, visible=False)
-                    ext._sim_per_screen_row_hstacks.append(row)
-                    with row:
-                        ui.Label(f"화면{si}", width=44, height=22, style={"color": 0xFFDDDDDD})
-                        st = ui.Label("(미저장)", width=64, height=22, style={"color": 0xFF9AA4B2})
-                        ext._sim_per_screen_status_labels.append(st)
-                        ui.Button(
-                            "현재 설정 저장",
-                            width=110,
-                            height=24,
-                            clicked_fn=lambda e=ext, k=si: _on_save_sim_settings_to_screen(e, k),
-                        )
-            ext._sync_sim_per_screen_rows_fn = lambda: _refresh_sim_per_screen_rows(ext)
+    build_ebs_case_window_panel(ext, int(case_id), cb_style=CHECKBOX_WHITE_STYLE)
 
 
 def _purge_hud_rows_from_lists(ext: Any) -> None:
@@ -677,11 +458,39 @@ def _build_ebs_control_panel_compact(
     on_sim_stop_clicked: Any,
     on_sim_reset_clicked: Any,
     _sync_ep3_port_cell_visibility: Any,
+    _on_sim_split_choice_changed: Any,
+    _sync_sim_split_checkboxes_from_ext_count: Any,
 ) -> None:
     _purge_hud_rows_from_lists(ext)
     lw, fw, sw = 72, 54, 48
     with ui.VStack(padding=0, spacing=5):
-        ui.Label("EBS (Viewport)", height=18, style={"font_size": 13, "color": 0xFFFFFFFF})
+        ui.Label("EBS (Viewport · CASE A)", height=18, style={"font_size": 13, "color": 0xFFFFFFFF})
+        ext._sim_multi_split_row = ui.HStack(spacing=4, height=22)
+        ext._sim_multi_split_row.visible = False
+        with ext._sim_multi_split_row:
+            ui.Label("분할", width=28, style={"color": 0xFF9AA4B2, "font_size": 11})
+            ext._sim_split_cb_models = []
+            try:
+                from .sim_control_defaults import MAX_VIEWPORT_SPLIT_COUNT, default_viewport_split_count
+
+                cap = max(1, int(MAX_VIEWPORT_SPLIT_COUNT))
+            except Exception:
+                cap = 2
+            try:
+                initial_n = max(1, min(cap, int(default_viewport_split_count())))
+            except Exception:
+                initial_n = 1
+            for i in range(1, cap + 1):
+                m = ui.SimpleBoolModel(i == initial_n)
+                ext._sim_split_cb_models.append(m)
+                ui.Label(f"{i}", width=14, style={"color": 0xFFDDDDDD, "font_size": 11})
+                ui.CheckBox(model=m, width=20, style=cb_style)
+                try:
+                    m.add_value_changed_fn(lambda md, ii=i: _on_sim_split_choice_changed(ext, ii, md))
+                except Exception:
+                    pass
+            ext._sync_sim_multi_split_ui_fn = lambda: _sync_sim_split_checkboxes_from_ext_count(ext)
+            _sync_sim_split_checkboxes_from_ext_count(ext)
         with ui.HStack(spacing=4, height=26):
             ui.Label("EBS 적용", width=lw)
             ui.CheckBox(model=ext._sim_ebs_enabled_model, width=24, style=cb_style)
@@ -812,8 +621,6 @@ def _build_ebs_control_panel_compact(
         with ui.HStack(spacing=4, height=26):
             ui.Label("배율", width=36)
             ui.FloatField(model=ext._sim_speed_model, width=fw)
-            ui.Label("로그(s)", width=44)
-            ui.FloatField(model=ext._sim_log_interval_model, width=fw)
         with ui.HStack(spacing=4, height=28):
             ui.CheckBox(model=ext._sim_bar_preview_model, width=24, style=cb_style)
             ui.Label("미리보기", width=52)
@@ -822,6 +629,11 @@ def _build_ebs_control_panel_compact(
             )
             ui.Button("정지", width=60, clicked_fn=lambda: on_sim_stop_clicked(ext))
             ui.Button("리셋", width=60, clicked_fn=lambda: on_sim_reset_clicked(ext))
+            ui.Label(
+                "두 화면 동시 적용",
+                width=0,
+                style={"color": 0xFF7EB8DA, "font_size": 11},
+            )
         try:
             from .control_window import _sync_ebs_control_visibility
 

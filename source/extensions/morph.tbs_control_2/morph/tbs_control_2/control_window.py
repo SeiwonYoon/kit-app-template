@@ -338,6 +338,7 @@ from .control_sim_multi_playback import (
     set_sim_playback_active,
     sim_log_ui_drain_limit,
     sim_log_ui_history_drain_limit,
+    stop_playback_for_screen,
     stop_playback_runtime,
 )
 from .control_sim_timetable_ui import (
@@ -1840,95 +1841,19 @@ def _estimate_anim_duration_for_gate_payload(ext: Any, payload: Dict[str, str]) 
         return 0.0
 
 
-def _capture_per_screen_sim_settings(ext: Any) -> Dict[str, Any]:
+def _capture_per_screen_sim_settings(ext: Any, screen_1based: int = 1) -> Dict[str, Any]:
     """
-    멀티 화면별 저장용 스냅샷.
+    화면별 CASE 실시간 UI → 시뮬 엔진용 dict.
 
-    ``prompt.md`` 기준: LOT 수, 생성/회수 간격, 초기 적재·비가동 포트, 4구간 시간만 포함.
-    시뮬 속도·로그 주기·공정시간 우선·각 공정 확인은 전역 공통으로 두고 여기서는 제외한다.
+    화면1 = CASE A (HUD 와 공유), 화면2 = CASE B.
     """
-    d: Dict[str, Any] = {}
     try:
-        d["ep_count_idx"] = int(get_sim_ep_count_idx(ext))
-    except Exception:
-        d["ep_count_idx"] = int(_SIM_DEF.ep_count_idx)
-    try:
-        from .ebs_control_panel_ui import get_sim_ebs_enabled
+        from .ebs_case_models import capture_case_sim_settings_for_screen
 
-        d["ebs_enabled"] = bool(get_sim_ebs_enabled(ext))
+        return capture_case_sim_settings_for_screen(ext, int(screen_1based))
     except Exception:
-        d["ebs_enabled"] = True
-    try:
-        d["lot_count"] = max(1, ext._sim_lot_count_model.get_value_as_int())
-    except Exception:
-        d["lot_count"] = int(_SIM_DEF.lot_count)
-    try:
-        d["spawn_min"] = float(ext._sim_lot_spawn_min_model.get_value_as_float())
-        d["spawn_max"] = float(ext._sim_lot_spawn_max_model.get_value_as_float())
-        d["pue_min"] = float(ext._sim_pickup_evt_min_model.get_value_as_float())
-        d["pue_max"] = float(ext._sim_pickup_evt_max_model.get_value_as_float())
-    except Exception:
-        d["spawn_min"], d["spawn_max"] = float(_SIM_DEF.lot_spawn_min), float(_SIM_DEF.lot_spawn_max)
-        d["pue_min"], d["pue_max"] = float(_SIM_DEF.pickup_min), float(_SIM_DEF.pickup_max)
-    _timing_snap_defaults = {
-        "oht_bp1_min": float(_SIM_DEF.oht_to_bp1_min),
-        "oht_bp1_max": float(_SIM_DEF.oht_to_bp1_max),
-        "bp1_bp_min": float(_SIM_DEF.bp1_to_bp_min),
-        "bp1_bp_max": float(_SIM_DEF.bp1_to_bp_max),
-        "bp_ep_min": float(_SIM_DEF.bp_to_ep_min),
-        "bp_ep_max": float(_SIM_DEF.bp_to_ep_max),
-        "ep_oht_min": float(_SIM_DEF.ep_to_oht_min),
-        "ep_oht_max": float(_SIM_DEF.ep_to_oht_max),
-    }
-    for key, attr in (
-        ("oht_bp1_min", "_sim_oht_bp1_min_model"),
-        ("oht_bp1_max", "_sim_oht_bp1_max_model"),
-        ("bp1_bp_min", "_sim_bp1_bp_min_model"),
-        ("bp1_bp_max", "_sim_bp1_bp_max_model"),
-        ("bp_ep_min", "_sim_bp_ep_min_model"),
-        ("bp_ep_max", "_sim_bp_ep_max_model"),
-        ("ep_oht_min", "_sim_ep_oht_min_model"),
-        ("ep_oht_max", "_sim_ep_oht_max_model"),
-    ):
-        fb = float(_timing_snap_defaults.get(key, _SIM_DEF.oht_to_bp1_min))
-        try:
-            m = getattr(ext, attr, None)
-            d[key] = float(m.get_value_as_float()) if m is not None else fb
-        except Exception:
-            d[key] = fb
-    # FOUP 공정 시간(min/max)
-    try:
-        mnm = getattr(ext, "_sim_foup_proc_min_model", None)
-        mxm = getattr(ext, "_sim_foup_proc_max_model", None)
-        d["foup_proc_min"] = float(mnm.get_value_as_float()) if mnm is not None else float(_SIM_DEF.foup_process_min)
-        d["foup_proc_max"] = float(mxm.get_value_as_float()) if mxm is not None else float(_SIM_DEF.foup_process_max)
-    except Exception:
-        d["foup_proc_min"] = float(_SIM_DEF.foup_process_min)
-        d["foup_proc_max"] = float(_SIM_DEF.foup_process_max)
-    for key, attr in (
-        ("init_inout", "_sim_init_inout_model"),
-        ("init_bp1", "_sim_init_bp1_model"),
-        ("init_bp2", "_sim_init_bp2_model"),
-        ("init_bp3", "_sim_init_bp3_model"),
-        ("init_bp4", "_sim_init_bp4_model"),
-        ("init_ep1", "_sim_init_ep1_model"),
-        ("init_ep2", "_sim_init_ep2_model"),
-        ("init_ep3", "_sim_init_ep3_model"),
-        ("fault_inout", "_sim_fault_inout_model"),
-        ("fault_bp1", "_sim_fault_bp1_model"),
-        ("fault_bp2", "_sim_fault_bp2_model"),
-        ("fault_bp3", "_sim_fault_bp3_model"),
-        ("fault_bp4", "_sim_fault_bp4_model"),
-        ("fault_ep1", "_sim_fault_ep1_model"),
-        ("fault_ep2", "_sim_fault_ep2_model"),
-        ("fault_ep3", "_sim_fault_ep3_model"),
-    ):
-        try:
-            m = getattr(ext, attr, None)
-            d[key] = bool(m.get_value_as_bool()) if m is not None else False
-        except Exception:
-            d[key] = False
-    return d
+        pass
+    return {}
 
 
 def _refresh_sim_per_screen_status_labels(ext: Any) -> None:
@@ -2038,61 +1963,8 @@ def _auto_fill_per_screen_snapshots_on_start(ext: Any) -> None:
 
 
 def _sync_default_sim_snapshot_from_ui(ext: Any) -> None:
-    """
-    제어창(UI 모델) 값을 “기본 스냅샷(dict)”으로 즉시 동기화한다.
-
-    목적:
-    - 사용자가 제어창에서 시간/간격/초기포트 등을 바꾸면, 그 값이 "기본값"으로 한 곳에서만 관리되게 한다.
-    - 화면별 스냅샷 구조는 유지하되,
-      - 화면1 스냅샷은 항상 "기본값"으로 갱신
-      - 저장하지 않은 화면(None)만 기본값을 자동으로 따라가게 한다.
-    """
-    # re-entrancy(모델 set_value가 다시 value_changed를 부르는 경우) 방지
-    try:
-        if bool(getattr(ext, "_sim_snapshot_sync_guard", False)):
-            return
-        ext._sim_snapshot_sync_guard = True
-    except Exception:
-        pass
-    try:
-        try:
-            cap = _capture_per_screen_sim_settings(ext)
-        except Exception:
-            cap = {}
-        try:
-            snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
-        except Exception:
-            snaps = [None, None, None, None]
-        while len(snaps) < 4:
-            snaps.append(None)
-        snaps = snaps[:4]
-
-        # 화면1은 “기본값”으로 항상 갱신
-        try:
-            snaps[0] = dict(cap)
-        except Exception:
-            snaps[0] = cap
-
-        # 요구사항: 화면2~4는 "저장"을 누르기 전까지는 스냅샷(None) 상태를 유지해야 한다.
-        # 따라서 여기서는 화면1(기본값)만 갱신하고, 다른 화면은 자동 채우지 않는다.
-
-        try:
-            ext._sim_per_screen_snapshots = snaps
-        except Exception:
-            pass
-        try:
-            _refresh_sim_per_screen_status_labels(ext)
-        except Exception:
-            pass
-        try:
-            sim_multi_view.schedule_viewport_snapshot_hud_refresh(ext)
-        except Exception:
-            pass
-    finally:
-        try:
-            ext._sim_snapshot_sync_guard = False
-        except Exception:
-            pass
+    """CASE A/B 실시간 모델 사용 — 스냅샷 자동 동기화는 사용하지 않는다."""
+    return
 
 
 def _fault_ports_from_snapshot(snap: Dict[str, Any], ep_count: int) -> Set[str]:
@@ -2336,20 +2208,28 @@ def _sync_sim_multi_split_row_visibility(ext: Any) -> None:
 
 
 def _sync_sim_split_checkboxes_from_ext_count(ext: Any) -> None:
-    """``ext._sim_viewport_split_count``(실제 적용 분할 수)에 맞춰 1~4 체크박스를 맞춘다. ``apply`` 를 호출하지 않는다."""
+    """``ext._sim_viewport_split_count``(실제 적용 분할 수)에 맞춰 분할 체크박스를 맞춘다. ``apply`` 를 호출하지 않는다."""
     if getattr(ext, "_sim_split_mutate_guard", False):
         return
+    try:
+        from .sim_control_defaults import MAX_VIEWPORT_SPLIT_COUNT
+
+        cap = max(1, int(MAX_VIEWPORT_SPLIT_COUNT))
+    except Exception:
+        cap = 2
     try:
         n = int(getattr(ext, "_sim_viewport_split_count", 1) or 1)
     except Exception:
         n = 1
-    n = max(1, min(4, n))
+    n = max(1, min(cap, n))
     models = getattr(ext, "_sim_split_cb_models", None)
-    if not isinstance(models, list) or len(models) != 4:
+    if not isinstance(models, list) or len(models) < 1:
         return
     ext._sim_split_mutate_guard = True
     try:
         for i, m in enumerate(models, start=1):
+            if i > cap:
+                break
             try:
                 m.set_value(i == n)
             except Exception:
@@ -2369,7 +2249,7 @@ def _force_sim_split_to_default(ext: Any) -> None:
     ext._sim_split_mutate_guard = True
     try:
         models = getattr(ext, "_sim_split_cb_models", None)
-        if isinstance(models, list) and len(models) == 4:
+        if isinstance(models, list) and len(models) >= 1:
             for i, m in enumerate(models, start=1):
                 try:
                     m.set_value(i == 1)
@@ -2396,9 +2276,16 @@ def _force_sim_split_to_default(ext: Any) -> None:
 
 
 def _on_sim_split_choice_changed(ext: Any, idx: int, m: Any) -> None:
-    """1~4 상호 배타 체크 + 분할 스텁 적용."""
+    """1~2 상호 배타 체크 + 분할 스텁 적용."""
     if getattr(ext, "_sim_split_mutate_guard", False):
         return
+    try:
+        from .sim_control_defaults import MAX_VIEWPORT_SPLIT_COUNT
+
+        if int(idx) < 1 or int(idx) > int(MAX_VIEWPORT_SPLIT_COUNT):
+            return
+    except Exception:
+        pass
     try:
         if not m.get_value_as_bool():
             cur = int(getattr(ext, "_sim_viewport_split_count", 1) or 1)
@@ -3779,7 +3666,9 @@ def build_control_window(ext: Any) -> None:
     try:
         ws = getattr(ui, "Workspace", None)
         if ws is not None and hasattr(ws, "get_window"):
-            old = ws.get_window("TBS 제어창")
+            old = ws.get_window("EBS제어창(CASE A)")
+            if old is None:
+                old = ws.get_window("EBS 제어창")
             if old is not None:
                 try:
                     old.destroy()
@@ -3793,14 +3682,23 @@ def build_control_window(ext: Any) -> None:
 
     init_ebs_control_models(ext)
 
-    ext._control_window = ui.Window("EBS 제어창", width=520, height=500)
+    ext._control_window = ui.Window("EBS제어창(CASE A)", width=520, height=500)
     with ext._control_window.frame:
         with ui.ScrollingFrame(
             height=ui.Fraction(1.0),
             style={"ScrollingFrame": {"padding": 4, "margin": 0}},
         ):
             with ui.VStack(spacing=0):
-                build_ebs_control_panel_content(ext, compact=False)
+                build_ebs_control_panel_content(ext, compact=False, case_id=1)
+
+    ext._control_window_b = ui.Window("EBS제어창(CASE B)", width=520, height=500)
+    with ext._control_window_b.frame:
+        with ui.ScrollingFrame(
+            height=ui.Fraction(1.0),
+            style={"ScrollingFrame": {"padding": 4, "margin": 0}},
+        ):
+            with ui.VStack(spacing=0):
+                build_ebs_control_panel_content(ext, compact=False, case_id=2)
     build_sim_monitor_window(ext)
     build_sim_timetable_window(ext)
     build_fix_proc_window(ext)
@@ -8949,6 +8847,20 @@ def _drain_sim_log_queue(ext: Any) -> None:
                 results = getattr(ext, "_sim_prerun_results_by_screen", None)
                 if isinstance(results, dict) and results:
                     try:
+                        stopped_scr = {
+                            int(x)
+                            for x in (getattr(ext, "_sim_stopped_screens", None) or set())
+                        }
+                        if stopped_scr:
+                            results = {
+                                int(k): v
+                                for k, v in results.items()
+                                if int(k) not in stopped_scr
+                            }
+                    except Exception:
+                        pass
+                if isinstance(results, dict) and results:
+                    try:
                         set_sim_playback_active(ext, True)
                         ext._sim_anim_pending = []
                         ext._sim_anim_pending_by_screen = {}
@@ -11329,12 +11241,36 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception:
         n_ch = 1
 
+    target_screens_raw = getattr(ext, "_sim_startup_target_screens", None)
+    partial_startup = isinstance(target_screens_raw, (list, tuple)) and len(target_screens_raw) > 0
+    target_screens: List[int] = []
+    if partial_startup:
+        for x in target_screens_raw:
+            try:
+                target_screens.append(max(1, min(4, int(x))))
+            except Exception:
+                pass
+
     try:
         unlock_timetable_rows(ext)
-        _clear_sim_timetable_storage(ext)
+        if not partial_startup:
+            _clear_sim_timetable_storage(ext)
     except Exception:
         pass
-    on_sim_stop_clicked(ext, freeze_ep_timeline=False)
+    if partial_startup:
+        for sc in target_screens:
+            _stop_sim_screen_only(ext, int(sc))
+    else:
+        on_sim_stop_clicked(ext, freeze_ep_timeline=False)
+    try:
+        stopped = _sim_stopped_screens_set(ext)
+        if partial_startup:
+            for sc in target_screens:
+                stopped.discard(int(sc))
+        else:
+            stopped.clear()
+    except Exception:
+        pass
     try:
         _restore_all_sim_channels_prim_motion(ext)
     except Exception:
@@ -11378,6 +11314,8 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception:
         ext._sim_run_gen = 1
     _auto_fill_per_screen_snapshots_on_start(ext)
+    if partial_startup and not target_screens:
+        return
     if n_ch > 1:
         try:
             _ensure_tick_pause_map_for_multi(ext, n_ch)
@@ -11398,15 +11336,10 @@ def on_sim_start_clicked(ext: Any) -> None:
     snap_1: Dict[str, Any] = {}
     if n_ch <= 1:
         try:
-            snaps1 = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
-        except Exception:
-            snaps1 = [None, None, None, None]
-        try:
-            cap1 = _capture_per_screen_sim_settings(ext)
+            cap1 = _capture_per_screen_sim_settings(ext, 1)
         except Exception:
             cap1 = {}
-        s0 = snaps1[0] if len(snaps1) >= 1 else None
-        snap_1 = dict(s0) if isinstance(s0, dict) else dict(cap1)
+        snap_1 = dict(cap1)
         try:
             timing, init_cfg = _timing_and_init_from_snapshot(ext, snap_1)
             _inject_lot_fix_proc_into_init(ext, init_cfg)
@@ -11417,7 +11350,7 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             ep_count = 2
 
-    log_interval = max(0.0, ext._sim_log_interval_model.get_value_as_float())
+    log_interval = 0.0
     log_cfg = SimulationLogConfig(
         progress_interval_sec=log_interval,
         input_status_interval_sec=log_interval,
@@ -11929,15 +11862,13 @@ def on_sim_start_clicked(ext: Any) -> None:
             _append_sim_log(ext, "[SIM] 시작 실패")
             return
     else:
-        try:
-            snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
-        except Exception:
-            snaps = [None, None, None, None]
-        while len(snaps) < 4:
-            snaps.append(None)
-        snaps = snaps[:4]
-        cap = _capture_per_screen_sim_settings(ext)
-        engines: List[Any] = []
+        from .ebs_case_models import snapshots_for_startup_channels
+
+        channel_snaps = snapshots_for_startup_channels(ext, n_ch)
+        engines: List[Any] = list(getattr(ext, "_sim_engines", None) or [])
+        while len(engines) < n_ch:
+            engines.append(None)
+        engines = engines[:n_ch]
 
         def _make_fault_supplier(sf: Dict[str, Any], ec: int):
             def _sup() -> Set[str]:
@@ -11945,24 +11876,11 @@ def on_sim_start_clicked(ext: Any) -> None:
 
             return _sup
 
-        # 요구사항: 화면2~4는 "저장" 전까지 현재 UI 변경이 즉시 반영되면 안 된다.
-        # 따라서 snap_i가 None이면,
-        # - 화면1은 현재 UI 캡처(cap)로 폴백(기본값)
-        # - 화면2~4는 화면1 스냅샷(기본값)이 있으면 그걸 폴백, 없으면 cap 폴백
-        base_snap = None
-        try:
-            base_snap = snaps[0] if (len(snaps) >= 1 and isinstance(snaps[0], dict)) else None
-        except Exception:
-            base_snap = None
         for i in range(n_ch):
-            snap_i = snaps[i]
-            if snap_i is None:
-                if i == 0:
-                    snap_i = copy.deepcopy(cap)
-                elif isinstance(base_snap, dict):
-                    snap_i = copy.deepcopy(base_snap)
-                else:
-                    snap_i = copy.deepcopy(cap)
+            screen = i + 1
+            if partial_startup and screen not in target_screens:
+                continue
+            snap_i = copy.deepcopy(channel_snaps[i] if i < len(channel_snaps) else {})
             timing_i, init_i = _timing_and_init_from_snapshot(ext, snap_i)
             _inject_lot_fix_proc_into_init(ext, init_i)
             screen_tag = str(i + 1)
@@ -11989,7 +11907,7 @@ def on_sim_start_clicked(ext: Any) -> None:
                 )
             except Exception:
                 pass
-            engines.append(eng)
+            engines[i] = eng
 
         # 멀티: start() 전에 화면별 총 예상 시간을 넣어 두어 첫 타임라인 갱신이 30초 스케일에 묶이지 않게 한다.
         try:
@@ -12011,6 +11929,8 @@ def on_sim_start_clicked(ext: Any) -> None:
 
         started: List[Any] = []
         for eng in engines:
+            if eng is None:
+                continue
             if not eng.start():
                 for e2 in started:
                     try:
@@ -12047,7 +11967,13 @@ def on_sim_start_clicked(ext: Any) -> None:
         except Exception:
             pass
         try:
-            _append_sim_log(ext, f"[SIM] 멀티 시뮼 시작 (채널={n_ch}, 화면별 스냅샷)")
+            if partial_startup:
+                _append_sim_log(
+                    ext,
+                    f"[SIM] 화면 {','.join(str(s) for s in target_screens)} 시뮼 시작 (CASE 실시간 설정)",
+                )
+            else:
+                _append_sim_log(ext, f"[SIM] 멀티 시뮼 시작 (채널={n_ch}, CASE A/B 실시간 설정)")
         except Exception:
             pass
         try:
@@ -12057,8 +11983,8 @@ def on_sim_start_clicked(ext: Any) -> None:
                 ext,
                 n_ch=n_ch,
                 run_gen=int(getattr(ext, "_sim_run_gen", 0) or 0),
-                snaps=snaps,
-                engines=engines,
+                snaps=channel_snaps,
+                engines=[e for e in engines if e is not None],
             )
         except Exception:
             pass
@@ -12132,10 +12058,19 @@ def on_sim_start_clicked(ext: Any) -> None:
                 engs = [e0] if e0 is not None else []
 
             results: Dict[int, SimPreRunResult] = {}
+            stopped_scr = set()
+            try:
+                stopped_scr = {
+                    int(x) for x in (getattr(ext, "_sim_stopped_screens", None) or set())
+                }
+            except Exception:
+                stopped_scr = set()
             for idx, eng in enumerate(engs):
                 if eng is None:
                     continue
                 scr = idx + 1
+                if scr in stopped_scr:
+                    continue
                 # 세대가 바뀌었으면 중단
                 try:
                     if int(getattr(ext, "_sim_run_gen", 0) or 0) != int(run_gen):
@@ -13273,6 +13208,464 @@ def on_copy_sim_progress(ext: Any) -> None:
         _append_sim_log(ext, "[SIM UI] 클립보드 미지원으로 콘솔 출력")
 
 
+def _sim_stopped_screens_set(ext: Any) -> set:
+    s = getattr(ext, "_sim_stopped_screens", None)
+    if not isinstance(s, set):
+        s = set()
+        ext._sim_stopped_screens = s
+    return s
+
+
+def _stop_anim_screen_worker_for_screen(ext: Any, screen_idx: int) -> None:
+    workers = getattr(ext, "_sim_anim_workers_by_screen", None)
+    if not isinstance(workers, dict):
+        return
+    key = str(max(1, int(screen_idx)))
+    ent = workers.get(key)
+    if not isinstance(ent, dict):
+        return
+    lock = ent.get("lock")
+    cond = ent.get("cond")
+    queue = ent.get("queue")
+    th = ent.get("thread")
+    try:
+        if lock is not None and cond is not None and queue is not None:
+            with cond:
+                queue.append(_ANIM_SCREEN_WORKER_STOP)
+                cond.notify()
+    except Exception:
+        pass
+    try:
+        if th is not None:
+            th.join(timeout=2.0)
+    except Exception:
+        pass
+    try:
+        workers.pop(key, None)
+    except Exception:
+        pass
+
+
+def _stop_sim_screen_only(ext: Any, screen: int) -> None:
+    """단일 화면 엔진·프리런 재생·애니만 정지(다른 화면 시뮬은 유지)."""
+    try:
+        sc = max(1, min(4, int(screen)))
+    except Exception:
+        return
+    sk = str(sc)
+    idx = sc - 1
+    _sim_stopped_screens_set(ext).add(sc)
+
+    try:
+        stop_playback_for_screen(ext, sc)
+    except Exception:
+        pass
+
+    try:
+        engs = list(getattr(ext, "_sim_engines", None) or [])
+        if idx < len(engs) and engs[idx] is not None:
+            try:
+                engs[idx].stop()
+            except Exception:
+                pass
+            engs[idx] = None
+            ext._sim_engines = engs
+    except Exception:
+        pass
+    if sc == 1:
+        sim = getattr(ext, "_sim_engine", None)
+        if sim is not None:
+            try:
+                sim.stop()
+            except Exception:
+                pass
+            try:
+                ext._sim_engine = None
+            except Exception:
+                pass
+
+    try:
+        _halt_screen_json_anim(ext, sc, join_sec=2.0)
+    except Exception:
+        pass
+    try:
+        _stop_anim_screen_worker_for_screen(ext, sc)
+    except Exception:
+        pass
+    try:
+        runners = getattr(ext, "_sim_runners_by_screen", None)
+        if isinstance(runners, dict):
+            rr = runners.get(sk)
+            if rr is not None:
+                try:
+                    rr.pause(cancel_all_move_rotate=True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        ie_by = getattr(ext, "_sim_interrupt_anim_event_by_screen", None)
+        if isinstance(ie_by, dict) and sk in ie_by and ie_by[sk] is not None:
+            try:
+                ie_by[sk].clear()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for attr, default in (
+        ("_sim_anim_pending_by_screen", []),
+        ("_sim_anim_active_by_screen", {}),
+        ("_sim_tick_pause_events_by_screen", None),
+        ("_sim_tick_pause_until_wall_by_screen", None),
+        ("_sim_interrupt_anim_event_by_screen", None),
+        ("_sim_post_anim_port_applied_by_screen", None),
+        ("_sim_pending_post_anim_port_by_screen", None),
+        ("_sim_renewal_port_defer_by_screen", None),
+    ):
+        try:
+            d = getattr(ext, attr, None)
+            if isinstance(d, dict) and sk in d:
+                if attr == "_sim_anim_pending_by_screen":
+                    d[sk] = []
+                elif attr == "_sim_anim_active_by_screen":
+                    d[sk] = {}
+                elif attr == "_sim_interrupt_anim_event_by_screen":
+                    try:
+                        if d[sk] is not None:
+                            d[sk].clear()
+                    except Exception:
+                        pass
+                else:
+                    d.pop(sk, None)
+        except Exception:
+            pass
+    try:
+        res = getattr(ext, "_sim_prerun_results_by_screen", None)
+        if isinstance(res, dict):
+            res.pop(sc, None)
+            res.pop(sk, None)
+    except Exception:
+        pass
+    try:
+        by_occ = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if isinstance(by_occ, dict):
+            by_occ.pop(sk, None)
+    except Exception:
+        pass
+    try:
+        _append_sim_log(ext, f"[SIM] 화면{sc} 정지")
+    except Exception:
+        pass
+
+
+def on_sim_start_for_screen(ext: Any, screen: int) -> None:
+    """CASE 창: 담당 화면만 시뮬 시작."""
+    try:
+        ext._sim_startup_target_screens = [int(screen)]
+        on_sim_start_clicked(ext)
+    finally:
+        try:
+            ext._sim_startup_target_screens = None
+        except Exception:
+            pass
+
+
+def on_sim_stop_for_screen(ext: Any, screen: int) -> None:
+    """CASE 창: 담당 화면만 정지."""
+    _stop_sim_screen_only(ext, int(screen))
+
+
+def on_sim_reset_for_screen(ext: Any, screen: int) -> None:
+    """CASE 창: 담당 화면만 리셋."""
+    try:
+        sc = max(1, min(4, int(screen)))
+    except Exception:
+        return
+    on_sim_stop_for_screen(ext, sc)
+    try:
+        ctx = _usd_context_name_for_sim_screen(ext, sc)
+        _restore_sim_prim_motion_to_initial(ext, usd_context_name=ctx)
+    except Exception:
+        pass
+    try:
+        chans = getattr(ext, "_sim_monitor_channels", None)
+        if isinstance(chans, list):
+            for ch in chans:
+                if not isinstance(ch, dict):
+                    continue
+                try:
+                    if int(ch.get("screen", 0)) != sc:
+                        continue
+                except Exception:
+                    continue
+                ht = "[SIM] 초기화" if sc == 1 else f"[SIM·화면{sc}] 초기화"
+                pt = "[진행현황] 초기화 (시뮬레이션 시작 대기)"
+                ph = f"[포트상태·화면{sc}] 초기화 (이벤트 대기)"
+                try:
+                    _set_channel_history_text(ch, ht)
+                except Exception:
+                    pass
+                pl = ch.get("progress_label")
+                phdr = ch.get("port_header")
+                if pl is not None:
+                    pl.text = pt
+                if phdr is not None:
+                    phdr.text = ph
+                cells = ch.get("port_cells") or {}
+                boxes = ch.get("port_cell_boxes") or {}
+                for port in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"):
+                    if port in cells:
+                        cells[port].text = "IN/OUT:-" if port == "INOUT" else f"{port}:-"
+                    try:
+                        _set_port_box_style(ext, port, "-", boxes)
+                    except Exception:
+                        pass
+                try:
+                    reset_timetable_channel_to_idle(ch, screen=sc, ext=ext)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        _sim_stopped_screens_set(ext).discard(sc)
+    except Exception:
+        pass
+
+
+def _apply_ep_port_layout_for_sim_screen(ext: Any, screen: int, *, reason: str = "") -> None:
+    """화면별 CASE EP/EBS 설정을 해당 USD 컨텍스트에 반영한다."""
+    from .ebs_case_models import case_from_screen, get_sim_ebs_enabled_for_case, get_sim_ep_count_idx_for_case
+    from .tbs_ep_port_visibility import (
+        apply_ep_port_layout_for_context,
+        ep_count_from_combo_idx,
+        schedule_apply_ep_port_layout,
+    )
+
+    try:
+        s = max(1, int(screen))
+    except Exception:
+        s = 1
+    cid = case_from_screen(s)
+    try:
+        idx = int(get_sim_ep_count_idx_for_case(ext, cid))
+    except Exception:
+        idx = 0
+    ep_count = ep_count_from_combo_idx(idx)
+    ebs_on = bool(get_sim_ebs_enabled_for_case(ext, cid))
+    rs = str(reason or f"screen{s}_ep_ebs").strip() or f"screen{s}_ep_ebs"
+    if s <= 1:
+        schedule_apply_ep_port_layout(
+            ext,
+            ep_count,
+            ebs_enabled=ebs_on,
+            delay_frames=2,
+            reason=rs,
+        )
+        return
+    ctx_nm = _usd_context_name_for_sim_screen(ext, s)
+    if ctx_nm:
+        apply_ep_port_layout_for_context(ext, str(ctx_nm), s, reason=rs)
+
+
+def _sync_ep3_port_cell_visibility_for_case(ext: Any, case_id: int) -> None:
+    from .ebs_case_models import CASE_A, CASE_B, get_sim_ep_count_idx_for_case
+
+    try:
+        is_ep3 = int(get_sim_ep_count_idx_for_case(ext, int(case_id))) == 1
+    except Exception:
+        is_ep3 = False
+    if int(case_id) == CASE_A:
+        bp4_row = getattr(ext, "_sim_init_bp4_row", None)
+        ep3_row = getattr(ext, "_sim_init_ep3_row", None)
+        f_bp4 = getattr(ext, "_sim_fault_bp4_row", None)
+        f_ep3 = getattr(ext, "_sim_fault_ep3_row", None)
+        extra_rows = (
+            list(getattr(ext, "_sim_init_bp4_rows", None) or [])
+            + list(getattr(ext, "_sim_init_ep3_rows", None) or [])
+            + list(getattr(ext, "_sim_fault_bp4_rows", None) or [])
+            + list(getattr(ext, "_sim_fault_ep3_rows", None) or [])
+        )
+    else:
+        bp4_row = getattr(ext, "_ebs_b_init_bp4_row", None)
+        ep3_row = getattr(ext, "_ebs_b_init_ep3_row", None)
+        f_bp4 = getattr(ext, "_ebs_b_fault_bp4_row", None)
+        f_ep3 = getattr(ext, "_ebs_b_fault_ep3_row", None)
+        extra_rows = (
+            list(getattr(ext, "_ebs_b_init_bp4_rows", None) or [])
+            + list(getattr(ext, "_ebs_b_init_ep3_rows", None) or [])
+            + list(getattr(ext, "_ebs_b_fault_bp4_rows", None) or [])
+            + list(getattr(ext, "_ebs_b_fault_ep3_rows", None) or [])
+        )
+    for row in (bp4_row, ep3_row, f_bp4, f_ep3):
+        if row is None:
+            continue
+        try:
+            row.visible = bool(is_ep3)
+        except Exception:
+            pass
+    for row in extra_rows:
+        try:
+            row.visible = bool(is_ep3)
+        except Exception:
+            pass
+    _sync_ep3_port_cell_visibility(ext)
+
+
+def _sync_ebs_control_visibility_for_case(ext: Any, case_id: int) -> None:
+    from .ebs_case_models import CASE_A, CASE_B, get_sim_ebs_enabled_for_case, get_sim_ep_count_idx_for_case
+
+    try:
+        ebs_on = bool(get_sim_ebs_enabled_for_case(ext, int(case_id)))
+        is_ep3 = int(get_sim_ep_count_idx_for_case(ext, int(case_id))) == 1
+    except Exception:
+        ebs_on = True
+        is_ep3 = False
+    if int(case_id) == CASE_A:
+        bp4_init = set(getattr(ext, "_sim_init_bp4_rows", None) or [])
+        bp4_fault = set(getattr(ext, "_sim_fault_bp4_rows", None) or [])
+        init_rows = list(getattr(ext, "_sim_init_ebs_rows", None) or [])
+        fault_rows = list(getattr(ext, "_sim_fault_ebs_rows", None) or [])
+        block = getattr(ext, "_sim_timing_inout_bp_block", None)
+        bp_ep_row = getattr(ext, "_sim_timing_bp_ep_row", None)
+        lbl = getattr(ext, "_sim_oht_timing_label", None)
+        compact_rows = list(getattr(ext, "_sim_timing_ebs_compact_rows", None) or [])
+    else:
+        bp4_init = set(getattr(ext, "_ebs_b_init_bp4_rows", None) or [])
+        bp4_fault = set(getattr(ext, "_ebs_b_fault_bp4_rows", None) or [])
+        init_rows = list(getattr(ext, "_ebs_b_init_ebs_rows", None) or [])
+        fault_rows = list(getattr(ext, "_ebs_b_fault_ebs_rows", None) or [])
+        block = getattr(ext, "_ebs_b_timing_inout_bp_block", None)
+        bp_ep_row = getattr(ext, "_ebs_b_timing_bp_ep_row", None)
+        lbl = getattr(ext, "_ebs_b_oht_timing_label", None)
+        compact_rows = []
+    for row in init_rows:
+        try:
+            row.visible = bool(ebs_on and is_ep3) if row in bp4_init else bool(ebs_on)
+        except Exception:
+            pass
+    for row in fault_rows:
+        try:
+            row.visible = bool(ebs_on and is_ep3) if row in bp4_fault else bool(ebs_on)
+        except Exception:
+            pass
+    if block is not None:
+        try:
+            block.visible = ebs_on
+        except Exception:
+            pass
+    if bp_ep_row is not None:
+        try:
+            bp_ep_row.visible = ebs_on
+        except Exception:
+            pass
+    if lbl is not None:
+        try:
+            lbl.text = "OHT→IN/OUT/EP" if ebs_on else "OHT→EP"
+        except Exception:
+            pass
+    for row in compact_rows:
+        try:
+            row.visible = ebs_on
+        except Exception:
+            pass
+    _sync_ep3_port_cell_visibility_for_case(ext, int(case_id))
+
+
+def on_sim_ep_count_changed_for_case(ext: Any, case_id: int) -> None:
+    from .ebs_case_models import CASE_A, CASE_B, get_case_model, get_sim_ep_count_idx_for_case, screen_from_case
+
+    if int(case_id) == CASE_A:
+        on_sim_ep_count_changed(ext)
+        return
+
+    try:
+        idx = int(get_sim_ep_count_idx_for_case(ext, CASE_B))
+    except Exception:
+        idx = 0
+    is_ep3 = idx == 1
+
+    if getattr(ext, "_ebs_b_init_bp4_row", None) is not None:
+        ext._ebs_b_init_bp4_row.visible = is_ep3
+    for row in list(getattr(ext, "_ebs_b_init_bp4_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
+    if not is_ep3:
+        m = get_case_model(ext, CASE_B, "init_bp4")
+        if m is not None:
+            try:
+                m.set_value(False)
+            except Exception:
+                pass
+    if getattr(ext, "_ebs_b_init_ep3_row", None) is not None:
+        ext._ebs_b_init_ep3_row.visible = is_ep3
+    for row in list(getattr(ext, "_ebs_b_init_ep3_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
+    if not is_ep3:
+        m = get_case_model(ext, CASE_B, "init_ep3")
+        if m is not None:
+            try:
+                m.set_value(False)
+            except Exception:
+                pass
+    if getattr(ext, "_ebs_b_fault_bp4_row", None) is not None:
+        ext._ebs_b_fault_bp4_row.visible = is_ep3
+    for row in list(getattr(ext, "_ebs_b_fault_bp4_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
+    if not is_ep3:
+        m = get_case_model(ext, CASE_B, "fault_bp4")
+        if m is not None:
+            try:
+                m.set_value(False)
+            except Exception:
+                pass
+    if getattr(ext, "_ebs_b_fault_ep3_row", None) is not None:
+        ext._ebs_b_fault_ep3_row.visible = is_ep3
+    for row in list(getattr(ext, "_ebs_b_fault_ep3_rows", None) or []):
+        try:
+            row.visible = is_ep3
+        except Exception:
+            pass
+    if not is_ep3:
+        m = get_case_model(ext, CASE_B, "fault_ep3")
+        if m is not None:
+            try:
+                m.set_value(False)
+            except Exception:
+                pass
+    _sync_ebs_control_visibility_for_case(ext, CASE_B)
+    try:
+        _apply_ep_port_layout_for_sim_screen(
+            ext,
+            screen_from_case(CASE_B),
+            reason="ep_count_changed_case_b",
+        )
+    except Exception:
+        pass
+
+
+def on_sim_ebs_enabled_changed_for_case(ext: Any, case_id: int) -> None:
+    from .ebs_case_models import screen_from_case
+
+    cid = int(case_id)
+    _sync_ebs_control_visibility_for_case(ext, cid)
+    try:
+        _apply_ep_port_layout_for_sim_screen(
+            ext,
+            screen_from_case(cid),
+            reason=f"ebs_enabled_case{cid}",
+        )
+    except Exception:
+        pass
+
+
 def _sync_ebs_control_visibility(ext: Any) -> None:
     """EBS 적용여부에 따라 버퍼 관련 UI·포트상태·공정시간 필드를 표시/숨김."""
     try:
@@ -13327,29 +13720,6 @@ def on_sim_ep_count_changed(ext: Any) -> None:
     except Exception:
         idx = 0
     is_ep3 = idx == 1
-
-    # 요구사항: EP 포트 개수는 "현재 화면 설정 저장" 시점에 해당 화면 스냅샷에 반영되어야 한다.
-    # - 화면1은 기본값이므로 즉시 반영(스냅샷[0] 갱신) 가능
-    # - 화면2~4 스냅샷은 여기서 건드리지 않는다(저장 버튼에서만 반영)
-    try:
-        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
-    except Exception:
-        snaps = [None, None, None, None]
-    while len(snaps) < 4:
-        snaps.append(None)
-    snaps = snaps[:4]
-    try:
-        if isinstance(snaps[0], dict):
-            snaps[0]["ep_count_idx"] = int(idx)
-        # 화면1 스냅샷이 아직 없으면 생성(기본값 성격)
-        elif snaps[0] is None:
-            cap0 = _capture_per_screen_sim_settings(ext)
-            if isinstance(cap0, dict):
-                cap0["ep_count_idx"] = int(idx)
-            snaps[0] = cap0
-        ext._sim_per_screen_snapshots = snaps
-    except Exception:
-        pass
 
     if getattr(ext, "_sim_init_bp4_row", None) is not None:
         ext._sim_init_bp4_row.visible = is_ep3

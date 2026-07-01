@@ -27,52 +27,29 @@ def ep_count_from_combo_idx(idx: int) -> int:
 
 
 def ep_count_idx_for_screen(ext: Any, screen_1based: int) -> int:
-    """
-    화면별 EP 콤보 인덱스 (0=EP2, 1=EP3).
-
-    멀티 분할 시 화면별 「현재 설정 저장」스냅샷이 있으면 그 값을 쓰고,
-    없으면 화면1 스냅샷(또는 현재 UI)을 따른다.
-    """
+    """화면별 EP 콤보 인덱스 (0=EP2, 1=EP3) — CASE A/B 실시간 UI."""
     try:
         si = max(1, int(screen_1based))
     except Exception:
         si = 1
     try:
-        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
-        idx = si - 1
-        if 0 <= idx < len(snaps) and isinstance(snaps[idx], dict):
-            return int(snaps[idx].get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
-        if si > 1 and len(snaps) >= 1 and isinstance(snaps[0], dict):
-            return int(snaps[0].get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
-    except Exception:
-        pass
-    try:
-        from .ebs_control_panel_ui import get_sim_ep_count_idx
+        from .ebs_case_models import case_from_screen, get_sim_ep_count_idx_for_case
 
-        return int(get_sim_ep_count_idx(ext))
+        return int(get_sim_ep_count_idx_for_case(ext, case_from_screen(si)))
     except Exception:
         return int(_SIM_DEF.ep_count_idx)
 
 
 def ebs_enabled_for_screen(ext: Any, screen_1based: int) -> bool:
-    """화면별 EBS 적용 여부 (스냅샷 우선, 없으면 현재 UI)."""
+    """화면별 EBS 적용 여부 — CASE A/B 실시간 UI."""
     try:
         si = max(1, int(screen_1based))
     except Exception:
         si = 1
     try:
-        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [])
-        idx = si - 1
-        if 0 <= idx < len(snaps) and isinstance(snaps[idx], dict):
-            return bool(snaps[idx].get("ebs_enabled", True))
-        if si > 1 and len(snaps) >= 1 and isinstance(snaps[0], dict):
-            return bool(snaps[0].get("ebs_enabled", True))
-    except Exception:
-        pass
-    try:
-        from .ebs_control_panel_ui import get_sim_ebs_enabled
+        from .ebs_case_models import case_from_screen, get_sim_ebs_enabled_for_case
 
-        return bool(get_sim_ebs_enabled(ext))
+        return bool(get_sim_ebs_enabled_for_case(ext, case_from_screen(si)))
     except Exception:
         return True
 
@@ -472,53 +449,14 @@ def schedule_apply_ep_port_layout(
 
 
 def on_sim_ebs_enabled_changed(ext: Any) -> None:
-    """EBS 적용여부 체크 변경 — UI·화면1 스냅샷·기본 USD 컨텍스트."""
+    """EBS 적용여부 체크 변경 — CASE A(화면1) 호환 래퍼."""
     try:
-        from .ebs_control_panel_ui import get_sim_ebs_enabled
+        from .control_window import on_sim_ebs_enabled_changed_for_case
+        from .ebs_case_models import CASE_A
 
-        ebs_on = bool(get_sim_ebs_enabled(ext))
-    except Exception:
-        ebs_on = True
-    try:
-        snaps = list(getattr(ext, "_sim_per_screen_snapshots", None) or [None, None, None, None])
-    except Exception:
-        snaps = [None, None, None, None]
-    while len(snaps) < 4:
-        snaps.append(None)
-    snaps = snaps[:4]
-    try:
-        if isinstance(snaps[0], dict):
-            snaps[0]["ebs_enabled"] = bool(ebs_on)
-        elif snaps[0] is None:
-            from .control_window import _capture_per_screen_sim_settings
-
-            cap0 = _capture_per_screen_sim_settings(ext)
-            if isinstance(cap0, dict):
-                cap0["ebs_enabled"] = bool(ebs_on)
-            snaps[0] = cap0
-        ext._sim_per_screen_snapshots = snaps
+        on_sim_ebs_enabled_changed_for_case(ext, CASE_A)
     except Exception:
         pass
-    try:
-        from .control_window import _sync_ebs_control_visibility
-
-        _sync_ebs_control_visibility(ext)
-    except Exception:
-        pass
-    try:
-        from .ebs_control_panel_ui import get_sim_ep_count_idx
-
-        idx = int(get_sim_ep_count_idx(ext))
-    except Exception:
-        idx = 0
-    ep_count = ep_count_from_combo_idx(idx)
-    schedule_apply_ep_port_layout(
-        ext,
-        ep_count,
-        ebs_enabled=ebs_on,
-        delay_frames=2,
-        reason="ebs_enabled_changed",
-    )
 
 
 def on_sim_ep_count_combo_changed(ext: Any) -> None:

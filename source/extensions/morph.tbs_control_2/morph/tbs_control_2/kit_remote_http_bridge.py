@@ -600,12 +600,6 @@ def _apply_web_fields(ext: Any, f: Dict[str, Any]) -> None:
     except Exception:
         pass
     try:
-        _set_float_model(
-            getattr(ext, "_sim_log_interval_model", None), max(0.0, _f("log_interval", float(_SIM_DEF.log_interval_sec)))
-        )
-    except Exception:
-        pass
-    try:
         _set_bool_model(getattr(ext, "_sim_confirm_each_step_model", None), _b("confirm_each"))
     except Exception:
         pass

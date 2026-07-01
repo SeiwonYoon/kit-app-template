@@ -330,7 +330,7 @@ class Extension(omni.ext.IExt):
 
         # 이전 비정상 종료 등으로 남은 보조 ViewportWindow / 보조 USD 컨텍스트 정리
         try:
-            teardown_sim_multi_viewports(self)
+            teardown_sim_multi_viewports(self, skip_deferred_restore=True)
         except Exception:
             pass
 
@@ -557,7 +557,11 @@ class Extension(omni.ext.IExt):
         except Exception:
             pass
         try:
-            teardown_sim_multi_viewports(self)
+            teardown_sim_multi_viewports(self, skip_deferred_restore=True)
+        except Exception:
+            pass
+        try:
+            self._tbs_auto_dual_layout_done = False
         except Exception:
             pass
         try:
