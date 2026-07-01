@@ -681,6 +681,7 @@ def _reapply_split_dock_in_geometry(ext: Any) -> bool:
         if bool(getattr(child_w, "docked", False)):
             ok_any = True
             continue
+        _undock_workspace_window(str(child))
         if _dock_aux_into_target(child_w, target_w, pos, float(ratio)):
             ok_any = True
     return ok_any
@@ -865,6 +866,8 @@ def _bring_kit_chrome_visible(ext: Any = None) -> None:
 
 def reapply_split_layout_sync(ext: Any, n: int) -> None:
     """분할 레이아웃 재적용 — Dock 성공 시 ``dock_in`` 만, 실패 시 보조 격자."""
+    if _startup_split_relayout_suppressed(ext):
+        return
     try:
         sn = channel_count_for_split(int(n))
     except Exception:
@@ -894,6 +897,8 @@ async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int)
         if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
             return
         await kit_app.get_app().next_update_async()
+    if _startup_split_relayout_suppressed(ext):
+        return
     reapply_split_layout_sync(ext, n)
     if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
         for _ in range(8):
@@ -988,13 +993,17 @@ async def _apply_split_dock_layout(ext: Any, token: int, n: int) -> bool:
                 return False
             await kit_app.get_app().next_update_async()
     if not await _wait_aux_windows_docked(ext, token, aux_names, max_frames=48):
-        try:
-            print(
-                "[TBS multi-sim] Dock: docked 플래그 미확인 — dock_in 은 적용됨, Dock 성공으로 처리",
-                flush=True,
-            )
-        except Exception:
-            pass
+        if not _aux_windows_actually_docked(n):
+            try:
+                print(
+                    "[TBS multi-sim] Dock: docked 플래그 미확인 — dock_in 미반영, 재시도 필요",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            return False
+    if not _aux_windows_actually_docked(n):
+        return False
     for nm in aux_names:
         hidden = False
         for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
@@ -1055,20 +1064,164 @@ def _main_usd_path_for_clone(ext: Any) -> Optional[str]:
         return None
 
 
+def _layout_first_shell_pass(ext: Any, *, skip_hydrate: bool) -> bool:
+    """layout-first: USD 로드 전 Dock·격자만 먼저 적용하는 경로인지."""
+    if not skip_hydrate:
+        return False
+    if startup_layout_first_active(ext):
+        return True
+    if startup_dual_orchestration_active(ext):
+        return True
+    if bool(getattr(ext, "_tbs_split_deferred_aux_load_pending", False)):
+        return True
+    return False
+
+
 def startup_layout_first_active(ext: Any) -> bool:
     """앱 시작 시 USD 로드 전 2분할 레이아웃만 먼저 적용 중인지."""
     return bool(getattr(ext, "_tbs_startup_layout_first_active", False))
+
+
+def _startup_split_relayout_suppressed(ext: Any) -> bool:
+    """layout-first 시작 중에는 중간 relayout·navigation 재적용을 막는다."""
+    if startup_dual_orchestration_active(ext):
+        return True
+    if bool(getattr(ext, "_tbs_startup_aux_load_inflight", False)):
+        return True
+    return False
+
+
+def startup_dual_layout_settled(ext: Any) -> bool:
+    """layout-first: Dock 50:50 배치가 끝났고 USD 로드 전/중 재배치를 막을 때."""
+    return bool(getattr(ext, "_tbs_startup_dual_layout_settled", False))
 
 
 def preserve_split_layout_during_startup(ext: Any) -> bool:
     """시작 직후 분할 UI 동기화가 2분할을 1로 되돌리지 않도록 한다."""
     if startup_layout_first_active(ext):
         return True
+    if startup_dual_orchestration_active(ext):
+        return True
     if bool(getattr(ext, "_tbs_split_deferred_aux_load_pending", False)):
+        return True
+    if bool(getattr(ext, "_tbs_startup_aux_load_inflight", False)):
         return True
     if bool(getattr(ext, "_tbs_defer_master_autoload_until_dual_layout", False)):
         return True
     return False
+
+
+def startup_dual_orchestration_active(ext: Any) -> bool:
+    """layout-first 2화면 시작이 끝날 때까지 중복 relayout 을 막는다."""
+    return bool(getattr(ext, "_tbs_startup_dual_orchestration_active", False))
+
+
+def _begin_startup_dual_orchestration(ext: Any) -> None:
+    try:
+        ext._tbs_startup_dual_orchestration_active = True
+        ext._tbs_startup_pending_chrome_relayout = None
+    except Exception:
+        pass
+
+
+async def _ensure_split_layout_geometry_ready(ext: Any, token: int, n: int) -> None:
+    """layout-first: 보조 창을 표시하기 전 Dock 검증·재시도, 실패 시 격자 폴백."""
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+    if not sim_viewport_split_dock_enabled():
+        await _enforce_equal_split_grid_async(ext, token, n, preserve_main_viewport=True)
+        try:
+            ext._tbs_split_used_dock_layout = False
+        except Exception:
+            pass
+        return
+    for _ in range(4):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        await kit_app.get_app().next_update_async()
+    if _aux_windows_actually_docked(n):
+        return
+    docked_ok = await _retry_split_dock_layout(ext, token, n, attempts=6)
+    try:
+        ext._tbs_split_used_dock_layout = bool(docked_ok)
+    except Exception:
+        pass
+    if _aux_windows_actually_docked(n):
+        return
+    try:
+        print("[TBS multi-sim] layout-first: Dock 미확인 → 동일 크기 격자 폴백", flush=True)
+    except Exception:
+        pass
+    for ti in range(1, n):
+        _undock_workspace_window(_split_window_name(ti))
+    for _ in range(4):
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return
+        await kit_app.get_app().next_update_async()
+    await _enforce_equal_split_grid_async(ext, token, n, preserve_main_viewport=True)
+    try:
+        ext._tbs_split_used_dock_layout = False
+    except Exception:
+        pass
+
+
+async def _finish_startup_dual_orchestration(ext: Any) -> None:
+    """화면1·2 USD 로드 후 chrome·해상도만 맞춤 — Dock/격자 재배치는 하지 않는다."""
+    try:
+        from .kit_chrome_visibility import (
+            KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH,
+            apply_kit_chrome_hidden,
+            is_kit_chrome_hidden,
+        )
+
+        if KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH and not is_kit_chrome_hidden(ext):
+            apply_kit_chrome_hidden(ext, True, schedule_layout_refresh=False)
+    except Exception:
+        pass
+    try:
+        ext._tbs_startup_dual_orchestration_active = False
+        ext._tbs_startup_pending_chrome_relayout = None
+        ext._tbs_startup_dual_layout_settled = False
+    except Exception:
+        pass
+    for _ in range(4):
+        await kit_app.get_app().next_update_async()
+    try:
+        sn = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 2) or 2))
+    except Exception:
+        sn = 2
+    if sn > 1:
+        tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
+        if not _aux_windows_actually_docked(sn):
+            if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+                _reapply_split_dock_in_geometry(ext)
+            if not _aux_windows_actually_docked(sn):
+                await _retry_split_dock_layout(ext, tok, sn, attempts=4)
+            if not _aux_windows_actually_docked(sn):
+                await _enforce_equal_split_grid_async(
+                    ext, tok, sn, preserve_main_viewport=True
+                )
+                try:
+                    ext._tbs_split_used_dock_layout = False
+                except Exception:
+                    pass
+        try:
+            set_viewport_fill_frame_for_split_count(sn, True)
+        except Exception:
+            pass
+        for ti in range(sn):
+            nm = "Viewport" if ti == 0 else _split_window_name(ti)
+            _sync_viewport_resolution_from_workspace_window(nm)
+
+
+def _dual_path_split_defer_skip_shell(ext: Any) -> bool:
+    """layout-first + dual-path: shell placeholder 생략(1회 open 만)."""
+    try:
+        from .tbs_split_composed_loader import split_dual_usd_paths_enabled
+
+        return bool(split_dual_usd_paths_enabled(ext))
+    except Exception:
+        return False
 
 
 def _startup_split_usd_path(ext: Any) -> Optional[str]:
@@ -1092,6 +1245,7 @@ def apply_startup_dual_layout_first(ext: Any, split_n: int = 2) -> None:
         ext._tbs_startup_layout_first_active = True
     except Exception:
         pass
+    _begin_startup_dual_orchestration(ext)
     apply_sim_viewport_split_layout(ext, split_n)
 
 
@@ -1105,31 +1259,39 @@ def schedule_deferred_aux_usd_load_after_master(ext: Any) -> None:
         pass
 
     async def _go() -> None:
-        for _ in range(6):
-            await kit_app.get_app().next_update_async()
         try:
-            n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
-        except Exception:
-            n = 1
-        if n <= 1:
-            return
-        usd_path = _main_usd_path_for_clone(ext) or _startup_split_usd_path(ext)
-        if not usd_path:
-            return
-        tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
-        try:
-            print("[TBS multi-sim] 레이아웃 완료 → 화면2 USD 로드 시작", flush=True)
+            ext._tbs_startup_aux_load_inflight = True
         except Exception:
             pass
-        await _load_aux_split_stages_background(ext, n, tok, usd_path, prev_n=1)
         try:
-            from .kit_chrome_visibility import is_kit_chrome_hidden
-
-            schedule_split_layout_refresh_for_chrome_change(
-                ext, bool(is_kit_chrome_hidden(ext))
+            for _ in range(_STARTUP_AUX_LOAD_SETTLE_FRAMES):
+                await kit_app.get_app().next_update_async()
+            try:
+                n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+            except Exception:
+                n = 1
+            if n <= 1:
+                return
+            usd_path = _main_usd_path_for_clone(ext) or _startup_split_usd_path(ext)
+            if not usd_path:
+                return
+            tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
+            try:
+                print("[TBS multi-sim] 레이아웃 완료 → 화면2 USD 로드 시작", flush=True)
+            except Exception:
+                pass
+            await _load_aux_split_stages_background(
+                ext, n, tok, usd_path, prev_n=1, serialize_gpu=True
             )
-        except Exception:
-            pass
+        finally:
+            try:
+                ext._tbs_startup_aux_load_inflight = False
+            except Exception:
+                pass
+            try:
+                await _finish_startup_dual_orchestration(ext)
+            except Exception:
+                pass
 
     try:
         asyncio.ensure_future(_go())
@@ -2283,6 +2445,12 @@ def schedule_split_rebuild_after_master_reload(ext: Any) -> None:
 
     Dock/타일이 깨져 있으면 ``apply_sim_viewport_split_layout`` 로 전체 재적용한다.
     """
+    if _startup_split_relayout_suppressed(ext):
+        return
+    if bool(getattr(ext, "_tbs_startup_aux_load_inflight", False)):
+        return
+    if bool(getattr(ext, "_tbs_split_deferred_aux_load_pending", False)):
+        return
     if split_layout_needs_reapply(ext):
         try:
             n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
@@ -2329,6 +2497,13 @@ _SPLIT_REBUILD_SETTLE_SEC_FIRST = 0.05
 _SPLIT_REBUILD_SETTLE_FRAMES_FIRST = 1
 _SPLIT_REBUILD_SETTLE_SEC = 0.05
 _SPLIT_REBUILD_SETTLE_FRAMES = 1
+
+# layout-first startup: Master→보조 로드 구간 GPU 직렬화용 프레임 대기(UX 동일, 내부 settle 만 증가).
+_STARTUP_AUX_LOAD_SETTLE_FRAMES = 16
+_STARTUP_STAGE_SWAP_SETTLE_FRAMES = 12
+_STARTUP_POST_OPEN_SETTLE_FRAMES = 8
+_STARTUP_HYDRATE_SETTLE_FRAMES = 8
+_STARTUP_POST_HYDRATE_SETTLE_FRAMES = 8
 
 
 def _read_viewport_rect() -> Tuple[int, int, int, int]:
@@ -2745,16 +2920,22 @@ def _relayout_single_viewport_fill_available(ext: Any, menus_hidden: bool) -> No
 def relayout_split_views_to_viewport(ext: Any, _menus_hidden: bool = False) -> None:
     """
     메뉴바·패널 표시가 바뀐 뒤 Dock 이 안정된 뒤 3D 뷰 영역을 다시 맞춘다.
-
-    - **1분할**: 메뉴 숨김 여부에 따라 ``Viewport`` 를 ``DockSpace``/메뉴바 보정 영역에 맞춘다.
-    - **2~4분할(격자)**: 합집합 기준(메뉴 숨김 시에는 ``DockSpace``/메인 창 우선)으로 격자 재배치.
-    - **2~4분할(Dock)**: 메뉴 숨김 시 ``Viewport`` 를 ``DockSpace`` 에 다시 채운 뒤 ``dock_in`` 분할을 재적용.
-
-    ``_menus_hidden``: ``True`` = 메뉴·패널 숨김 적용 상태, ``False`` = 복원(다시 보임).
-
-    메뉴 숨김 시에는 뷰포트 API ``fill_frame=True`` 로 두어(고정 ``resolution`` 유지 시
-    UI만 넓어지고 3D가 그대로인 현상 완화) Dock/격자 재배치와 함께 적용한다.
     """
+    if startup_dual_layout_settled(ext) and startup_dual_orchestration_active(ext):
+        try:
+            sn = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 2) or 2))
+        except Exception:
+            sn = 2
+        if sn > 1:
+            try:
+                set_viewport_fill_frame_for_split_count(sn, True)
+            except Exception:
+                pass
+            for ti in range(sn):
+                nm = "Viewport" if ti == 0 else _split_window_name(ti)
+                _sync_viewport_resolution_from_workspace_window(nm)
+        return
+
     try:
         n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
     except Exception:
@@ -2793,6 +2974,12 @@ def relayout_split_views_to_viewport(ext: Any, _menus_hidden: bool = False) -> N
 
 def schedule_split_layout_refresh_for_chrome_change(ext: Any, menus_hidden: bool) -> None:
     """Kit 크롬(메뉴·패널) 표시 변경 직후 Dock 이 안정된 뒤 뷰 레이아웃을 다시 맞춘다."""
+    if startup_dual_orchestration_active(ext):
+        try:
+            ext._tbs_startup_pending_chrome_relayout = bool(menus_hidden)
+        except Exception:
+            pass
+        return
 
     async def _go() -> None:
         # Dock/Workspace 가 크롬 숨김·복원 직후에야 실제 사각형을 반영하는 경우가 있어
@@ -3007,6 +3194,7 @@ async def _hydrate_aux_split_tile_background(
     screen_1based: int,
     *,
     fast_visual: bool,
+    settle_frames: int = 3,
 ) -> None:
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
@@ -3017,7 +3205,7 @@ async def _hydrate_aux_split_tile_background(
             ext,
             ctx_name,
             screen_1based,
-            settle_frames=3,
+            settle_frames=max(1, int(settle_frames)),
             fast_visual=fast_visual,
         )
     except Exception as exc:
@@ -3037,6 +3225,7 @@ async def _finalize_aux_split_tile_after_open(
     screen_1based: int,
     *,
     fast_visual: bool,
+    hydrate_settle_frames: int = 3,
 ) -> None:
     """Dock 이후 백그라운드: runtime hydrate + 화면별 EP2/EP3 레이아웃."""
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
@@ -3047,6 +3236,7 @@ async def _finalize_aux_split_tile_after_open(
         ctx_name,
         screen_1based,
         fast_visual=fast_visual,
+        settle_frames=hydrate_settle_frames,
     )
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
@@ -3191,25 +3381,17 @@ def _spawn_aux_tile_hydrate(
         pass
 
 
-def _spawn_pending_aux_tile_hydrates(
-    ext: Any,
-    n: int,
-    token: int,
-    *,
-    on_all_done: Optional[Callable[[], None]] = None,
-) -> None:
-    """Dock 완료 후 hydrate_pending 보조 타일에 인스턴스 hydrate 를 순차 시작."""
+def _collect_pending_aux_tile_hydrates(
+    ext: Any, n: int
+) -> Tuple[List[Dict[str, Any]], List[Tuple[str, int]]]:
+    """hydrate_pending 보조 타일 목록을 수집하고 플래그를 내린다."""
     try:
         sn = channel_count_for_split(int(n))
     except Exception:
-        return
+        return [], []
     if sn <= 1:
-        if callable(on_all_done):
-            try:
-                on_all_done()
-            except Exception:
-                pass
-        return
+        return list(getattr(ext, "_sim_multi_viewport_entries", []) or []), []
+
     entries = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
     pending: List[Tuple[str, int]] = []
     for ent in entries:
@@ -3228,6 +3410,69 @@ def _spawn_pending_aux_tile_hydrates(
             pending.append((ctx_name, ci + 1))
             ent["hydrate_pending"] = False
     pending.sort(key=lambda x: x[1])
+    return entries, pending
+
+
+async def _await_pending_aux_tile_hydrates(
+    ext: Any,
+    n: int,
+    token: int,
+    *,
+    fast_visual: bool,
+    hydrate_settle_frames: int = 3,
+    on_all_done: Optional[Callable[[], None]] = None,
+) -> None:
+    """보조 타일 hydrate 를 순차 await (startup GPU 직렬화)."""
+    entries, pending = _collect_pending_aux_tile_hydrates(ext, n)
+    try:
+        ext._sim_multi_viewport_entries = entries
+    except Exception:
+        pass
+    if not pending:
+        if callable(on_all_done):
+            try:
+                on_all_done()
+            except Exception:
+                pass
+        return
+
+    for idx, (ctx_name, screen_i) in enumerate(pending):
+        for _ in range(max(0, int(idx) * 2)):
+            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                return
+            await kit_app.get_app().next_update_async()
+        try:
+            await _finalize_aux_split_tile_after_open(
+                ext,
+                token,
+                ctx_name,
+                screen_i,
+                fast_visual=fast_visual,
+                hydrate_settle_frames=hydrate_settle_frames,
+            )
+        except Exception:
+            pass
+
+    if callable(on_all_done):
+        try:
+            on_all_done()
+        except Exception:
+            pass
+
+
+def _spawn_pending_aux_tile_hydrates(
+    ext: Any,
+    n: int,
+    token: int,
+    *,
+    on_all_done: Optional[Callable[[], None]] = None,
+) -> None:
+    """Dock 완료 후 hydrate_pending 보조 타일에 인스턴스 hydrate 를 순차 시작."""
+    entries, pending = _collect_pending_aux_tile_hydrates(ext, n)
+    try:
+        ext._sim_multi_viewport_entries = entries
+    except Exception:
+        pass
     if not pending:
         if callable(on_all_done):
             try:
@@ -3268,6 +3513,109 @@ def _spawn_pending_aux_tile_hydrates(
             asyncio.ensure_future(_go())
         except Exception:
             _one_done()
+
+
+async def _apply_aux_bg_load_layout_finish(
+    ext: Any,
+    n: int,
+    token: int,
+    entries: List[Dict[str, Any]],
+    *,
+    show_all_aux_tiles: bool = False,
+    skip_dock_reapply: bool = False,
+) -> None:
+    """보조 스테이지·hydrate 완료 후 카메라·Dock·창 표시를 한 번만 적용."""
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return
+    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
+    cam_paths: List[Optional[str]] = [None] + ["/OmniverseKit_Persp"] * (n - 1)
+    if not skip_dock_reapply:
+        await _assign_split_cameras_after_layout(ext, token, win_names, cam_paths)
+        if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+            _reapply_split_dock_in_geometry(ext)
+    else:
+        for ti in range(1, n):
+            nm = _split_window_name(ti)
+            _sync_viewport_resolution_from_workspace_window(nm)
+    if startup_dual_layout_settled(ext) and skip_dock_reapply:
+        try:
+            ext._sim_multi_viewport_entries = entries
+        except Exception:
+            pass
+        return
+    for ent in entries:
+        wn = str(ent.get("win_name") or "").strip()
+        if not wn:
+            continue
+        if show_all_aux_tiles:
+            try:
+                ci = int(ent.get("cell_index", -1))
+            except Exception:
+                ci = -1
+            if ci < 1:
+                continue
+        elif not ent.get("aux_hidden_until_load"):
+            continue
+        _apply_aux_window_chrome_flags(wn)
+        _workspace_show_named_window(wn, True)
+        ent["aux_hidden_until_load"] = False
+        _sync_viewport_resolution_from_workspace_window(wn)
+    try:
+        ext._sim_multi_viewport_entries = entries
+    except Exception:
+        pass
+
+
+def _show_split_layout_shell_windows(ext: Any, n: int) -> None:
+    """layout-first: Dock 50:50 직후 메인·보조 Viewport 를 **한 번만** 분할 위치에 표시(USD 전)."""
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        sn = 1
+    if sn <= 1:
+        return
+    try:
+        set_viewport_fill_frame_for_split_count(sn, True)
+    except Exception:
+        pass
+    for ti in range(sn):
+        wn = "Viewport" if ti == 0 else _split_window_name(ti)
+        if ti >= 1:
+            _apply_aux_window_chrome_flags(wn)
+        _workspace_show_named_window(wn, True)
+        _sync_viewport_resolution_from_workspace_window(wn)
+        if ti == 0:
+            _ensure_viewport_camera_navigation_enabled(wn)
+        else:
+            _schedule_split_viewport_input_ready(wn, frames=8)
+        if ti >= 1:
+            for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
+                if str(ent.get("win_name") or "") == wn:
+                    ent["aux_hidden_until_layout"] = False
+                    break
+
+
+async def wake_main_viewport_after_master_open(ext: Any, n: int = 0) -> None:
+    """Master open 직후 메인 Hydra 를 깨운다(격자·Dock 재적용 없음)."""
+    try:
+        sn = channel_count_for_split(int(n or getattr(ext, "_sim_viewport_split_count", 2) or 2))
+    except Exception:
+        sn = 2
+    for _ in range(6):
+        await kit_app.get_app().next_update_async()
+    try:
+        set_viewport_fill_frame_for_split_count(sn, True)
+    except Exception:
+        pass
+    if not startup_dual_layout_settled(ext):
+        _workspace_show_named_window("Viewport", True)
+    _sync_viewport_resolution_from_workspace_window("Viewport")
+    _ensure_viewport_camera_navigation_enabled("Viewport")
+
+
+async def refresh_main_viewport_after_master_open(ext: Any, n: int = 0) -> None:
+    """호환 래퍼 — startup 중에는 relayout 없이 wake 만."""
+    await wake_main_viewport_after_master_open(ext, n)
 
 
 async def _clone_aux_paths_parallel(
@@ -3511,19 +3859,32 @@ async def _provision_aux_split_tile(
     except Exception:
         pass
 
+    aux_skip_shell_defer = False
     if defer_stage_load:
-        shell_path, shell_err = _make_aux_shell_stage_path(ext, token, ti)
-        if not shell_path:
+        if _dual_path_split_defer_skip_shell(ext):
+            aux_skip_shell_defer = True
             try:
-                print(f"[TBS multi-sim] 보조 타일 {ti} shell stage 실패: {shell_err}", flush=True)
+                print(
+                    f"[TBS multi-sim] 보조 타일 {ti}: dual-path defer (shell 생략, 1회 open)",
+                    flush=True,
+                )
             except Exception:
                 pass
-            _release_usd_context_names([ctx_name])
-            if ctx_name in ctx_names:
-                ctx_names.remove(ctx_name)
-            return False
-        ok_open, err_open = await _ctx_open_stage_path(ctx, shell_path, None)
-        composed_used = False
+            ok_open, err_open = True, ""
+            composed_used = False
+        else:
+            shell_path, shell_err = _make_aux_shell_stage_path(ext, token, ti)
+            if not shell_path:
+                try:
+                    print(f"[TBS multi-sim] 보조 타일 {ti} shell stage 실패: {shell_err}", flush=True)
+                except Exception:
+                    pass
+                _release_usd_context_names([ctx_name])
+                if ctx_name in ctx_names:
+                    ctx_names.remove(ctx_name)
+                return False
+            ok_open, err_open = await _ctx_open_stage_path(ctx, shell_path, None)
+            composed_used = False
     elif pre_cloned is not None:
         aux_usd, composed_used = str(pre_cloned[0]), bool(pre_cloned[1])
         ok_open, err_open = await _open_aux_stage_with_unique_session(
@@ -3630,6 +3991,7 @@ async def _provision_aux_split_tile(
                     "composed_hydrate": composed_used,
                     "hydrate_pending": True,
                     "stage_load_pending": bool(defer_stage_load),
+                    "aux_skip_shell_defer": aux_skip_shell_defer,
                     "aux_hidden_until_load": hidden_until_load,
                     "aux_hidden_until_layout": True,
                 }
@@ -3654,13 +4016,21 @@ async def _provision_aux_split_tile(
                 "composed_hydrate": composed_used,
                 "hydrate_pending": True,
                 "stage_load_pending": bool(defer_stage_load),
+                "aux_skip_shell_defer": aux_skip_shell_defer,
                 "aux_hidden_until_load": hidden_until_load,
                 "aux_hidden_until_layout": True,
             }
         )
 
     _apply_aux_window_chrome_flags(wname)
-    _workspace_show_named_window(wname, bool(show_before_usd_load))
+    hide_until_layout = bool(
+        defer_stage_load
+        and (
+            startup_layout_first_active(ext)
+            or startup_dual_orchestration_active(ext)
+        )
+    )
+    _workspace_show_named_window(wname, False if hide_until_layout else bool(show_before_usd_load))
 
     await kit_app.get_app().next_update_async()
     _log_viewport_usd_context_bind(wname, ctx_name)
@@ -3678,14 +4048,18 @@ async def _load_aux_split_stages_background(
     usd_path: str,
     *,
     prev_n: int = 1,
+    serialize_gpu: bool = False,
 ) -> None:
     """
     분할 레이아웃 표시 **이후** 보조 타일에 합성 USD 를 연다.
 
     prewarm 스냅샷이 있으면 ``copy_async`` 만(빠름), 없으면 백그라운드 Flatten 후 연다.
+    ``serialize_gpu=True`` (layout-first startup): hydrate·레이아웃을 직렬 await.
     """
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
+
+    swap_settle = _STARTUP_STAGE_SWAP_SETTLE_FRAMES if serialize_gpu else 6
 
     dual_path = False
     try:
@@ -3750,19 +4124,22 @@ async def _load_aux_split_stages_background(
             continue
         wname = _split_window_name(ti)
         stage_pending = False
+        skip_shell_defer = False
         for ent in entries:
             try:
                 if int(ent.get("cell_index", -1)) == ti:
                     stage_pending = bool(ent.get("stage_load_pending"))
+                    skip_shell_defer = bool(ent.get("aux_skip_shell_defer"))
                     break
             except Exception:
                 pass
         if stage_pending:
-            try:
-                _workspace_show_named_window(wname, False)
-            except Exception:
-                pass
-            await _prepare_aux_context_for_stage_swap(ctx, frame_wait=6)
+            if not skip_shell_defer:
+                try:
+                    _workspace_show_named_window(wname, False)
+                except Exception:
+                    pass
+            await _prepare_aux_context_for_stage_swap(ctx, frame_wait=swap_settle)
         ok_open, err_open = await _open_aux_stage_with_unique_session(
             ctx,
             aux_usd,
@@ -3779,6 +4156,11 @@ async def _load_aux_split_stages_background(
                 )
             except Exception:
                 pass
+            if stage_pending and not serialize_gpu:
+                try:
+                    _workspace_show_named_window(wname, True)
+                except Exception:
+                    pass
             continue
         for ent in entries:
             try:
@@ -3791,13 +4173,19 @@ async def _load_aux_split_stages_background(
             ent["composed_hydrate"] = composed_used
             ent["hydrate_pending"] = True
             break
-        if stage_pending:
+        if stage_pending and not serialize_gpu and not skip_shell_defer:
             try:
                 _workspace_show_named_window(wname, True)
                 _sync_viewport_resolution_from_workspace_window(wname)
             except Exception:
                 pass
-        await kit_app.get_app().next_update_async()
+        if serialize_gpu:
+            for _ in range(_STARTUP_POST_OPEN_SETTLE_FRAMES):
+                if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                    return
+                await kit_app.get_app().next_update_async()
+        else:
+            await kit_app.get_app().next_update_async()
 
     try:
         ext._sim_multi_viewport_entries = entries
@@ -3805,6 +4193,35 @@ async def _load_aux_split_stages_background(
         pass
 
     on_done = getattr(ext, "_tbs_split_nav_after_hydrate_fn", None)
+
+    if serialize_gpu:
+        await _await_pending_aux_tile_hydrates(
+            ext,
+            n,
+            token,
+            fast_visual=False,
+            hydrate_settle_frames=_STARTUP_HYDRATE_SETTLE_FRAMES,
+            on_all_done=on_done if callable(on_done) else None,
+        )
+        for _ in range(_STARTUP_POST_HYDRATE_SETTLE_FRAMES):
+            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                return
+            await kit_app.get_app().next_update_async()
+        await _apply_aux_bg_load_layout_finish(
+            ext,
+            n,
+            token,
+            entries,
+            show_all_aux_tiles=False,
+            skip_dock_reapply=True,
+        )
+        try:
+            ext._tbs_split_layout_usd_key = _split_layout_usd_key(ext)
+            ext._tbs_layout_first_aux_load_done = True
+        except Exception:
+            pass
+        return
+
     _spawn_pending_aux_tile_hydrates(
         ext,
         n,
@@ -3814,37 +4231,17 @@ async def _load_aux_split_stages_background(
 
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
-    win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
-    cam_paths: List[Optional[str]] = [None] + ["/OmniverseKit_Persp"] * (n - 1)
-    await _assign_split_cameras_after_layout(ext, token, win_names, cam_paths)
-    if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
-        _reapply_split_dock_in_geometry(ext)
-    for ent in entries:
-        wn = str(ent.get("win_name") or "").strip()
-        if wn and ent.get("aux_hidden_until_load"):
-            _apply_aux_window_chrome_flags(wn)
-            _workspace_show_named_window(wn, True)
-            ent["aux_hidden_until_load"] = False
-            _sync_viewport_resolution_from_workspace_window(wn)
-    try:
-        ext._sim_multi_viewport_entries = entries
-    except Exception:
-        pass
+    await _apply_aux_bg_load_layout_finish(ext, n, token, entries)
 
 
 async def _complete_startup_layout_first_async(ext: Any, n: int, token: int) -> None:
     """layout-first: Dock 안정화 후 Master USD 자동 로드를 트리거한다."""
-    for _ in range(12):
+    for _ in range(6):
         if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
             return
         await kit_app.get_app().next_update_async()
 
     if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
-        _reapply_split_dock_in_geometry(ext)
-        for _ in range(8):
-            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
-                return
-            await kit_app.get_app().next_update_async()
         for ti in range(n):
             nm = "Viewport" if ti == 0 else _split_window_name(ti)
             _sync_viewport_resolution_from_workspace_window(nm)
@@ -3902,6 +4299,11 @@ async def _finish_split_layout_after_tiles(
     win_names = ["Viewport"] + [_split_window_name(ti) for ti in range(1, n)]
     cam_paths: List[Optional[str]] = [None] + ["/OmniverseKit_Persp"] * (n - 1)
 
+    layout_first_shell = _layout_first_shell_pass(ext, skip_hydrate=skip_hydrate)
+    if layout_first_shell:
+        for ti in range(1, n):
+            _workspace_show_named_window(_split_window_name(ti), False)
+
     if sim_viewport_split_dock_enabled():
         docked_ok = await _apply_split_dock_layout(ext, token, n)
         if not docked_ok:
@@ -3931,22 +4333,8 @@ async def _finish_split_layout_after_tiles(
         )
 
     if not bool(getattr(ext, "_kit_chrome_hide_active", False)):
-        _bring_kit_chrome_visible(ext)
-
-    for ti in range(1, n):
-        wn = _split_window_name(ti)
-        hidden = False
-        for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
-            if str(ent.get("win_name") or "") == wn:
-                if ent.get("aux_hidden_until_load"):
-                    hidden = True
-                ent["aux_hidden_until_layout"] = False
-                break
-        if not hidden:
-            _apply_aux_window_chrome_flags(wn)
-            _workspace_show_named_window(wn, True)
-            _sync_viewport_resolution_from_workspace_window(wn)
-            _schedule_split_viewport_input_ready(wn, frames=12)
+        if not layout_first_shell:
+            _bring_kit_chrome_visible(ext)
 
     try:
         set_viewport_fill_frame_for_split_count(n, True)
@@ -3954,9 +4342,63 @@ async def _finish_split_layout_after_tiles(
         pass
 
     await _assign_split_cameras_after_layout(ext, token, win_names, cam_paths)
-    _apply_split_navigation_to_aux(ext, n, token, hold_ticks=96)
+    if not layout_first_shell:
+        _apply_split_navigation_to_aux(ext, n, token, hold_ticks=96)
+
+    if layout_first_shell:
+        await _ensure_split_layout_geometry_ready(ext, token, n)
+        _show_split_layout_shell_windows(ext, n)
+        try:
+            ext._tbs_startup_dual_layout_settled = True
+        except Exception:
+            pass
+        for _ in range(6):
+            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                return
+            await kit_app.get_app().next_update_async()
+        try:
+            print(
+                "[TBS multi-sim] layout-first: 2분할 Dock·격자 배치 완료 — USD 로드 대기",
+                flush=True,
+            )
+        except Exception:
+            pass
+        fn = getattr(ext, "_tbs_on_dual_layout_ready_fn", None)
+        if callable(fn):
+            try:
+                ext._tbs_on_dual_layout_ready_fn = None
+            except Exception:
+                pass
+            try:
+                fn(ext)
+            except Exception as exc:
+                try:
+                    print(f"[TBS multi-sim] layout-first ready callback failed: {exc}", flush=True)
+                except Exception:
+                    pass
+        try:
+            ext._tbs_startup_layout_first_active = False
+        except Exception:
+            pass
+    else:
+        for ti in range(1, n):
+            wname = _split_window_name(ti)
+            hidden = False
+            for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
+                if str(ent.get("win_name") or "") == wname:
+                    if ent.get("aux_hidden_until_load"):
+                        hidden = True
+                    ent["aux_hidden_until_layout"] = False
+                    break
+            if not hidden:
+                _apply_aux_window_chrome_flags(wname)
+                _workspace_show_named_window(wname, True)
+                _sync_viewport_resolution_from_workspace_window(wname)
+                _schedule_split_viewport_input_ready(wname, frames=12)
 
     def _nav_after_all_hydrate() -> None:
+        if _startup_split_relayout_suppressed(ext):
+            return
         try:
             reapply_split_layout_sync(ext, n)
             asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, n))
@@ -3965,12 +4407,7 @@ async def _finish_split_layout_after_tiles(
         _apply_split_navigation_to_aux(ext, n, token, hold_ticks=96)
 
     if skip_hydrate:
-        if startup_layout_first_active(ext):
-            try:
-                asyncio.ensure_future(_complete_startup_layout_first_async(ext, n, token))
-            except Exception:
-                pass
-        else:
+        if not layout_first_shell:
             try:
                 print(
                     "[TBS multi-sim] 분할 레이아웃 완료 — 보조 스테이지 로드는 백그라운드",
@@ -4131,7 +4568,7 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str, 
     _workspace_show_named_window("Viewport", True)
     entries.append({"kind": "main_viewport", "win_name": "Viewport", "cell_index": 0, "viewport_window": None, "kit_vp": None})
 
-    if startup_layout_first_active(ext):
+    if startup_layout_first_active(ext) or startup_dual_orchestration_active(ext):
         try:
             print(f"[TBS multi-sim] 분할 빌드: layout-first shell (n={n})", flush=True)
         except Exception:
@@ -4155,7 +4592,7 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str, 
                 entries=entries,
                 ctx_names=ctx_names,
                 defer_stage_load=True,
-                show_before_usd_load=True,
+                show_before_usd_load=False,
             )
             if not ok:
                 _rollback_split_attempt(ext, entries, ctx_names)
@@ -4380,6 +4817,18 @@ def _apply_sim_viewport_split_layout_impl(ext: Any, n: int) -> None:
         and _split_aux_layout_healthy(ext, n)
         and str(getattr(ext, "_tbs_split_layout_usd_key", "") or "").strip() != _split_layout_usd_key(ext)
     ):
+        if bool(getattr(ext, "_tbs_startup_aux_load_inflight", False)):
+            notify_sim_split_ui_sync(ext)
+            return
+        if bool(getattr(ext, "_tbs_layout_first_aux_load_done", False)) and _split_layout_already_active(
+            ext, n
+        ):
+            try:
+                ext._tbs_split_layout_usd_key = _split_layout_usd_key(ext)
+            except Exception:
+                pass
+            notify_sim_split_ui_sync(ext)
+            return
         try:
             asyncio.ensure_future(_refresh_aux_split_stages_async(ext, n, tok, usd_path))
         except Exception:

@@ -232,7 +232,7 @@ def _iter_workspace_windows() -> List[Any]:
     return out
 
 
-def apply_kit_chrome_hidden(ext: Any, hidden: bool) -> None:
+def apply_kit_chrome_hidden(ext: Any, hidden: bool, *, schedule_layout_refresh: bool = True) -> None:
     """
     hidden=True: 기본 메뉴바·상태줄·알려진 패널 창을 숨김. TBS/시퀀스/Viewport·TBS_SimSplit_* 유지.
     hidden=False: 직전 백업으로 복원(없으면 메뉴만 보이게 시도).
@@ -334,7 +334,8 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool) -> None:
                     )
                 except Exception:
                     pass
-            _smv.schedule_split_layout_refresh_for_chrome_change(ext, bool(hidden))
+            if schedule_layout_refresh:
+                _smv.schedule_split_layout_refresh_for_chrome_change(ext, bool(hidden))
         except Exception:
             pass
 

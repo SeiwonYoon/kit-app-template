@@ -205,7 +205,7 @@ def _schedule_startup_dual_layout_first(ext: Any) -> None:
     async def _go() -> None:
         kit_app = app.get_app()
         try:
-            for _ in range(30):
+            for _ in range(8):
                 await kit_app.next_update_async()
         except Exception:
             pass
@@ -261,7 +261,21 @@ async def _deferred_apply_kit_chrome_hide(ext: Any) -> None:
     for _ in range(5):
         await kit_app.next_update_async()
     try:
-        apply_kit_chrome_hidden(ext, True)
+        from . import sim_multi_view
+
+        for _ in range(360):
+            if not sim_multi_view.startup_dual_orchestration_active(ext):
+                break
+            await kit_app.next_update_async()
+    except Exception:
+        pass
+    if bool(getattr(ext, "_tbs_startup_dual_orchestration_active", False)):
+        return
+    try:
+        from .kit_chrome_visibility import is_kit_chrome_hidden
+
+        if not is_kit_chrome_hidden(ext):
+            apply_kit_chrome_hidden(ext, True)
     except Exception:
         pass
 

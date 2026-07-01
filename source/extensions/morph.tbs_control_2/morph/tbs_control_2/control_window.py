@@ -2163,6 +2163,20 @@ def notify_tbs_composed_usd_ready_for_split(ext: Any, usd_path: str = "") -> Non
     except Exception:
         pass
 
+    async def _refresh_main_vp_after_open() -> None:
+        try:
+            from . import sim_multi_view
+
+            n = int(getattr(ext, "_sim_viewport_split_count", 2) or 2)
+            await sim_multi_view.wake_main_viewport_after_master_open(ext, n)
+        except Exception:
+            pass
+
+    try:
+        asyncio.ensure_future(_refresh_main_vp_after_open())
+    except Exception:
+        pass
+
 
 def _preserve_split_layout_during_startup(ext: Any) -> bool:
     try:

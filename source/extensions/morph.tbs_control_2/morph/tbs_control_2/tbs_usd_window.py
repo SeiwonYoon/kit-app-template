@@ -428,14 +428,20 @@ class TbsUsdWindow:
             )
             self._try_autoload_master_on_startup()
 
-    def _try_autoload_master_on_startup(self) -> None:
+    def _try_autoload_master_on_startup(self, *, layout_ready: bool = False) -> None:
         if not load_automatically:
             return
         ext = self._kit_ext
-        if ext is not None and bool(
-            getattr(ext, "_tbs_defer_master_autoload_until_dual_layout", False)
-        ):
-            return
+        if ext is not None and not layout_ready:
+            if bool(getattr(ext, "_tbs_defer_master_autoload_until_dual_layout", False)):
+                return
+            try:
+                from . import sim_multi_view
+
+                if sim_multi_view.preserve_split_layout_during_startup(ext):
+                    return
+            except Exception:
+                pass
         resolved = resolve_local_data_path(default_load_usd_path)
         if not resolved:
             self._log("자동 로드: default_load_usd_path 가 비어 있습니다.")
@@ -451,7 +457,7 @@ class TbsUsdWindow:
 
     def run_master_autoload_now(self) -> None:
         """layout-first: 2분할 레이아웃 완료 후 Master USD 자동 로드를 실행."""
-        self._try_autoload_master_on_startup()
+        self._try_autoload_master_on_startup(layout_ready=True)
 
     def destroy(self) -> None:
         try:
