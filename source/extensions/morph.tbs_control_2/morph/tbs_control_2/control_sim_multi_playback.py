@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional
 from .control_sim_prerun_playback import SimPreRunResult, SimTimelinePlayer
 from .control_sim_screen_playback import (
     SimPlaybackRuntime,
+    add_playback_sessions_after_prerun,
     bootstrap_playback_after_prerun,
     get_playback_runtime,
     get_sim_playback_player,
@@ -44,6 +45,7 @@ def tick_multi_playback(ext: Any) -> None:
 
 
 __all__ = [
+    "add_playback_sessions_after_prerun",
     "bootstrap_playback_after_prerun",
     "get_playback_runtime",
     "get_sim_playback_player",

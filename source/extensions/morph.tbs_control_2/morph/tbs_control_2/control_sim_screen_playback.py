@@ -384,6 +384,80 @@ def bootstrap_playback_after_prerun(
     return SimPlaybackRuntime.start(ext, results, emit_fn, speed_fn, gate_fn)
 
 
+def add_playback_sessions_after_prerun(
+    ext: Any,
+    new_results: Dict[int, SimPreRunResult],
+    emit_fn: EmitFn,
+    speed_fn: SpeedFn,
+    gate_fn: Optional[GateFn] = None,
+) -> SimPlaybackRuntime:
+    """다른 화면이 이미 재생 중일 때 신규 화면 세션만 추가한다."""
+    if not new_results:
+        rt0 = get_playback_runtime(ext)
+        if rt0 is not None:
+            return rt0
+        return bootstrap_playback_after_prerun(ext, {}, emit_fn, speed_fn, gate_fn)
+    if gate_fn is None:
+        gate_fn = lambda scr: can_emit_timeline_event(ext, int(scr))
+    try:
+        from .control_sim_playback_plan import ensure_playback_plans_for_results, refresh_playback_display_at_sim
+
+        for scr_k in new_results:
+            try:
+                scr_i = int(scr_k)
+            except Exception:
+                continue
+            plan_by = getattr(ext, "_sim_playback_plan_by_screen", None)
+            if isinstance(plan_by, dict):
+                plan_by.pop(str(scr_i), None)
+                plan_by.pop(scr_i, None)
+        ensure_playback_plans_for_results(ext, new_results)
+        for scr_k in new_results:
+            try:
+                refresh_playback_display_at_sim(ext, int(scr_k), 0.0, force=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    rt = get_playback_runtime(ext)
+    if rt is None:
+        return bootstrap_playback_after_prerun(ext, new_results, emit_fn, speed_fn, gate_fn)
+    for scr_k, res in new_results.items():
+        if res is None:
+            continue
+        try:
+            scr_i = int(scr_k)
+        except Exception:
+            continue
+        prev_sess = rt.session(scr_i)
+        if prev_sess is not None:
+            try:
+                prev_sess.player.stop()
+            except Exception:
+                pass
+        player = SimTimelinePlayer(
+            results_by_screen={scr_i: res},
+            emit_fn=emit_fn,
+            speed_supplier=make_playback_speed_supplier(ext, scr_i),
+            event_emit_allowed=gate_fn,
+        )
+        player.start()
+        rt.sessions[scr_i] = ScreenPlaybackSession(
+            screen=scr_i,
+            prerun=res,
+            player=player,
+        )
+    _attach_runtime(ext, rt)
+    if len(rt.sessions) > 1:
+        try:
+            from .tbs_main_dispatch import set_multi_instance_dispatch_mode
+
+            set_multi_instance_dispatch_mode(True)
+        except Exception:
+            pass
+    return rt
+
+
 def any_playback_still_active(ext: Any) -> bool:
     """한 화면이라도 재생 중이면 True."""
     rt = get_playback_runtime(ext)
@@ -614,6 +688,7 @@ __all__ = [
     "SIM_LOG_UI_DRAIN_MAX_IDLE",
     "SIM_LOG_UI_DRAIN_MAX_PLAYBACK",
     "bootstrap_playback_after_prerun",
+    "add_playback_sessions_after_prerun",
     "get_playback_runtime",
     "get_sim_playback_player",
     "is_multi_playback_instances",

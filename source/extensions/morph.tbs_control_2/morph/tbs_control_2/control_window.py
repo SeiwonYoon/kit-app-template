@@ -330,6 +330,7 @@ from .progress_step_state import (
     sync_anim_runtime_from_ext,
 )
 from .control_sim_multi_playback import (
+    add_playback_sessions_after_prerun,
     bootstrap_playback_after_prerun,
     get_playback_runtime,
     get_sim_playback_player,
@@ -6067,23 +6068,63 @@ def _screen_anim_worker_has_pending(ext: Any, screen: int) -> bool:
         return False
 
 
-def _prepare_playback_emit_environment(ext: Any, results: Dict[int, Any]) -> None:
+def _prepare_playback_emit_environment(
+    ext: Any,
+    results: Dict[int, Any],
+    *,
+    scope_screens_only: bool = False,
+) -> None:
     """
     프리런 재생 직전: 잔류 JSON wall·러너 busy 를 비워 첫 타임라인 event 가 막히지 않게 한다.
 
     ``emit_due_items`` 는 event 게이트에 걸리면 커서를 전진시키지 못해 시계만 흐르는 증상이 난다.
+
+    ``scope_screens_only=True`` — 다른 화면이 이미 재생 중일 때 ``results`` 에 해당하는 화면만 정리한다.
     """
+    scoped: set = set()
+    if scope_screens_only:
+        for scr_k in (results or {}).keys():
+            try:
+                scoped.add(int(scr_k))
+            except Exception:
+                continue
     try:
-        clear_playback_gate_state(ext)
-        clear_playback_step_speed_locks(ext)
+        if scope_screens_only and scoped:
+            for scr_i in scoped:
+                try:
+                    set_json_wall_busy(ext, scr_i, False)
+                except Exception:
+                    pass
+            try:
+                from .control_sim_playback_gate import clear_playback_step_speed_locks
+
+                clear_playback_step_speed_locks(ext)
+            except Exception:
+                pass
+        else:
+            clear_playback_gate_state(ext)
+            clear_playback_step_speed_locks(ext)
     except Exception:
         pass
     try:
-        _clear_playback_json_job_queues(ext)
+        if scope_screens_only and scoped:
+            by = getattr(ext, "_sim_playback_json_jobs_by_screen", None)
+            if isinstance(by, dict):
+                for scr_i in scoped:
+                    by.pop(str(int(scr_i)), None)
+        else:
+            _clear_playback_json_job_queues(ext)
     except Exception:
         pass
     try:
-        ext._sim_foup_playback_last_by_screen = {}
+        if scope_screens_only and scoped:
+            foup_by = getattr(ext, "_sim_foup_playback_last_by_screen", None)
+            if isinstance(foup_by, dict):
+                for scr_i in scoped:
+                    foup_by.pop(str(int(scr_i)), None)
+                    foup_by.pop(int(scr_i), None)
+        else:
+            ext._sim_foup_playback_last_by_screen = {}
     except Exception:
         pass
     try:
@@ -8453,7 +8494,31 @@ def _restore_timetable_display(ext: Any, *, screen: Optional[int] = None) -> Non
                 pass
 
 
-def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) -> None:
+def _merge_prerun_ui_screen_dict(
+    ext: Any,
+    attr: str,
+    new_by: Dict[Any, Any],
+    *,
+    merge: bool,
+) -> None:
+    """화면별 프리런 UI 자산 dict — ``merge=True`` 이면 기존 화면 키는 유지한다."""
+    if not isinstance(new_by, dict) or not new_by:
+        return
+    if merge:
+        prev = getattr(ext, attr, None)
+        merged = dict(prev) if isinstance(prev, dict) else {}
+        merged.update(new_by)
+        setattr(ext, attr, merged)
+    else:
+        setattr(ext, attr, new_by)
+
+
+def _finalize_prerun_ui_assets(
+    ext: Any,
+    results: Dict[int, SimPreRunResult],
+    *,
+    merge: bool = False,
+) -> None:
     """프리런 완료 후 막대 사전 계산·인터랙티브 타임테이블 장착."""
     if not isinstance(results, dict) or not results:
         return
@@ -8648,13 +8713,28 @@ def _finalize_prerun_ui_assets(ext: Any, results: Dict[int, SimPreRunResult]) ->
             except Exception:
                 pass
     try:
-        ext._sim_ep_bar_prerun_by_screen = bar_by
-        ext._sim_timetable_row_metas_by_screen = meta_by
-        ext._sim_seek_snapshots_by_screen = seek_by
-        ext._sim_prerun_export_json_by_screen = export_by
-        ext._sim_playback_schedule_by_screen = sched_by if isinstance(sched_by, dict) else {}
-        ext._sim_playback_plan_by_screen = plan_by if isinstance(plan_by, dict) else {}
-        ext._sim_playback_plan_initial_occ_by_screen = init_occ_by
+        _merge_prerun_ui_screen_dict(ext, "_sim_ep_bar_prerun_by_screen", bar_by, merge=merge)
+        _merge_prerun_ui_screen_dict(ext, "_sim_timetable_row_metas_by_screen", meta_by, merge=merge)
+        _merge_prerun_ui_screen_dict(ext, "_sim_seek_snapshots_by_screen", seek_by, merge=merge)
+        _merge_prerun_ui_screen_dict(ext, "_sim_prerun_export_json_by_screen", export_by, merge=merge)
+        _merge_prerun_ui_screen_dict(
+            ext,
+            "_sim_playback_schedule_by_screen",
+            sched_by if isinstance(sched_by, dict) else {},
+            merge=merge,
+        )
+        _merge_prerun_ui_screen_dict(
+            ext,
+            "_sim_playback_plan_by_screen",
+            plan_by if isinstance(plan_by, dict) else {},
+            merge=merge,
+        )
+        _merge_prerun_ui_screen_dict(
+            ext,
+            "_sim_playback_plan_initial_occ_by_screen",
+            init_occ_by,
+            merge=merge,
+        )
     except Exception:
         pass
     try:
@@ -8844,6 +8924,124 @@ def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
     return out
 
 
+def _bootstrap_partial_prerun_playback(
+    ext: Any, new_results: Dict[int, SimPreRunResult], partial_targets: List[int]
+) -> None:
+    """다른 화면 재생 중 — 신규 화면만 프리런 결과를 붙여 재생한다."""
+    if not new_results:
+        return
+    try:
+        set_sim_playback_active(ext, True)
+    except Exception:
+        pass
+    try:
+        by = getattr(ext, "_sim_last_total_est_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_last_total_est_by_screen = by
+        for scr, res in new_results.items():
+            try:
+                by[str(int(scr))] = float(res.final_sim_time)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    try:
+        _finalize_prerun_ui_assets(ext, new_results, merge=True)
+    except Exception as e:
+        print(f"[SIM] 부분 프리런 UI 자산 구성 실패: {e}", flush=True)
+
+    full_results: Dict[int, SimPreRunResult] = {}
+    try:
+        merged_src = getattr(ext, "_sim_prerun_results_by_screen", None)
+        if isinstance(merged_src, dict):
+            for k, v in merged_src.items():
+                try:
+                    full_results[int(k)] = v
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    if not full_results:
+        full_results = dict(new_results)
+
+    def _speed() -> float:
+        try:
+            m = getattr(ext, "_sim_speed_model", None)
+            return float(m.get_value_as_float()) if m is not None else 1.0
+        except Exception:
+            return 1.0
+
+    def _timeline_event_gate(scr: int) -> bool:
+        return can_emit_timeline_event(ext, int(scr))
+
+    try:
+        _prepare_playback_emit_environment(ext, new_results, scope_screens_only=True)
+    except Exception:
+        pass
+    try:
+        add_playback_sessions_after_prerun(
+            ext,
+            new_results,
+            _make_playback_emit_fn(ext, full_results),
+            _speed,
+            gate_fn=_timeline_event_gate,
+        )
+    except Exception as e:
+        print(f"[SIM] 부분 재생 세션 추가 실패: {e}", flush=True)
+        return
+    try:
+        from .control_sim_playback_plan import refresh_playback_display_at_sim
+
+        for scr_k in new_results:
+            try:
+                refresh_playback_display_at_sim(ext, int(scr_k), 0.0, force=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        for scr, rr in new_results.items():
+            try:
+                scr_i = int(scr)
+            except Exception:
+                scr_i = 1
+            p0 = {
+                "tbs_sim_screen": str(scr_i),
+                "sim_time": "0.00",
+                "sim_total_est_sec": f"{float(rr.final_sim_time):.2f}",
+                "label": "대기",
+                "detail": "",
+                "status": "RUNNING",
+                "elapsed": "0.0",
+                "total": "0.0",
+                "percent": "0",
+            }
+            _update_sim_progress(ext, p0)
+    except Exception:
+        pass
+    try:
+        sub = getattr(ext, "_sim_playback_ui_sub", None)
+        if sub is None:
+            ext._sim_playback_ui_sub = app.get_app().get_update_event_stream().create_subscription_to_pop(
+                lambda _e: _tick_playback_timeline(ext),
+                name="morph.tbs_control_2:sim_playback_tick",
+            )
+    except Exception:
+        pass
+    try:
+        _append_sim_log(
+            ext,
+            f"[SIM] 화면 {','.join(str(s) for s in partial_targets)} 프리런 완료 — 재생 시작",
+        )
+    except Exception:
+        pass
+    try:
+        ext._sim_partial_prerun_screens = None
+    except Exception:
+        pass
+
+
 def _drain_sim_log_queue(ext: Any) -> None:
     try:
         # 프리런 완료 시점에 타임라인 플레이어를 시작한다(메인 스레드에서만).
@@ -8851,7 +9049,32 @@ def _drain_sim_log_queue(ext: Any) -> None:
             ev = getattr(ext, "_sim_prerun_done_evt", None)
             started = bool(getattr(ext, "_sim_playback_started", False))
             playback_done = bool(getattr(ext, "_sim_playback_done", False))
+            partial_targets = getattr(ext, "_sim_partial_prerun_screens", None)
             if (
+                partial_targets
+                and ev is not None
+                and hasattr(ev, "is_set")
+                and ev.is_set()
+            ):
+                results_all = getattr(ext, "_sim_prerun_results_by_screen", None)
+                partial_set = {int(x) for x in partial_targets}
+                new_results: Dict[int, SimPreRunResult] = {}
+                if isinstance(results_all, dict):
+                    for k, v in results_all.items():
+                        try:
+                            ki = int(k)
+                        except Exception:
+                            continue
+                        if ki in partial_set:
+                            new_results[ki] = v
+                if new_results:
+                    _bootstrap_partial_prerun_playback(ext, new_results, list(partial_targets))
+                else:
+                    try:
+                        ext._sim_partial_prerun_screens = None
+                    except Exception:
+                        pass
+            elif (
                 (not started)
                 and (not playback_done)
                 and ev is not None
@@ -11285,10 +11508,18 @@ def on_sim_start_clicked(ext: Any) -> None:
             stopped.clear()
     except Exception:
         pass
-    try:
-        _restore_all_sim_channels_prim_motion(ext)
-    except Exception:
-        pass
+    if partial_startup:
+        for sc in target_screens:
+            try:
+                ctx = _usd_context_name_for_sim_screen(ext, int(sc))
+                _restore_sim_prim_motion_to_initial(ext, usd_context_name=ctx)
+            except Exception:
+                pass
+    else:
+        try:
+            _restore_all_sim_channels_prim_motion(ext)
+        except Exception:
+            pass
     # FOUP 진행중 보호 표시 추가 안전망(이전 세션 잔여 차단):
     # - on_sim_stop_clicked 에서 이미 정리하지만, 어떤 경로로든 잔여가 남는 것을 막기 위해 한 번 더 비운다.
     try:
@@ -11313,20 +11544,23 @@ def on_sim_start_clicked(ext: Any) -> None:
     # 시작을 반복할 때 모니터 UI(포트/그래프/진행/이력) 영역에 위젯이 누적되어
     # 버튼 아래의 빈 공간이 점점 커지는 현상이 발생할 수 있어,
     # 시작 시점에 모니터 영역을 한 번 깨끗하게 재빌드한다.
-    try:
-        ext._sim_timetable_allow_shell_rebuild = True
-        _rebuild_all_sim_ui_panels(ext)
-        ext._sim_timetable_allow_shell_rebuild = False
-    except Exception:
+    if not partial_startup:
         try:
+            ext._sim_timetable_allow_shell_rebuild = True
+            _rebuild_all_sim_ui_panels(ext)
             ext._sim_timetable_allow_shell_rebuild = False
         except Exception:
-            pass
+            try:
+                ext._sim_timetable_allow_shell_rebuild = False
+            except Exception:
+                pass
     # 실행 세대 토큰: stop/reset 후 남은 이벤트/애니 job을 무시하기 위해 사용
-    try:
-        ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
-    except Exception:
-        ext._sim_run_gen = 1
+    # (화면별 시작 시 다른 화면 재생 이벤트는 유지 — 전역 gen 은 올리지 않음)
+    if not partial_startup:
+        try:
+            ext._sim_run_gen = int(getattr(ext, "_sim_run_gen", 0) or 0) + 1
+        except Exception:
+            ext._sim_run_gen = 1
     _auto_fill_per_screen_snapshots_on_start(ext)
     if partial_startup and not target_screens:
         return
@@ -11371,53 +11605,54 @@ def on_sim_start_clicked(ext: Any) -> None:
     )
     lots: List[Lot] = []
 
-    ext._sim_history_text.set_value("[SIM] 초기화")
-    ext._sim_progress_text.set_value("[진행현황] 초기화 (시뮬레이션 시작 대기)")
-    ext._sim_port_state_text.set_value("[포트상태] 초기화 (이벤트 대기)")
+    if not partial_startup:
+        ext._sim_history_text.set_value("[SIM] 초기화")
+        ext._sim_progress_text.set_value("[진행현황] 초기화 (시뮬레이션 시작 대기)")
+        ext._sim_port_state_text.set_value("[포트상태] 초기화 (이벤트 대기)")
+    elif 1 in target_screens:
+        try:
+            ext._sim_history_text.set_value("[SIM] 초기화")
+            ext._sim_progress_text.set_value("[진행현황] 초기화 (시뮬레이션 시작 대기)")
+            ext._sim_port_state_text.set_value("[포트상태] 초기화 (이벤트 대기)")
+        except Exception:
+            pass
     # EP 타임라인: 시작 버튼 누르는 순간부터(t=0) 빈 포트 상태로 표시/진행할 수 있도록 초기 스냅샷을 만든다.
-    try:
-        ext._sim_ep_occ_timeline_state_by_screen = {}
-    except Exception:
-        pass
-    try:
-        ext._sim_last_ports_occupancy_by_screen = {}
-    except Exception:
-        pass
-    try:
-        ext._sim_post_anim_port_applied_by_screen = {}
-    except Exception:
-        pass
-    try:
-        ext._sim_renewal_port_defer_by_screen = {}
-    except Exception:
-        pass
-    try:
-        ext._sim_pending_post_anim_port_by_screen = {}
-    except Exception:
-        pass
-    try:
-        ext._sim_post_anim_src_by_screen = {}
-    except Exception:
-        pass
-    # 종료 시점(env.now)과의 정합을 위해 유지(엔진 timeline_only 경로와는 별개)
-    try:
-        ext._sim_ep_timeline_virtual_time_by_screen = {}
-    except Exception:
-        pass
-    try:
-        sub = getattr(ext, "_sim_ep_timeline_ui_sub", None)
-        if sub is not None:
+    _per_scr_state_attrs = (
+        "_sim_ep_occ_timeline_state_by_screen",
+        "_sim_last_ports_occupancy_by_screen",
+        "_sim_post_anim_port_applied_by_screen",
+        "_sim_renewal_port_defer_by_screen",
+        "_sim_pending_post_anim_port_by_screen",
+        "_sim_post_anim_src_by_screen",
+        "_sim_ep_timeline_virtual_time_by_screen",
+    )
+    if partial_startup:
+        for attr in _per_scr_state_attrs:
+            d = getattr(ext, attr, None)
+            if not isinstance(d, dict):
+                continue
+            for sc in target_screens:
+                d.pop(str(int(sc)), None)
+    else:
+        for attr in _per_scr_state_attrs:
             try:
-                sub.unsubscribe()
+                setattr(ext, attr, {})
             except Exception:
                 pass
-        ext._sim_ep_timeline_ui_sub = None
-    except Exception:
-        pass
-    try:
-        ext._sim_aux_anim_notice_screens = set()
-    except Exception:
-        pass
+        try:
+            sub = getattr(ext, "_sim_ep_timeline_ui_sub", None)
+            if sub is not None:
+                try:
+                    sub.unsubscribe()
+                except Exception:
+                    pass
+            ext._sim_ep_timeline_ui_sub = None
+        except Exception:
+            pass
+        try:
+            ext._sim_aux_anim_notice_screens = set()
+        except Exception:
+            pass
     chans0 = getattr(ext, "_sim_monitor_channels", None)
     if isinstance(chans0, list) and len(chans0) > 1:
         for ch in chans0:
@@ -11427,6 +11662,8 @@ def on_sim_start_clicked(ext: Any) -> None:
                 si = int(ch.get("screen", 1))
             except Exception:
                 si = 1
+            if partial_startup and si not in target_screens:
+                continue
             ht = "[SIM] 초기화" if si == 1 else f"[SIM·화면{si}] 초기화"
             pt = "[진행현황] 초기화 (시뮬레이션 시작 대기)" if si == 1 else f"[진행현황·화면{si}] 초기화 (대기)"
             ph = f"[포트상태·화면{si}] 초기화 (이벤트 대기)"
@@ -11464,42 +11701,43 @@ def on_sim_start_clicked(ext: Any) -> None:
             except Exception:
                 pass
     else:
-        try:
-            chans_s = getattr(ext, "_sim_monitor_channels", None)
-            if isinstance(chans_s, list) and chans_s and isinstance(chans_s[0], dict):
-                _set_channel_history_text(chans_s[0], "[SIM] 초기화")
-        except Exception:
-            pass
-        if getattr(ext, "_sim_history_label", None) is not None:
+        if not partial_startup or 1 in target_screens:
             try:
-                ext._sim_history_label.text = "[SIM] 초기화"
+                chans_s = getattr(ext, "_sim_monitor_channels", None)
+                if isinstance(chans_s, list) and chans_s and isinstance(chans_s[0], dict):
+                    _set_channel_history_text(chans_s[0], "[SIM] 초기화")
             except Exception:
                 pass
-        if getattr(ext, "_sim_progress_label", None) is not None:
-            ext._sim_progress_label.text = "[진행현황] 초기화 (시뮬레이션 시작 대기)"
-        if getattr(ext, "_sim_port_state_label", None) is not None:
-            ext._sim_port_state_label.text = "[포트상태] 초기화 (이벤트 대기)"
-        if getattr(ext, "_sim_port_state_header_label", None) is not None:
-            ext._sim_port_state_header_label.text = "[포트상태] 초기화 (이벤트 대기)"
-        cells = getattr(ext, "_sim_port_cells", {}) or {}
-        for port in ("INOUT", "BP2", "BP3", "BP4", "BP1", "EP1", "EP2"):
-            if port in cells:
-                cells[port].text = "IN/OUT:-" if port == "INOUT" else f"{port}:-"
-        if getattr(ext, "_sim_port_ep3_cell", None) is not None:
-            ext._sim_port_ep3_cell.text = "EP3:-"
-        # 단일(또는 모니터 채널 1개) 모드: 시작 직후 timeline_only 가 last_occ 없이 스킵되지 않도록 시드
-        try:
-            occ0 = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
-            by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-            if not isinstance(by, dict):
-                by = {}
-                ext._sim_last_ports_occupancy_by_screen = by
-            by["1"] = dict(occ0)
-            chans_s = getattr(ext, "_sim_monitor_channels", None)
-            if isinstance(chans_s, list) and len(chans_s) >= 1 and isinstance(chans_s[0], dict):
-                _update_ep_timeline_under_port_state(ext, chans_s[0], occ0, "0.0")
-        except Exception:
-            pass
+            if getattr(ext, "_sim_history_label", None) is not None:
+                try:
+                    ext._sim_history_label.text = "[SIM] 초기화"
+                except Exception:
+                    pass
+            if getattr(ext, "_sim_progress_label", None) is not None:
+                ext._sim_progress_label.text = "[진행현황] 초기화 (시뮬레이션 시작 대기)"
+            if getattr(ext, "_sim_port_state_label", None) is not None:
+                ext._sim_port_state_label.text = "[포트상태] 초기화 (이벤트 대기)"
+            if getattr(ext, "_sim_port_state_header_label", None) is not None:
+                ext._sim_port_state_header_label.text = "[포트상태] 초기화 (이벤트 대기)"
+            cells = getattr(ext, "_sim_port_cells", {}) or {}
+            for port in ("INOUT", "BP2", "BP3", "BP4", "BP1", "EP1", "EP2"):
+                if port in cells:
+                    cells[port].text = "IN/OUT:-" if port == "INOUT" else f"{port}:-"
+            if getattr(ext, "_sim_port_ep3_cell", None) is not None:
+                ext._sim_port_ep3_cell.text = "EP3:-"
+            # 단일(또는 모니터 채널 1개) 모드: 시작 직후 timeline_only 가 last_occ 없이 스킵되지 않도록 시드
+            try:
+                occ0 = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
+                by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+                if not isinstance(by, dict):
+                    by = {}
+                    ext._sim_last_ports_occupancy_by_screen = by
+                by["1"] = dict(occ0)
+                chans_s = getattr(ext, "_sim_monitor_channels", None)
+                if isinstance(chans_s, list) and len(chans_s) >= 1 and isinstance(chans_s[0], dict):
+                    _update_ep_timeline_under_port_state(ext, chans_s[0], occ0, "0.0")
+            except Exception:
+                pass
 
     # -------------------------------------------------------------------
     # Start 직후(t=0) 초기 적재 포트(FULL) 즉시 반영
@@ -11541,6 +11779,8 @@ def on_sim_start_clicked(ext: Any) -> None:
     snaps_init = snaps_init[:4]
 
     for scr0 in range(1, int(n_ch) + 1):
+        if partial_startup and scr0 not in target_screens:
+            continue
         s0 = snaps_init[scr0 - 1] if (scr0 - 1) < len(snaps_init) else None
         if not isinstance(s0, dict):
             try:
@@ -11575,14 +11815,26 @@ def on_sim_start_clicked(ext: Any) -> None:
             )
         except Exception:
             pass
-    ext._sim_progress_rows = {}
-    ext._sim_progress_history = []
-    ext._sim_progress_start_times = {}
+    if partial_startup:
+        try:
+            rows = getattr(ext, "_sim_progress_rows", None)
+            if isinstance(rows, dict):
+                for sc in target_screens:
+                    rows.pop(str(int(sc)), None)
+                    rows.pop(int(sc), None)
+        except Exception:
+            pass
+    else:
+        ext._sim_progress_rows = {}
+        ext._sim_progress_history = []
+        ext._sim_progress_start_times = {}
     ext._sim_log_queue = queue.SimpleQueue()
     _enqueue_sim_log(ext, "[SIM UI] 실시간 로그 큐 초기화")
     # 첫 공정 전에도 진행현황이 끊기지 않도록, 화면별 기본 progress payload를 1회 시드한다.
     try:
         for scr0 in range(1, int(n_ch) + 1):
+            if partial_startup and scr0 not in target_screens:
+                continue
             p0 = {
                 "tbs_sim_screen": str(scr0),
                 "sim_time": "0.00",
@@ -11596,8 +11848,21 @@ def on_sim_start_clicked(ext: Any) -> None:
             _enqueue_sim_progress(ext, p0)
     except Exception:
         pass
-    ext._sim_anim_active = {}
-    ext._sim_anim_pending = []
+    if partial_startup:
+        try:
+            active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+            pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+            for sc in target_screens:
+                sk = str(int(sc))
+                if isinstance(active_by, dict):
+                    active_by[sk] = {}
+                if isinstance(pending_by, dict):
+                    pending_by[sk] = []
+        except Exception:
+            pass
+    else:
+        ext._sim_anim_active = {}
+        ext._sim_anim_pending = []
 
     def _interrupt_anim_for_proc_priority(screen: Optional[str] = None) -> None:
         """
@@ -11821,10 +12086,11 @@ def on_sim_start_clicked(ext: Any) -> None:
         done_evt.wait()
         return float(anim_est_sec)
 
-    try:
-        ext._sim_engines = []
-    except Exception:
-        pass
+    if not partial_startup:
+        try:
+            ext._sim_engines = []
+        except Exception:
+            pass
 
     if n_ch <= 1:
 
@@ -12016,7 +12282,13 @@ def on_sim_start_clicked(ext: Any) -> None:
     except Exception:
         pass
     speed_value = max(0.1, ext._sim_speed_model.get_value_as_float())
-    _append_sim_log(ext, "[SIM] 프리런 시작: 내부적으로 전체 시뮬을 먼저 계산합니다...")
+    if partial_startup:
+        _append_sim_log(
+            ext,
+            f"[SIM] 화면 {','.join(str(s) for s in target_screens)} 프리런 시작…",
+        )
+    else:
+        _append_sim_log(ext, "[SIM] 프리런 시작: 내부적으로 전체 시뮬을 먼저 계산합니다...")
     try:
         _set_sim_prerun_ui_busy(ext, True)
     except Exception:
@@ -12036,29 +12308,62 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     # prerun 결과/플레이어 상태 초기화
     try:
-        _clear_sim_timetable_storage(ext)
+        ext._sim_partial_prerun_screens = list(target_screens) if partial_startup else None
     except Exception:
         pass
-    try:
-        ext._sim_prerun_done_evt = threading.Event()
-        ext._sim_prerun_results_by_screen = None
-        ext._sim_playback_schedule_by_screen = None
+    if partial_startup:
         try:
-            from .control_sim_playback_plan import clear_playback_plan_runtime_state
-
-            clear_playback_plan_runtime_state(ext)
+            ext._sim_prerun_done_evt = threading.Event()
+            prev_res = getattr(ext, "_sim_prerun_results_by_screen", None)
+            if isinstance(prev_res, dict):
+                for sc in target_screens:
+                    prev_res.pop(int(sc), None)
+                    prev_res.pop(str(int(sc)), None)
         except Exception:
             pass
-        ext._sim_playback_player = None
-        ext._sim_playback_players_by_screen = None
-        ext._sim_playback_runtime = None
-        ext._sim_playback_ui_sub = None
-        ext._sim_prerun_timetable_printed = False
-        set_sim_playback_active(ext, False)
-        ext._sim_playback_done = False
-        clear_proc_gates(ext)
-    except Exception:
-        pass
+        try:
+            for sc in target_screens:
+                sk = str(int(sc))
+                for attr in (
+                    "_sim_playback_plan_by_screen",
+                    "_sim_ep_bar_prerun_by_screen",
+                    "_sim_playback_schedule_by_screen",
+                    "_sim_playback_plan_initial_occ_by_screen",
+                ):
+                    d = getattr(ext, attr, None)
+                    if isinstance(d, dict):
+                        d.pop(sk, None)
+                        try:
+                            d.pop(int(sc), None)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    else:
+        try:
+            _clear_sim_timetable_storage(ext)
+        except Exception:
+            pass
+        try:
+            ext._sim_prerun_done_evt = threading.Event()
+            ext._sim_prerun_results_by_screen = None
+            ext._sim_playback_schedule_by_screen = None
+            try:
+                from .control_sim_playback_plan import clear_playback_plan_runtime_state
+
+                clear_playback_plan_runtime_state(ext)
+            except Exception:
+                pass
+            ext._sim_playback_player = None
+            ext._sim_playback_players_by_screen = None
+            ext._sim_playback_runtime = None
+            ext._sim_playback_ui_sub = None
+            ext._sim_prerun_timetable_printed = False
+            set_sim_playback_active(ext, False)
+            ext._sim_playback_done = False
+            clear_proc_gates(ext)
+        except Exception:
+            pass
 
     def _prerun_thread_body(run_gen: int) -> None:
         try:
@@ -12073,37 +12378,65 @@ def on_sim_start_clicked(ext: Any) -> None:
 
             results: Dict[int, SimPreRunResult] = {}
             stopped_scr = set()
+            partial_targets: Any = None
+            try:
+                partial_targets = getattr(ext, "_sim_partial_prerun_screens", None)
+            except Exception:
+                partial_targets = None
             try:
                 stopped_scr = {
                     int(x) for x in (getattr(ext, "_sim_stopped_screens", None) or set())
                 }
             except Exception:
                 stopped_scr = set()
+            partial_set = set()
+            if partial_targets is not None:
+                try:
+                    partial_set = {int(x) for x in partial_targets}
+                except Exception:
+                    partial_set = set()
             for idx, eng in enumerate(engs):
                 if eng is None:
                     continue
                 scr = idx + 1
                 if scr in stopped_scr:
                     continue
-                # 세대가 바뀌었으면 중단
-                try:
-                    if int(getattr(ext, "_sim_run_gen", 0) or 0) != int(run_gen):
-                        return
-                except Exception:
+                if partial_set and scr not in partial_set:
+                    continue
+                # 세대가 바뀌었으면 중단 (전역 시작만 해당)
+                if partial_set:
                     pass
+                else:
+                    try:
+                        if int(getattr(ext, "_sim_run_gen", 0) or 0) != int(run_gen):
+                            return
+                    except Exception:
+                        pass
                 try:
                     res = prerun_engine_to_timeline(screen=scr, engine=eng)
                     results[int(scr)] = res
                 except Exception:
                     continue
+            if not partial_set:
+                try:
+                    if int(getattr(ext, "_sim_run_gen", 0) or 0) != int(run_gen):
+                        return
+                except Exception:
+                    pass
             try:
-                # 세대가 바뀌었으면 버린다
-                if int(getattr(ext, "_sim_run_gen", 0) or 0) != int(run_gen):
-                    return
-            except Exception:
-                pass
-            try:
-                ext._sim_prerun_results_by_screen = results
+                if partial_set:
+                    merged: Dict[int, SimPreRunResult] = {}
+                    prev = getattr(ext, "_sim_prerun_results_by_screen", None)
+                    if isinstance(prev, dict):
+                        for k, v in prev.items():
+                            try:
+                                merged[int(k)] = v
+                            except Exception:
+                                continue
+                    merged.update(results)
+                    ext._sim_prerun_results_by_screen = merged
+                else:
+                    ext._sim_prerun_results_by_screen = results
             except Exception:
                 pass
             try:
