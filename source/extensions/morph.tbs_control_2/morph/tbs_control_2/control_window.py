@@ -2284,9 +2284,21 @@ def notify_tbs_composed_usd_ready_for_split(ext: Any, usd_path: str = "") -> Non
     try:
         from . import sim_multi_view
 
-        sim_multi_view.schedule_split_rebuild_after_master_reload(ext)
+        if bool(getattr(ext, "_tbs_split_deferred_aux_load_pending", False)):
+            sim_multi_view.schedule_deferred_aux_usd_load_after_master(ext)
+        else:
+            sim_multi_view.schedule_split_rebuild_after_master_reload(ext)
     except Exception:
         pass
+
+
+def _preserve_split_layout_during_startup(ext: Any) -> bool:
+    try:
+        from . import sim_multi_view
+
+        return bool(sim_multi_view.preserve_split_layout_during_startup(ext))
+    except Exception:
+        return False
 
 
 def _sync_sim_multi_split_row_visibility(ext: Any) -> None:
@@ -2301,10 +2313,11 @@ def _sync_sim_multi_split_row_visibility(ext: Any) -> None:
         return
     try:
         if get_stage() is None:
-            try:
-                ext._tbs_multi_split_usd_ready = False
-            except Exception:
-                pass
+            if not _preserve_split_layout_during_startup(ext):
+                try:
+                    ext._tbs_multi_split_usd_ready = False
+                except Exception:
+                    pass
     except Exception:
         pass
     try:
@@ -2317,6 +2330,8 @@ def _sync_sim_multi_split_row_visibility(ext: Any) -> None:
         except Exception:
             pass
     if not getattr(row, "visible", False):
+        if _preserve_split_layout_during_startup(ext):
+            return
         _force_sim_split_to_default(ext)
 
 
@@ -2349,6 +2364,8 @@ def _sync_sim_split_checkboxes_from_ext_count(ext: Any) -> None:
 
 def _force_sim_split_to_default(ext: Any) -> None:
     """분할 UI를 1개 시뮼만 선택된 상태로 되돌린다."""
+    if _preserve_split_layout_during_startup(ext):
+        return
     ext._sim_split_mutate_guard = True
     try:
         models = getattr(ext, "_sim_split_cb_models", None)

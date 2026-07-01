@@ -110,26 +110,23 @@ def _start_with_dual_screen_enabled() -> bool:
 
 def _maybe_start_with_dual_screen(ext: Any) -> None:
     """
-    화면1 Master USD 가 열린 직후, 최초 1회만 2분할을 자동 적용한다.
+    (레거시) Master USD 로드 후 2분할 — ``START_WITH_DUAL_SCREEN`` 이 layout-first 가 아닐 때만.
 
-    - 사용자가 분할 체크박스 "2" 를 누르는 것과 동일한 ``apply_sim_viewport_split_layout``
-      경로를 그대로 사용하므로, 시뮬레이션 동작·분할 빌드 로직은 전혀 바뀌지 않는다.
-    - 화면2 USD 는 ``default_aux_load_usd_path`` (dual-path) 로 로드된다.
-    - master 재오픈마다 재실행되지 않도록 ``_tbs_auto_dual_split_done`` 가드로 1회만 동작.
+    layout-first 경로는 ``_schedule_startup_dual_layout_first`` 를 사용한다.
     """
+    if bool(getattr(ext, "_tbs_defer_master_autoload_until_dual_layout", False)):
+        return
+    if bool(getattr(ext, "_tbs_auto_dual_layout_done", False)):
+        return
     if not _start_with_dual_screen_enabled():
         return
-    if bool(getattr(ext, "_tbs_auto_dual_split_done", False)):
-        return
     try:
-        ext._tbs_auto_dual_split_done = True
+        ext._tbs_auto_dual_layout_done = True
     except Exception:
         pass
 
     async def _go() -> None:
         kit_app = app.get_app()
-        # 메인 Viewport/DockSpace 가 자리 잡기 전에 분할하면 Dock 이 1:1 로 안 나뉘어
-        # 좌/우 폭이 크게 어긋난다(예: 566:1140). 시작 직후 충분히 양보한 뒤 적용한다.
         try:
             for _ in range(30):
                 await kit_app.next_update_async()
@@ -143,8 +140,6 @@ def _maybe_start_with_dual_screen(ext: Any) -> None:
         except Exception as exc:
             print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN apply failed: {exc}", flush=True)
             return
-        # 분할 빌드(비동기) 가 끝나고 Dock 이 안정된 뒤 균등 재배치 패스를 한 번 더 돌린다.
-        # (수동 체크박스 클릭 후 크롬 변경 시 쓰는 검증된 재배치 경로를 그대로 사용)
         try:
             for _ in range(60):
                 await kit_app.next_update_async()
@@ -170,6 +165,65 @@ def _maybe_start_with_dual_screen(ext: Any) -> None:
             sim_multi_view.apply_sim_viewport_split_layout(ext, 2)
         except Exception:
             pass
+
+
+def _trigger_master_autoload_after_dual_layout(ext: Any) -> None:
+    """layout-first: 2분할 Dock 완료 후 화면1 Master USD 자동 로드."""
+    try:
+        ext._tbs_defer_master_autoload_until_dual_layout = False
+    except Exception:
+        pass
+    try:
+        print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN: 화면1 Master USD 로드 시작", flush=True)
+    except Exception:
+        pass
+    win = getattr(ext, "_tbs_usd_window", None)
+    if win is not None and hasattr(win, "run_master_autoload_now"):
+        try:
+            win.run_master_autoload_now()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} master autoload after layout failed: {exc}", flush=True)
+
+
+def _schedule_startup_dual_layout_first(ext: Any) -> None:
+    """
+    앱 시작: USD 로드 **전에** 최종 2분할 Dock 레이아웃을 먼저 만든다.
+
+    레이아웃 완료 콜백에서 화면1 Master → Master 열림 콜백에서 화면2 USD 순으로 로드.
+    """
+    if not _start_with_dual_screen_enabled():
+        return
+    if bool(getattr(ext, "_tbs_auto_dual_layout_done", False)):
+        return
+    try:
+        ext._tbs_auto_dual_layout_done = True
+        ext._tbs_defer_master_autoload_until_dual_layout = True
+        ext._tbs_startup_layout_first_active = True
+    except Exception:
+        pass
+
+    async def _go() -> None:
+        kit_app = app.get_app()
+        try:
+            for _ in range(30):
+                await kit_app.next_update_async()
+        except Exception:
+            pass
+        try:
+            from . import sim_multi_view
+
+            ext._tbs_on_dual_layout_ready_fn = (
+                lambda e=ext: _trigger_master_autoload_after_dual_layout(e)
+            )
+            sim_multi_view.apply_startup_dual_layout_first(ext, 2)
+            print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN: 2분할 레이아웃 선적용 요청", flush=True)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN layout-first failed: {exc}", flush=True)
+
+    try:
+        asyncio.ensure_future(_go())
+    except Exception:
+        pass
 
 
 def _log_extension_load_paths(ext_id: str) -> None:
@@ -330,21 +384,27 @@ class Extension(omni.ext.IExt):
                     hud.sync_layers(delay_frames=12)
             except Exception:
                 pass
-            # 앱 시작 시 2분할 자동 적용 (START_WITH_DUAL_SCREEN=True 일 때, 최초 1회).
-            # 사용자가 분할 체크박스 "2" 를 누르는 것과 동일한 경로를 그대로 사용한다.
+
+        if _start_with_dual_screen_enabled():
             try:
-                _maybe_start_with_dual_screen(self)
-            except Exception as exc:
-                print(f"{_PRINT_PREFIX} auto dual-screen start failed: {exc}", flush=True)
+                self._tbs_defer_master_autoload_until_dual_layout = True
+            except Exception:
+                pass
 
         self._tbs_usd_window = TbsUsdWindow(
             self._tbs_registry,
             self._tbs_scheduler,
             self._tbs_evaluator,
             ext_id=ext_id,
+            kit_ext=self,
         )
         self._tbs_usd_window.set_master_open_listener(_on_master_opened_for_ep)
         self._tbs_usd_window.show()
+        if _start_with_dual_screen_enabled():
+            try:
+                _schedule_startup_dual_layout_first(self)
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} layout-first dual-screen start failed: {exc}", flush=True)
         try:
             self._tbs_evaluator.start()
         except Exception:

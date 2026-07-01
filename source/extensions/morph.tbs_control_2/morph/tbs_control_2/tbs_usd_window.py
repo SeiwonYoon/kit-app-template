@@ -113,11 +113,13 @@ class TbsUsdWindow:
         evaluator: RuntimeEvaluator,
         *,
         ext_id: str = "",
+        kit_ext: Any = None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
         self._evaluator = evaluator
         self._ext_id = (ext_id or "").strip()
+        self._kit_ext = kit_ext
         self._master = MasterStage()
         self._loader = MultiUsdLoader(self._master, self._registry)
         self._discovery = CompositionDiscovery(self._master, self._registry)
@@ -429,6 +431,11 @@ class TbsUsdWindow:
     def _try_autoload_master_on_startup(self) -> None:
         if not load_automatically:
             return
+        ext = self._kit_ext
+        if ext is not None and bool(
+            getattr(ext, "_tbs_defer_master_autoload_until_dual_layout", False)
+        ):
+            return
         resolved = resolve_local_data_path(default_load_usd_path)
         if not resolved:
             self._log("자동 로드: default_load_usd_path 가 비어 있습니다.")
@@ -441,6 +448,10 @@ class TbsUsdWindow:
                 pass
         self._log(f"자동 로드 시작: {resolved}")
         self._open_master_at_path(resolved, log_prefix="자동 로드")
+
+    def run_master_autoload_now(self) -> None:
+        """layout-first: 2분할 레이아웃 완료 후 Master USD 자동 로드를 실행."""
+        self._try_autoload_master_on_startup()
 
     def destroy(self) -> None:
         try:
