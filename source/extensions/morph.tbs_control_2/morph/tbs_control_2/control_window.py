@@ -1914,7 +1914,7 @@ def _on_save_sim_settings_to_screen(ext: Any, screen_1based: int) -> None:
         snaps.append(None)
     snaps = snaps[:4]
     try:
-        snaps[screen_1based - 1] = _capture_per_screen_sim_settings(ext)
+        snaps[screen_1based - 1] = _capture_per_screen_sim_settings(ext, int(screen_1based))
         ext._sim_per_screen_snapshots = snaps
     except Exception:
         pass
@@ -3102,6 +3102,25 @@ def _sim_snapshot_for_screen(ext: Any, screen_1based: int) -> Dict[str, Any]:
         except Exception:
             pass
     return {}
+
+
+def _effective_sim_settings_snapshot_for_screen(ext: Any, screen_1based: int) -> Dict[str, Any]:
+    """
+    프리런 export·웹 연동용 화면별 설정 dict.
+
+    저장 슬롯이 비어 있어도 CASE A/B 실시간 UI(엔진 시작과 동일 SSOT)를 반환한다.
+    """
+    try:
+        si = max(1, int(screen_1based))
+    except Exception:
+        si = 1
+    try:
+        from .ebs_case_models import capture_case_sim_settings_for_screen
+
+        return dict(capture_case_sim_settings_for_screen(ext, si))
+    except Exception:
+        saved = _sim_snapshot_for_screen(ext, si)
+        return dict(saved) if isinstance(saved, dict) else {}
 
 
 def _ep_timeline_host_height(ext: Any) -> int:
@@ -8555,13 +8574,13 @@ def _finalize_prerun_ui_assets(
             si = int(scr)
         except Exception:
             continue
-        snap = _sim_snapshot_for_screen(ext, si)
+        snap = _effective_sim_settings_snapshot_for_screen(ext, si)
         try:
             ep_idx = int(snap.get("ep_count_idx", _ep_count_idx_for_port_panel(ext, si)) or 0)
         except Exception:
             ep_idx = int(_ep_count_idx_for_port_panel(ext, si))
         ep_count = 3 if ep_idx else 2
-        ebs_on = bool(snap.get("ebs_enabled", True)) if snap else True
+        ebs_on = bool(snap.get("ebs_enabled", True))
         faults = _fault_ports_from_snapshot(snap, ep_count) if snap else set()
         sched = sched_by.get(int(si)) if isinstance(sched_by, dict) else None
         bar = None

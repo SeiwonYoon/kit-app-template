@@ -1070,8 +1070,13 @@ def build_prerun_export_document(
 ) -> Dict[str, Any]:
     """웹·외부 연동용 프리런 통합 JSON (막대 세그먼트 + 상태별 누적 초 포함)."""
     snap = dict(sim_snapshot or {})
-    ep_count_idx = int(snap.get("ep_count_idx", 0) or 0)
+    try:
+        ep_count_idx = int(snap.get("ep_count_idx", 0) or 0)
+    except Exception:
+        ep_count_idx = 0
+    ep_count_idx = 1 if int(ep_count_idx) >= 1 else 0
     ep_count = 3 if ep_count_idx else 2
+    ebs_enable = bool(snap.get("ebs_enabled", True))
     row_order = (
         normalize_bar_graph_row_order(list(bar.row_order))
         if bar.row_order
@@ -1121,6 +1126,7 @@ def build_prerun_export_document(
         "sim": {
             "ep_count_idx": ep_count_idx,
             "ep_count": ep_count,
+            "ebs_enable": ebs_enable,
             "buffer_ports": list(bar.buffer_ports or bar_graph_row_order(ep_count_idx)[- (4 if ep_count_idx else 3) :]),
             "fault_ports": list(bar.fault_ports or ()),
             "final_sim_time_sec": timeline_summary["final_sim_time_sec"],
