@@ -93,6 +93,11 @@ def default_viewport_split_count() -> int:
 # True        → 프리런 로그도 콘솔에 출력(디버그용).
 SIM_PRERUN_CONSOLE_LOG: bool = False
 
+# 프리런 완료 시 ``data/sim_prerun/prerun_screen{N}_*.json`` 파일 저장 여부.
+# False → 메모리(``_sim_prerun_export_json_by_screen``)·재생용 export 문서만 유지, 디스크에는 쓰지 않음.
+# True  → 화면별 JSON 파일 생성(기존 동작).
+SIM_PRERUN_EXPORT_JSON: bool = True
+
 # 막대그래프 "미리보기"(전체 막대 노출) 체크박스의 앱 시작 시 기본값.
 # True  → 시작부터 미리보기 ON(막대 전체가 보이고 진행 마스크 숨김).
 # False → 지금처럼 미리보기 OFF(재생 진행분만 보임).
@@ -108,5 +113,6 @@ __all__ = [
     "LOCK_VIEWPORT_SPLIT_USER_RESIZE",
     "default_viewport_split_count",
     "SIM_PRERUN_CONSOLE_LOG",
+    "SIM_PRERUN_EXPORT_JSON",
     "SIM_BAR_PREVIEW_DEFAULT",
 ]

@@ -8665,18 +8665,26 @@ def _finalize_prerun_ui_assets(
                 sim_speed=_sim_speed,
             )
             export_by[str(si)] = export_doc
+            _prerun_export_json = True
             try:
-                from pathlib import Path
-                from datetime import datetime
+                from .sim_control_defaults import SIM_PRERUN_EXPORT_JSON
 
-                out_dir = Path(__file__).resolve().parents[2] / "data" / "sim_prerun"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                out_path = out_dir / f"prerun_screen{si}_{stamp}.json"
-                write_prerun_export_json(str(out_path), export_doc)
-                print(f"[SIM] 프리런 export JSON (화면{si}): {out_path}", flush=True)
-            except Exception as ex:
-                print(f"[SIM] 프리런 export JSON 저장 실패(화면{si}): {ex}", flush=True)
+                _prerun_export_json = bool(SIM_PRERUN_EXPORT_JSON)
+            except Exception:
+                _prerun_export_json = True
+            if _prerun_export_json:
+                try:
+                    from pathlib import Path
+                    from datetime import datetime
+
+                    out_dir = Path(__file__).resolve().parents[2] / "data" / "sim_prerun"
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    out_path = out_dir / f"prerun_screen{si}_{stamp}.json"
+                    write_prerun_export_json(str(out_path), export_doc)
+                    print(f"[SIM] 프리런 export JSON (화면{si}): {out_path}", flush=True)
+                except Exception as ex:
+                    print(f"[SIM] 프리런 export JSON 저장 실패(화면{si}): {ex}", flush=True)
         except Exception as ex:
             print(f"[SIM] 프리런 export 문서 구성 실패(화면{si}): {ex}", flush=True)
         header = f"[SIM] 타임테이블(프리런) — 화면{si}"
