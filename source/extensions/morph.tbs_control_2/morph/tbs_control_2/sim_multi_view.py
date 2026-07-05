@@ -224,9 +224,16 @@ def sim_viewport_split_dock_enabled() -> bool:
     """
     보조 뷰포트를 메인 ``Viewport`` Dock 안에 넣을지(기본 True).
 
-    ``dock_in`` 성공 시 **메인 Viewport 절대 좌표는 건드리지 않아** Console/Content 가 유지된다.
+    ``USE_VIEWPORT_WIDGET_SPLIT=True`` 이면 **Dock 미사용** (ViewportWidget get_frame 분할).
     ``TBS_SIM_VIEWPORT_SPLIT_DOCK=0`` 이면 좌표 격자(보조 창만 이동, Viewport Dock 유지)로 폴백.
     """
+    try:
+        from .sim_multi_view_widget import sim_viewport_split_widget_enabled
+
+        if sim_viewport_split_widget_enabled():
+            return False
+    except Exception:
+        pass
     try:
         v = str(os.environ.get("TBS_SIM_VIEWPORT_SPLIT_DOCK", "") or "").strip().lower()
     except Exception:
@@ -275,6 +282,13 @@ def split_layout_description(split_n: int) -> str:
     n = channel_count_for_split(split_n)
     if n <= 1:
         return "단일 화면(기본)"
+    try:
+        from .sim_multi_view_widget import sim_viewport_split_widget_enabled
+
+        if sim_viewport_split_widget_enabled() and n == 2:
+            return "2분할: ViewportWidget — get_frame HStack (Dock 미사용)"
+    except Exception:
+        pass
     if n == 2:
         return "2분할: Viewport Dock — TBS_SimSplit_1(우 50%)"
     if n == 3:
@@ -426,8 +440,18 @@ def _split_viewport_tile_names(n: int) -> List[str]:
     return ["Viewport"] + [_split_window_name(ti) for ti in range(1, sn)]
 
 
-def apply_viewport_split_tab_chrome(n: int) -> None:
-    """화면1(Viewport)·화면2+ Dock 탭 숨김 — Dock 레이아웃 유지."""
+def apply_viewport_split_tab_chrome(n: int, ext: Any = None) -> None:
+    """화면1(Viewport)·화면2+ Dock 탭 숨김 — **Dock 레이아웃 전용** (Widget 분할 시 no-op)."""
+    try:
+        from .sim_multi_view_widget import ensure_viewport_workspace_tab_visible, is_split_widget_layout_active
+        from .tbs_extension_singleton import get_tbs_extension_instance
+
+        e = ext if ext is not None else get_tbs_extension_instance()
+        if e is not None and is_split_widget_layout_active(e):
+            ensure_viewport_workspace_tab_visible()
+            return
+    except Exception:
+        pass
     try:
         from .kit_chrome_visibility import apply_viewport_dock_tab_bars_hidden
 
@@ -665,6 +689,13 @@ def _install_viewport_split_splitter_guard(ext: Any) -> None:
 
 def apply_viewport_split_user_resize_lock(ext: Any) -> None:
     """Dock 50:50 유지 — floating 리사이즈·이동 제한 + 분할선 드래그 입력 차단."""
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+
+        if is_split_widget_layout_active(ext):
+            return
+    except Exception:
+        pass
     if not viewport_split_user_resize_locked():
         teardown_viewport_split_resize_lock(ext)
         return
@@ -1044,16 +1075,95 @@ def _reapply_split_dock_in_geometry(ext: Any) -> bool:
     return ok_any
 
 
+def _split_viewport_api(win_name: str) -> Any:
+    """Widget 분할 또는 Workspace 뷰포트 API."""
+    try:
+        from .sim_multi_view_widget import get_split_viewport_api, is_split_widget_layout_active
+        from .tbs_extension_singleton import get_tbs_extension_instance
+
+        ext = get_tbs_extension_instance()
+        if ext is not None and is_split_widget_layout_active(ext):
+            return get_split_viewport_api(ext, str(win_name))
+    except Exception:
+        pass
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name
+
+        return get_viewport_from_window_name(str(win_name))
+    except Exception:
+        return None
+
+
+def _sync_entries_from_widget_tiles(ext: Any) -> None:
+    """Widget 분할 후 ``entries`` 의 HUD·뷰포트 참조를 타일 레코드와 맞춘다."""
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+
+        if not is_split_widget_layout_active(ext):
+            return
+    except Exception:
+        return
+    tiles = getattr(ext, "_tbs_split_widget_tiles", None)
+    if not isinstance(tiles, dict):
+        return
+    entries = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    for ent in entries:
+        wn = str(ent.get("win_name") or "")
+        if wn == "Viewport":
+            try:
+                vw = _resolve_viewport_window_for_workspace_name("Viewport")
+                if vw is not None:
+                    ent["viewport_window"] = vw
+            except Exception:
+                pass
+            continue
+        rec = tiles.get(wn)
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("widget") is None:
+            if ent.get("kit_vp") is not None or ent.get("viewport_window") is not None:
+                continue
+        vpw = rec.get("viewport_window")
+        wgt = rec.get("widget")
+        if vpw is not None:
+            ent["viewport_window"] = vpw
+            ent["kit_vp"] = vpw
+        elif wgt is not None:
+            ent["kit_vp"] = wgt
+        if bool(rec.get("_uses_viewport_window", False)):
+            ent["kind"] = "aux_viewport"
+        if rec.get("api") is not None:
+            ent["viewport_api"] = rec.get("api")
+        if rec.get("context_name") is not None:
+            ent["context_name"] = rec.get("context_name")
+    try:
+        ext._sim_multi_viewport_entries = entries
+    except Exception:
+        pass
+
+
 def _sync_viewport_resolution_from_workspace_window(win_name: str) -> None:
     """Workspace 창의 ``width``/``height`` 에 맞춰 뷰포트 API ``resolution`` 을 맞춘다(렌더 버퍼 크기)."""
     wn = str(win_name or "").strip()
     if not wn:
         return
     try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+        from .tbs_extension_singleton import get_tbs_extension_instance
+
+        ext = get_tbs_extension_instance()
+        if ext is not None and is_split_widget_layout_active(ext):
+            from .sim_multi_view_widget import sync_split_widget_fill_frame
+
+            sync_split_widget_fill_frame(ext, 2)
+            return
+    except Exception:
+        pass
+    try:
         from omni.kit.viewport.utility import get_viewport_from_window_name
 
         w = ui.Workspace.get_window(wn)
-        api = get_viewport_from_window_name(wn)
+        api = _split_viewport_api(wn) or get_viewport_from_window_name(wn)
         if w is None or api is None or not hasattr(api, "resolution"):
             return
         if bool(getattr(api, "fill_frame", False)):
@@ -1222,7 +1332,7 @@ def _bring_kit_chrome_visible(ext: Any = None) -> None:
 
 
 def reapply_split_layout_sync(ext: Any, n: int) -> None:
-    """분할 레이아웃 재적용 — Dock 성공 시 ``dock_in`` 만, 실패 시 보조 격자."""
+    """분할 레이아웃 재적용 — Widget / Dock / 격자 중 활성 경로만."""
     if _startup_split_relayout_suppressed(ext):
         return
     try:
@@ -1231,6 +1341,25 @@ def reapply_split_layout_sync(ext: Any, n: int) -> None:
         return
     if sn <= 1:
         return
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, sync_split_widget_fill_frame
+
+        if is_split_widget_layout_active(ext):
+            sync_split_widget_fill_frame(ext, sn)
+            try:
+                from .sim_multi_view_widget import ensure_viewport_workspace_tab_visible
+
+                ensure_viewport_workspace_tab_visible()
+            except Exception:
+                pass
+            try:
+                set_viewport_fill_frame_for_split_count(sn, True)
+            except Exception:
+                pass
+            _bring_kit_chrome_visible(ext)
+            return
+    except Exception:
+        pass
     if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
         if not _all_aux_split_windows_docked(sn):
             _reapply_split_dock_in_geometry(ext)
@@ -1259,6 +1388,13 @@ async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int)
     if _startup_split_relayout_suppressed(ext):
         return
     reapply_split_layout_sync(ext, n)
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+
+        if is_split_widget_layout_active(ext):
+            return
+    except Exception:
+        pass
     if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
         for _ in range(8):
             if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
@@ -1299,7 +1435,7 @@ def set_viewport_fill_frame_for_split_count(split_n: int, fill: bool) -> None:
     for ti in range(sn):
         name = "Viewport" if ti == 0 else _split_window_name(ti)
         try:
-            api = get_viewport_from_window_name(str(name))
+            api = _split_viewport_api(str(name))
             if api is not None and hasattr(api, "fill_frame"):
                 api.fill_frame = bool(fill)
         except Exception:
@@ -1504,6 +1640,14 @@ async def _ensure_split_layout_geometry_ready(ext: Any, token: int, n: int) -> N
     """layout-first: 보조 창을 표시하기 전 Dock 검증·재시도, 실패 시 격자 폴백."""
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, sync_split_widget_fill_frame
+
+        if is_split_widget_layout_active(ext):
+            sync_split_widget_fill_frame(ext, n)
+            return
+    except Exception:
+        pass
     if not sim_viewport_split_dock_enabled():
         await _enforce_equal_split_grid_async(ext, token, n, preserve_main_viewport=True)
         try:
@@ -1568,6 +1712,25 @@ async def _finish_startup_dual_orchestration(ext: Any) -> None:
         sn = 2
     if sn > 1:
         tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
+        try:
+            from .sim_multi_view_widget import is_split_widget_layout_active, sync_split_widget_fill_frame
+
+            if is_split_widget_layout_active(ext):
+                sync_split_widget_fill_frame(ext, sn)
+                try:
+                    from .sim_multi_view_widget import finalize_widget_split_startup
+
+                    tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
+                    await finalize_widget_split_startup(ext, tok, sn)
+                except Exception:
+                    pass
+                try:
+                    set_viewport_fill_frame_for_split_count(sn, True)
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
         if not _aux_windows_actually_docked(sn):
             if bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
                 _reapply_split_dock_in_geometry(ext)
@@ -2364,6 +2527,18 @@ def _cancel_split_aux_navigation_hold(ext: Any) -> None:
 def _apply_split_navigation_to_aux(ext: Any, n: int, token: int, *, hold_ticks: int = 48) -> None:
     """보조 타일 카메라 orbit/pan — Dock·레이아웃 변경 직후 호출."""
     try:
+        from .sim_multi_view_widget import (
+            apply_split_widget_navigation,
+            is_split_widget_layout_active,
+            refresh_split_widget_tiles_after_stage,
+        )
+
+        if is_split_widget_layout_active(ext):
+            apply_split_widget_navigation(ext, n, token, hold_ticks=int(hold_ticks))
+            return
+    except Exception:
+        pass
+    try:
         sn = channel_count_for_split(int(n))
     except Exception:
         sn = 1
@@ -2528,15 +2703,24 @@ def _workspace_show_named_window(name: str, visible: bool) -> None:
     ``Calling setVisible to WindowHandle will be deprecated`` 가 날 수 있어,
     가능하면 ``Workspace.show_window`` 를 쓴다.
     """
+    wn = str(name or "").strip()
+    if bool(visible) and wn.startswith("TBS_SimSplit"):
+        try:
+            from .sim_multi_view_widget import sim_viewport_split_widget_enabled
+
+            if sim_viewport_split_widget_enabled():
+                return
+        except Exception:
+            pass
     try:
         fn = getattr(ui.Workspace, "show_window", None)
         if callable(fn):
-            fn(str(name), bool(visible))
+            fn(wn, bool(visible))
             return
     except Exception:
         pass
     try:
-        w = ui.Workspace.get_window(str(name))
+        w = ui.Workspace.get_window(wn)
         if w is not None:
             w.visible = bool(visible)
     except Exception:
@@ -2592,14 +2776,25 @@ def _aux_viewport_api_healthy(win_name: str) -> bool:
     if not wn:
         return False
     try:
+        from .sim_multi_view_widget import get_split_viewport_api, is_split_widget_layout_active
+        from .tbs_extension_singleton import get_tbs_extension_instance
+
+        ext = get_tbs_extension_instance()
+        if ext is not None and is_split_widget_layout_active(ext):
+            api = get_split_viewport_api(ext, wn)
+            if api is not None:
+                return True
+            if wn != "Viewport":
+                return False
+    except Exception:
+        pass
+    try:
         if ui.Workspace.get_window(wn) is None:
             return False
     except Exception:
         return False
     try:
-        from omni.kit.viewport.utility import get_viewport_from_window_name
-
-        api = get_viewport_from_window_name(wn)
+        api = _split_viewport_api(wn)
         if api is None:
             return False
         for attr in ("viewport_window", "window", "_viewport_window", "_window"):
@@ -2719,6 +2914,13 @@ def teardown_sim_multi_viewports(ext: Any, *, skip_deferred_restore: bool = Fals
     _cancel_pending_split_viewport_restore(ext)
     _clear_viewport_layout_sync_caches()
     _cancel_split_aux_navigation_hold(ext)
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, teardown_split_widget_host
+
+        if is_split_widget_layout_active(ext):
+            teardown_split_widget_host(ext)
+    except Exception:
+        pass
     used_dock = bool(getattr(ext, "_tbs_split_used_dock_layout", False))
     for ti in range(1, 5):
         wname = _split_window_name(ti)
@@ -2742,19 +2944,21 @@ def teardown_sim_multi_viewports(ext: Any, *, skip_deferred_restore: bool = Fals
     entries: List[Dict[str, Any]] = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
     # 보조 뷰를 먼저 파괴한 뒤 메인 Viewport 를 복원한다(메인만 먼저 키우면 보조와 동시에 그려져 GPU 부담).
     for ent in entries:
-        if ent.get("kind") == "main_viewport":
+        if ent.get("kind") in ("main_viewport", "widget_main"):
             continue
         wn = str(ent.get("win_name") or "")
         if wn:
             _clear_split_viewport_input_hook(wn)
-            if used_dock:
+            if used_dock and ent.get("kind") not in ("widget_aux",):
                 _undock_workspace_window(wn)
+        if ent.get("kind") in ("widget_aux",):
+            continue
         if ent.get("kit_vp") is not None:
             _destroy_kit_viewport(ent.get("kit_vp"))
         else:
             _destroy_viewport_window(ent.get("window"))
     for ent in entries:
-        if ent.get("kind") == "main_viewport":
+        if ent.get("kind") in ("main_viewport", "widget_main"):
             _restore_viewport_after_split_teardown(
                 ext,
                 schedule_deferred_restore=not bool(skip_deferred_restore),
@@ -2812,8 +3016,17 @@ def split_layout_needs_reapply(ext: Any) -> bool:
             n = 1
     if n <= 1:
         return False
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, split_widget_layout_healthy
+
+        if is_split_widget_layout_active(ext):
+            return not split_widget_layout_healthy(ext, n)
+    except Exception:
+        pass
     if not _split_aux_layout_healthy(ext, n):
         return True
+    if bool(getattr(ext, "_tbs_split_used_widget_layout", False)):
+        return False
     if not bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
         return True
     return False
@@ -3455,13 +3668,16 @@ async def _assign_split_cameras_after_layout(
     win_names: List[str],
     cam_paths: List[Optional[str]],
 ) -> None:
-    """보조 타일 카메라 — 메인 Viewport 와 동일 경로(기울어짐·빈 shell 기본 카메라 방지)."""
+    """보조 타일 카메라 — Widget 분할은 타일별 독립 카메라, Dock 은 기존 경로."""
     try:
-        from omni.kit.viewport.utility import get_viewport_from_window_name
-    except Exception:
-        return
+        from .sim_multi_view_widget import assign_widget_split_cameras, is_split_widget_layout_active
 
-    main_api = get_viewport_from_window_name("Viewport")
+        if is_split_widget_layout_active(ext):
+            await assign_widget_split_cameras(ext, token, win_names)
+            return
+    except Exception:
+        pass
+    main_api = _split_viewport_api("Viewport")
     main_cam = ""
     if main_api is not None:
         try:
@@ -3481,7 +3697,7 @@ async def _assign_split_cameras_after_layout(
             want = main_cam
             if i < len(cam_paths) and cam_paths[i]:
                 want = str(cam_paths[i])
-            api = get_viewport_from_window_name(str(name))
+            api = _split_viewport_api(str(name))
             if api is None:
                 missing = True
                 continue
@@ -3514,10 +3730,31 @@ def notify_sim_split_ui_sync(ext: Any) -> None:
             fn3()
         except Exception:
             pass
-    schedule_viewport_snapshot_hud_refresh(ext)
+    if not _widget_split_startup_in_progress(ext):
+        schedule_viewport_snapshot_hud_refresh(ext)
+
+
+def _widget_split_startup_in_progress(ext: Any) -> bool:
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+
+        if not is_split_widget_layout_active(ext):
+            return False
+    except Exception:
+        return False
+    return startup_dual_orchestration_active(ext) or not bool(
+        getattr(ext, "_tbs_widget_split_ready", False)
+    )
 
 
 def _rollback_split_attempt(ext: Any, entries: List[Dict[str, Any]], ctx_names: List[str]) -> None:
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, teardown_split_widget_host
+
+        if is_split_widget_layout_active(ext):
+            teardown_split_widget_host(ext)
+    except Exception:
+        pass
     _restore_kit_full_layout_after_split(ext)
     for ent in entries:
         if ent.get("kind") == "main_viewport":
@@ -3665,15 +3902,32 @@ async def _finalize_aux_split_tile_after_open(
     try:
         si = max(2, int(screen_1based))
         wn = _split_window_name(si - 1)
-        _ensure_viewport_camera_navigation_enabled(wn)
-        _wire_split_viewport_click_focus(wn)
+        try:
+            from .sim_multi_view_widget import is_split_widget_layout_active, request_aux_widget_materialize
+
+            if is_split_widget_layout_active(ext):
+                sn = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+                request_aux_widget_materialize(ext, token, sn)
+            else:
+                _ensure_viewport_camera_navigation_enabled(wn)
+                _wire_split_viewport_click_focus(wn)
+        except Exception:
+            _ensure_viewport_camera_navigation_enabled(wn)
+            _wire_split_viewport_click_focus(wn)
     except Exception:
         pass
     try:
         sn = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
         if sn > 1:
-            reapply_split_layout_sync(ext, sn)
-            asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, sn))
+            try:
+                from .sim_multi_view_widget import is_split_widget_layout_active
+
+                if not is_split_widget_layout_active(ext):
+                    reapply_split_layout_sync(ext, sn)
+                    asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, sn))
+            except Exception:
+                reapply_split_layout_sync(ext, sn)
+                asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, sn))
     except Exception:
         pass
 
@@ -3686,6 +3940,34 @@ def _split_aux_layout_healthy(ext: Any, split_n: int) -> bool:
         return False
     if sn <= 1:
         return False
+    try:
+        from .sim_multi_view_widget import (
+            is_split_widget_layout_active,
+            sim_viewport_split_widget_enabled,
+            split_widget_layout_healthy,
+        )
+
+        if is_split_widget_layout_active(ext):
+            return split_widget_layout_healthy(ext, sn)
+        if sim_viewport_split_widget_enabled():
+            ctx = list(getattr(ext, "_sim_multi_context_names", None) or [])
+            if len(ctx) != sn - 1:
+                return False
+            entries = list(getattr(ext, "_sim_multi_viewport_entries", None) or [])
+            if len(entries) < sn:
+                return False
+            for ti in range(1, sn):
+                wname = _split_window_name(ti)
+                found = False
+                for ent in entries:
+                    if str(ent.get("win_name") or "") == wname and ent.get("kind") == "widget_aux":
+                        found = True
+                        break
+                if not found:
+                    return False
+            return True
+    except Exception:
+        pass
     ctx = list(getattr(ext, "_sim_multi_context_names", None) or [])
     if len(ctx) != sn - 1:
         return False
@@ -3707,6 +3989,13 @@ def _split_aux_layout_healthy(ext: Any, split_n: int) -> bool:
 def _destroy_aux_split_tile(ext: Any, ti: int, entries: List[Dict[str, Any]], ctx_names: List[str]) -> None:
     """보조 타일 하나(``ti``=1..)만 제거 — 뷰포트·USD 컨텍스트·런타임."""
     wname = _split_window_name(ti)
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, teardown_split_widget_host
+
+        if is_split_widget_layout_active(ext):
+            teardown_split_widget_host(ext)
+    except Exception:
+        pass
     _undock_workspace_window(wname)
     _clear_split_viewport_input_hook(wname)
     ctx_name = f"morph_tbs_split_aux_{ti}"
@@ -3716,6 +4005,12 @@ def _destroy_aux_split_tile(ext: Any, ti: int, entries: List[Dict[str, Any]], ct
         except Exception:
             ci = -999
         if ent.get("win_name") != wname and ci != ti:
+            continue
+        if ent.get("kind") == "widget_aux":
+            try:
+                entries.remove(ent)
+            except ValueError:
+                pass
             continue
         if ent.get("kit_vp") is not None:
             _destroy_kit_viewport(ent.get("kit_vp"))
@@ -3930,6 +4225,20 @@ async def _apply_aux_bg_load_layout_finish(
         except Exception:
             pass
         return
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, _destroy_all_aux_workspace_windows
+
+        if is_split_widget_layout_active(ext):
+            _destroy_all_aux_workspace_windows(ext)
+            for ent in entries:
+                ent["aux_hidden_until_load"] = False
+            try:
+                ext._sim_multi_viewport_entries = entries
+            except Exception:
+                pass
+            return
+    except Exception:
+        pass
     for ent in entries:
         wn = str(ent.get("win_name") or "").strip()
         if not wn:
@@ -3962,6 +4271,16 @@ def _show_split_layout_shell_windows(ext: Any, n: int) -> None:
     if sn <= 1:
         return
     try:
+        from .sim_multi_view_widget import is_split_widget_layout_active, sync_split_widget_fill_frame
+
+        if is_split_widget_layout_active(ext):
+            sync_split_widget_fill_frame(ext, sn)
+            for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
+                ent["aux_hidden_until_layout"] = False
+            return
+    except Exception:
+        pass
+    try:
         set_viewport_fill_frame_for_split_count(sn, True)
     except Exception:
         pass
@@ -3988,6 +4307,14 @@ async def wake_main_viewport_after_master_open(ext: Any, n: int = 0) -> None:
         sn = channel_count_for_split(int(n or getattr(ext, "_sim_viewport_split_count", 2) or 2))
     except Exception:
         sn = 2
+    try:
+        from .sim_multi_view_widget import connect_widget_tile_main_stage, is_split_widget_layout_active
+
+        if is_split_widget_layout_active(ext):
+            tok = int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0)
+            await connect_widget_tile_main_stage(ext, tok)
+    except Exception:
+        pass
     for _ in range(6):
         await kit_app.get_app().next_update_async()
     try:
@@ -4152,6 +4479,13 @@ async def _refresh_aux_split_stages_async(ext: Any, n: int, token: int, usd_path
 
     def _nav_after_hydrate() -> None:
         try:
+            from .sim_multi_view_widget import is_split_widget_layout_active
+
+            if is_split_widget_layout_active(ext):
+                return
+        except Exception:
+            pass
+        try:
             reapply_split_layout_sync(ext, sn)
             asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, sn))
         except Exception:
@@ -4159,7 +4493,13 @@ async def _refresh_aux_split_stages_async(ext: Any, n: int, token: int, usd_path
         _apply_split_navigation_to_aux(ext, sn, token, hold_ticks=96)
 
     _spawn_pending_aux_tile_hydrates(ext, sn, token, on_all_done=_nav_after_hydrate)
-    _apply_split_navigation_to_aux(ext, sn, token, hold_ticks=48)
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+
+        if not is_split_widget_layout_active(ext):
+            _apply_split_navigation_to_aux(ext, sn, token, hold_ticks=48)
+    except Exception:
+        _apply_split_navigation_to_aux(ext, sn, token, hold_ticks=48)
 
     try:
         ext._tbs_split_layout_usd_key = _split_layout_usd_key(ext)
@@ -4207,6 +4547,88 @@ async def _resolve_aux_tile_usd_path(
         return None, False, str(cerr or "Master USD 복제 실패")
     _register_session_layer_path(ext, clone_path)
     return clone_path, False, ""
+
+
+async def _materialize_dock_windows_for_widget_aux_entries(
+    ext: Any, token: int, n: int
+) -> bool:
+    """Widget 분할 실패 시 ``widget_aux`` entry 를 Dock 용 Workspace 뷰포트 창으로 승격."""
+    entries = list(getattr(ext, "_sim_multi_viewport_entries", []) or [])
+    pending = [e for e in entries if e.get("kind") == "widget_aux"]
+    if not pending:
+        return True
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+        return False
+    fracs = _split_cell_layout_fracs(n)
+    vx, vy, vw, vh = _capture_split_tile_bbox(ext)
+    try:
+        from omni.kit.viewport.utility import create_viewport_window
+    except Exception:
+        create_viewport_window = None  # type: ignore
+
+    ok_all = True
+    for ent in pending:
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return False
+        try:
+            ti = int(ent.get("cell_index", 0) or 0)
+        except Exception:
+            ti = 0
+        ctx_name = str(ent.get("context_name") or f"morph_tbs_split_aux_{ti}")
+        wname = str(ent.get("win_name") or _split_window_name(ti))
+        _destroy_stale_split_workspace_window(wname)
+        x0, y0, x1, y1 = fracs[ti]
+        pw = max(_VP_TILE_MIN_PX, int(vw * (x1 - x0)))
+        ph = max(_VP_TILE_MIN_PX, int(vh * (y1 - y0)))
+        vp_obj = None
+        if create_viewport_window is not None:
+            try:
+                vp_obj = create_viewport_window(
+                    name=wname,
+                    usd_context_name=ctx_name,
+                    width=int(pw),
+                    height=int(ph),
+                )
+            except Exception:
+                vp_obj = None
+        if vp_obj is None:
+            try:
+                from omni.kit.viewport.window import ViewportWindow
+
+                win = ViewportWindow(
+                    name=wname,
+                    usd_context_name=ctx_name,
+                    width=int(pw),
+                    height=int(ph),
+                )
+                ent.update(
+                    {
+                        "kind": "aux_viewport",
+                        "window": win,
+                        "viewport_window": win,
+                        "kit_vp": None,
+                    }
+                )
+            except Exception:
+                ok_all = False
+                continue
+        else:
+            ent.update(
+                {
+                    "kind": "aux_viewport",
+                    "kit_vp": vp_obj,
+                    "viewport_window": vp_obj,
+                    "window": None,
+                }
+            )
+        _apply_aux_window_chrome_flags(wname)
+        _workspace_show_named_window(wname, False)
+        await kit_app.get_app().next_update_async()
+    try:
+        ext._sim_multi_viewport_entries = entries
+    except Exception:
+        pass
+    return ok_all
 
 
 async def _provision_aux_split_tile(
@@ -4329,6 +4751,39 @@ async def _provision_aux_split_tile(
     await kit_app.get_app().next_update_async()
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
         return False
+
+    hidden_until_load = bool(defer_stage_load) and not bool(show_before_usd_load)
+
+    try:
+        from .sim_multi_view_widget import sim_viewport_split_widget_enabled
+
+        use_widget = sim_viewport_split_widget_enabled()
+    except Exception:
+        use_widget = False
+
+    if use_widget:
+        wname = _split_window_name(ti)
+        entries.append(
+            {
+                "kind": "widget_aux",
+                "win_name": wname,
+                "cell_index": ti,
+                "context_name": ctx_name,
+                "viewport_window": None,
+                "kit_vp": None,
+                "composed_hydrate": composed_used,
+                "hydrate_pending": True,
+                "stage_load_pending": bool(defer_stage_load),
+                "aux_skip_shell_defer": aux_skip_shell_defer,
+                "aux_hidden_until_load": hidden_until_load,
+                "aux_hidden_until_layout": True,
+            }
+        )
+        await kit_app.get_app().next_update_async()
+        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+            return False
+        _log_viewport_usd_context_bind(wname, ctx_name)
+        return True
 
     wname = _split_window_name(ti)
     _destroy_stale_split_workspace_window(wname)
@@ -4691,18 +5146,60 @@ async def _finish_split_layout_after_tiles(
         for ti in range(1, n):
             _workspace_show_named_window(_split_window_name(ti), False)
 
-    if sim_viewport_split_dock_enabled():
-        docked_ok = await _apply_split_dock_layout(ext, token, n)
-        if not docked_ok:
-            docked_ok = await _retry_split_dock_layout(ext, token, n)
-    else:
-        docked_ok = False
+    widget_ok = False
+    widget_only = False
     try:
-        ext._tbs_split_used_dock_layout = bool(docked_ok)
-    except Exception:
-        pass
+        from .sim_multi_view_widget import (
+            _destroy_all_aux_workspace_windows,
+            apply_split_widget_layout,
+            sim_viewport_split_widget_enabled,
+        )
 
-    if docked_ok:
+        widget_only = sim_viewport_split_widget_enabled()
+        if widget_only:
+            widget_ok = await apply_split_widget_layout(ext, token, n)
+            if widget_ok:
+                _sync_entries_from_widget_tiles(ext)
+                try:
+                    ext._tbs_split_used_dock_layout = False
+                except Exception:
+                    pass
+            else:
+                try:
+                    print(
+                        "[TBS multi-sim] ViewportWidget 분할 실패 — "
+                        "Dock/create_viewport_window 폴백 금지 (단일 Viewport 탭 유지)",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+                _destroy_all_aux_workspace_windows(ext)
+    except Exception:
+        widget_ok = False
+
+    docked_ok = False
+    if not widget_ok and not widget_only:
+        if sim_viewport_split_dock_enabled():
+            docked_ok = await _apply_split_dock_layout(ext, token, n)
+            if not docked_ok:
+                docked_ok = await _retry_split_dock_layout(ext, token, n)
+        try:
+            ext._tbs_split_used_dock_layout = bool(docked_ok)
+            if docked_ok:
+                ext._tbs_split_used_widget_layout = False
+        except Exception:
+            pass
+
+    if widget_ok:
+        for _ in range(2):
+            if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
+                return
+            await kit_app.get_app().next_update_async()
+        try:
+            print("[TBS multi-sim] 분할 레이아웃: ViewportWidget shell (Dock 미사용)", flush=True)
+        except Exception:
+            pass
+    elif docked_ok:
         for _ in range(8):
             if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
                 return
@@ -4727,6 +5224,10 @@ async def _finish_split_layout_after_tiles(
         set_viewport_fill_frame_for_split_count(n, True)
     except Exception:
         pass
+    if n >= 2 and not bool(getattr(ext, "_tbs_split_used_widget_layout", False)):
+        apply_viewport_split_tab_chrome(n)
+        if viewport_split_user_resize_locked():
+            apply_viewport_split_user_resize_lock(ext)
 
     await _assign_split_cameras_after_layout(ext, token, win_names, cam_paths)
     if not layout_first_shell:
@@ -4768,24 +5269,50 @@ async def _finish_split_layout_after_tiles(
         except Exception:
             pass
     else:
-        for ti in range(1, n):
-            wname = _split_window_name(ti)
-            hidden = False
+        try:
+            from .sim_multi_view_widget import is_split_widget_layout_active
+
+            widget_active = is_split_widget_layout_active(ext)
+        except Exception:
+            widget_active = False
+        if not widget_active:
+            for ti in range(1, n):
+                wname = _split_window_name(ti)
+                hidden = False
+                for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
+                    if str(ent.get("win_name") or "") == wname:
+                        if ent.get("aux_hidden_until_load"):
+                            hidden = True
+                        ent["aux_hidden_until_layout"] = False
+                        break
+                if not hidden:
+                    _apply_aux_window_chrome_flags(wname)
+                    _workspace_show_named_window(wname, True)
+                    _sync_viewport_resolution_from_workspace_window(wname)
+                    _schedule_split_viewport_input_ready(wname, frames=12)
+        else:
+            try:
+                from .sim_multi_view_widget import _destroy_all_aux_workspace_windows
+
+                _destroy_all_aux_workspace_windows(ext)
+            except Exception:
+                pass
+            for ti in range(1, n):
+                wname = _split_window_name(ti)
+                _workspace_show_named_window(wname, False)
             for ent in list(getattr(ext, "_sim_multi_viewport_entries", []) or []):
-                if str(ent.get("win_name") or "") == wname:
-                    if ent.get("aux_hidden_until_load"):
-                        hidden = True
-                    ent["aux_hidden_until_layout"] = False
-                    break
-            if not hidden:
-                _apply_aux_window_chrome_flags(wname)
-                _workspace_show_named_window(wname, True)
-                _sync_viewport_resolution_from_workspace_window(wname)
-                _schedule_split_viewport_input_ready(wname, frames=12)
+                ent["aux_hidden_until_layout"] = False
 
     def _nav_after_all_hydrate() -> None:
         if _startup_split_relayout_suppressed(ext):
             return
+        try:
+            from .sim_multi_view_widget import is_split_widget_layout_active
+
+            if is_split_widget_layout_active(ext):
+                return
+        except Exception:
+            pass
         try:
             reapply_split_layout_sync(ext, n)
             asyncio.ensure_future(reapply_split_layout_after_hydrate_async(ext, token, n))
@@ -4842,9 +5369,17 @@ async def _finish_split_layout_after_tiles(
         pass
 
     if n >= 2:
-        apply_viewport_split_tab_chrome(n)
-        if viewport_split_user_resize_locked():
-            apply_viewport_split_user_resize_lock(ext)
+        try:
+            from .sim_multi_view_widget import is_split_widget_layout_active
+
+            if not is_split_widget_layout_active(ext):
+                apply_viewport_split_tab_chrome(n)
+                if viewport_split_user_resize_locked():
+                    apply_viewport_split_user_resize_lock(ext)
+        except Exception:
+            apply_viewport_split_tab_chrome(n)
+            if viewport_split_user_resize_locked():
+                apply_viewport_split_user_resize_lock(ext)
 
 
 async def _shrink_split_async(ext: Any, n: int, prev_n: int, token: int) -> None:
@@ -4958,7 +5493,21 @@ async def _build_multi_split_async(ext: Any, n: int, token: int, usd_path: str, 
         return
 
     _workspace_show_named_window("Viewport", True)
-    entries.append({"kind": "main_viewport", "win_name": "Viewport", "cell_index": 0, "viewport_window": None, "kit_vp": None})
+    try:
+        from .sim_multi_view_widget import sim_viewport_split_widget_enabled
+
+        main_kind = "widget_main" if sim_viewport_split_widget_enabled() else "main_viewport"
+    except Exception:
+        main_kind = "main_viewport"
+    entries.append(
+        {
+            "kind": main_kind,
+            "win_name": "Viewport",
+            "cell_index": 0,
+            "viewport_window": None,
+            "kit_vp": None,
+        }
+    )
 
     if startup_layout_first_active(ext) or startup_dual_orchestration_active(ext):
         try:
@@ -5347,11 +5896,25 @@ def _resolve_viewport_window_for_workspace_name(wname: str) -> Optional[Any]:
     ``get_viewport_from_window_name`` 이 반환하는 API 객체에 ``viewport_window`` 등이 붙는 Kit 버전이 있다.
     """
     try:
-        from omni.kit.viewport.utility import get_viewport_from_window_name
+        from .sim_multi_view_widget import get_split_hud_mount, is_split_widget_layout_active
+        from .tbs_extension_singleton import get_tbs_extension_instance
+
+        ext = get_tbs_extension_instance()
+        if ext is not None and is_split_widget_layout_active(ext) and str(wname) != "Viewport":
+            tiles = getattr(ext, "_tbs_split_widget_tiles", None)
+            if isinstance(tiles, dict):
+                rec = tiles.get(str(wname))
+                if isinstance(rec, dict) and bool(rec.get("_uses_viewport_window", False)):
+                    vpw = rec.get("viewport_window")
+                    if vpw is not None and callable(getattr(vpw, "get_frame", None)):
+                        return vpw
+            mount = get_split_hud_mount(ext, str(wname))
+            if mount is not None and callable(getattr(mount, "get_frame", None)):
+                return mount
     except Exception:
-        return None
+        pass
     try:
-        api = get_viewport_from_window_name(str(wname))
+        api = _split_viewport_api(str(wname))
     except Exception:
         api = None
     if api is None:
@@ -5636,6 +6199,17 @@ def _snapshot_hud_placer_offset_x(ext: Any, screen_1based: int, panel_w: int, ma
     si = int(screen_1based)
     wname = "Viewport" if si <= 1 else _split_window_name(si - 1)
     try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+
+        if si <= 1 and ext is not None and is_split_widget_layout_active(ext):
+            w = ui.Workspace.get_window("Viewport")
+            ww = int(getattr(w, "width", 0) or 0)
+            half = max(1, ww // 2)
+            if half > panel_w + margin:
+                return max(0, half - panel_w - margin)
+    except Exception:
+        pass
+    try:
         w = ui.Workspace.get_window(str(wname))
         ww = int(getattr(w, "width", 0) or 0)
         if ww > panel_w + margin:
@@ -5753,6 +6327,8 @@ def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
 
 def schedule_viewport_snapshot_hud_refresh(ext: Any) -> None:
     """Dock/뷰포트 레이아웃이 잡힌 뒤 HUD 를 다시 붙이기 위해 몇 프레임 뒤에 실행한다."""
+    if _widget_split_startup_in_progress(ext):
+        return
     try:
         ext._tbs_sim_snapshot_hud_sched_token = int(getattr(ext, "_tbs_sim_snapshot_hud_sched_token", 0) or 0) + 1
         tok = int(ext._tbs_sim_snapshot_hud_sched_token)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 _PRINT_PREFIX = "[TBS/EBS-HUD]"
 
@@ -15,7 +15,9 @@ def _viewport_control_hud_enabled() -> bool:
     except Exception:
         return True
 
+
 _FRAME_SLOT = "morph.tbs_control_2:ebs_control_hud"
+_FRAME_SLOT_WIDGET = "morph.tbs_control_2:zz_ebs_control_hud"
 _PANEL_W = 300
 _PANEL_PAD = 8
 _TOP_SPACER_H = 12
@@ -53,6 +55,24 @@ def _resolve_viewport_window(ext: Any) -> Optional[Any]:
     return None
 
 
+def _is_widget_split_hud(ext: Any) -> bool:
+    try:
+        from .sim_multi_view_widget import is_split_widget_layout_active
+
+        return bool(is_split_widget_layout_active(ext))
+    except Exception:
+        return False
+
+
+def _resolve_ebs_hud_mount(ext: Any) -> Tuple[Optional[Any], str]:
+    """Widget 분할도 ``ViewportWindow.get_frame`` — 패널은 왼쪽 50% 에만 그린다."""
+    vw = _resolve_viewport_window(ext)
+    if vw is not None:
+        slot = _FRAME_SLOT_WIDGET if _is_widget_split_hud(ext) else _FRAME_SLOT
+        return vw, slot
+    return None, _FRAME_SLOT
+
+
 class TbsViewportControlHud:
     """Viewport 좌측 상단 — EBS 시뮬 제어 패널."""
 
@@ -64,23 +84,32 @@ class TbsViewportControlHud:
     def destroy(self) -> None:
         self._destroy_layer()
 
-    def sync_layers(self, *, delay_frames: int = 8) -> None:
+    def sync_layers(self, *, delay_frames: int = 8, force: bool = False) -> None:
         if not _viewport_control_hud_enabled():
             self._destroy_layer()
             return
+        if not force and bool(getattr(self._ext, "_tbs_ebs_hud_mounted", False)):
+            return
+        try:
+            from .sim_multi_view import startup_dual_orchestration_active
+
+            if not force and startup_dual_orchestration_active(self._ext):
+                return
+        except Exception:
+            pass
         self._sched_token += 1
         token = self._sched_token
 
         def _try_mount(remaining: int) -> None:
             if token != self._sched_token:
                 return
-            vw = _resolve_viewport_window(self._ext)
-            if vw is not None:
+            mount, slot = _resolve_ebs_hud_mount(self._ext)
+            if mount is not None:
                 try:
-                    self._ext._tbs_split_main_viewport_window = vw
+                    self._ext._tbs_split_main_viewport_window = mount
                 except Exception:
                     pass
-                self._mount_on_viewport(vw)
+                self._mount_on_viewport(mount, slot, sched_token=token)
                 return
             if remaining > 0:
                 try:
@@ -99,16 +128,33 @@ class TbsViewportControlHud:
     def _destroy_layer(self) -> None:
         self._root = None
         try:
+            self._ext._tbs_ebs_hud_mounted = False
+        except Exception:
+            pass
+        try:
+            mount, slot = _resolve_ebs_hud_mount(self._ext)
+            if mount is not None and callable(getattr(mount, "get_frame", None)):
+                self._clear_viewport_slot(mount, slot)
             vw = _resolve_viewport_window(self._ext)
-            if vw is None:
-                return
-            if callable(getattr(vw, "get_frame", None)):
-                with vw.get_frame(_FRAME_SLOT):
-                    pass
+            if vw is not None and callable(getattr(vw, "get_frame", None)):
+                for s in (_FRAME_SLOT, _FRAME_SLOT_WIDGET):
+                    self._clear_viewport_slot(vw, s)
         except Exception:
             pass
 
-    def _mount_on_viewport(self, vw: Any) -> None:
+    @staticmethod
+    def _clear_viewport_slot(vw: Any, slot: str) -> None:
+        try:
+            import omni.ui as ui  # type: ignore
+
+            with vw.get_frame(slot):
+                ui.Spacer(height=0)
+        except Exception:
+            pass
+
+    def _mount_on_viewport(self, mount: Any, slot: str, *, sched_token: int) -> None:
+        if sched_token != self._sched_token:
+            return
         try:
             import omni.ui as ui  # type: ignore
         except Exception as exc:
@@ -117,48 +163,75 @@ class TbsViewportControlHud:
 
         from .ebs_control_panel_ui import build_ebs_control_panel_content
 
-        self._destroy_layer()
+        self._clear_viewport_slot(mount, slot)
+        if sched_token != self._sched_token:
+            return
+
+        widget_split = _is_widget_split_hud(self._ext)
+        bg_color = 0xE6181C22
         try:
             ra = getattr(ui, "Alignment", None)
             lt = getattr(ra, "LEFT_TOP", None) if ra is not None else None
-            with vw.get_frame(_FRAME_SLOT):
-                root = ui.ZStack(alignment=lt) if lt is not None else ui.ZStack()
-                self._root = root
-                with root:
-                    with ui.VStack():
-                        ui.Spacer(height=_TOP_SPACER_H)
-                        with ui.HStack():
-                            with ui.Frame(
-                                width=_PANEL_W,
-                                style={
-                                    "border_width": 1,
-                                    "border_color": 0xFF5A6A80,
-                                    "border_radius": 4,
-                                    "padding": _PANEL_PAD,
-                                },
-                            ):
-                                with ui.ZStack():
-                                    ui.Rectangle(style={"background_color": 0xE6181C22})
-                                    with ui.ScrollingFrame(
-                                        height=_MAX_SCROLL_H,
-                                        style={"ScrollingFrame": {"padding": 2, "margin": 0}},
-                                    ):
-                                        with ui.VStack(spacing=0):
-                                            build_ebs_control_panel_content(self._ext, compact=True)
-                            ui.Spacer()
-                        ui.Spacer()
+            with mount.get_frame(slot):
+                outer = ui.ZStack(alignment=lt) if lt is not None else ui.ZStack()
+                self._root = outer
+                with outer:
+                    if widget_split:
+                        with ui.HStack(spacing=0):
+                            self._build_panel_column(ui, bg_color, build_ebs_control_panel_content)
+                            ui.Spacer(width=ui.Fraction(0.5))
+                    else:
+                        self._build_panel_column(ui, bg_color, build_ebs_control_panel_content)
+            try:
+                self._ext._tbs_ebs_hud_mounted = True
+            except Exception:
+                pass
         except Exception as exc:
             print(f"{_PRINT_PREFIX} mount failed: {exc}", flush=True)
 
+    def _build_panel_column(self, ui: Any, bg_color: int, build_fn: Any) -> None:
+        with ui.VStack(width=ui.Fraction(0.5)):
+            ui.Spacer(height=_TOP_SPACER_H)
+            with ui.HStack():
+                with ui.Frame(
+                    width=_PANEL_W,
+                    style={
+                        "border_width": 1,
+                        "border_color": 0xFF5A6A80,
+                        "border_radius": 4,
+                        "padding": _PANEL_PAD,
+                    },
+                ):
+                    with ui.ZStack():
+                        ui.Rectangle(style={"background_color": bg_color})
+                        with ui.ScrollingFrame(
+                            height=_MAX_SCROLL_H,
+                            style={"ScrollingFrame": {"padding": 2, "margin": 0}},
+                        ):
+                            with ui.VStack(spacing=0):
+                                build_fn(self._ext, compact=True)
+                ui.Spacer()
+            ui.Spacer()
+
 
 def attach_tbs_viewport_control_hud(ext: Any) -> TbsViewportControlHud:
-    """확장에 Viewport EBS HUD 를 붙이고 즉시 sync 를 예약한다."""
+    """확장에 Viewport EBS HUD 를 붙인다. layout-first widget 분할 시 READY 까지 mount 를 미룬다."""
     hud = TbsViewportControlHud(ext)
     try:
         ext._tbs_viewport_control_hud = hud
+        ext._tbs_ebs_hud_mounted = False
     except Exception:
         pass
-    hud.sync_layers()
+    defer = False
+    try:
+        from .sim_control_defaults import START_WITH_DUAL_SCREEN
+        from .sim_multi_view_widget import sim_viewport_split_widget_enabled
+
+        defer = bool(START_WITH_DUAL_SCREEN) and sim_viewport_split_widget_enabled()
+    except Exception:
+        defer = False
+    if not defer:
+        hud.sync_layers()
     return hud
 
 

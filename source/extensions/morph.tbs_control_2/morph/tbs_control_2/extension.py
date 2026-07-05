@@ -411,7 +411,10 @@ class Extension(omni.ext.IExt):
             try:
                 hud = getattr(self, "_tbs_viewport_control_hud", None)
                 if hud is not None and hasattr(hud, "sync_layers"):
-                    hud.sync_layers(delay_frames=12)
+                    from .sim_multi_view import startup_dual_orchestration_active
+
+                    if not startup_dual_orchestration_active(self):
+                        hud.sync_layers(delay_frames=12)
             except Exception:
                 pass
 

@@ -727,6 +727,15 @@ def _refresh_aux_viewport_resolution(
             except Exception:
                 sn = 2
         if sn > 1:
+            try:
+                from .sim_multi_view_widget import is_split_widget_layout_active, sync_split_widget_fill_frame, sync_split_widget_aux_render
+
+                if ext is not None and is_split_widget_layout_active(ext):
+                    sync_split_widget_fill_frame(ext, sn)
+                    sync_split_widget_aux_render(ext)
+                    return
+            except Exception:
+                pass
             refresh_split_viewport_resolution_from_grid(
                 wn, sn, ext=ext, force_window_rect=not bool(
                     getattr(ext, "_tbs_split_used_dock_layout", False)

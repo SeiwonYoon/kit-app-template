@@ -76,6 +76,19 @@ START_WITH_DUAL_SCREEN: bool = True
 # 뷰포트 분할 UI·적용 상한 (1 또는 2만 사용).
 MAX_VIEWPORT_SPLIT_COUNT: int = 2
 
+# True: ViewportWidget 2분할 host (독립 usd_context·stage).
+# False: Dock + create_viewport_window (TBS_SimSplit_*). TBS_SIM_VIEWPORT_WIDGET_SPLIT=0 도 False.
+USE_VIEWPORT_WIDGET_SPLIT: bool = True
+
+# RenderProduct 생성 원인 조사 (증상 수정 아님 — 관측·실험 전용).
+# True → [TBS/rp-invest] / [TBS/rp-timeline] 상세 로그.
+VIEWPORT_RP_DIAG_ENABLED: bool = True
+# True → aux Context + master_2 로드 후 독립 ui.Window 에 ViewportWidget 1개 생성 (CASE A/B).
+# 근본 원인 확정 후 기본 off — orphan Widget·깜빡임 유발.
+VIEWPORT_RP_ISOLATED_WINDOW_TEST: bool = False
+# Widget 생성 직후 RP/Hydra 프레임별 타임라인 관측 프레임 수.
+VIEWPORT_RP_TIMELINE_FRAMES: int = 12
+
 # 2분할 시 Viewport·보조 창 사용자 리사이즈 차단(기본 on).
 # Dock 50:50·Console/Content 레이아웃 유지. 분할선 드래그는 투명 오버레이가 입력을 선점(복구·되돌림 없음).
 # 끄려면 False 또는 TBS_SIM_VIEWPORT_SPLIT_LOCK_RESIZE=0
@@ -96,7 +109,7 @@ SIM_PRERUN_CONSOLE_LOG: bool = False
 # 프리런 완료 시 ``data/sim_prerun/prerun_screen{N}_*.json`` 파일 저장 여부.
 # False → 메모리(``_sim_prerun_export_json_by_screen``)·재생용 export 문서만 유지, 디스크에는 쓰지 않음.
 # True  → 화면별 JSON 파일 생성(기존 동작).
-SIM_PRERUN_EXPORT_JSON: bool = True
+SIM_PRERUN_EXPORT_JSON: bool = False
 
 # 막대그래프 "미리보기"(전체 막대 노출) 체크박스의 앱 시작 시 기본값.
 # True  → 시작부터 미리보기 ON(막대 전체가 보이고 진행 마스크 숨김).
@@ -110,6 +123,10 @@ __all__ = [
     "SHOW_VIEWPORT_EBS_CONTROL_HUD",
     "START_WITH_DUAL_SCREEN",
     "MAX_VIEWPORT_SPLIT_COUNT",
+    "USE_VIEWPORT_WIDGET_SPLIT",
+    "VIEWPORT_RP_DIAG_ENABLED",
+    "VIEWPORT_RP_ISOLATED_WINDOW_TEST",
+    "VIEWPORT_RP_TIMELINE_FRAMES",
     "LOCK_VIEWPORT_SPLIT_USER_RESIZE",
     "default_viewport_split_count",
     "SIM_PRERUN_CONSOLE_LOG",
