@@ -32,6 +32,8 @@ def _on_app_window_resize(ext: Any, _event: Any) -> None:
         sn = int(getattr(ext, "_sim_viewport_split_count", 1) or 1)
         smv.set_viewport_fill_frame_for_split_count(sn, True)
         apply_viewport_dock_tab_bars_hidden()
+        if sn >= 2:
+            smv.apply_viewport_split_tab_chrome(sn)
     except Exception:
         pass
 

@@ -260,6 +260,7 @@ async def _deferred_apply_streaming_viewport_polish(ext: Any) -> None:
         sn = int(getattr(ext, "_sim_viewport_split_count", 1) or 1)
         smv.set_viewport_fill_frame_for_split_count(sn, True)
         smv.schedule_split_layout_refresh_for_chrome_change(ext, True)
+        smv.apply_viewport_split_tab_chrome(sn)
         apply_viewport_dock_tab_bars_hidden()
     except Exception:
         pass

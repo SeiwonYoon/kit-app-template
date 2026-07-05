@@ -372,6 +372,329 @@ def _aux_windows_dock_plausible(n: int) -> bool:
     return True
 
 
+def viewport_split_user_resize_locked() -> bool:
+    """2분할 타일에 사용자 드래그 리사이즈 잠금 on/off."""
+    try:
+        from .sim_control_defaults import LOCK_VIEWPORT_SPLIT_USER_RESIZE
+
+        if not bool(LOCK_VIEWPORT_SPLIT_USER_RESIZE):
+            return False
+    except Exception:
+        pass
+    try:
+        v = str(os.environ.get("TBS_SIM_VIEWPORT_SPLIT_LOCK_RESIZE", "") or "").strip().lower()
+    except Exception:
+        return True
+    if v in ("0", "false", "no", "off", "disable", "disabled"):
+        return False
+    return True
+
+
+def _viewport_split_lock_window_flags() -> int:
+    """Dock 레이아웃 유지 — NO_DOCKING/NO_TITLE_BAR 는 Console·Content 레이아웃을 깨뜨림."""
+    flags = 0
+    for name in ("WINDOW_FLAGS_NO_RESIZE", "WINDOW_FLAGS_NO_MOVE"):
+        bit = getattr(ui, name, None)
+        if bit is not None:
+            flags |= int(bit)
+    return flags
+
+
+def _apply_viewport_split_tile_lock_flags(wname: str) -> None:
+    """화면1·2 — floating 리사이즈·이동만 제한(Dock 50:50 레이아웃은 그대로)."""
+    if not viewport_split_user_resize_locked():
+        return
+    wn = str(wname or "").strip()
+    if not wn:
+        return
+    try:
+        wui = ui.Workspace.get_window(wn)
+        if wui is None:
+            return
+        try:
+            wui.flags = int(getattr(wui, "flags", 0) or 0) | _viewport_split_lock_window_flags()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _split_viewport_tile_names(n: int) -> List[str]:
+    sn = channel_count_for_split(int(n))
+    if sn <= 1:
+        return []
+    return ["Viewport"] + [_split_window_name(ti) for ti in range(1, sn)]
+
+
+def apply_viewport_split_tab_chrome(n: int) -> None:
+    """화면1(Viewport)·화면2+ Dock 탭 숨김 — Dock 레이아웃 유지."""
+    try:
+        from .kit_chrome_visibility import apply_viewport_dock_tab_bars_hidden
+
+        apply_viewport_dock_tab_bars_hidden()
+    except Exception:
+        pass
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        sn = 0
+    names = _split_viewport_tile_names(sn) if sn >= 2 else ["Viewport"]
+    for wn in names:
+        try:
+            wui = ui.Workspace.get_window(str(wn))
+            if wui is None:
+                continue
+            if str(wn) != "Viewport":
+                try:
+                    wui.title = str(wn)
+                except Exception:
+                    pass
+            try:
+                wui.noTabBar = True
+            except Exception:
+                pass
+            for attr in ("dock_tab_bar_enabled", "dock_tab_bar_visible"):
+                try:
+                    setattr(wui, attr, False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+_SPLITTER_GUARD_WIN_TITLE = "TBS_SimSplit_SplitterGuard"
+_SPLITTER_GUARD_HIT_PX = 10
+
+
+def _splitter_guard_window_flags() -> int:
+    flags = 0
+    for name in (
+        "WINDOW_FLAGS_NO_TITLE_BAR",
+        "WINDOW_FLAGS_NO_SCROLLBAR",
+        "WINDOW_FLAGS_NO_DOCKING",
+        "WINDOW_FLAGS_NO_COLLAPSE",
+        "WINDOW_FLAGS_NO_BACKGROUND",
+        "WINDOW_FLAGS_NO_MOVE",
+        "WINDOW_FLAGS_NO_RESIZE",
+    ):
+        bit = getattr(ui, name, None)
+        if bit is not None:
+            flags |= int(bit)
+    return flags
+
+
+def _consume_splitter_guard_mouse(*_a: Any, **_k: Any) -> bool:
+    """Dock 분할선 드래그가 ImGui 로 내려가지 않도록 이벤트를 삼킨다."""
+    return True
+
+
+def _wire_splitter_guard_mouse_targets(*targets: Any) -> None:
+    for target in targets:
+        if target is None:
+            continue
+        for fn_name in ("set_mouse_pressed_fn", "set_mouse_released_fn"):
+            fn = getattr(target, fn_name, None)
+            if callable(fn):
+                try:
+                    fn(_consume_splitter_guard_mouse)
+                except Exception:
+                    pass
+
+
+def _workspace_window_rect(wname: str) -> Optional[Tuple[float, float, float, float]]:
+    try:
+        w = ui.Workspace.get_window(str(wname))
+    except Exception:
+        w = None
+    if w is None:
+        return None
+    try:
+        if not bool(getattr(w, "visible", True)):
+            return None
+    except Exception:
+        pass
+    try:
+        x = float(getattr(w, "position_x", 0.0) or 0.0)
+        y = float(getattr(w, "position_y", 0.0) or 0.0)
+        ww = float(getattr(w, "width", 0.0) or 0.0)
+        wh = float(getattr(w, "height", 0.0) or 0.0)
+    except Exception:
+        return None
+    if ww < 8.0 or wh < 8.0:
+        return None
+    return (x, y, ww, wh)
+
+
+def _compute_viewport_split_splitter_rect(n: int) -> Optional[Tuple[float, float, float, float]]:
+    """Viewport ↔ 보조 타일 사이 Dock 분할선 히트 영역 (x, y, w, h)."""
+    if int(n) < 2:
+        return None
+    if not bool(sim_viewport_split_dock_enabled()):
+        return None
+    left = _workspace_window_rect("Viewport")
+    right = _workspace_window_rect(_split_window_name(1))
+    if left is None or right is None:
+        return None
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    gap_l = lx + lw
+    gap_r = rx
+    if gap_r + 1.0 < gap_l:
+        return None
+    mid = (gap_l + gap_r) * 0.5
+    hit = float(_SPLITTER_GUARD_HIT_PX)
+    gw = max(hit, gap_r - gap_l + hit)
+    gx = mid - gw * 0.5
+    gy = min(ly, ry)
+    gh = max(lh, rh)
+    return (gx, gy, gw, gh)
+
+
+def _apply_splitter_guard_geometry(ext: Any, rect: Tuple[float, float, float, float]) -> None:
+    gx, gy, gw, gh = rect
+    win = getattr(ext, "_tbs_split_splitter_guard_win", None)
+    if win is None:
+        return
+    for target in (win, ui.Workspace.get_window(_SPLITTER_GUARD_WIN_TITLE)):
+        if target is None:
+            continue
+        for attr, val in (
+            ("position_x", gx),
+            ("position_y", gy),
+            ("width", gw),
+            ("height", gh),
+            ("visible", True),
+        ):
+            try:
+                setattr(target, attr, val)
+            except Exception:
+                pass
+    try:
+        top_modal = getattr(win, "set_top_modal", None)
+        if callable(top_modal):
+            top_modal()
+    except Exception:
+        pass
+
+
+def _ensure_splitter_guard_window(ext: Any) -> Any:
+    win = getattr(ext, "_tbs_split_splitter_guard_win", None)
+    if win is not None:
+        return win
+    try:
+        win = ui.Window(
+            _SPLITTER_GUARD_WIN_TITLE,
+            width=int(_SPLITTER_GUARD_HIT_PX),
+            height=100,
+            flags=_splitter_guard_window_flags(),
+        )
+    except Exception:
+        return None
+    try:
+        ext._tbs_split_splitter_guard_win = win
+    except Exception:
+        pass
+    try:
+        with win.frame:
+            block = ui.Rectangle(style={"background_color": 0x01000000})
+        _wire_splitter_guard_mouse_targets(win.frame, block)
+    except Exception:
+        pass
+    return win
+
+
+def _hide_splitter_guard_window(ext: Any) -> None:
+    win = getattr(ext, "_tbs_split_splitter_guard_win", None)
+    for target in (win, ui.Workspace.get_window(_SPLITTER_GUARD_WIN_TITLE)):
+        if target is None:
+            continue
+        try:
+            target.visible = False
+        except Exception:
+            pass
+
+
+def _tick_viewport_split_splitter_guard(ext: Any) -> None:
+    if not viewport_split_user_resize_locked():
+        _hide_splitter_guard_window(ext)
+        return
+    try:
+        n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+    except Exception:
+        n = 1
+    if n < 2 or not bool(getattr(ext, "_tbs_split_used_dock_layout", False)):
+        _hide_splitter_guard_window(ext)
+        return
+    rect = _compute_viewport_split_splitter_rect(n)
+    if rect is None:
+        _hide_splitter_guard_window(ext)
+        return
+    if _ensure_splitter_guard_window(ext) is None:
+        return
+    _apply_splitter_guard_geometry(ext, rect)
+
+
+def _install_viewport_split_splitter_guard(ext: Any) -> None:
+    """Dock 분할선 위 투명 창 — 드래그 입력 선점(비율 되돌림 없음)."""
+    teardown_viewport_split_resize_lock(ext)
+    if not viewport_split_user_resize_locked():
+        return
+    try:
+        n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+    except Exception:
+        return
+    if n < 2:
+        return
+    _ensure_splitter_guard_window(ext)
+    _tick_viewport_split_splitter_guard(ext)
+
+    sub_ref: List[Any] = [None]
+
+    def _on_tick(_ev: Any) -> None:
+        _tick_viewport_split_splitter_guard(ext)
+
+    try:
+        sub_ref[0] = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
+            _on_tick,
+            name="morph.tbs_control_2.split_splitter_guard",
+        )
+        ext._tbs_split_splitter_guard_sub = sub_ref[0]
+    except Exception:
+        pass
+
+
+def apply_viewport_split_user_resize_lock(ext: Any) -> None:
+    """Dock 50:50 유지 — floating 리사이즈·이동 제한 + 분할선 드래그 입력 차단."""
+    if not viewport_split_user_resize_locked():
+        teardown_viewport_split_resize_lock(ext)
+        return
+    try:
+        n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
+    except Exception:
+        return
+    if n < 2:
+        teardown_viewport_split_resize_lock(ext)
+        return
+    for nm in _split_viewport_tile_names(n):
+        _apply_viewport_split_tile_lock_flags(nm)
+    _install_viewport_split_splitter_guard(ext)
+
+
+def teardown_viewport_split_resize_lock(ext: Any) -> None:
+    """분할선 가드 구독·창 정리."""
+    sub = getattr(ext, "_tbs_split_splitter_guard_sub", None)
+    try:
+        ext._tbs_split_splitter_guard_sub = None
+    except Exception:
+        pass
+    if sub is not None:
+        try:
+            sub.unsubscribe()
+        except Exception:
+            pass
+    _hide_splitter_guard_window(ext)
+
+
 def _apply_aux_window_chrome_flags(wname: str) -> None:
     """보조 타일 — Workspace 탭 제목 표시(스크롤바만 끔). 타이틀바 제거는 조작·제목 문제를 유발."""
     try:
@@ -923,6 +1246,8 @@ def reapply_split_layout_sync(ext: Any, n: int) -> None:
     except Exception:
         pass
     _bring_kit_chrome_visible(ext)
+    if sn >= 2:
+        apply_viewport_split_tab_chrome(sn)
 
 
 async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int) -> None:
@@ -950,6 +1275,10 @@ async def reapply_split_layout_after_hydrate_async(ext: Any, token: int, n: int)
     except Exception:
         pass
     _bring_kit_chrome_visible(ext)
+    if n >= 2:
+        apply_viewport_split_tab_chrome(n)
+        if viewport_split_user_resize_locked():
+            apply_viewport_split_user_resize_lock(ext)
 
 
 def set_viewport_fill_frame_for_split_count(split_n: int, fill: bool) -> None:
@@ -1059,6 +1388,7 @@ async def _apply_split_dock_layout(
         from .kit_chrome_visibility import apply_viewport_dock_tab_bars_hidden
 
         apply_viewport_dock_tab_bars_hidden()
+        apply_viewport_split_tab_chrome(n)
     except Exception:
         pass
     return True
@@ -1258,6 +1588,9 @@ async def _finish_startup_dual_orchestration(ext: Any) -> None:
         for ti in range(sn):
             nm = "Viewport" if ti == 0 else _split_window_name(ti)
             _sync_viewport_resolution_from_workspace_window(nm)
+        apply_viewport_split_tab_chrome(sn)
+        if viewport_split_user_resize_locked():
+            apply_viewport_split_user_resize_lock(ext)
 
 
 def _dual_path_split_defer_skip_shell(ext: Any) -> bool:
@@ -2382,6 +2715,7 @@ def _destroy_stale_split_workspace_window(win_name: str) -> None:
 
 def teardown_sim_multi_viewports(ext: Any, *, skip_deferred_restore: bool = False) -> None:
     """분할 뷰·보조 USD 컨텍스트를 정리하고 기본 Viewport 를 복원한다."""
+    teardown_viewport_split_resize_lock(ext)
     _cancel_pending_split_viewport_restore(ext)
     _clear_viewport_layout_sync_caches()
     _cancel_split_aux_navigation_hold(ext)
@@ -4507,6 +4841,11 @@ async def _finish_split_layout_after_tiles(
     except Exception:
         pass
 
+    if n >= 2:
+        apply_viewport_split_tab_chrome(n)
+        if viewport_split_user_resize_locked():
+            apply_viewport_split_user_resize_lock(ext)
+
 
 async def _shrink_split_async(ext: Any, n: int, prev_n: int, token: int) -> None:
     """분할 수 축소(예: 3→2) — 남는 보조 타일은 유지해 재빌드·조작 리셋을 피한다."""
@@ -4938,6 +5277,7 @@ def _apply_sim_viewport_split_layout_impl(ext: Any, n: int) -> None:
 
 def apply_sim_viewport_split_layout(ext: Any, split_n: int) -> None:
     """분할 수 변경 시: 다음 업데이트 이후 레이아웃 적용(경합 방지)."""
+    teardown_viewport_split_resize_lock(ext)
     n = channel_count_for_split(split_n)
     # ``_sim_viewport_split_count`` 는 impl/빌드 성공 여부에 맞춰만 갱신(단일 소스).
     _cancel_pending_split_viewport_restore(ext)

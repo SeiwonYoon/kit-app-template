@@ -76,6 +76,11 @@ START_WITH_DUAL_SCREEN: bool = True
 # 뷰포트 분할 UI·적용 상한 (1 또는 2만 사용).
 MAX_VIEWPORT_SPLIT_COUNT: int = 2
 
+# 2분할 시 Viewport·보조 창 사용자 리사이즈 차단(기본 on).
+# Dock 50:50·Console/Content 레이아웃 유지. 분할선 드래그는 투명 오버레이가 입력을 선점(복구·되돌림 없음).
+# 끄려면 False 또는 TBS_SIM_VIEWPORT_SPLIT_LOCK_RESIZE=0
+LOCK_VIEWPORT_SPLIT_USER_RESIZE: bool = True
+
 
 def default_viewport_split_count() -> int:
     """앱 시작 시 ``ext._sim_viewport_split_count`` / HUD 분할 체크 초기값."""
@@ -100,6 +105,7 @@ __all__ = [
     "SHOW_VIEWPORT_EBS_CONTROL_HUD",
     "START_WITH_DUAL_SCREEN",
     "MAX_VIEWPORT_SPLIT_COUNT",
+    "LOCK_VIEWPORT_SPLIT_USER_RESIZE",
     "default_viewport_split_count",
     "SIM_PRERUN_CONSOLE_LOG",
     "SIM_BAR_PREVIEW_DEFAULT",

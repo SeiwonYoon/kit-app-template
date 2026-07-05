@@ -390,6 +390,10 @@ def _set_dock_tab_bar_hidden_on_window(w: Any) -> None:
                 setattr(ww, attr, False)
         except Exception:
             pass
+    try:
+        ww.noTabBar = True
+    except Exception:
+        pass
 
 
 def apply_viewport_dock_tab_bars_hidden() -> None:
