@@ -435,6 +435,18 @@ def apply_startup_checkbox_side_effects() -> None:
         schedule_top_view_after_stage_ready(delay_frames=12)
     except Exception:
         pass
+    try:
+        from .lam_viewport_top_view import warmup_camera_bindings_defaults
+
+        warmup_camera_bindings_defaults()
+    except Exception:
+        pass
+    try:
+        from .lam_traffic_light_emissive import schedule_traffic_light_emissive_after_stage_ready
+
+        schedule_traffic_light_emissive_after_stage_ready(delay_frames=16)
+    except Exception:
+        pass
 
 
 def register_toggle_listener(fn) -> None:

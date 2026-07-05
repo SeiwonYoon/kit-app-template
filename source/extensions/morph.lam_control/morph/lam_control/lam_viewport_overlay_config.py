@@ -26,8 +26,15 @@ STARTUP_CHECK_PLAY_CAMERA_FLY: bool = True  # Play 시 preset 뷰로 fly (일시
 
 # ---------------------------------------------------------------------------
 # CSV Play 시작 시 카메라 fly-to (구현: lam_play_camera_fly.py)
-# 「뷰 저장」버튼으로 콘솔에 출력된 블록을 eye_xyz / target_xyz 에 붙여넣기.
+# True(기본)=PLAY_CAMERA_PRESET 좌표 fly (현재와 동일)
+# False=PLAY_CAMERA_PRIM_PATH USD Camera prim 뷰로 fly
 # ---------------------------------------------------------------------------
+PLAY_CAMERA_USE_PRESET_COORDS: bool = True
+PLAY_CAMERA_PRIM_PATH: str = "/Camera"  # stage 트리 기준 실제 경로로 수정
+# Camera prim 모드(USE_PRESET_COORDS=False)에서는 fly 후 viewport 가 USD Camera 에 bind 됨.
+# 아래 플래그는 레거시·문서용 (동작에는 영향 없음).
+PLAY_CAMERA_BIND_VIEWPORT_TO_USD_PRIM: bool = True
+
 PLAY_CAMERA_PRESET_ENABLED: bool = True
 PLAY_CAMERA_FLY_DURATION_SEC: float = 2
 PLAY_CAMERA_FLY_POSITION_EPS_M: float = 0.05
@@ -59,8 +66,14 @@ PLAY_CAMERA_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
 
 # ---------------------------------------------------------------------------
 # Viewport 「탑뷰 보기」 — preset 뷰 고정 + 카메라 조작 잠금 (lam_viewport_top_view.py)
-# 「뷰저장」 콘솔 출력 블록을 TOP_VIEW_PRESET 에 붙여넣기 (Play preset 과 동일 형식).
+# True(기본)=TOP_VIEW_PRESET 좌표 (현재와 동일)
+# False=TOP_VIEW_CAMERA_PRIM_PATH USD Camera prim 뷰로 fly 후 고정
 # ---------------------------------------------------------------------------
+TOP_VIEW_USE_PRESET_COORDS: bool = True
+TOP_VIEW_CAMERA_PRIM_PATH: str = "/Camera"  # stage 트리 기준 실제 경로로 수정
+# Camera prim 모드(USE_PRESET_COORDS=False)에서는 fly 후 viewport 가 USD Camera 에 bind 됨.
+TOP_VIEW_BIND_VIEWPORT_TO_USD_PRIM: bool = True
+
 STARTUP_CHECK_TOP_VIEW: bool = False
 TOP_VIEW_PRESET_ENABLED: bool = True
 TOP_VIEW_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
@@ -320,6 +333,23 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
 
 
 # ---------------------------------------------------------------------------
+# 신호등 라이트 Emissive 랜덤 (구현: lam_traffic_light_emissive.py)
+# ---------------------------------------------------------------------------
+TRAFFIC_LIGHT_EMISSIVE_ENABLED: bool = True
+TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MIN_SEC: float = 30.0
+TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MAX_SEC: float = 45.0
+TRAFFIC_LIGHT_SHADER_PATHS: Tuple[str, str, str] = (
+    "/Looks/Light_Red_01/Light_Red",
+    "/Looks/Light_Green_01/Light_Green",
+    "/Looks/Light_Yellow_01/Light_Yellow",
+)
+# False(기본)=stage 로드 직후 타이머 시작 / True=CSV 재생 중에만 (정지·일시정지·종료 시 정지)
+TRAFFIC_LIGHT_EMISSIVE_ONLY_DURING_PLAYBACK: bool = False
+# 비우면 Enable Emission 속성 자동 탐색. 특정 USD만 고정할 때만 채움.
+TRAFFIC_LIGHT_EMISSIVE_ENABLE_ATTR: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Kit 시작 시 Viewport 오빗 pivot — prim 선택 없이 COI(회전 중심)만 설정
 # 카메라 eye/줌은 유지. 구현: lam_viewport_startup_focus.py
 # enabled=False 이거나 prim_path 가 비어 있으면 적용하지 않음 (기존 Kit 동작 유지).
@@ -348,6 +378,9 @@ __all__ = [
     "STARTUP_CHECK_PLAY_PRIM_HIDE",
     "STARTUP_CHECK_PLAY_CAMERA_FLY",
     "STARTUP_CHECK_TOP_VIEW",
+    "PLAY_CAMERA_USE_PRESET_COORDS",
+    "PLAY_CAMERA_PRIM_PATH",
+    "PLAY_CAMERA_BIND_VIEWPORT_TO_USD_PRIM",
     "PLAY_CAMERA_PRESET_ENABLED",
     "PLAY_CAMERA_FLY_DURATION_SEC",
     "PLAY_CAMERA_FLY_POSITION_EPS_M",
@@ -356,8 +389,17 @@ __all__ = [
     "PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC",
     "PlayCameraPresetSpec",
     "PLAY_CAMERA_PRESET",
+    "TOP_VIEW_USE_PRESET_COORDS",
+    "TOP_VIEW_CAMERA_PRIM_PATH",
+    "TOP_VIEW_BIND_VIEWPORT_TO_USD_PRIM",
     "TOP_VIEW_PRESET_ENABLED",
     "TOP_VIEW_PRESET",
+    "TRAFFIC_LIGHT_EMISSIVE_ENABLED",
+    "TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MIN_SEC",
+    "TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MAX_SEC",
+    "TRAFFIC_LIGHT_SHADER_PATHS",
+    "TRAFFIC_LIGHT_EMISSIVE_ONLY_DURING_PLAYBACK",
+    "TRAFFIC_LIGHT_EMISSIVE_ENABLE_ATTR",
     "PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET",
     "PLAY_HIDE_FADE_ENABLED",
     "PLAY_HIDE_FADE_DURATION_SEC",

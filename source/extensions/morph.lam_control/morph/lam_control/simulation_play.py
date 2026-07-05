@@ -4903,7 +4903,8 @@ class LamSimulationCsvPlayWindow:
                 height=int(row_height),
                 tooltip=(
                     "체크 후 Play: 설정 뷰로 부드럽게 이동한 뒤 prim숨김·재생. "
-                    "preset: lam_viewport_overlay_config PLAY_CAMERA_PRESET"
+                    "USE_PRESET_COORDS=True: PLAY_CAMERA_PRESET / "
+                    "False: PLAY_CAMERA_PRIM_PATH Camera prim"
                 ),
             )
             ui.Spacer()
@@ -4928,8 +4929,10 @@ class LamSimulationCsvPlayWindow:
                 width=20,
                 height=int(row_height),
                 tooltip=(
-                    "체크 ON: TOP_VIEW_PRESET 뷰로 이동 후 pan/zoom/tumble 등 카메라 조작 잠금. "
-                    "체크 OFF: 조작만 해제(시점 유지). preset: lam_viewport_overlay_config TOP_VIEW_PRESET"
+                    "체크 ON: 탑뷰 시점으로 이동 후 pan/zoom/tumble 등 카메라 조작 잠금. "
+                    "USE_PRESET_COORDS=True: TOP_VIEW_PRESET / "
+                    "False: TOP_VIEW_CAMERA_PRIM_PATH Camera prim. "
+                    "체크 OFF(camera 모드): Perspective 복귀"
                 ),
             )
             ui.Spacer()
@@ -6106,6 +6109,12 @@ class LamSimulationCsvPlayWindow:
             process_only=process_only,
         )
         request_pause_csv_playback(self._registry, self._scheduler)
+        try:
+            from .lam_traffic_light_emissive import on_csv_playback_paused_or_stopped
+
+            on_csv_playback_paused_or_stopped()
+        except Exception:
+            pass
         clear_csv_play_timeline_highlight()
         json_note = " · JSON 처음부터" if ck.paused_in_json else ""
         self._log(
@@ -6130,6 +6139,12 @@ class LamSimulationCsvPlayWindow:
         if self._csv_play_thread_alive():
             request_stop_csv_playback(self._registry, self._scheduler)
             self._schedule_reap_csv_play_thread_after_stop(timeout=45.0)
+        try:
+            from .lam_traffic_light_emissive import on_csv_playback_paused_or_stopped
+
+            on_csv_playback_paused_or_stopped()
+        except Exception:
+            pass
         self._log(
             "정지(초기화) 시작 — Z/팔 TBS→0, FOUP 75 show, "
             "나머지 슬롯·팔 wafer hide (백그라운드)"
@@ -6148,6 +6163,15 @@ class LamSimulationCsvPlayWindow:
                 except Exception as exc:
                     print(
                         f"{_PRINT_PREFIX} play prim hide (stop_reset): {exc}",
+                        flush=True,
+                    )
+                try:
+                    from .lam_play_camera_fly import restore_perspective_after_play_camera_mode
+
+                    restore_perspective_after_play_camera_mode()
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} perspective restore (stop_reset): {exc}",
                         flush=True,
                     )
                 self._log(
@@ -6356,6 +6380,13 @@ class LamSimulationCsvPlayWindow:
                         )
                         return
 
+                try:
+                    from .lam_traffic_light_emissive import on_csv_playback_started
+
+                    on_csv_playback_started()
+                except Exception:
+                    pass
+
                 if csv_playback_stop_requested():
                     msg = "Play 취소 — 중지 플래그가 남아 있습니다. [재생]을 다시 눌러 주세요."
                     print(f"{_PRINT_PREFIX} {msg}", flush=True)
@@ -6379,6 +6410,12 @@ class LamSimulationCsvPlayWindow:
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} CSV Play 오류: {exc}", flush=True)
             finally:
+                try:
+                    from .lam_traffic_light_emissive import on_csv_playback_paused_or_stopped
+
+                    on_csv_playback_paused_or_stopped()
+                except Exception:
+                    pass
                 set_csv_play_live_speed_ui_reader(None)
                 set_csv_play_progress_ui_callback(None)
                 set_csv_play_timeline_highlight_callback(None)

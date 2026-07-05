@@ -78,6 +78,12 @@ class LamControlExtension(omni.ext.IExt):
 
     def on_shutdown(self) -> None:
         print(f"{_PRINT_PREFIX} on_shutdown", flush=True)
+        try:
+            from .lam_traffic_light_emissive import shutdown_traffic_light_emissive
+
+            shutdown_traffic_light_emissive()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} traffic light shutdown: {exc}", flush=True)
         clear_session()
         try:
             if self._window is not None:
