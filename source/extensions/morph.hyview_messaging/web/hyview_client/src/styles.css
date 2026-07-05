@@ -1,0 +1,152 @@
+:root {
+  font-family: system-ui, Segoe UI, sans-serif;
+  color: #e8e8e8;
+  background: #1a1a1f;
+}
+
+body {
+  margin: 0;
+}
+
+code {
+  background: #2a2a35;
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+}
+
+.app-layout {
+  padding: 1rem 1.25rem 2rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 960px) {
+  .main-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.stream-panel,
+.ebs-panel {
+  background: #24242e;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.stream-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.stream-video {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 4px;
+}
+
+.pill {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  background: #444;
+}
+
+.pill-connected {
+  background: #1b6b3a;
+}
+
+.pill-connecting {
+  background: #6b5a1b;
+}
+
+.pill-error {
+  background: #6b1b1b;
+}
+
+.error {
+  color: #ff8a8a;
+}
+
+.case-card {
+  border: 1px solid #3a3a48;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.case-card h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.4rem;
+}
+
+.sim-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 1rem 0;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid #555;
+  background: #333;
+  color: inherit;
+  padding: 0.35rem 0.75rem;
+  border-radius: 4px;
+}
+
+button.primary {
+  background: #2d5a8e;
+  border-color: #3d7ac0;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.hint {
+  font-size: 0.85rem;
+  color: #aaa;
+}
+
+.result-box pre,
+.log-panel pre {
+  background: #111;
+  padding: 0.75rem;
+  border-radius: 4px;
+  overflow: auto;
+  max-height: 240px;
+  font-size: 0.8rem;
+}
+
+.log-panel {
+  margin-top: 1rem;
+}
+
+input,
+select {
+  background: #1a1a22;
+  color: inherit;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 0.25rem 0.4rem;
+}

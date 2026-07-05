@@ -8650,6 +8650,11 @@ def _finalize_prerun_ui_assets(
         except Exception:
             seek_by[str(si)] = []
         try:
+            try:
+                _sp_m = getattr(ext, "_sim_speed_model", None)
+                _sim_speed = max(0.1, float(_sp_m.get_value_as_float())) if _sp_m is not None else 1.0
+            except Exception:
+                _sim_speed = 1.0
             export_doc = build_prerun_export_document(
                 screen=si,
                 result=res,
@@ -8657,6 +8662,7 @@ def _finalize_prerun_ui_assets(
                 timetable_metas=metas,
                 seek_snapshots_count=len(seek_by.get(str(si)) or []),
                 sim_snapshot=snap,
+                sim_speed=_sim_speed,
             )
             export_by[str(si)] = export_doc
             try:

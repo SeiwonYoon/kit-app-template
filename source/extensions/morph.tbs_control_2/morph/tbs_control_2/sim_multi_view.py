@@ -338,6 +338,40 @@ def _aux_windows_actually_docked(n: int) -> bool:
     return True
 
 
+def _aux_windows_dock_plausible(n: int) -> bool:
+    """
+    Kit 이 ``docked`` 플래그를 늦게 갱신할 때 — 보조 창이 존재하고 최소 크기면 Dock 성공으로 간주.
+    """
+    if _aux_windows_actually_docked(n):
+        return True
+    try:
+        sn = channel_count_for_split(int(n))
+    except Exception:
+        return False
+    if sn <= 1:
+        return False
+    for ti in range(1, sn):
+        try:
+            w = ui.Workspace.get_window(_split_window_name(ti))
+        except Exception:
+            return False
+        if w is None:
+            return False
+        try:
+            if not bool(getattr(w, "visible", True)):
+                return False
+        except Exception:
+            pass
+        try:
+            ww = int(getattr(w, "width", 0) or 0)
+            wh = int(getattr(w, "height", 0) or 0)
+        except Exception:
+            return False
+        if ww < _VP_TILE_MIN_PX or wh < _VP_TILE_MIN_PX:
+            return False
+    return True
+
+
 def _apply_aux_window_chrome_flags(wname: str) -> None:
     """보조 타일 — Workspace 탭 제목 표시(스크롤바만 끔). 타이틀바 제거는 조작·제목 문제를 유발."""
     try:
@@ -943,7 +977,9 @@ def set_viewport_fill_frame_for_split_count(split_n: int, fill: bool) -> None:
             pass
 
 
-async def _apply_split_dock_layout(ext: Any, token: int, n: int) -> bool:
+async def _apply_split_dock_layout(
+    ext: Any, token: int, n: int, *, warn_on_dock_miss: bool = True
+) -> bool:
     """보조 뷰를 메인 ``Viewport`` Dock 트리 안으로 넣는다. 실패 시 False(좌표 격자로 폴백)."""
     if not sim_viewport_split_dock_enabled():
         return False
@@ -992,17 +1028,18 @@ async def _apply_split_dock_layout(ext: Any, token: int, n: int) -> bool:
             if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
                 return False
             await kit_app.get_app().next_update_async()
-    if not await _wait_aux_windows_docked(ext, token, aux_names, max_frames=48):
-        if not _aux_windows_actually_docked(n):
-            try:
-                print(
-                    "[TBS multi-sim] Dock: docked 플래그 미확인 — dock_in 미반영, 재시도 필요",
-                    flush=True,
-                )
-            except Exception:
-                pass
+    if not await _wait_aux_windows_docked(ext, token, aux_names, max_frames=72):
+        if not _aux_windows_dock_plausible(n):
+            if warn_on_dock_miss:
+                try:
+                    print(
+                        "[TBS multi-sim] Dock: docked 플래그 미확인 — 격자 폴백 또는 재시도",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
             return False
-    if not _aux_windows_actually_docked(n):
+    if not _aux_windows_dock_plausible(n):
         return False
     for nm in aux_names:
         hidden = False
@@ -1018,17 +1055,26 @@ async def _apply_split_dock_layout(ext: Any, token: int, n: int) -> bool:
         print("[TBS multi-sim] Viewport Dock 분할 적용 완료 (dock_in)", flush=True)
     except Exception:
         pass
+    try:
+        from .kit_chrome_visibility import apply_viewport_dock_tab_bars_hidden
+
+        apply_viewport_dock_tab_bars_hidden()
+    except Exception:
+        pass
     return True
 
 
 async def _retry_split_dock_layout(ext: Any, token: int, n: int, *, attempts: int = 4) -> bool:
     """``dock_in`` 이 floating 좌표 때문에 실패할 때 undock 후 재시도."""
-    for attempt in range(max(1, int(attempts))):
+    last = max(1, int(attempts))
+    for attempt in range(last):
         if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != token:
             return False
-        if await _apply_split_dock_layout(ext, token, n):
+        if await _apply_split_dock_layout(
+            ext, token, n, warn_on_dock_miss=(attempt >= last - 1)
+        ):
             return True
-        if attempt + 1 < attempts:
+        if attempt + 1 < last:
             for ti in range(1, n):
                 _undock_workspace_window(_split_window_name(ti))
             for _ in range(4):
@@ -3001,6 +3047,13 @@ def schedule_split_layout_refresh_for_chrome_change(ext: Any, menus_hidden: bool
                 return
         try:
             relayout_split_views_to_viewport(ext, _menus_hidden=menus_hidden)
+        except Exception:
+            pass
+        try:
+            from .kit_chrome_visibility import apply_viewport_dock_tab_bars_hidden, is_streaming_deployment
+
+            if is_streaming_deployment():
+                apply_viewport_dock_tab_bars_hidden()
         except Exception:
             pass
 

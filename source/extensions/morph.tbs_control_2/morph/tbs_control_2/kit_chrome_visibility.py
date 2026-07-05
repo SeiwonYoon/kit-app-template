@@ -342,3 +342,71 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool, *, schedule_layout_refresh: 
 
 def is_kit_chrome_hidden(ext: Any) -> bool:
     return bool(getattr(ext, "_kit_chrome_hide_active", False))
+
+
+def is_streaming_deployment() -> bool:
+    """``morph.editor_streaming`` 등 livestream 배포 Kit 인지."""
+    try:
+        settings = carb.settings.get_settings()
+        if settings and bool(settings.get("/app/morph/streamingUi")):
+            return True
+    except Exception:
+        pass
+    try:
+        import omni.kit.app as kit_app
+
+        em = kit_app.get_app().get_extension_manager()
+        if em is not None and em.is_extension_enabled("omni.kit.livestream.app"):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_streaming_window_resize_enabled() -> None:
+    """legacy — windowed streaming kit 은 livestream.app 을 로드하지 않음."""
+    pass
+
+
+def _is_viewport_or_split_window(label: str) -> bool:
+    if not label:
+        return False
+    if label.strip() == "Viewport":
+        return True
+    stripped = label.strip()
+    for pref in _PROTECTED_NAME_PREFIXES:
+        if stripped.startswith(pref):
+            return True
+    return False
+
+
+def _set_dock_tab_bar_hidden_on_window(w: Any) -> None:
+    ww = _as_window(w)
+    if ww is None:
+        return
+    for attr in ("dock_tab_bar_enabled", "dock_tab_bar_visible"):
+        try:
+            if hasattr(ww, attr):
+                setattr(ww, attr, False)
+        except Exception:
+            pass
+
+
+def apply_viewport_dock_tab_bars_hidden() -> None:
+    """Viewport·TBS_SimSplit_* 의 Dock 탭 바(뷰포트 1/2·화면 탭) 숨김."""
+    seen: Set[str] = set()
+    for w in _iter_workspace_windows():
+        label = _window_label(w)
+        if not _is_viewport_or_split_window(label):
+            continue
+        if label in seen:
+            continue
+        seen.add(label)
+        _set_dock_tab_bar_hidden_on_window(w)
+    for name in ("Viewport", "TBS_SimSplit_1", "TBS_SimSplit_2", "TBS_SimSplit_3"):
+        try:
+            w = ui.Workspace.get_window(name)
+            if w is not None:
+                _set_dock_tab_bar_hidden_on_window(w)
+        except Exception:
+            pass

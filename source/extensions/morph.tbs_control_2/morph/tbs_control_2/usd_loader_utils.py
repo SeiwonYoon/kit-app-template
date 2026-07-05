@@ -12,7 +12,7 @@ usd_loader_utils.py — USD 로드 관련 유틸 (경로 검증, resource 폴더
 - resource 폴더 위치가 바뀌면: get_resource_folder_path()
 - 콤보에 표시할 파일 필터: get_resource_usd_list() 내부
 
-사용처: kit_remote_http_bridge (/api/resources)
+사용처: tbs_usd_window (리소스 목록)
 
 【유지보수 시나리오】
 1) 특정 USD/USDA/USDC가 로드 버튼에서 거부될 때

@@ -1,0 +1,15 @@
+[package]
+title = "HyView Messaging Extension"
+version = "0.1.0"
+description = "HyView livestream T2V/V2T 메시징 — morph.tbs_control_2 시뮬 API 브리지."
+category = "Messaging"
+keywords = ["kit", "messaging", "hyview", "tbs", "livestream"]
+repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
+
+[dependencies]
+"omni.kit.livestream.messaging" = {}
+"omni.kit.livestream.webrtc" = {}
+"morph.tbs_control_2" = {}
+
+[[python.module]]
+name = "morph.hyview_messaging"

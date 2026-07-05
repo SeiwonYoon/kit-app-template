@@ -1,0 +1,10 @@
+{
+  "source": "local",
+  "stream": {},
+  "gfn": {},
+  "local": {
+    "server": "127.0.0.1",
+    "signalingPort": 49100,
+    "mediaPort": null
+  }
+}

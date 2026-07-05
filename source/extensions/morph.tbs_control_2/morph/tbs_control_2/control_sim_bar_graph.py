@@ -151,7 +151,7 @@ def get_bar_state_colors_kit() -> Dict[str, int]:
 # 모듈 import 시 1회 로드
 get_bar_state_colors_hex()
 
-PRERUN_EXPORT_VERSION = 1
+PRERUN_EXPORT_VERSION = 2
 
 
 @dataclass
@@ -1067,6 +1067,7 @@ def build_prerun_export_document(
     timetable_metas: Optional[List[TimetableRowMeta]] = None,
     seek_snapshots_count: int = 0,
     sim_snapshot: Optional[Dict[str, Any]] = None,
+    sim_speed: Optional[float] = None,
 ) -> Dict[str, Any]:
     """웹·외부 연동용 프리런 통합 JSON (막대 세그먼트 + 상태별 누적 초 포함)."""
     snap = dict(sim_snapshot or {})
@@ -1077,6 +1078,10 @@ def build_prerun_export_document(
     ep_count_idx = 1 if int(ep_count_idx) >= 1 else 0
     ep_count = 3 if ep_count_idx else 2
     ebs_enable = bool(snap.get("ebs_enabled", True))
+    try:
+        speed = max(0.1, float(sim_speed if sim_speed is not None else snap.get("speed", 1.0) or 1.0))
+    except Exception:
+        speed = 1.0
     row_order = (
         normalize_bar_graph_row_order(list(bar.row_order))
         if bar.row_order
@@ -1122,11 +1127,12 @@ def build_prerun_export_document(
 
     return {
         "version": PRERUN_EXPORT_VERSION,
-        "screen": int(screen),
+        "case": max(0, int(screen) - 1),
         "sim": {
             "ep_count_idx": ep_count_idx,
             "ep_count": ep_count,
             "ebs_enable": ebs_enable,
+            "speed": round(float(speed), 4),
             "buffer_ports": list(bar.buffer_ports or bar_graph_row_order(ep_count_idx)[- (4 if ep_count_idx else 3) :]),
             "fault_ports": list(bar.fault_ports or ()),
             "final_sim_time_sec": timeline_summary["final_sim_time_sec"],
