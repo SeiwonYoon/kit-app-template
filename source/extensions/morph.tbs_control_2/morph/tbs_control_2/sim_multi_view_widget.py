@@ -240,6 +240,33 @@ def _stage_has_usd_lights(stage: Any) -> bool:
     return False
 
 
+def _stage_lux_prim_paths(stage: Any) -> List[str]:
+    """Stage 내 UsdLux 조명 prim 경로 목록."""
+    paths: List[str] = []
+    if stage is None:
+        return paths
+    try:
+        from pxr import UsdLux
+
+        light_types = frozenset(
+            {
+                "DomeLight",
+                "DistantLight",
+                "RectLight",
+                "DiskLight",
+                "SphereLight",
+                "CylinderLight",
+                "PortalLight",
+            }
+        )
+        for prim in stage.Traverse():
+            if prim.IsA(UsdLux.LightAPI) or prim.GetTypeName() in light_types:
+                paths.append(str(prim.GetPath()))
+    except Exception:
+        pass
+    return paths
+
+
 def _ensure_world_xform(stage: Any) -> None:
     try:
         from pxr import UsdGeom
@@ -250,10 +277,114 @@ def _ensure_world_xform(stage: Any) -> None:
         pass
 
 
+def _ensure_prim_ancestor_xforms(stage: Any, prim_path: str) -> None:
+    """session layer 에 조명 복제 전 상위 Xform 경로를 만든다."""
+    try:
+        from pxr import Sdf, Usd, UsdGeom
+
+        parts = [p for p in str(prim_path or "").strip("/").split("/") if p]
+        if not parts:
+            return
+        session = stage.GetSessionLayer()
+        if session is None:
+            return
+        with Usd.EditContext(stage, session):
+            cur = Sdf.Path("/")
+            for part in parts[:-1]:
+                cur = cur.AppendChild(part)
+                if not stage.GetPrimAtPath(cur).IsValid():
+                    UsdGeom.Xform.Define(stage, cur)
+    except Exception:
+        pass
+
+
+def _sync_aux_stage_lighting_from_main(aux_ctx_name: str) -> int:
+    """
+    화면1(default ctx) UsdLux 스펙을 화면2 aux session layer 로 복제.
+    generic DomeLight 대신 화면1과 동일 조명 환경을 목표로 한다.
+    """
+    aux_ctx_name = str(aux_ctx_name or "").strip()
+    if not aux_ctx_name:
+        return 0
+    try:
+        from .sim_control_defaults import VIEWPORT_AUX_LIGHTING_SYNC_FROM_MAIN
+
+        if not bool(VIEWPORT_AUX_LIGHTING_SYNC_FROM_MAIN):
+            return 0
+    except Exception:
+        pass
+
+    main_ctx = _named_usd_context("")
+    aux_ctx = _named_usd_context(aux_ctx_name)
+    if main_ctx is None or aux_ctx is None:
+        return 0
+    try:
+        main_stage = main_ctx.get_stage() if hasattr(main_ctx, "get_stage") else None
+        aux_stage = aux_ctx.get_stage() if hasattr(aux_ctx, "get_stage") else None
+    except Exception:
+        return 0
+    if main_stage is None or aux_stage is None:
+        return 0
+
+    copied = 0
+    try:
+        from pxr import Sdf, Usd, UsdUtils
+
+        main_layer = main_stage.GetRootLayer()
+        session = aux_stage.GetSessionLayer()
+        if main_layer is None or session is None:
+            return 0
+
+        stale = aux_stage.GetPrimAtPath("/World/TBS_DefaultDomeLight")
+        if stale is not None and stale.IsValid():
+            with Usd.EditContext(aux_stage, session):
+                try:
+                    aux_stage.RemovePrim(Sdf.Path("/World/TBS_DefaultDomeLight"))
+                except Exception:
+                    pass
+
+        src_paths = _stage_lux_prim_paths(main_stage)
+        with Usd.EditContext(aux_stage, session):
+            for src_path in src_paths:
+                _ensure_prim_ancestor_xforms(aux_stage, src_path)
+                dst_prim = aux_stage.GetPrimAtPath(src_path)
+                if dst_prim is not None and dst_prim.IsValid():
+                    continue
+                try:
+                    UsdUtils.CopySpec(main_layer, Sdf.Path(src_path), session, Sdf.Path(src_path))
+                    if aux_stage.GetPrimAtPath(src_path).IsValid():
+                        copied += 1
+                except Exception:
+                    pass
+    except Exception as exc:
+        try:
+            print(
+                f"[TBS multi-sim] aux 조명 동기화 실패 ctx={aux_ctx_name!r}: {exc}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return copied
+
+    if copied > 0:
+        try:
+            print(
+                f"[TBS multi-sim] aux 조명 동기화 완료 ctx={aux_ctx_name!r} "
+                f"copied={copied} paths={_stage_lux_prim_paths(aux_stage)}",
+                flush=True,
+            )
+        except Exception:
+            pass
+    return copied
+
+
 def _ensure_aux_stage_default_lighting(ctx_name: str) -> None:
-    """보조 스테이지에 조명이 없으면 DomeLight 1개 추가 (검은 실루엣 방지)."""
+    """보조 스테이지 조명 — 화면1 복제 우선, 없으면 generic DomeLight fallback."""
     ctx_name = str(ctx_name or "").strip()
     if not ctx_name:
+        return
+    synced = _sync_aux_stage_lighting_from_main(ctx_name)
+    if synced > 0:
         return
     ctx = _named_usd_context(ctx_name)
     if ctx is None:
@@ -278,7 +409,7 @@ def _ensure_aux_stage_default_lighting(ctx_name: str) -> None:
         dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
         try:
             print(
-                f"[TBS multi-sim] 보조 스테이지 기본 DomeLight 추가 ctx={ctx_name!r}",
+                f"[TBS multi-sim] 보조 스테이지 fallback DomeLight 추가 ctx={ctx_name!r}",
                 flush=True,
             )
         except Exception:
@@ -320,7 +451,7 @@ async def connect_widget_tile_main_stage(ext: Any, token: int = 0) -> bool:
     ref_api = _reference_viewport_render_api(ext, tiles)
     api = main_rec.get("api")
     if ref_api is not None and api is not None:
-        _copy_viewport_render_profile(ref_api, api, share_hydra_engine=True)
+        _copy_visual_render_profile_only(ref_api, api)
 
     main_rec["stage_connected"] = True
     _kick_viewport_widget_render(main_rec)
@@ -342,62 +473,142 @@ async def connect_widget_tile_main_stage(ext: Any, token: int = 0) -> bool:
 async def assign_widget_split_cameras(
     ext: Any, token: int, win_names: Optional[List[str]] = None
 ) -> None:
-    """Widget 분할 — 타일별 ``ViewportAPI`` 에 동일 경로 카메라(스테이지별 독립 prim)."""
+    """Widget 분할 — 타일별 camera_path 1회 설정 (스테이지별 독립 prim)."""
     if not is_split_widget_layout_active(ext):
+        return
+    if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != int(token):
         return
     names = list(win_names or [])
     if not names:
         names = ["Viewport", _tile_win_name(1)]
-    for _ in range(12):
-        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != int(token):
-            return
-        missing = False
-        for wn in names:
-            wn = str(wn)
-            api = get_split_viewport_api(ext, wn)
-            if api is None:
-                missing = True
-                continue
-            tiles = getattr(ext, "_tbs_split_widget_tiles", None)
-            rec = tiles.get(wn) if isinstance(tiles, dict) else None
-            ctx_name = ""
+    _bind_widget_split_cameras_once(ext, names)
+    _activate_tile_manipulator_only(
+        ext, str(getattr(ext, "_tbs_active_widget_tile", "") or "Viewport")
+    )
+
+
+def _bind_widget_split_cameras_once(ext: Any, win_names: List[str]) -> None:
+    """타일 stage 에 유효한 camera prim 이 있으면 api.camera_path 1회 설정."""
+    for wn in win_names:
+        wn = str(wn)
+        api = get_split_viewport_api(ext, wn)
+        if api is None:
+            continue
+        tiles = getattr(ext, "_tbs_split_widget_tiles", None)
+        rec = tiles.get(wn) if isinstance(tiles, dict) else None
+        ctx_name = ""
+        if isinstance(rec, dict):
+            ctx_name = str(rec.get("context_name") or "")
+            if not ctx_name and wn != "Viewport":
+                ctx_name = _tile_usd_context_name(int(rec.get("cell_index", 1) or 1))
+        ctx = _named_usd_context(ctx_name)
+        stage = ctx.get_stage() if ctx is not None and hasattr(ctx, "get_stage") else None
+        cam = _resolve_camera_path_for_stage(stage, _MAIN_TILE_CAMERA)
+        if cam is None:
+            continue
+        try:
+            api.camera_path = cam
             if isinstance(rec, dict):
-                ctx_name = str(rec.get("context_name") or "")
-                if not ctx_name and wn != "Viewport":
-                    ctx_name = _tile_usd_context_name(int(rec.get("cell_index", 1) or 1))
-            ctx = _named_usd_context(ctx_name)
-            stage = ctx.get_stage() if ctx is not None and hasattr(ctx, "get_stage") else None
-            cam = _resolve_camera_path_for_stage(stage, _MAIN_TILE_CAMERA)
-            if cam is None:
-                missing = True
-                continue
-            try:
-                api.camera_path = cam
-                if isinstance(rec, dict):
-                    rec["camera_path"] = str(cam)
-                    fn = getattr(api, "viewport_changed", None)
-                    if callable(fn) and stage is not None and not _api_has_render_product(api):
-                        fn(cam, stage)
-            except Exception:
-                missing = True
-        if not missing:
-            _enforce_widget_tile_manipulator_isolation(ext)
+                rec["camera_path"] = str(cam)
+        except Exception:
+            pass
+
+
+def _disable_native_viewport_navigation_permanent(ext: Any) -> None:
+    """Widget 분할 — Workspace 네이티브 Viewport manipulator·입력 영구 비활성."""
+    if not is_split_widget_layout_active(ext):
+        return
+    _disable_viewport_window_camera_bindings(ext)
+    try:
+        from .sim_multi_view import (
+            _collect_camera_manipulator_models_for_window,
+            _set_model_navigation_enabled,
+        )
+
+        for model in _collect_camera_manipulator_models_for_window("Viewport"):
+            _set_model_navigation_enabled(model, False)
+    except Exception:
+        pass
+    native_api = _get_native_viewport_api()
+    if native_api is not None and id(native_api) not in _our_widget_tile_api_ids(ext):
+        for attr in ("enable_input", "inputs_enabled"):
+            if hasattr(native_api, attr):
+                try:
+                    setattr(native_api, attr, False)
+                except Exception:
+                    pass
+
+
+_CAM_BINDINGS_CARB_KEY = "/exts/omni.kit.viewport.window/bindings/camera"
+
+
+def _disable_viewport_window_camera_bindings(ext: Any) -> None:
+    """ViewportWindow 전역 camera mouse bindings 비활성 — native manipulator 경로 차단."""
+    if not is_split_widget_layout_active(ext):
+        return
+    try:
+        from .sim_control_defaults import VIEWPORT_DISABLE_NATIVE_CAMERA_BINDINGS
+
+        if not bool(VIEWPORT_DISABLE_NATIVE_CAMERA_BINDINGS):
             return
-        await kit_app.get_app().next_update_async()
+    except Exception:
+        pass
+    if bool(getattr(ext, "_tbs_camera_bindings_disabled", False)):
+        return
+    try:
+        import carb.settings
+
+        settings = carb.settings.get_settings()
+        if not hasattr(ext, "_tbs_camera_bindings_saved"):
+            try:
+                ext._tbs_camera_bindings_saved = settings.get(_CAM_BINDINGS_CARB_KEY)
+            except Exception:
+                ext._tbs_camera_bindings_saved = None
+        settings.set(_CAM_BINDINGS_CARB_KEY, {})
+        ext._tbs_camera_bindings_disabled = True
+        try:
+            print(
+                "[TBS multi-sim] ViewportWindow camera bindings disabled "
+                f"(key={_CAM_BINDINGS_CARB_KEY!r})",
+                flush=True,
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            print(f"[TBS multi-sim] camera bindings disable fail: {exc}", flush=True)
+        except Exception:
+            pass
 
 
-def _enforce_widget_tile_manipulator_isolation(ext: Any) -> None:
-    """활성 타일 manipulator 만 켜고 네이티브 Viewport 조작은 항상 끈다."""
-    _set_native_viewport_input_blocked(ext, True)
-    _suspend_native_viewport_manipulators(ext)
-    active = str(getattr(ext, "_tbs_active_widget_tile", "") or "Viewport")
+def _activate_tile_manipulator_only(ext: Any, win_name: str) -> None:
+    """활성 타일 manipulator model 만 navigation on — focus/enable_input 사용 안 함."""
+    wn = str(win_name or "").strip() or "Viewport"
+    try:
+        ext._tbs_active_widget_tile = wn
+    except Exception:
+        pass
     tiles = getattr(ext, "_tbs_split_widget_tiles", None)
     if not isinstance(tiles, dict):
+        _disable_native_viewport_navigation_permanent(ext)
         return
     for name, rec in tiles.items():
         if not isinstance(rec, dict):
             continue
-        _set_tile_manipulator_navigation(rec, str(name) == active)
+        _set_tile_manipulator_navigation(rec, str(name) == wn)
+    _disable_native_viewport_navigation_permanent(ext)
+    try:
+        from .sim_viewport_coupling_diag import log_manipulator_activation_state
+
+        log_manipulator_activation_state(ext, wn, "activate")
+    except Exception:
+        pass
+
+
+def _enforce_widget_tile_manipulator_isolation(ext: Any) -> None:
+    """활성 타일 manipulator 만 켜고 네이티브 Viewport 조작은 항상 끈다."""
+    active = str(getattr(ext, "_tbs_active_widget_tile", "") or "Viewport")
+    _activate_tile_manipulator_only(ext, active)
 
 
 def _named_usd_context(ctx_name: str) -> Any:
@@ -963,63 +1174,7 @@ def _reset_promoted_widget_aux_entries(ext: Any) -> None:
 
 
 def _set_active_widget_tile(ext: Any, win_name: str) -> None:
-    wn = str(win_name or "").strip()
-    if not wn:
-        return
-    try:
-        ext._tbs_active_widget_tile = wn
-    except Exception:
-        pass
-    tiles = getattr(ext, "_tbs_split_widget_tiles", None)
-    if not isinstance(tiles, dict):
-        _enforce_widget_tile_manipulator_isolation(ext)
-        return
-    for name, rec in tiles.items():
-        if not isinstance(rec, dict):
-            continue
-        api = rec.get("api")
-        active = str(name) == wn
-        if bool(rec.get("_uses_viewport_window", False)):
-            _set_tile_manipulator_navigation(rec, active)
-            if api is not None:
-                try:
-                    if active:
-                        focus_fn = getattr(api, "focus", None)
-                        if callable(focus_fn):
-                            focus_fn()
-                        for attr in ("enable_input", "inputs_enabled", "updates_enabled", "enabled"):
-                            if hasattr(api, attr):
-                                setattr(api, attr, True)
-                    else:
-                        for attr in ("enable_input", "inputs_enabled"):
-                            if hasattr(api, attr):
-                                setattr(api, attr, False)
-                        for attr in ("updates_enabled", "enabled"):
-                            if hasattr(api, attr):
-                                setattr(api, attr, True)
-                except Exception:
-                    pass
-            continue
-        if api is None:
-            continue
-        try:
-            if active:
-                focus_fn = getattr(api, "focus", None)
-                if callable(focus_fn):
-                    focus_fn()
-                for attr in ("enable_input", "inputs_enabled", "updates_enabled", "enabled"):
-                    if hasattr(api, attr):
-                        setattr(api, attr, True)
-            else:
-                for attr in ("enable_input", "inputs_enabled"):
-                    if hasattr(api, attr):
-                        setattr(api, attr, False)
-                for attr in ("updates_enabled", "enabled"):
-                    if hasattr(api, attr):
-                        setattr(api, attr, True)
-        except Exception:
-            pass
-    _enforce_widget_tile_manipulator_isolation(ext)
+    _activate_tile_manipulator_only(ext, win_name)
 
 
 def _enable_tile_manipulator_navigation(rec: Dict[str, Any]) -> None:
@@ -1037,6 +1192,29 @@ _RENDER_PROFILE_ATTRS = (
     "display_render_var",
     "resolution_scale",
     "lock_to_render_result",
+    "background_color",
+    "background_enable",
+    "show_fps",
+    "scene_visibility",
+)
+
+_RENDER_PROFILE_SKIP_COPY = frozenset(
+    {
+        "stage",
+        "usd_context",
+        "hydra_engine",
+        "hd_engine",
+        "camera_path",
+        "resolution",
+        "full_resolution",
+        "render_product_path",
+        "id",
+        "viewport_id",
+        "texture",
+        "hydra_texture",
+        "renderer",
+        "projection",
+    }
 )
 
 
@@ -1615,6 +1793,31 @@ def _copy_visual_render_profile_only(src: Any, dst: Any) -> None:
                 setattr(dst, attr, getattr(src, attr))
         except Exception:
             pass
+    _copy_matching_viewport_display_attrs(src, dst)
+
+
+def _copy_matching_viewport_display_attrs(src: Any, dst: Any) -> None:
+    """동일 이름·단순 타입 ViewportAPI 속성을 추가 복사 (톤·배경 등 누락 방지)."""
+    if src is None or dst is None:
+        return
+    for attr in dir(src):
+        if attr.startswith("_") or attr in _RENDER_PROFILE_SKIP_COPY:
+            continue
+        if attr in _RENDER_PROFILE_ATTRS or attr == "render_mode":
+            continue
+        if not hasattr(dst, attr):
+            continue
+        try:
+            val = getattr(src, attr)
+        except Exception:
+            continue
+        if callable(val):
+            continue
+        if isinstance(val, (bool, int, float, str, tuple, list)):
+            try:
+                setattr(dst, attr, val)
+            except Exception:
+                pass
 
 
 def _copy_viewport_render_profile(
@@ -1676,8 +1879,8 @@ def _copy_viewport_render_profile(
 
 def _sync_aux_tile_render_from_main(ext: Any) -> None:
     """
-    보조 타일 — RenderProduct 가 이미 있으면 **해상도만** 동기화.
-    메인 Widget API 프로필을 aux(named context)에 복사하지 않는다 (Hydra 파괴 방지).
+    보조 타일 — RenderProduct 가 이미 있으면 메인 Widget API 시각 프로필만 동기화.
+    Hydra 엔진 공유·viewport_changed 호출 없음.
     """
     if not bool(getattr(ext, "_tbs_aux_stage_connected", False)):
         return
@@ -1694,28 +1897,23 @@ def _sync_aux_tile_render_from_main(ext: Any) -> None:
     if aux_api is None:
         return
 
-    if _api_has_render_product(aux_api):
-        ref_api = _reference_viewport_render_api(ext, tiles)
-        if ref_api is not None:
-            _copy_visual_render_profile_only(ref_api, aux_api)
-        _kick_viewport_widget_render(aux_rec)
-        return
-
-    main_api = main_rec.get("api")
-    if main_api is None:
-        return
     ref_api = _reference_viewport_render_api(ext, tiles)
     if ref_api is not None:
-        _copy_viewport_render_profile(ref_api, aux_api, share_hydra_engine=False)
-    else:
-        _copy_viewport_render_profile(main_api, aux_api, share_hydra_engine=False)
-    _kick_viewport_widget_render(aux_rec)
+        _copy_visual_render_profile_only(ref_api, aux_api)
+
+    if not _api_has_render_product(aux_api):
+        main_api = main_rec.get("api")
+        if main_api is not None and ref_api is None:
+            _copy_visual_render_profile_only(main_api, aux_api)
+        _kick_viewport_widget_render(aux_rec)
 
 
 def _api_projection_ready(api: Any) -> bool:
-    """``ViewportAPI.projection`` 이 유효할 때만 SceneView manipulator 를 붙인다."""
+    """``ViewportAPI.projection`` 유효 또는 RenderProduct 존재 시 manipulator 부착 허용."""
     if api is None:
         return False
+    if _api_has_render_product(api):
+        return True
     try:
         proj = getattr(api, "projection", None)
         if proj is None:
@@ -1727,6 +1925,41 @@ def _api_projection_ready(api: Any) -> bool:
         return False
     except Exception:
         return False
+
+
+def _manipulator_attach_block_reason(rec: Dict[str, Any]) -> str:
+    if not isinstance(rec, dict):
+        return "invalid-rec"
+    if rec.get("camera_manipulator") is not None:
+        return "already-attached"
+    if not bool(rec.get("manip_pending", True)):
+        return "manip-not-pending"
+    api = rec.get("api")
+    scene_view = rec.get("scene_view")
+    if api is None:
+        return "api-none"
+    if scene_view is None:
+        return "scene_view-none"
+    if not _api_ready_for_manipulator(api):
+        return "resolution-not-ready"
+    if not _api_projection_ready(api):
+        return "projection-not-ready"
+    cam = getattr(api, "camera_path", None)
+    if cam is None:
+        return "camera_path-none"
+    try:
+        from pxr import Sdf
+
+        if not isinstance(cam, Sdf.Path):
+            cam = Sdf.Path(str(cam))
+        stage = _tile_stage(rec)
+        if stage is None or not stage.GetPrimAtPath(cam).IsValid():
+            return "camera-prim-invalid"
+    except Exception:
+        return "camera-prim-check-fail"
+    if not bool(rec.get("scene_view_registered", False)):
+        return "scene_view-not-registered"
+    return "unknown"
 
 
 def _api_ready_for_manipulator(api: Any) -> bool:
@@ -1797,25 +2030,47 @@ def _ensure_tile_manipulator(ext: Any, win_name: str, rec: Dict[str, Any]) -> bo
         return False
     manip = _attach_camera_manipulator(api, scene_view)
     if manip is None:
+        try:
+            print(
+                f"[TBS multi-sim] manipulator attach FAIL tile={win_name!r} "
+                f"reason=ViewportCameraManipulator-returned-None",
+                flush=True,
+            )
+        except Exception:
+            pass
         return False
     rec["camera_manipulator"] = manip
     rec["manip_pending"] = False
     rec["camera_path"] = _tile_camera_path(int(rec.get("cell_index", 0) or 0))
-    _wire_tile_input(ext, win_name, rec.get("widget"), api, scene_view)
+    _bind_tile_manipulator_activation(ext, win_name, scene_view)
     try:
+        from .sim_viewport_coupling_diag import probe_tile_manipulator
+
+        probe = probe_tile_manipulator(rec, str(win_name))
         print(
             f"[TBS multi-sim] manipulator attached tile={win_name!r} "
-            f"ctx={_api_context_name(api)!r}",
+            f"ctx={_api_context_name(api)!r} "
+            f"scene_view.model={probe.get('scene_view.model')} "
+            f"manip.model={probe.get('manip.model')}",
             flush=True,
         )
     except Exception:
-        pass
+        try:
+            print(
+                f"[TBS multi-sim] manipulator attached tile={win_name!r} "
+                f"ctx={_api_context_name(api)!r}",
+                flush=True,
+            )
+        except Exception:
+            pass
     try:
         from .tbs_extension_singleton import get_tbs_extension_instance
 
         ext = get_tbs_extension_instance()
         if ext is not None:
-            _enforce_widget_tile_manipulator_isolation(ext)
+            _activate_tile_manipulator_only(
+                ext, str(getattr(ext, "_tbs_active_widget_tile", "") or "Viewport")
+            )
     except Exception:
         pass
     return True
@@ -1840,6 +2095,23 @@ def _schedule_tile_manipulators_when_ready(ext: Any, token: int, split_n: int) -
                     sub_ref[0].unsubscribe()
                 except Exception:
                     pass
+            tiles_timeout = getattr(ext, "_tbs_split_widget_tiles", None)
+            if isinstance(tiles_timeout, dict):
+                try:
+                    sn = max(2, int(split_n))
+                except Exception:
+                    sn = 2
+                for wn in ("Viewport",) + tuple(_tile_win_name(ti) for ti in range(1, sn)):
+                    rec = tiles_timeout.get(str(wn))
+                    if isinstance(rec, dict) and rec.get("camera_manipulator") is None:
+                        try:
+                            print(
+                                f"[TBS multi-sim] manipulator TIMEOUT tile={wn!r} "
+                                f"reason={_manipulator_attach_block_reason(rec)}",
+                                flush=True,
+                            )
+                        except Exception:
+                            pass
             return
         tiles = getattr(ext, "_tbs_split_widget_tiles", None)
         if not isinstance(tiles, dict):
@@ -1886,39 +2158,27 @@ def _schedule_tile_manipulators_when_ready(ext: Any, token: int, split_n: int) -
         pass
 
 
-def _wire_tile_input(ext: Any, win_name: str, widget: Any, api: Any, scene_view: Any) -> None:
-    targets: List[Any] = []
-    if widget is not None:
-        targets.append(widget)
-        fr = getattr(widget, "frame", None)
-        if fr is not None and fr not in targets:
-            targets.append(fr)
-    if scene_view is not None and scene_view not in targets:
-        targets.append(scene_view)
+def _bind_tile_manipulator_activation(ext: Any, win_name: str, scene_view: Any) -> None:
+    """SceneView 마우스 press/hover 시 해당 타일 manipulator 만 활성화 (focus/enable_input 없음)."""
+    if scene_view is None:
+        return
 
-    def _on_activate(*_a: Any, **_k: Any) -> bool:
-        _set_active_widget_tile(ext, win_name)
-        # False — manipulator / ViewportWidget 이 orbit·zoom 이벤트를 받게 함.
+    def _activate(*_a: Any, **_k: Any) -> bool:
+        _activate_tile_manipulator_only(ext, win_name)
         return False
 
-    for target in targets:
-        for fn_name in (
-            "set_mouse_pressed_fn",
-            "set_mouse_released_fn",
-            "set_mouse_moved_fn",
-        ):
-            fn = getattr(target, fn_name, None)
-            if callable(fn):
-                try:
-                    fn(_on_activate)
-                except Exception:
-                    pass
-        hover_fn = getattr(target, "set_mouse_hovered_fn", None)
-        if callable(hover_fn):
+    for fn_name in ("set_mouse_pressed_fn", "set_mouse_hovered_fn"):
+        fn = getattr(scene_view, fn_name, None)
+        if callable(fn):
             try:
-                hover_fn(_on_activate)
+                fn(_activate)
             except Exception:
                 pass
+
+
+def _wire_tile_input(ext: Any, win_name: str, widget: Any, api: Any, scene_view: Any) -> None:
+    """레거시 — ``_bind_tile_manipulator_activation`` 사용."""
+    _bind_tile_manipulator_activation(ext, win_name, scene_view)
 
 
 def _wire_frame_focus_input(ext: Any, win_name: str, frame: Any) -> None:
@@ -2230,6 +2490,14 @@ async def _connect_widget_tile_aux_stage(ext: Any, token: int, sn: int) -> bool:
 
     await _wait_aux_usd_stage_settled(ext, aux_ctx, int(token))
 
+    _ensure_aux_stage_default_lighting(aux_ctx)
+    try:
+        from .sim_viewport_coupling_diag import log_stage_lighting_summary
+
+        log_stage_lighting_summary(ext, "after-lighting-sync")
+    except Exception:
+        pass
+
     # --- RenderProduct 원인 조사: embedded 생성 전 독립 ui.Window 실험 (CASE A/B) ---
     try:
         from .sim_viewport_rp_diag import (
@@ -2268,7 +2536,6 @@ async def _connect_widget_tile_aux_stage(ext: Any, token: int, sn: int) -> bool:
         _log_widget_lifecycle(ext, "connect-aux-deferred-create", aux_wn, aux_rec)
 
     _purge_widget_mode_stale_windows(ext)
-    _ensure_aux_stage_default_lighting(aux_ctx)
 
     try:
         print(
@@ -2292,17 +2559,8 @@ async def _connect_widget_tile_aux_stage(ext: Any, token: int, sn: int) -> bool:
     ref_api = _reference_viewport_render_api(ext, tiles)
     api = aux_rec.get("api")
     if ref_api is not None and api is not None and not _api_has_render_product(api):
-        _copy_viewport_render_profile(ref_api, api, share_hydra_engine=False)
+        _copy_visual_render_profile_only(ref_api, api)
     _log_hydra_pipeline_diag(aux_wn, aux_rec, "connect-profile")
-
-    if api is not None:
-        try:
-            if hasattr(api, "ambient_light_intensity"):
-                cur = float(getattr(api, "ambient_light_intensity", 0) or 0)
-                if cur < 0.25:
-                    api.ambient_light_intensity = 0.25
-        except Exception:
-            pass
 
     aux_rec["context_name"] = aux_ctx
     aux_rec["stage_connected"] = True
@@ -2314,8 +2572,7 @@ async def _connect_widget_tile_aux_stage(ext: Any, token: int, sn: int) -> bool:
     await assign_widget_split_cameras(ext, int(token), ["Viewport", aux_wn])
 
     if ref_api is not None and aux_rec.get("api") is not None:
-        if not _api_has_render_product(aux_rec.get("api")):
-            _copy_viewport_render_profile(ref_api, aux_rec.get("api"), share_hydra_engine=False)
+        _copy_visual_render_profile_only(ref_api, aux_rec.get("api"))
     _kick_viewport_widget_render(aux_rec)
 
     _schedule_tile_manipulators_when_ready(ext, int(token), int(sn))
@@ -2466,15 +2723,16 @@ def _create_viewport_tile(
 
     def _build_contents() -> None:
         nonlocal vw_tile, api, scene_view
-        if include_background_rect:
-            ui.Rectangle(style={"background_color": 0xFF101010})
-        vw_tile = ViewportWidget(**vw_kw)
-        policy = getattr(sc, "AspectRatioPolicy", None)
-        stretch = getattr(policy, "STRETCH", None) if policy is not None else None
-        if stretch is not None:
-            scene_view = sc.SceneView(aspect_ratio_policy=stretch)
-        else:
-            scene_view = sc.SceneView()
+        with ui.ZStack():
+            if include_background_rect:
+                ui.Rectangle(style={"background_color": 0xFF101010})
+            vw_tile = ViewportWidget(**vw_kw)
+            policy = getattr(sc, "AspectRatioPolicy", None)
+            stretch = getattr(policy, "STRETCH", None) if policy is not None else None
+            if stretch is not None:
+                scene_view = sc.SceneView(aspect_ratio_policy=stretch)
+            else:
+                scene_view = sc.SceneView()
 
     try:
         if ui_container is not None:
@@ -2524,7 +2782,7 @@ def _create_viewport_tile(
         with hud_overlay:
             pass
         hud_mount = _WidgetHudMount(hud_overlay)
-    _wire_tile_input(ext, wn, vw_tile, api, scene_view)
+    _bind_tile_manipulator_activation(ext, wn, scene_view)
     rec: Dict[str, Any] = {
         "widget": vw_tile,
         "scene_view": scene_view,
@@ -2694,6 +2952,12 @@ def _clear_split_frame_slot(vw: Any) -> None:
 
 
 def _destroy_split_widget_host_ui(ext: Any) -> None:
+    try:
+        from .sim_viewport_coupling_diag import teardown_camera_change_tracker
+
+        teardown_camera_change_tracker(ext)
+    except Exception:
+        pass
     tiles = getattr(ext, "_tbs_split_widget_tiles", None)
     if isinstance(tiles, dict):
         for rec in tiles.values():
@@ -2947,6 +3211,11 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
             await refresh_split_widget_tiles_after_stage(ext, int(token), sn)
 
     sync_split_widget_fill_frame(ext, sn)
+
+    tiles_now = getattr(ext, "_tbs_split_widget_tiles", None)
+    aux_wn = _tile_win_name(1)
+    aux_rec = tiles_now.get(aux_wn) if isinstance(tiles_now, dict) else None
+
     try:
         from .sim_viewport_rp_diag import log_finalize_rp_step
 
@@ -2961,9 +3230,6 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
     except Exception:
         pass
 
-    tiles_now = getattr(ext, "_tbs_split_widget_tiles", None)
-    aux_wn = _tile_win_name(1)
-    aux_rec = tiles_now.get(aux_wn) if isinstance(tiles_now, dict) else None
     if isinstance(aux_rec, dict):
         _refresh_rec_api_from_widget(aux_rec, aux_wn)
 
@@ -2981,7 +3247,6 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
         and _api_has_render_product(aux_rec.get("api"))
     )
 
-    _sync_aux_tile_render_from_main(ext)
     if aux_hydra_ok:
         try:
             print(
@@ -3007,18 +3272,6 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
             wn = str(rec.get("_win_name") or "")
             if wn:
                 _refresh_rec_api_from_widget(rec, wn)
-            if rec.get("api") is not None and not (
-                aux_hydra_ok and rec is aux_rec
-            ):
-                _bootstrap_tile_viewport_render(rec)
-
-    try:
-        from .sim_viewport_rp_diag import log_finalize_rp_step
-
-        if isinstance(aux_rec, dict):
-            log_finalize_rp_step(aux_rec, "after-bootstrap-loop")
-    except Exception:
-        pass
 
     try:
         await assign_widget_split_cameras(
@@ -3028,13 +3281,8 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
         )
     except Exception:
         pass
-    if aux_hydra_ok and isinstance(aux_rec, dict):
-        await _bootstrap_tile_viewport_render_async(
-            ext,
-            aux_rec,
-            int(token),
-            frames=4,
-        )
+
+    _sync_aux_tile_render_from_main(ext)
     try:
         from .sim_viewport_rp_diag import log_finalize_rp_step
 
@@ -3051,14 +3299,8 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
                 _ensure_tile_manipulator(ext, str(wn), rec_m)
     apply_split_widget_navigation(ext, sn, int(token))
     _suspend_native_viewport_widget_presenter(ext)
-    try:
-        from .sim_viewport_rp_diag import log_finalize_rp_step
-
-        if isinstance(aux_rec, dict):
-            log_finalize_rp_step(aux_rec, "after-navigation")
-    except Exception:
-        pass
-    _enforce_widget_tile_manipulator_isolation(ext)
+    _disable_native_viewport_navigation_permanent(ext)
+    _activate_tile_manipulator_only(ext, "Viewport")
     _destroy_all_aux_workspace_windows(ext)
     try:
         from .sim_viewport_rp_diag import log_finalize_rp_step
@@ -3086,6 +3328,20 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
                 if rec.get("api") is not None:
                     _log_hydra_pipeline_diag(str(wn), rec, "READY")
                     _warn_tile_stage_isolation(ext, rec, label="READY")
+
+    try:
+        from .sim_viewport_coupling_diag import (
+            install_camera_change_tracker,
+            log_manipulator_investigation,
+            log_render_profile_diff,
+        )
+
+        log_manipulator_investigation(ext, "READY")
+        log_render_profile_diff(ext)
+        log_stage_lighting_summary(ext, "READY")
+        install_camera_change_tracker(ext)
+    except Exception:
+        pass
 
     try:
         total = int(getattr(ext, "_tbs_widget_create_total", 0) or 0)
@@ -3206,14 +3462,13 @@ async def apply_split_widget_layout(ext: Any, token: int, n: int) -> bool:
         ref_api = _reference_viewport_render_api(ext, tiles)
         main_rec = tiles.get("Viewport")
         if isinstance(main_rec, dict) and main_rec.get("api") is not None:
-            _copy_viewport_render_profile(ref_api, main_rec.get("api"), share_hydra_engine=False)
+            _copy_visual_render_profile_only(ref_api, main_rec.get("api"))
             _kick_viewport_widget_render(main_rec)
     except Exception:
         pass
 
     _suspend_native_viewport_widget_presenter(ext)
-    _set_native_viewport_input_blocked(ext, True)
-    _start_native_viewport_input_guard(ext, int(token))
+    _disable_native_viewport_navigation_permanent(ext)
     ensure_viewport_workspace_tab_visible()
     sync_split_widget_fill_frame(ext, sn)
     main_rec = tiles.get("Viewport")
@@ -3237,57 +3492,15 @@ def sync_split_widget_aux_render(ext: Any) -> None:
 
 
 def apply_split_widget_navigation(ext: Any, n: int, token: int, *, hold_ticks: int = 16) -> None:
-    """Widget 타일 카메라 조작 — 네이티브 Viewport 입력 차단 + 타일별 manipulator."""
+    """Widget 타일 카메라 조작 — 네이티브 manipulator 영구 off + 타일별 manipulator."""
     if not is_split_widget_layout_active(ext):
         return
     _suspend_native_viewport_widget_presenter(ext)
-    _set_native_viewport_input_blocked(ext, True)
-    _start_native_viewport_input_guard(ext, int(token))
+    _disable_native_viewport_navigation_permanent(ext)
     ensure_viewport_workspace_tab_visible()
-    tiles = getattr(ext, "_tbs_split_widget_tiles", None)
-    if not isinstance(tiles, dict):
-        return
     active = str(getattr(ext, "_tbs_active_widget_tile", "") or "Viewport")
-    _set_active_widget_tile(ext, active)
-
-    sub_ref: List[Any] = [None]
-    remaining = [max(4, int(hold_ticks))]
-
-    def _tick(_ev: Any = None) -> None:
-        if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != int(token):
-            if sub_ref[0] is not None:
-                try:
-                    sub_ref[0].unsubscribe()
-                except Exception:
-                    pass
-            return
-        if remaining[0] <= 0:
-            if sub_ref[0] is not None:
-                try:
-                    sub_ref[0].unsubscribe()
-                except Exception:
-                    pass
-            return
-        if remaining[0] % 4 == 0:
-            _set_active_widget_tile(
-                ext, str(getattr(ext, "_tbs_active_widget_tile", "") or "Viewport")
-            )
-        remaining[0] -= 1
-
-    try:
-        old = getattr(ext, "_tbs_widget_nav_hold_sub", None)
-        if old is not None:
-            try:
-                old.unsubscribe()
-            except Exception:
-                pass
-        sub_ref[0] = kit_app.get_app().get_post_update_event_stream().create_subscription_to_pop(
-            _tick,
-            name="morph.tbs_control_2.widget_split_nav_hold",
-        )
-        ext._tbs_widget_nav_hold_sub = sub_ref[0]
-    except Exception:
-        pass
+    _activate_tile_manipulator_only(ext, active)
+    _schedule_tile_manipulators_when_ready(ext, int(token), int(n))
 
 
 __all__ = [

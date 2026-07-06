@@ -89,6 +89,16 @@ VIEWPORT_RP_ISOLATED_WINDOW_TEST: bool = False
 # Widget 생성 직후 RP/Hydra 프레임별 타임라인 관측 프레임 수.
 VIEWPORT_RP_TIMELINE_FRAMES: int = 12
 
+# P0 카메라 coupling / 렌더 프로필 조사 로그 ([TBS/coupling-report], [TBS/coupling-trace]).
+VIEWPORT_COUPLING_DIAG_ENABLED: bool = True
+
+# 화면2(aux) Stage 조명 — 화면1(default ctx) UsdLux 스펙을 session layer 로 복제 (톤·IBL 동기).
+# False 면 조명 없을 때만 generic DomeLight fallback.
+VIEWPORT_AUX_LIGHTING_SYNC_FROM_MAIN: bool = True
+
+# Widget 분할 시 ViewportWindow 전역 camera bindings 비활성 (native manipulator 경로 차단).
+VIEWPORT_DISABLE_NATIVE_CAMERA_BINDINGS: bool = True
+
 # 2분할 시 Viewport·보조 창 사용자 리사이즈 차단(기본 on).
 # Dock 50:50·Console/Content 레이아웃 유지. 분할선 드래그는 투명 오버레이가 입력을 선점(복구·되돌림 없음).
 # 끄려면 False 또는 TBS_SIM_VIEWPORT_SPLIT_LOCK_RESIZE=0
@@ -127,6 +137,9 @@ __all__ = [
     "VIEWPORT_RP_DIAG_ENABLED",
     "VIEWPORT_RP_ISOLATED_WINDOW_TEST",
     "VIEWPORT_RP_TIMELINE_FRAMES",
+    "VIEWPORT_COUPLING_DIAG_ENABLED",
+    "VIEWPORT_AUX_LIGHTING_SYNC_FROM_MAIN",
+    "VIEWPORT_DISABLE_NATIVE_CAMERA_BINDINGS",
     "LOCK_VIEWPORT_SPLIT_USER_RESIZE",
     "default_viewport_split_count",
     "SIM_PRERUN_CONSOLE_LOG",

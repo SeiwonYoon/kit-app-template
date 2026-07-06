@@ -184,6 +184,7 @@ def probe_render_product_chain(
     # --- SceneView (우리가 붙이는 omni.ui.scene.SceneView — manipulator용) ---
     out["scene_view"] = _fmt_val(scene_view)
     out["scene_view.camera_model"] = _safe_attr(scene_view, "camera_model")
+    out["scene_view.model"] = _safe_attr(scene_view, "model")
 
     # --- Kit 전역 ViewportWidget 인스턴스 ---
     out["ViewportWidget.get_instances"] = _enumerate_viewport_widgets()
