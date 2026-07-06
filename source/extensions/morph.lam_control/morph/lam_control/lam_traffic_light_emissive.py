@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import random
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import omni.usd as ou  # type: ignore
 from pxr import Sdf, Usd, UsdShade  # type: ignore
@@ -18,7 +18,6 @@ _state: Dict[str, Any] = {
     "timer": None,
     "running": False,
     "startup_sub": None,
-    "attr_cache": {},
     "last_active_index": -1,
 }
 _lock = threading.Lock()
@@ -67,15 +66,6 @@ def _interval_bounds() -> Tuple[float, float]:
         return 30.0, 45.0
 
 
-def _config_attr_override() -> str:
-    try:
-        from .lam_viewport_overlay_config import TRAFFIC_LIGHT_EMISSIVE_ENABLE_ATTR  # type: ignore
-
-        return str(TRAFFIC_LIGHT_EMISSIVE_ENABLE_ATTR or "").strip()
-    except Exception:
-        return ""
-
-
 def _get_stage() -> Optional[Usd.Stage]:
     try:
         ctx = ou.get_context()
@@ -88,56 +78,10 @@ def _get_stage() -> Optional[Usd.Stage]:
     return None
 
 
-def _attr_name_matches_emission(name: str) -> bool:
-    n = (name or "").lower()
-    if "emission" in n or "emissive" in n:
-        return True
-    if "enable" in n and ("emit" in n or "light" in n):
-        return True
-    return False
-
-
-def _is_bool_attr(attr: Usd.Attribute) -> bool:
-    try:
-        return attr.GetTypeName() == Sdf.ValueTypeNames.Bool
-    except Exception:
-        return False
-
-
-def _discover_emission_attr(prim: Usd.Prim) -> Optional[str]:
-    if not prim or not prim.IsValid():
-        return None
-    override = _config_attr_override()
-    if override:
-        attr = prim.GetAttribute(override)
-        if attr and attr.IsValid():
-            return override
-    if prim.IsA(UsdShade.Shader):
-        shader = UsdShade.Shader(prim)
-        candidates: List[str] = []
-        for inp in shader.GetInputs():
-            full = str(inp.GetFullName() or "")
-            base = str(inp.GetBaseName() or "")
-            for name in (full, base):
-                if name and _attr_name_matches_emission(name):
-                    candidates.append(full or f"inputs:{base}")
-        for name in candidates:
-            inp = shader.GetInput(name.replace("inputs:", ""))
-            if inp:
-                return name if name.startswith("inputs:") else f"inputs:{name}"
-    for attr in prim.GetAttributes():
-        name = attr.GetName()
-        if not _attr_name_matches_emission(name):
-            continue
-        if _is_bool_attr(attr):
-            return name
-    return None
+_EMISSION_ENABLE_ATTR = "inputs:enable_emission"
 
 
 def _resolve_attr_name(shader_path: str) -> Optional[str]:
-    cached = _state.get("attr_cache", {}).get(shader_path)
-    if cached:
-        return str(cached)
     stage = _get_stage()
     if stage is None:
         return None
@@ -148,15 +92,7 @@ def _resolve_attr_name(shader_path: str) -> Optional[str]:
             flush=True,
         )
         return None
-    name = _discover_emission_attr(prim)
-    if not name:
-        print(
-            f"{_PRINT_PREFIX} Enable Emission 속성 탐색 실패 — skip: {shader_path}",
-            flush=True,
-        )
-        return None
-    _state.setdefault("attr_cache", {})[shader_path] = name
-    return name
+    return _EMISSION_ENABLE_ATTR
 
 
 def _set_shader_emission(shader_path: str, enabled: bool) -> bool:

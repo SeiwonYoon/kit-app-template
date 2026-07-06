@@ -345,8 +345,7 @@ TRAFFIC_LIGHT_SHADER_PATHS: Tuple[str, str, str] = (
 )
 # False(기본)=stage 로드 직후 타이머 시작 / True=CSV 재생 중에만 (정지·일시정지·종료 시 정지)
 TRAFFIC_LIGHT_EMISSIVE_ONLY_DURING_PLAYBACK: bool = False
-# 비우면 Enable Emission 속성 자동 탐색. 특정 USD만 고정할 때만 채움.
-TRAFFIC_LIGHT_EMISSIVE_ENABLE_ATTR: str = ""
+# Enable Emission — lam_traffic_light_emissive.py 에서 inputs:enable_emission 고정 사용
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +398,6 @@ __all__ = [
     "TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MAX_SEC",
     "TRAFFIC_LIGHT_SHADER_PATHS",
     "TRAFFIC_LIGHT_EMISSIVE_ONLY_DURING_PLAYBACK",
-    "TRAFFIC_LIGHT_EMISSIVE_ENABLE_ATTR",
     "PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET",
     "PLAY_HIDE_FADE_ENABLED",
     "PLAY_HIDE_FADE_DURATION_SEC",
