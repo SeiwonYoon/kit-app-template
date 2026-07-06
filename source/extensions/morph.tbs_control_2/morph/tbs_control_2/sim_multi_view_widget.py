@@ -2336,6 +2336,18 @@ def sync_widget_aux_resolution_from_workspace(ext: Any, win_name: str) -> None:
 
 def sync_split_widget_fill_frame(ext: Any, split_n: int) -> None:
     """``Viewport`` 창 크기 기준 50:50 — Dock·Workspace 보조 창 없음."""
+    try:
+        from .hyview_stream import is_hyview_stream_layout_locked, bridge_stream_skip
+
+        if is_hyview_stream_layout_locked(ext):
+            bridge_stream_skip(
+                "sync_split_widget_fill_frame",
+                "layout_locked",
+                split_n=int(split_n),
+            )
+            return
+    except Exception:
+        pass
     if not is_split_widget_layout_active(ext):
         return
     try:

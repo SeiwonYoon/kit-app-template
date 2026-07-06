@@ -99,6 +99,17 @@ VIEWPORT_AUX_LIGHTING_SYNC_FROM_MAIN: bool = True
 # Widget 분할 시 ViewportWindow 전역 camera bindings 비활성 (native manipulator 경로 차단).
 VIEWPORT_DISABLE_NATIVE_CAMERA_BINDINGS: bool = True
 
+# HyView / livestream T2V bridge 진단 로그 ([HyView/bridge] queued/work_start/work_done/watchdog).
+HYVIEW_BRIDGE_DIAG_ENABLED: bool = True
+# work_start·work_done 사이 watchdog (초). 0 이면 비활성.
+HYVIEW_BRIDGE_WATCHDOG_SEC: float = 120.0
+
+# streaming 배포 시 viewport fill_frame·창 resize 훅 가드 (T2V resize 연쇄 억제).
+HYVIEW_STREAM_LOCK_LAYOUT: bool = True
+
+# False → morph.editor_streaming.kit 및 startup 에서 allowDynamicResize=false 적용.
+STREAMING_ALLOW_DYNAMIC_RESIZE: bool = False
+
 # 2분할 시 Viewport·보조 창 사용자 리사이즈 차단(기본 on).
 # Dock 50:50·Console/Content 레이아웃 유지. 분할선 드래그는 투명 오버레이가 입력을 선점(복구·되돌림 없음).
 # 끄려면 False 또는 TBS_SIM_VIEWPORT_SPLIT_LOCK_RESIZE=0
@@ -140,6 +151,10 @@ __all__ = [
     "VIEWPORT_COUPLING_DIAG_ENABLED",
     "VIEWPORT_AUX_LIGHTING_SYNC_FROM_MAIN",
     "VIEWPORT_DISABLE_NATIVE_CAMERA_BINDINGS",
+    "HYVIEW_BRIDGE_DIAG_ENABLED",
+    "HYVIEW_BRIDGE_WATCHDOG_SEC",
+    "HYVIEW_STREAM_LOCK_LAYOUT",
+    "STREAMING_ALLOW_DYNAMIC_RESIZE",
     "LOCK_VIEWPORT_SPLIT_USER_RESIZE",
     "default_viewport_split_count",
     "SIM_PRERUN_CONSOLE_LOG",

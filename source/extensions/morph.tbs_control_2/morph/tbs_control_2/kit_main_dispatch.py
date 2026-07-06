@@ -9,7 +9,7 @@ from typing import Any, Callable, Deque, Optional, Tuple
 
 import omni.kit.app as kit_app
 
-_pending_main: Deque[Tuple[Future, Callable[[], Any]]] = deque()
+_pending_main: Deque[Tuple[Optional[Future], Callable[[], Any]]] = deque()
 _pending_lock = threading.Lock()
 _update_sub: Any = None
 
@@ -39,8 +39,34 @@ def ensure_kit_main_dispatch() -> None:
         _update_sub = None
 
 
+def schedule_on_main_thread(
+    fn: Callable[[], Any],
+    *,
+    on_done: Optional[Callable[[Any], None]] = None,
+    on_error: Optional[Callable[[BaseException], None]] = None,
+) -> None:
+    """UI 스레드에서 fn 실행. 완료까지 호출 스레드를 block 하지 않는다."""
+    ensure_kit_main_dispatch()
+
+    def _wrap() -> None:
+        try:
+            result = fn()
+        except BaseException as exc:
+            if on_error is not None:
+                on_error(exc)
+            return
+        if on_done is not None:
+            try:
+                on_done(result)
+            except Exception:
+                pass
+
+    with _pending_lock:
+        _pending_main.append((None, _wrap))
+
+
 def run_on_main_thread(fn: Callable[[], Any], *, timeout: float = 120.0) -> Any:
-    """UI 스레드에서 fn 실행 후 결과 반환."""
+    """UI 스레드에서 fn 실행 후 결과 반환 (동기 대기)."""
     ensure_kit_main_dispatch()
     fut: Future = Future()
 

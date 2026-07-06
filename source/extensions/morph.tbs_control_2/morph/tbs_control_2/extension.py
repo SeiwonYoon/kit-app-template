@@ -68,7 +68,9 @@ from .kit_chrome_visibility import (
     is_kit_chrome_hidden,
     is_streaming_deployment,
 )
-from .streaming_window import (
+from .hyview_stream import (
+    apply_streaming_livestream_settings,
+    enable_hyview_stream_layout_lock,
     install_streaming_window_resize_hooks,
     teardown_streaming_window_hooks,
 )
@@ -262,6 +264,9 @@ async def _deferred_apply_streaming_viewport_polish(ext: Any) -> None:
         smv.schedule_split_layout_refresh_for_chrome_change(ext, True)
         smv.apply_viewport_split_tab_chrome(sn)
         apply_viewport_dock_tab_bars_hidden()
+        from .hyview_stream import enable_hyview_stream_layout_lock
+
+        enable_hyview_stream_layout_lock(ext)
     except Exception:
         pass
 
@@ -459,6 +464,7 @@ class Extension(omni.ext.IExt):
             self._kit_chrome_startup_task = asyncio.ensure_future(_deferred_apply_kit_chrome_hide(self))
 
         if is_streaming_deployment():
+            apply_streaming_livestream_settings()
             install_streaming_window_resize_hooks(self)
             self._streaming_viewport_task = asyncio.ensure_future(
                 _deferred_apply_streaming_viewport_polish(self)

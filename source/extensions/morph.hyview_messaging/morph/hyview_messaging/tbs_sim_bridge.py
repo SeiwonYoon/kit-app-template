@@ -17,8 +17,14 @@ from typing import Any, Callable, Dict, List, Optional
 import omni.kit.app as kit_app
 
 from morph.tbs_control_2.ebs_case_models import apply_case_sim_settings, case_from_screen
-from morph.tbs_control_2.kit_main_dispatch import run_on_main_thread
-from morph.tbs_control_2.sim_control_defaults import SIM_CONTROL_DEFAULTS
+from morph.tbs_control_2.hyview_stream import (
+    bridge_queued,
+    bridge_watchdog,
+    bridge_work_done,
+    bridge_work_start,
+)
+from morph.tbs_control_2.kit_main_dispatch import schedule_on_main_thread
+from morph.tbs_control_2.sim_control_defaults import HYVIEW_BRIDGE_WATCHDOG_SEC, SIM_CONTROL_DEFAULTS
 from morph.tbs_control_2.tbs_extension_singleton import require_tbs_extension_instance
 
 _SIM_SPEED_MIN = 0.1
@@ -104,6 +110,61 @@ def _err(message: str, *, code: int = 1, data: Optional[Dict[str, Any]] = None) 
     return {"code": int(code), "message": str(message), "data": dict(data or {})}
 
 
+def _schedule_hyview_main_work(
+    op: str,
+    work_fn: Callable[[], Dict[str, Any]],
+    dispatch: Callable[[Dict[str, Any]], None],
+    *,
+    watchdog_sec: float = HYVIEW_BRIDGE_WATCHDOG_SEC,
+    **queued_ctx: Any,
+) -> None:
+    """메인 스레드에 work 큐 — 메시징 스레드 block 없음. 완료 시 dispatch."""
+    req_id = bridge_queued(op, **queued_ctx)
+    state = {"done": False, "started": False}
+
+    def _finish(result: Dict[str, Any]) -> None:
+        if state["done"]:
+            return
+        state["done"] = True
+        dispatch(result)
+
+    def _work() -> None:
+        state["started"] = True
+        t0 = bridge_work_start(req_id, op)
+        try:
+            result = work_fn()
+        except Exception as exc:
+            result = _err(str(exc), data=dict(queued_ctx))
+        bridge_work_done(req_id, op, t0)
+        _finish(result)
+
+    schedule_on_main_thread(
+        _work,
+        on_error=lambda exc: _finish(_err(str(exc), data=dict(queued_ctx))),
+    )
+
+    if watchdog_sec > 0:
+        async def _watchdog() -> None:
+            await asyncio.sleep(float(watchdog_sec))
+            if state["done"]:
+                return
+            if not state["started"]:
+                bridge_watchdog(
+                    req_id,
+                    f"work not started within {watchdog_sec}s since queued",
+                )
+            else:
+                bridge_watchdog(
+                    req_id,
+                    f"work not done within {watchdog_sec}s since work_start",
+                )
+
+        try:
+            asyncio.ensure_future(_watchdog())
+        except Exception:
+            pass
+
+
 def _apply_ep_count_for_case(ext: Any, case_index: int, ep_count: int) -> None:
     from morph.tbs_control_2.control_window import (
         on_sim_ep_count_changed,
@@ -175,17 +236,24 @@ def _prerun_result_for_case(ext: Any, case_index: int) -> Dict[str, Any]:
     return dict(doc)
 
 
-def handle_eqp_change(payload: Any) -> Dict[str, Any]:
+def handle_eqp_change(
+    payload: Any,
+    *,
+    dispatch: Callable[[Dict[str, Any]], None],
+) -> None:
     """T2V_request_eqp_change — eqp_id 는 무시, ep_count 만 반영."""
     pl = _event_payload_to_dict(payload)
     try:
         case_index = int(pl.get("case", 0))
         ep_count = int(pl.get("ep_count", 2))
     except Exception as exc:
-        return _err(
-            f"invalid payload: {exc}",
-            data={"case": pl.get("case", 0), "ep_count": pl.get("ep_count", 2)},
+        dispatch(
+            _err(
+                f"invalid payload: {exc}",
+                data={"case": pl.get("case", 0), "ep_count": pl.get("ep_count", 2)},
+            )
         )
+        return
 
     def _work() -> Dict[str, Any]:
         ext = require_tbs_extension_instance()
@@ -199,22 +267,32 @@ def handle_eqp_change(payload: Any) -> Dict[str, Any]:
         )
         return _ok({"case": case_index, "ep_count": ep_count})
 
-    try:
-        return run_on_main_thread(_work)
-    except Exception as exc:
-        return _err(str(exc), data={"case": case_index, "ep_count": ep_count})
+    _schedule_hyview_main_work(
+        "eqp_change",
+        _work,
+        dispatch,
+        case=case_index,
+        ep_count=ep_count,
+    )
 
 
-def handle_ebs_enable(payload: Any) -> Dict[str, Any]:
+def handle_ebs_enable(
+    payload: Any,
+    *,
+    dispatch: Callable[[Dict[str, Any]], None],
+) -> None:
     pl = _event_payload_to_dict(payload)
     try:
         case_index = int(pl.get("case", 0))
         ebs_enable = bool(pl.get("ebs_enable", True))
     except Exception as exc:
-        return _err(
-            f"invalid payload: {exc}",
-            data={"case": pl.get("case", 0), "ebs_enable": pl.get("ebs_enable", False)},
+        dispatch(
+            _err(
+                f"invalid payload: {exc}",
+                data={"case": pl.get("case", 0), "ebs_enable": pl.get("ebs_enable", False)},
+            )
         )
+        return
 
     def _work() -> Dict[str, Any]:
         ext = require_tbs_extension_instance()
@@ -228,10 +306,13 @@ def handle_ebs_enable(payload: Any) -> Dict[str, Any]:
         )
         return _ok({"case": case_index, "ebs_enable": bool(ebs_enable)})
 
-    try:
-        return run_on_main_thread(_work)
-    except Exception as exc:
-        return _err(str(exc), data={"case": case_index, "ebs_enable": ebs_enable})
+    _schedule_hyview_main_work(
+        "ebs_enable",
+        _work,
+        dispatch,
+        case=case_index,
+        ebs_enable=bool(ebs_enable),
+    )
 
 
 async def _wait_prerun_done(ext: Any, *, timeout_sec: float = 600.0) -> bool:
@@ -260,19 +341,23 @@ def handle_start_simulation(
     *,
     dispatch: Callable[[str, Dict[str, Any]], None],
 ) -> None:
-    """T2V_request_start_simulation — config[0]=case0, config[1]=case1 settings_snapshot."""
+    """T2V_request_start_simulation — configs[0]=case0, configs[1]=case1 settings_snapshot."""
     pl = _event_payload_to_dict(payload)
-    raw_config = pl.get("config")
+    raw_config = pl.get("configs")
     if not isinstance(raw_config, list):
         raw_config = []
     config: List[Dict[str, Any]] = [snap if isinstance(snap, dict) else {} for snap in raw_config]
     while len(config) < 2:
         config.append({})
 
+    req_id = bridge_queued("start_simulation", cases=2)
+
     def _begin() -> None:
+        t0 = bridge_work_start(req_id, "start_simulation")
         try:
             ext = require_tbs_extension_instance()
         except Exception as exc:
+            bridge_work_done(req_id, "start_simulation", t0)
             dispatch(
                 "V2T_response_start_simulation",
                 _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
@@ -289,22 +374,28 @@ def handle_start_simulation(
         try:
             on_sim_start_clicked(ext)
         except Exception as exc:
+            bridge_work_done(req_id, "start_simulation", t0)
             dispatch(
                 "V2T_response_start_simulation",
                 _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
             )
             return
 
+        bridge_work_done(req_id, "start_simulation_begin", t0)
+
         async def _finish() -> None:
+            t1 = bridge_work_start(req_id, "start_simulation_prerun_wait")
             try:
                 ext2 = require_tbs_extension_instance()
             except Exception as exc:
+                bridge_work_done(req_id, "start_simulation_prerun_wait", t1)
                 dispatch(
                     "V2T_response_start_simulation",
                     _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
                 )
                 return
             ok = await _wait_prerun_done(ext2)
+            bridge_work_done(req_id, "start_simulation_prerun_wait", t1)
             if not ok:
                 dispatch(
                     "V2T_response_start_simulation",
@@ -324,16 +415,20 @@ def handle_start_simulation(
                 _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
             )
 
-    try:
-        run_on_main_thread(_begin, timeout=30.0)
-    except Exception as exc:
-        dispatch(
+    schedule_on_main_thread(
+        _begin,
+        on_error=lambda exc: dispatch(
             "V2T_response_start_simulation",
             _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
-        )
+        ),
+    )
 
 
-def handle_control_simulation(payload: Any) -> Dict[str, Any]:
+def handle_control_simulation(
+    payload: Any,
+    *,
+    dispatch: Callable[[Dict[str, Any]], None],
+) -> None:
     pl = _event_payload_to_dict(payload)
     action = str(pl.get("action", "") or "").strip().lower()
     speed_requested = _parse_requested_speed(pl.get("speed"))
@@ -348,22 +443,20 @@ def handle_control_simulation(payload: Any) -> Dict[str, Any]:
             on_sim_stop_clicked(ext)
             active = "pause"
         elif action == "play":
-            # --- play: 기본 = 재시작 (Viewport HUD 시작과 동일) ---
             on_sim_start_clicked(ext)
             active = "play"
-
-            # --- [RESUME] 이어하기: 미구현. 필요 시 위 on_sim_start_clicked 를 주석 처리하고 아래 해제 ---
-            # from morph.tbs_control_2.control_window import ...  # _resume_playback_from_pause(ext)
-            # active = "play"
         else:
             return _err(f"unknown action: {action!r}", data={"active": "", "speed": _SIM_SPEED_DEFAULT})
 
         return _ok({"active": active, "speed": _read_sim_speed(ext)})
 
-    try:
-        return run_on_main_thread(_work, timeout=180.0)
-    except Exception as exc:
-        return _err(str(exc), data={"active": "", "speed": _SIM_SPEED_DEFAULT})
+    _schedule_hyview_main_work(
+        "control_simulation",
+        _work,
+        dispatch,
+        action=action,
+        speed=speed_requested,
+    )
 
 
 def payload_from_event(event: Any) -> Dict[str, Any]:

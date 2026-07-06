@@ -135,7 +135,7 @@
 | 방식 | 설명 |
 |------|------|
 | **A. 별도 이벤트** | `T2V_request_eqp_change`, `T2V_request_ebs_enable` → prim·레이아웃 **즉시 반영** |
-| **B. 시작 시 snapshot** | `T2V_request_start_simulation`의 `config[n]` 안 `settings_snapshot`에 `ep_count_idx` / `ebs_enabled` 포함 → 시작 직전 해당 case 설정 적용 |
+| **B. 시작 시 snapshot** | `T2V_request_start_simulation`의 `configs[n]` 안 `settings_snapshot`에 `ep_count_idx` / `ebs_enabled` 포함 → 시작 직전 해당 case 설정 적용 |
 
 - A만 쓰거나, B만 쓰거나, **A 후 B** 조합 모두 허용.
 - `settings_snapshot` 내 키는 `ebs_enabled` (bool). 이벤트·`sim` 최상위는 `ebs_enable` — **이름 차이 유지** (웹·Kit 매핑 시 변환).
@@ -209,7 +209,7 @@
 
 ```json
 {
-  "config": [
+  "configs": [
     { },
     { }
   ]
@@ -218,16 +218,16 @@
 
 | 항목 | 규칙 (**확정**) |
 |------|----------------|
-| `config` | **길이 2 고정**. 형식 `config: [{}, {}]` |
-| `config[0]` | **case 0** (화면 1) — `settings_snapshot` object |
-| `config[1]` | **case 1** (화면 2) — `settings_snapshot` object |
+| `configs` | **길이 2 고정**. 형식 `configs: [{}, {}]` |
+| `configs[0]` | **case 0** (화면 1) — `settings_snapshot` object |
+| `configs[1]` | **case 1** (화면 2) — `settings_snapshot` object |
 | 원소 내 `case` 필드 | **없음** (배열 인덱스로만 매핑) |
 
 **예시:**
 
 ```json
 {
-  "config": [
+  "configs": [
     {
       "lot_count": 6,
       "spawn_min": 5.0,
@@ -249,8 +249,8 @@
 
 **Kit 처리 순서 (목표):**
 
-1. `config[0]` → CASE A UI/엔진 설정 적용 (`apply_case_sim_settings` 등)
-2. `config[1]` → CASE B 적용
+1. `configs[0]` → CASE A UI/엔진 설정 적용 (`apply_case_sim_settings` 등)
+2. `configs[1]` → CASE B 적용
 3. snapshot 내 `ep_count_idx` / `ebs_enabled`가 있으면 EP·EBS도 적용 (§4 방식 B)
 4. **Viewport HUD 「시작」과 동일** — `on_sim_start_clicked(ext)` (2화면 동시 프리런·재생)
 
@@ -339,7 +339,7 @@ on_sim_start_clicked(ext)
 |-------|-----|--------|
 | EP 2/3 | EP 콤보 + prim | `eqp_change` 또는 snapshot `ep_count_idx` |
 | EBS 체크 | EBS + prim | `ebs_enable` 또는 snapshot `ebs_enabled` |
-| LOT·간격·적재·고장 | 제어창 | `config[n]` (= settings_snapshot) |
+| LOT·간격·적재·고장 | 제어창 | `configs[n]` (= settings_snapshot) |
 | 시뮬 시작 2화면 | HUD 시작 | `start_simulation` |
 | 시뮬 정지 | HUD 정지 | `control_simulation` `pause` |
 | 배속 | 속도 | `control_simulation` `speed` + prerun `sim.speed` |
@@ -364,7 +364,7 @@ on_sim_start_clicked(ext)
 | prerun 루트 | `case` 0-based, `version` 2 |
 | prerun 파일명 | `prerun_screen{N}_*.json` 유지 |
 | `eqp_id` | Kit **무시** |
-| `config` | `[{}, {}]` 고정, `[0]`=화면1, `[1]`=화면2, 원소=settings_snapshot |
+| `configs` | `[{}, {}]` 고정, `[0]`=화면1, `[1]`=화면2, 원소=settings_snapshot |
 | EP/EBS | 별도 이벤트 **또는** snapshot 내 포함 (둘 다 가능) |
 | `start` 응답 `result` | 화면별 **프리런 v2 JSON 전체** |
 | `play` after `pause` | 기본 **재시작**; resume는 주석 토글로 추후 활성화 |
@@ -378,7 +378,7 @@ on_sim_start_clicked(ext)
 |------|------|
 | 2026-07-05 | 문서 생성 |
 | 2026-07-05 | API v0 8종 |
-| 2026-07-05 | eqp_id 무시, config 인덱스 고정, EP/EBS 이중 경로, result 전체 JSON, play/restart+resume 주석 패턴, speed 무제한 |
+| 2026-07-05 | eqp_id 무시, configs 인덱스 고정, EP/EBS 이중 경로, result 전체 JSON, play/restart+resume 주석 패턴, speed 무제한 |
 | 2026-07-05 | §12~§14 실무·로컬·유지보수 가이드 상세화; Q7 전송계층 확정; 따라하기 순서·envelope 형식 추가 |
 
 ---
@@ -404,7 +404,7 @@ on_sim_start_clicked(ext)
 | Q5/Q6 | 루트 `case`만, 내부·병기 없음 |
 | Q9 | speed **범위 없음** |
 | Q10 | `eqp_id` → Kit **무시** |
-| Q11 | `config[0]`=case0, `config[1]`=case1 **고정** |
+| Q11 | `configs[0]`=case0, `configs[1]`=case1 **고정** |
 | Q12 | EP/EBS → **별도 이벤트 또는 snapshot** 둘 다 |
 | Q13 | `result[]` = **프리런 v2 JSON 전체** |
 | Q14 | `play` 기본 **재시작**; resume **주석 토글**로 추후 |
@@ -535,7 +535,7 @@ T2V 전송 시 콘솔에 `[EBSHandler] _on_req_*` 가 추가로 보이면 messag
 | 연결 | WebRTC **connected 후** 버튼 |
 | 전송 | `AppStreamer.sendMessage(JSON.stringify({ event_type, payload }))` |
 | EBS | `T2V_request_ebs_enable`, payload `ebs_enable` |
-| 시뮬 시작 | `config` 길이 2 |
+| 시뮬 시작 | `configs` 길이 2 |
 | 시뮬 응답 | `data.result` (`results` 아님) |
 | 제어 | `T2V_request_control_simulation`, `action`: `play` \| `pause` |
 | 성공 | `code === 0` |
@@ -557,7 +557,7 @@ T2V 전송 시 콘솔에 `[EBSHandler] _on_req_*` 가 추가로 보이면 messag
 | Kit에 `[EBSHandler]` 없음 | `morph.hyview_messaging` 로드 | `morph.editor.kit` dependencies |
 | Handler 로그는 있는데 UI 안 변함 | Python traceback | `tbs_sim_bridge` / `tbs_control_2` |
 | V2T 없음 | `event_type` 오타 | 웹 `onCustomEvent` |
-| `code: 1` | `message` 필드 | payload 키 (`config` vs `configs`) |
+| `code: 1` | `message` 필드 | payload 키 오타 (`configs` 등) |
 | HTTP 8720 호출 | **폐기된 경로** | §13 방법 A 로 재검증 |
 
 ---
@@ -688,7 +688,7 @@ npm install
 | `source/extensions/morph.tbs_control_2/morph/tbs_control_2/control_window.py` | HUD·EP 레이아웃 |
 | `source/apps/morph.editor.kit` | `morph.hyview_messaging` 의존 |
 
-`ebs_handler.py` **파일 상단 주석**에 `config`/`configs` 등 불일치 시 수정 위치 요약.
+`ebs_handler.py` **파일 상단 주석**에 payload 키 SSOT (`configs`, `result` 등) 요약.
 
 ### 14.3 현재 등록 이벤트 (기준선)
 
@@ -796,7 +796,7 @@ def handle_my_feature(payload: Any) -> Dict[str, Any]:
 | 실수 | 결과 | 올바른 방법 |
 |------|------|-------------|
 | connected 전 T2V | 무반응 | 연결 후 전송 |
-| `ebs_active`, `configs`, `results` | 불일치 | §5: `ebs_enable`, `config`, `result` |
+| `ebs_active`, `config`, `results` | 구버전/불일치 | §5: `ebs_enable`, `configs`, `result` |
 | V2T 이름만 코드 변경 | 웹 무시 | 웹 수신부 동시 수정 |
 | handler에만 UI 로직 | 스레드 오류 | `tbs_sim_bridge` + `run_on_main_thread` |
 | HTTP 8720 | 동작 안 함 | livestream.messaging |

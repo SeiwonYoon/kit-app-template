@@ -48,11 +48,11 @@ export function requestEbsEnable(caseIndex: number, ebsEnable: boolean): void {
   sendT2V("T2V_request_ebs_enable", { case: caseIndex, ebs_enable: ebsEnable });
 }
 
-/** T2V — 시뮬 시작 (config[0]=case0, config[1]=case1 settings_snapshot) */
+/** T2V — 시뮬 시작 (configs[0]=case0, configs[1]=case1 settings_snapshot) */
 export function requestStartSimulation(
-  config: [Record<string, unknown>, Record<string, unknown>],
+  configs: [Record<string, unknown>, Record<string, unknown>],
 ): void {
-  sendT2V("T2V_request_start_simulation", { config });
+  sendT2V("T2V_request_start_simulation", { configs });
 }
 
 /** T2V — play / pause / speed */

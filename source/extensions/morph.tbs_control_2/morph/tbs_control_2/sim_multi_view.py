@@ -1425,6 +1425,19 @@ def set_viewport_fill_frame_for_split_count(split_n: int, fill: bool) -> None:
     3D 픽셀 영역이 늘지 않는 경우가 있다. ``morph.morph_base_viewer`` 등에서 쓰는 패턴과 같다.
     """
     try:
+        from .hyview_stream import is_hyview_stream_layout_locked, bridge_stream_skip
+
+        if is_hyview_stream_layout_locked():
+            bridge_stream_skip(
+                "fill_frame",
+                "layout_locked",
+                split_n=int(split_n),
+                fill=bool(fill),
+            )
+            return
+    except Exception:
+        pass
+    try:
         from omni.kit.viewport.utility import get_viewport_from_window_name
     except Exception:
         return
