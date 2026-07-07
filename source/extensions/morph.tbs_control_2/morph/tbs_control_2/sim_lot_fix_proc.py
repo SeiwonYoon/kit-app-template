@@ -111,14 +111,27 @@ def _fmt_fix_num(v: Any) -> str:
 
 
 def read_lot_fix_proc_at_start(ext: Any) -> Optional[Tuple[LotFixProcEntry, ...]]:
-    """시뮬 시작 시 fix 창 텍스트 스냅샷. 비어 있으면 ``None`` (기존 동작 유지)."""
-    mdl = getattr(ext, "_sim_fix_proc_text_model", None)
-    if mdl is None:
-        return None
+    """시뮬 시작 시 fix 텍스트 스냅샷. 비어 있으면 ``None`` (기존 동작 유지).
+
+    HUD 「파일사용」 ON + 「적용」된 ``data/txt`` 본문이 있으면 fix 창보다 우선한다.
+    """
+    text = ""
     try:
-        text = str(mdl.get_value_as_string() or "")
+        from .control_sim_fix_proc_hud import fix_proc_txt_text_for_sim_start
+
+        file_text = fix_proc_txt_text_for_sim_start(ext)
+        if file_text is not None:
+            text = file_text
     except Exception:
         text = ""
+    if not str(text).strip():
+        mdl = getattr(ext, "_sim_fix_proc_text_model", None)
+        if mdl is None:
+            return None
+        try:
+            text = str(mdl.get_value_as_string() or "")
+        except Exception:
+            text = ""
     if not str(text).strip():
         return None
     try:

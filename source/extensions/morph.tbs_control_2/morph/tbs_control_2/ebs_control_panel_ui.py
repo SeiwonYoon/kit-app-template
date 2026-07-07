@@ -256,6 +256,12 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_fault_ep3_rows: List[Any] = []
     ext._sim_fault_bp4_row = None
     ext._sim_fault_ep3_row = None
+    try:
+        from .control_sim_fix_proc_hud import ensure_fix_proc_file_hud_models
+
+        ensure_fix_proc_file_hud_models(ext)
+    except Exception:
+        pass
     ext._sim_log_text = ui.SimpleStringModel("[SIM] 대기 중")
     ext._sim_history_text = ui.SimpleStringModel("[SIM] 대기 중")
     ext._sim_progress_text = ui.SimpleStringModel("[진행현황] 없음")
@@ -465,6 +471,12 @@ def _build_ebs_control_panel_compact(
     lw, fw, sw = 72, 54, 48
     with ui.VStack(padding=0, spacing=5):
         ui.Label("EBS (Viewport · CASE A)", height=18, style={"font_size": 13, "color": 0xFFFFFFFF})
+        try:
+            from .control_sim_fix_proc_hud import build_fix_proc_file_ebs_rows
+
+            build_fix_proc_file_ebs_rows(ext, lw=lw, cb_style=cb_style)
+        except Exception:
+            pass
         ext._sim_multi_split_row = ui.HStack(spacing=4, height=22)
         ext._sim_multi_split_row.visible = False
         with ext._sim_multi_split_row:
