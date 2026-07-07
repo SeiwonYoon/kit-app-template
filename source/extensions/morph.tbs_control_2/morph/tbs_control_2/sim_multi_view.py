@@ -487,7 +487,12 @@ def apply_viewport_split_tab_chrome(n: int, ext: Any = None) -> None:
 
 
 _SPLITTER_GUARD_WIN_TITLE = "TBS_SimSplit_SplitterGuard"
-_SPLITTER_GUARD_HIT_PX = 10
+_SPLITTER_GUARD_HIT_PX = 1
+# gw(논리 폭)와 실제 칠해짐 폭은 다름 — Kit ui.Window 는 최소 ~8px 수준으로 그릴 수 있어
+# 0.5·0.3 으로 줄여도 화면상 띠 폭은 거의 안 줄어듦. 위치는 ORIGIN_LEFT 로 보정.
+_SPLITTER_GUARD_CHROME_SLOP = 2.0 / 3.0
+# anchor 기준 창 원점 — Kit 실제 칠해짐(~8px) 우측 끝이 접합선에 맞도록.
+_SPLITTER_GUARD_ORIGIN_LEFT = 8.0
 
 
 def _splitter_guard_window_flags() -> int:
@@ -500,6 +505,8 @@ def _splitter_guard_window_flags() -> int:
         "WINDOW_FLAGS_NO_BACKGROUND",
         "WINDOW_FLAGS_NO_MOVE",
         "WINDOW_FLAGS_NO_RESIZE",
+        "WINDOW_FLAGS_NO_FOCUS_ON_APPEARING",
+        "WINDOW_FLAGS_NO_BRING_TO_FRONT_ON_FOCUS",
     ):
         bit = getattr(ui, name, None)
         if bit is not None:
@@ -523,6 +530,16 @@ def _wire_splitter_guard_mouse_targets(*targets: Any) -> None:
                     fn(_consume_splitter_guard_mouse)
                 except Exception:
                     pass
+
+
+def _hide_splitter_guard_workspace_duplicate() -> None:
+    """동명 Workspace 창 — geometry 이중 적용 시 넓은 띠로 보일 수 있어 숨김."""
+    try:
+        dup = ui.Workspace.get_window(_SPLITTER_GUARD_WIN_TITLE)
+        if dup is not None:
+            dup.visible = False
+    except Exception:
+        pass
 
 
 def _workspace_window_rect(wname: str) -> Optional[Tuple[float, float, float, float]]:
@@ -550,7 +567,10 @@ def _workspace_window_rect(wname: str) -> Optional[Tuple[float, float, float, fl
 
 
 def _compute_viewport_split_splitter_rect(n: int) -> Optional[Tuple[float, float, float, float]]:
-    """Viewport ↔ 보조 타일 사이 Dock 분할선 히트 영역 (x, y, w, h)."""
+    """Viewport ↔ 보조 타일 사이 Dock 분할선 히트 영역 (x, y, w, h).
+
+    가로: 두 타일 사이 Dock 갭(또는 겹침/접합부)만. 세로: 두 타일 높이 교집합만.
+    """
     if int(n) < 2:
         return None
     if not bool(sim_viewport_split_dock_enabled()):
@@ -565,12 +585,27 @@ def _compute_viewport_split_splitter_rect(n: int) -> Optional[Tuple[float, float
     gap_r = rx
     if gap_r + 1.0 < gap_l:
         return None
-    mid = (gap_l + gap_r) * 0.5
+    top = max(ly, ry)
+    bottom = min(ly + lh, ry + rh)
+    gh = bottom - top
+    if gh < 1.0:
+        return None
+    gy = top
     hit = float(_SPLITTER_GUARD_HIT_PX)
-    gw = max(hit, gap_r - gap_l + hit)
-    gx = mid - gw * 0.5
-    gy = min(ly, ry)
-    gh = max(lh, rh)
+    dock_gap = gap_r - gap_l
+    if dock_gap >= 1.0:
+        gw = max(1.0, min(dock_gap, hit))
+        anchor = gap_l
+    elif dock_gap < -0.5:
+        gw = max(1.0, min(gap_l - gap_r, hit))
+        anchor = gap_r
+    else:
+        gw = hit
+        anchor = gap_l
+    # Kit 창 원점 — 칠해짐 폭(~CHROME_SLOP)보다 왼쪽에 두어 우측 삐져남 방지.
+    gx = anchor - float(_SPLITTER_GUARD_ORIGIN_LEFT)
+    if gw < 1.0:
+        return None
     return (gx, gy, gw, gh)
 
 
@@ -579,20 +614,22 @@ def _apply_splitter_guard_geometry(ext: Any, rect: Tuple[float, float, float, fl
     win = getattr(ext, "_tbs_split_splitter_guard_win", None)
     if win is None:
         return
-    for target in (win, ui.Workspace.get_window(_SPLITTER_GUARD_WIN_TITLE)):
-        if target is None:
-            continue
-        for attr, val in (
-            ("position_x", gx),
-            ("position_y", gy),
-            ("width", gw),
-            ("height", gh),
-            ("visible", True),
-        ):
-            try:
-                setattr(target, attr, val)
-            except Exception:
-                pass
+    _hide_splitter_guard_workspace_duplicate()
+    try:
+        win.flags = _splitter_guard_window_flags()
+    except Exception:
+        pass
+    for attr, val in (
+        ("position_x", gx),
+        ("position_y", gy),
+        ("width", gw),
+        ("height", gh),
+        ("visible", True),
+    ):
+        try:
+            setattr(win, attr, val)
+        except Exception:
+            pass
     try:
         top_modal = getattr(win, "set_top_modal", None)
         if callable(top_modal):
@@ -620,7 +657,9 @@ def _ensure_splitter_guard_window(ext: Any) -> Any:
         pass
     try:
         with win.frame:
-            block = ui.Rectangle(style={"background_color": 0x01000000})
+            block = ui.Frame(style={"background_color": 0x00000000, "border_width": 0})
+            with block:
+                ui.Spacer()
         _wire_splitter_guard_mouse_targets(win.frame, block)
     except Exception:
         pass
@@ -629,13 +668,12 @@ def _ensure_splitter_guard_window(ext: Any) -> Any:
 
 def _hide_splitter_guard_window(ext: Any) -> None:
     win = getattr(ext, "_tbs_split_splitter_guard_win", None)
-    for target in (win, ui.Workspace.get_window(_SPLITTER_GUARD_WIN_TITLE)):
-        if target is None:
-            continue
+    if win is not None:
         try:
-            target.visible = False
+            win.visible = False
         except Exception:
             pass
+    _hide_splitter_guard_workspace_duplicate()
 
 
 def _tick_viewport_split_splitter_guard(ext: Any) -> None:
