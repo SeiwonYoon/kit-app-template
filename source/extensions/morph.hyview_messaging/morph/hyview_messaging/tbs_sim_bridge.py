@@ -165,6 +165,31 @@ def _schedule_hyview_main_work(
             pass
 
 
+def _normalize_ep_count(raw: Any, *, default: int = 2) -> int:
+    try:
+        return 3 if int(raw) >= 3 else 2
+    except Exception:
+        return 3 if int(default) >= 3 else 2
+
+
+def _normalize_hyview_case_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """웹 configs[n] — ``settings_snapshot`` 하위 + 최상위 병합(최상위 우선). ``ep_count`` 만 사용."""
+    if not isinstance(raw, dict):
+        return {}
+    inner = raw.get("settings_snapshot")
+    merged: Dict[str, Any] = {}
+    if isinstance(inner, dict):
+        merged.update(inner)
+    for key, val in raw.items():
+        if key == "settings_snapshot":
+            continue
+        merged[key] = val
+    merged.pop("ep_count_idx", None)
+    if "ep_count" in merged:
+        merged["ep_count"] = _normalize_ep_count(merged.get("ep_count"))
+    return merged
+
+
 def _apply_ep_count_for_case(ext: Any, case_index: int, ep_count: int) -> None:
     from morph.tbs_control_2.control_window import (
         on_sim_ep_count_changed,
@@ -198,22 +223,27 @@ def _apply_ebs_enable_for_case(ext: Any, case_index: int, ebs_enable: bool) -> N
 
 
 def _apply_settings_snapshot_for_case(ext: Any, case_index: int, snap: Dict[str, Any]) -> None:
-    if not isinstance(snap, dict) or not snap:
+    raw = snap if isinstance(snap, dict) else {}
+    norm = _normalize_hyview_case_config(raw)
+    if not norm:
         return
-    apply_case_sim_settings(ext, _case_index_to_case_id(case_index), dict(snap))
-    if "ep_count_idx" in snap:
+    apply_case_sim_settings(ext, _case_index_to_case_id(case_index), norm)
+    if "ep_count" in norm:
         try:
-            ep_count = 3 if int(snap.get("ep_count_idx", 0) or 0) >= 1 else 2
-            _apply_ep_count_for_case(ext, case_index, ep_count)
+            _apply_ep_count_for_case(ext, case_index, int(norm["ep_count"]))
         except Exception:
             pass
-    if "ebs_enabled" in snap or "ebs_enable" in snap:
+    if "ebs_enabled" in norm or "ebs_enable" in norm:
         try:
-            _apply_ebs_enable_for_case(
-                ext,
-                case_index,
-                bool(snap.get("ebs_enable", snap.get("ebs_enabled", True))),
-            )
+            from morph.tbs_control_2.ebs_case_models import CASE_A, CASE_B
+            from morph.tbs_control_2.tbs_ep_port_visibility import on_sim_ebs_enabled_changed
+            from morph.tbs_control_2.control_window import on_sim_ebs_enabled_changed_for_case
+
+            cid = _case_index_to_case_id(case_index)
+            if cid == CASE_A:
+                on_sim_ebs_enabled_changed(ext)
+            else:
+                on_sim_ebs_enabled_changed_for_case(ext, CASE_B)
         except Exception:
             pass
     from morph.tbs_control_2.control_window import _apply_ep_port_layout_for_sim_screen
@@ -346,7 +376,9 @@ def handle_start_simulation(
     raw_config = pl.get("configs")
     if not isinstance(raw_config, list):
         raw_config = []
-    config: List[Dict[str, Any]] = [snap if isinstance(snap, dict) else {} for snap in raw_config]
+    config: List[Dict[str, Any]] = [
+        _normalize_hyview_case_config(snap if isinstance(snap, dict) else {}) for snap in raw_config
+    ]
     while len(config) < 2:
         config.append({})
 
@@ -360,7 +392,7 @@ def handle_start_simulation(
             bridge_work_done(req_id, "start_simulation", t0)
             dispatch(
                 "V2T_response_start_simulation",
-                _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
+                _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
             )
             return
 
@@ -377,7 +409,7 @@ def handle_start_simulation(
             bridge_work_done(req_id, "start_simulation", t0)
             dispatch(
                 "V2T_response_start_simulation",
-                _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
+                _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
             )
             return
 
@@ -391,7 +423,7 @@ def handle_start_simulation(
                 bridge_work_done(req_id, "start_simulation_prerun_wait", t1)
                 dispatch(
                     "V2T_response_start_simulation",
-                    _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
+                    _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
                 )
                 return
             ok = await _wait_prerun_done(ext2)
@@ -399,12 +431,12 @@ def handle_start_simulation(
             if not ok:
                 dispatch(
                     "V2T_response_start_simulation",
-                    _err("prerun timeout or failed", data={"result": list(_EMPTY_START_RESULT)}),
+                    _err("prerun timeout or failed", data={"results": list(_EMPTY_START_RESULT)}),
                 )
                 return
             dispatch(
                 "V2T_response_start_simulation",
-                _ok({"result": _collect_start_result(ext2)}),
+                _ok({"results": _collect_start_result(ext2)}),
             )
 
         try:
@@ -412,14 +444,14 @@ def handle_start_simulation(
         except Exception as exc:
             dispatch(
                 "V2T_response_start_simulation",
-                _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
+                _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
             )
 
     schedule_on_main_thread(
         _begin,
         on_error=lambda exc: dispatch(
             "V2T_response_start_simulation",
-            _err(str(exc), data={"result": list(_EMPTY_START_RESULT)}),
+            _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
         ),
     )
 

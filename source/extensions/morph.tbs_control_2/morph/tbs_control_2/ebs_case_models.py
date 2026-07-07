@@ -216,14 +216,22 @@ def bind_case_b_ep_count_combo(ext: Any, combo: Any) -> None:
         ext._ebs_b_ep_count_combo = combo
 
 
+def _ep_count_from_snap_value(raw: Any, *, default: int = 2) -> int:
+    try:
+        return 3 if int(raw) >= 3 else 2
+    except Exception:
+        return 3 if int(default) >= 3 else 2
+
+
 def capture_case_sim_settings(ext: Any, case_id: int) -> Dict[str, Any]:
     """CASE 실시간 UI → 시뮬 엔진용 dict (화면별 전체 설정)."""
     cid = int(case_id)
     d: Dict[str, Any] = {}
     try:
-        d["ep_count_idx"] = int(get_sim_ep_count_idx_for_case(ext, cid))
+        idx = int(get_sim_ep_count_idx_for_case(ext, cid))
     except Exception:
-        d["ep_count_idx"] = int(_SIM_DEF.ep_count_idx)
+        idx = int(_SIM_DEF.ep_count_idx)
+    d["ep_count"] = _ep_count_from_snap_value(3 if idx == 1 else 2)
     d["ebs_enabled"] = bool(get_sim_ebs_enabled_for_case(ext, cid))
     try:
         m = get_case_model(ext, cid, "lot_count")
@@ -276,16 +284,15 @@ def apply_case_sim_settings(ext: Any, case_id: int, snap: Dict[str, Any]) -> Non
     if not isinstance(snap, dict) or not snap:
         return
     cid = int(case_id)
-    try:
-        idx = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
-    except Exception:
-        idx = int(_SIM_DEF.ep_count_idx)
-    if cid == CASE_A:
-        from .ebs_control_panel_ui import _sync_ep_count_combo_widgets
+    ep_in_snap = "ep_count" in snap
+    if ep_in_snap:
+        idx = 1 if _ep_count_from_snap_value(snap.get("ep_count")) >= 3 else 0
+        if cid == CASE_A:
+            from .ebs_control_panel_ui import _sync_ep_count_combo_widgets
 
-        _sync_ep_count_combo_widgets(ext, idx)
-    else:
-        _sync_case_b_ep_count_combo_widgets(ext, idx)
+            _sync_ep_count_combo_widgets(ext, idx)
+        else:
+            _sync_case_b_ep_count_combo_widgets(ext, idx)
     try:
         m = get_case_model(ext, cid, "ebs_enabled")
         if m is not None and "ebs_enabled" in snap:
@@ -336,19 +343,21 @@ def apply_case_sim_settings(ext: Any, case_id: int, snap: Dict[str, Any]) -> Non
         except Exception:
             pass
     if cid == CASE_A:
-        try:
-            from .control_window import on_sim_ep_count_changed
+        if ep_in_snap:
+            try:
+                from .control_window import on_sim_ep_count_changed
 
-            on_sim_ep_count_changed(ext)
-        except Exception:
-            pass
+                on_sim_ep_count_changed(ext)
+            except Exception:
+                pass
     else:
-        try:
-            from .control_window import on_sim_ep_count_changed_for_case
+        if ep_in_snap:
+            try:
+                from .control_window import on_sim_ep_count_changed_for_case
 
-            on_sim_ep_count_changed_for_case(ext, CASE_B)
-        except Exception:
-            pass
+                on_sim_ep_count_changed_for_case(ext, CASE_B)
+            except Exception:
+                pass
 
 
 def copy_case_sim_settings(ext: Any, from_case: int, to_case: int) -> None:

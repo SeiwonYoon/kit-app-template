@@ -2004,10 +2004,13 @@ def _fault_ports_from_snapshot(snap: Dict[str, Any], ep_count: int) -> Set[str]:
 def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[SimulationTimingConfig, SimulationInitConfig]:
     """화면별 스냅샷으로 채널 전용 ``SimulationTimingConfig`` / ``SimulationInitConfig`` 를 만든다."""
     try:
-        ep_count_idx = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
+        ep_count = _ep_count_from_snap_value(
+            snap.get("ep_count"),
+            default=int(_SIM_DEF.ep_count()),
+        )
     except Exception:
-        ep_count_idx = int(_SIM_DEF.ep_count_idx)
-    ep_count = 2 if ep_count_idx == 0 else 3
+        ep_count = int(_SIM_DEF.ep_count())
+    ep_count_idx = 1 if ep_count >= 3 else 0
     ebs_enabled = bool(snap.get("ebs_enabled", True))
     initial_full_ports: List[str] = []
     if ebs_enabled:
@@ -11821,10 +11824,13 @@ def on_sim_start_clicked(ext: Any) -> None:
             except Exception:
                 s0 = {}
         try:
-            ep_idx0 = int(s0.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx)
+            if "ep_count" in s0:
+                ep_cnt0 = 3 if int(s0.get("ep_count", 2) or 2) >= 3 else 2
+            else:
+                ep_cnt0 = int(_SIM_DEF.ep_count())
         except Exception:
-            ep_idx0 = int(_SIM_DEF.ep_count_idx)
-        ep_cnt0 = 2 if int(ep_idx0) == 0 else 3
+            ep_cnt0 = int(_SIM_DEF.ep_count())
+        ep_idx0 = 0 if ep_cnt0 < 3 else 1
         occ_init = _occ_from_snap(s0, ep_cnt0)
         try:
             ext._sim_last_ports_occupancy_by_screen[str(scr0)] = dict(occ_init)  # type: ignore[index]

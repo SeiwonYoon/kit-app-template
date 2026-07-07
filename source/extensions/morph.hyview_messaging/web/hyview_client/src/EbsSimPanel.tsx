@@ -27,7 +27,7 @@ const defaultCase = (): CaseForm => ({
 function snapshotFromForm(form: CaseForm): Record<string, unknown> {
   return {
     lot_count: form.lotCount,
-    ep_count_idx: form.epCount >= 3 ? 1 : 0,
+    ep_count: form.epCount,
     ebs_enabled: form.ebsEnable,
   };
 }

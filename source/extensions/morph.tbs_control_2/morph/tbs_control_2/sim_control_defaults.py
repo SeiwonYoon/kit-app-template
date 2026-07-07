@@ -78,7 +78,7 @@ MAX_VIEWPORT_SPLIT_COUNT: int = 2
 
 # True: ViewportWidget 2분할 host (독립 usd_context·stage).
 # False: Dock + create_viewport_window (TBS_SimSplit_*). TBS_SIM_VIEWPORT_WIDGET_SPLIT=0 도 False.
-USE_VIEWPORT_WIDGET_SPLIT: bool = True
+USE_VIEWPORT_WIDGET_SPLIT: bool = False
 
 # RenderProduct 생성 원인 조사 (증상 수정 아님 — 관측·실험 전용).
 # True → [TBS/rp-invest] / [TBS/rp-timeline] 상세 로그.
@@ -111,7 +111,7 @@ HYVIEW_STREAM_LOCK_LAYOUT: bool = True
 STREAMING_ALLOW_DYNAMIC_RESIZE: bool = False
 
 # 2분할 시 Viewport·보조 창 사용자 리사이즈 차단(기본 on).
-# Dock 50:50·Console/Content 레이아웃 유지. 분할선 드래그는 투명 오버레이가 입력을 선점(복구·되돌림 없음).
+# Dock 50:50·Console/Content 레이아웃 유지. 분할선 드래그는 투명 ui.Window 오버레이 + carb.input 보조.
 # 끄려면 False 또는 TBS_SIM_VIEWPORT_SPLIT_LOCK_RESIZE=0
 LOCK_VIEWPORT_SPLIT_USER_RESIZE: bool = True
 

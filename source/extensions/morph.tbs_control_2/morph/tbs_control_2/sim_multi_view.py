@@ -6110,12 +6110,22 @@ def _ensure_sim_screen1_live_hud_subscription(ext: Any) -> None:
             pass
 
 
+def _ep2_layout_from_snap(snap: Dict[str, Any]) -> bool:
+    """True → EP2 구성. ``ep_count``(2|3)만 사용."""
+    if "ep_count" in snap:
+        try:
+            return int(snap.get("ep_count", 2) or 2) < 3
+        except Exception:
+            return True
+    try:
+        return int(_SIM_DEF.ep_count()) < 3
+    except Exception:
+        return True
+
+
 def _format_initial_load_ports_line(snap: Dict[str, Any]) -> str:
     """스냅샷/캡처 dict 기준 초기 적재(풀) 포트 목록."""
-    try:
-        ep2 = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx) == 0
-    except Exception:
-        ep2 = int(_SIM_DEF.ep_count_idx) == 0
+    ep2 = _ep2_layout_from_snap(snap)
     pairs = (
         ("INOUT", "init_inout"),
         ("BP1", "init_bp1"),
@@ -6170,10 +6180,7 @@ def _describe_snapshot_for_viewport_hud(
 
     - ``live_control_panel=True`` (화면1): 제어창과 동기 표시. 글리프 깨짐 방지로 ``|`` 구분·``시뮬`` 표기.
     """
-    try:
-        ep2 = int(snap.get("ep_count_idx", _SIM_DEF.ep_count_idx) or _SIM_DEF.ep_count_idx) == 0
-    except Exception:
-        ep2 = int(_SIM_DEF.ep_count_idx) == 0
+    ep2 = _ep2_layout_from_snap(snap)
     ep_s = "EP2구성" if ep2 else "EP3구성"
     try:
         lots = max(1, int(snap.get("lot_count", _SIM_DEF.lot_count) or _SIM_DEF.lot_count))
