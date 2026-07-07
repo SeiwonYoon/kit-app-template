@@ -272,6 +272,7 @@ from .control_sim_bar_graph import (
     bar_state_from_seg,
     build_ep_bar_from_playback_schedule,
     build_ep_bar_from_progress_items,
+    build_bar_graph_copy_document,
     build_prerun_export_document,
     format_row_state_duration_summary,
     merge_bar_row_segments,
@@ -3088,9 +3089,12 @@ def _ep_occ_timeline_layout_dims(ext: Any) -> Tuple[int, int, int, int, int]:
     return (176, 40, 126, 2, 2)
 
 
+_BAR_GRAPH_COPY_ROW_H = 26
+
+
 def _sim_channel_upper_height(ext: Any) -> int:
     """포트·EP막대·진행현황 고정 높이(타임테이블 패널과 분리)."""
-    return 84 + _ep_timeline_host_height(ext) + 168 + 8
+    return 84 + _ep_timeline_host_height(ext) + _BAR_GRAPH_COPY_ROW_H + 168 + 8
 
 
 def _sim_snapshot_for_screen(ext: Any, screen_1based: int) -> Dict[str, Any]:
@@ -3139,11 +3143,20 @@ def _ep_timeline_host_height(ext: Any) -> int:
     except Exception:
         ebs_on = True
     n_bars = len(bar_graph_row_order(idx, ebs_enabled=ebs_on))
-    _, _, _, frame_pad, _ = _ep_occ_timeline_layout_dims(ext)
+    _, _, _, frame_pad, row_sp = _ep_occ_timeline_layout_dims(ext)
     bar_h = 10
     tick_h = 14
     inner_sp = 3
-    h = int(frame_pad) * 2 + tick_h + inner_sp + n_bars * bar_h + max(0, n_bars - 1) * inner_sp + 2
+    # 우측 요약이 2줄로 접히는 경우가 많아 행당 최소 높이를 넉넉히 잡는다.
+    row_h_est = 22
+    h = (
+        int(frame_pad) * 2
+        + tick_h
+        + inner_sp
+        + n_bars * int(row_h_est)
+        + max(0, n_bars - 1) * int(row_sp)
+        + 2
+    )
     return max(68, int(h))
 
 
@@ -3245,6 +3258,20 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
                 with ch["ep_timeline_host"]:
                     ch["ep_timeline_busy_label"] = ui.Label("", height=1)
                 ch["ep_timeline_widget"] = None
+                bar_w, name_w, val_w, _, _ = _ep_occ_timeline_layout_dims(ext)
+                with ui.HStack(height=_BAR_GRAPH_COPY_ROW_H, spacing=0):
+                    ui.Spacer(width=int(name_w))
+                    ui.Spacer(width=int(bar_w))
+                    ch["ep_timeline_copy_btn"] = ui.Button(
+                        "데이터 복사",
+                        width=int(val_w),
+                        height=22,
+                        clicked_fn=lambda s=int(screen): _copy_bar_graph_prerun_json(ext, s),
+                    )
+                    try:
+                        ch["ep_timeline_copy_btn"].enabled = False
+                    except Exception:
+                        pass
                 ch["progress_frame"] = ui.ScrollingFrame(height=168, style={"background_color": 0xFF1A1E26, "border_width": 1, "border_color": 0xFF3A3A3A})
                 with ch["progress_frame"]:
                     ch["progress_label"] = ui.Label("", word_wrap=True, height=158, style={"color": 0xFFFFFFFF})
@@ -5008,6 +5035,63 @@ def _apply_bar_mask_widths(
             pass
 
 
+def _bar_graph_has_prerun_data(ext: Any, screen: int) -> bool:
+    pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
+    if not isinstance(pre_by, dict):
+        return False
+    bar_pre = pre_by.get(str(int(screen)))
+    if not isinstance(bar_pre, EpBarPrecomputed):
+        return False
+    rows = getattr(bar_pre, "rows", None)
+    return isinstance(rows, dict) and bool(rows)
+
+
+def _copy_bar_graph_prerun_json(ext: Any, screen: int) -> None:
+    """프리런 막대 전체를 시간 순 JSON 으로 클립보드·콘솔에 출력."""
+    pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
+    bar_pre = pre_by.get(str(int(screen))) if isinstance(pre_by, dict) else None
+    if not isinstance(bar_pre, EpBarPrecomputed) or not _bar_graph_has_prerun_data(ext, int(screen)):
+        msg = f"[SIM UI] 화면{int(screen)}: 프리런 막대 데이터가 없습니다."
+        print(msg, flush=True)
+        _append_sim_log(ext, msg)
+        return
+    try:
+        snap = _effective_sim_settings_snapshot_for_screen(ext, int(screen))
+    except Exception:
+        snap = _sim_snapshot_for_screen(ext, int(screen))
+    doc = build_bar_graph_copy_document(
+        screen=int(screen),
+        bar=bar_pre,
+        sim_snapshot=snap,
+    )
+    text = json.dumps(doc, ensure_ascii=False, indent=2)
+    header = f"[SIM UI] 막대그래프 JSON 복사 (화면{int(screen)})"
+    print(f"{header}\n{text}", flush=True)
+    try:
+        import omni.kit.clipboard as cb  # type: ignore
+
+        if hasattr(cb, "copy"):
+            cb.copy(text)
+        elif hasattr(cb, "set_text"):
+            cb.set_text(text)
+        else:
+            raise RuntimeError("clipboard api not found")
+        _append_sim_log(ext, f"{header} — 클립보드 복사 완료")
+    except Exception as exc:
+        print(f"[SIM UI] 클립보드 복사 실패({exc}); 위 콘솔 JSON 참고", flush=True)
+        _append_sim_log(ext, f"{header} — 클립보드 미지원, 콘솔 출력")
+
+
+def _sync_bar_graph_copy_button(ext: Any, ch: Dict[str, Any], screen: int) -> None:
+    btn = ch.get("ep_timeline_copy_btn")
+    if btn is None:
+        return
+    try:
+        btn.enabled = _bar_graph_has_prerun_data(ext, int(screen))
+    except Exception:
+        pass
+
+
 def _build_precomputed_bar_with_mask(
     ext: Any,
     ch: Dict[str, Any],
@@ -5168,6 +5252,7 @@ def _build_precomputed_bar_with_mask(
                                 masks[rk] = (placer, mrect, vlabel)
         st["_mask_widgets"] = masks
         st["_mask_full_rows"] = full_rows
+        _sync_bar_graph_copy_button(ext, ch, int(screen))
         return True
     except Exception as ex:
         print(f"[SIM] EP 막대 마스크 렌더 실패(화면{screen}): {ex}", flush=True)
@@ -5272,6 +5357,7 @@ def _render_or_update_precomputed_bar_mask(
         )
         st["_mask_last_t"] = float(t_bar)
         st["_mask_last_preview"] = bool(preview_full)
+        _sync_bar_graph_copy_button(ext, ch, int(screen))
         return True
 
     ok = _build_precomputed_bar_with_mask(
@@ -5290,6 +5376,7 @@ def _render_or_update_precomputed_bar_mask(
         st["_mask_sig"] = sig
         st["_mask_last_t"] = float(t_bar)
         st["_mask_last_preview"] = bool(preview_full)
+        _sync_bar_graph_copy_button(ext, ch, int(screen))
         return True
     return False
 
@@ -5643,6 +5730,7 @@ def _update_ep_timeline_under_port_state(
             preview_full=bool(preview_full),
             layout=cur_layout,
         ):
+            _sync_bar_graph_copy_button(ext, ch, int(screen))
             return
 
     # 동일 시뮼 시각(dt=0)·막대 스케일·EP 점유가 같으면 VStack 전체 destroy/rebuild 생략.
@@ -5851,6 +5939,7 @@ def _update_ep_timeline_under_port_state(
                                     alignment=ui.Alignment.LEFT_CENTER,
                                     style={"color": 0xFFDDDDDD, "font_size": 11},
                                 )
+        _sync_bar_graph_copy_button(ext, ch, int(screen))
     except Exception as ex:
         print(f"[SIM] EP 막대 UI 렌더 실패(화면{screen}): {ex}", flush=True)
         _clear_ep_timeline_host_content(ch)

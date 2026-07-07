@@ -1048,6 +1048,103 @@ def build_ep_bar_from_progress_items(
     )
 
 
+def _bar_copy_round_sec(sec: float) -> float:
+    s = float(sec)
+    if abs(s - round(s)) < 0.05:
+        return float(int(round(s)))
+    return round(s, 1)
+
+
+def _bar_copy_pct(part: float, whole: float) -> float:
+    if float(whole) <= 1e-9:
+        return 0.0
+    return round(100.0 * float(part) / float(whole), 1)
+
+
+def build_bar_graph_copy_document(
+    *,
+    screen: int,
+    bar: EpBarPrecomputed,
+    sim_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """클립보드 복사용 막대그래프 JSON — 행별 시간 구간·상태별 합계(초·%)."""
+    _ = sim_snapshot  # API 호환용 (현재 export 에 메타 미포함)
+    row_order = (
+        normalize_bar_graph_row_order(list(bar.row_order))
+        if bar.row_order
+        else normalize_bar_graph_row_order([str(k) for k in (bar.rows or {}).keys()])
+    )
+    try:
+        total_est = float(bar.total_est)
+    except Exception:
+        total_est = 0.0
+
+    rows_out: Dict[str, Any] = {}
+    for row_name in row_order:
+        rk = str(row_name)
+        segs = bar.rows.get(rk, []) if isinstance(bar.rows, dict) else []
+        seg_list = segs if isinstance(segs, list) else []
+
+        row_total = 0.0
+        for s in seg_list:
+            if not isinstance(s, dict):
+                continue
+            try:
+                row_total += float(s.get("dur", 0.0))
+            except Exception:
+                pass
+        if row_total <= 1e-9:
+            row_total = float(total_est)
+
+        segments_out: List[Dict[str, Any]] = []
+        acc_by_state: Dict[str, float] = {st: 0.0 for st in BAR_STATES}
+        t_cur = 0.0
+        for s in seg_list:
+            if not isinstance(s, dict):
+                continue
+            try:
+                dur = float(s.get("dur", 0.0))
+            except Exception:
+                dur = 0.0
+            if dur <= 1e-9:
+                continue
+            st = bar_state_from_seg(s)
+            t_end = float(t_cur) + float(dur)
+            segments_out.append(
+                {
+                    "from_sec": _bar_copy_round_sec(t_cur),
+                    "to_sec": _bar_copy_round_sec(t_end),
+                    "state": st,
+                    "pct": _bar_copy_pct(dur, row_total),
+                }
+            )
+            acc_by_state[st] = float(acc_by_state.get(st, 0.0)) + float(dur)
+            t_cur = float(t_end)
+
+        by_state: Dict[str, Dict[str, float]] = {}
+        for st in BAR_STATES:
+            sec = float(acc_by_state.get(st, 0.0) or 0.0)
+            if sec <= 0.05:
+                continue
+            by_state[st] = {
+                "sec": _bar_copy_round_sec(sec),
+                "pct": _bar_copy_pct(sec, row_total),
+            }
+
+        rows_out[rk] = {
+            "total_sec": _bar_copy_round_sec(row_total),
+            "segments": segments_out,
+            "by_state": by_state,
+        }
+
+    return {
+        "screen": int(screen),
+        "total_sec": _bar_copy_round_sec(total_est),
+        "row_order": [str(r) for r in row_order],
+        "rows": rows_out,
+    }
+
+
 def _timetable_meta_to_dict(m: TimetableRowMeta) -> Dict[str, Any]:
     return {
         "row_index": int(m.row_index),
@@ -1176,6 +1273,7 @@ __all__ = [
     "build_ep_bar_from_progress_items",
     "build_ep_bar_from_playback_schedule",
     "build_ep_bar_from_timeline_replay",
+    "build_bar_graph_copy_document",
     "build_prerun_export_document",
     "compute_duration_sec_by_row",
     "format_row_state_duration_summary",
