@@ -441,14 +441,14 @@ def _split_viewport_tile_names(n: int) -> List[str]:
 
 
 def apply_viewport_split_tab_chrome(n: int, ext: Any = None) -> None:
-    """화면1(Viewport)·화면2+ Dock 탭 숨김 — **Dock 레이아웃 전용** (Widget 분할 시 no-op)."""
+    """화면1(Viewport)·화면2+ Dock 탭 숨김 — Dock·Widget 분할 공통."""
     try:
-        from .sim_multi_view_widget import ensure_viewport_workspace_tab_visible, is_split_widget_layout_active
+        from .sim_multi_view_widget import hide_viewport_workspace_tab_chrome, is_split_widget_layout_active
         from .tbs_extension_singleton import get_tbs_extension_instance
 
         e = ext if ext is not None else get_tbs_extension_instance()
         if e is not None and is_split_widget_layout_active(e):
-            ensure_viewport_workspace_tab_visible()
+            hide_viewport_workspace_tab_chrome()
             return
     except Exception:
         pass

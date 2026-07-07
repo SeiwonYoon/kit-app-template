@@ -1,5 +1,5 @@
 """
-ViewportWidget 기반 2분할 — Workspace ``Viewport`` 탭 1개, ``get_frame`` HStack 50:50.
+ViewportWidget 기반 2분할 — Workspace ``Viewport`` 창 1개, ``get_frame`` HStack 50:50 (Dock 탭 바 숨김).
 
 - Startup 시 ``ViewportWidget`` — 화면1 즉시 1회, 화면2는 **master_2 Stage 준비 후** 1회 (총 2회, 재생성 없음)
 - 화면2를 빈 aux 컨텍스트에서 미리 만들지 않음 → RenderProduct 미생성 방지
@@ -683,24 +683,35 @@ def _resolve_main_viewport_window(ext: Any) -> Any:
     return None
 
 
-def ensure_viewport_workspace_tab_visible() -> None:
-    """Widget 분할: Workspace ``Viewport`` 기본 탭 유지 (Dock 전용 noTabBar 미적용)."""
+def hide_viewport_workspace_tab_chrome() -> None:
+    """Widget 분할: Workspace ``Viewport`` Dock 탭 바 숨김 (Dock 방식과 동일)."""
+    try:
+        from .kit_chrome_visibility import apply_viewport_dock_tab_bars_hidden
+
+        apply_viewport_dock_tab_bars_hidden()
+    except Exception:
+        pass
     try:
         wui = ui.Workspace.get_window("Viewport")
         if wui is None:
             return
         try:
-            wui.noTabBar = False
+            wui.noTabBar = True
         except Exception:
             pass
         for attr in ("dock_tab_bar_enabled", "dock_tab_bar_visible"):
             try:
                 if hasattr(wui, attr):
-                    setattr(wui, attr, True)
+                    setattr(wui, attr, False)
             except Exception:
                 pass
     except Exception:
         pass
+
+
+def ensure_viewport_workspace_tab_visible() -> None:
+    """(legacy) Widget 분할에서도 탭 바를 숨긴다 — ``hide_viewport_workspace_tab_chrome``."""
+    hide_viewport_workspace_tab_chrome()
 
 
 def _suspend_native_viewport_widget_presenter(ext: Any) -> None:
@@ -3516,6 +3527,7 @@ def apply_split_widget_navigation(ext: Any, n: int, token: int, *, hold_ticks: i
 
 
 __all__ = [
+    "hide_viewport_workspace_tab_chrome",
     "ensure_viewport_workspace_tab_visible",
     "sync_split_widget_aux_render",
     "apply_split_widget_navigation",
