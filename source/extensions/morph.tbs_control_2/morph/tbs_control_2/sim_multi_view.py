@@ -103,6 +103,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -487,12 +488,17 @@ def apply_viewport_split_tab_chrome(n: int, ext: Any = None) -> None:
 
 
 _SPLITTER_GUARD_WIN_TITLE = "TBS_SimSplit_SplitterGuard"
-_SPLITTER_GUARD_HIT_PX = 1
+# Dock splitter hit-zone 을 덮는 논리 폭.
+# Kit가 내부적으로 최소 칠해짐 폭을 갖는 경우가 있어, 1px보다 더 작은 실수 폭을 시도한다.
+# (입력 선점은 유지하면서, 화면에 보이는 세로 띠를 더 얇게 만드는 목적)
+_SPLITTER_GUARD_HIT_PX = 0.2
 # gw(논리 폭)와 실제 칠해짐 폭은 다름 — Kit ui.Window 는 최소 ~8px 수준으로 그릴 수 있어
 # 0.5·0.3 으로 줄여도 화면상 띠 폭은 거의 안 줄어듦. 위치는 ORIGIN_LEFT 로 보정.
 _SPLITTER_GUARD_CHROME_SLOP = 2.0 / 3.0
 # anchor 기준 창 원점 — Kit 실제 칠해짐(~8px) 우측 끝이 접합선에 맞도록.
-_SPLITTER_GUARD_ORIGIN_LEFT = 8.0
+# Dock 2분할에서 우측 타일(화면2) 좌측에 오버레이가 더 남는 경우가 있어,
+# 칠해짐을 전체적으로 왼쪽으로 살짝 당겨(우측 침범 감소) gap 내부에 더 맞춘다.
+_SPLITTER_GUARD_ORIGIN_LEFT = 9.0
 
 
 def _splitter_guard_window_flags() -> int:
@@ -591,20 +597,20 @@ def _compute_viewport_split_splitter_rect(n: int) -> Optional[Tuple[float, float
     if gh < 1.0:
         return None
     gy = top
-    hit = float(_SPLITTER_GUARD_HIT_PX)
+    hit = max(0.1, float(_SPLITTER_GUARD_HIT_PX))
     dock_gap = gap_r - gap_l
     if dock_gap >= 1.0:
-        gw = max(1.0, min(dock_gap, hit))
+        gw = max(0.1, min(dock_gap, hit))
         anchor = gap_l
     elif dock_gap < -0.5:
-        gw = max(1.0, min(gap_l - gap_r, hit))
+        gw = max(0.1, min(gap_l - gap_r, hit))
         anchor = gap_r
     else:
         gw = hit
         anchor = gap_l
     # Kit 창 원점 — 칠해짐 폭(~CHROME_SLOP)보다 왼쪽에 두어 우측 삐져남 방지.
-    gx = anchor - float(_SPLITTER_GUARD_ORIGIN_LEFT)
-    if gw < 1.0:
+    gx = float(anchor) - float(_SPLITTER_GUARD_ORIGIN_LEFT)
+    if gw < 0.1:
         return None
     return (gx, gy, gw, gh)
 
@@ -619,6 +625,8 @@ def _apply_splitter_guard_geometry(ext: Any, rect: Tuple[float, float, float, fl
         win.flags = _splitter_guard_window_flags()
     except Exception:
         pass
+    # NOTE: geometry 적용은 _tick_viewport_split_splitter_guard 에서 변화가 있을 때만 호출되도록
+    # 캐시/스로틀한다. 여기서는 주어진 rect 를 그대로 적용만 한다.
     for attr, val in (
         ("position_x", gx),
         ("position_y", gy),
@@ -645,7 +653,9 @@ def _ensure_splitter_guard_window(ext: Any) -> Any:
     try:
         win = ui.Window(
             _SPLITTER_GUARD_WIN_TITLE,
-            width=int(_SPLITTER_GUARD_HIT_PX),
+            # Window 생성 width 는 int 로 들어가므로 최소 1을 보장하고,
+            # 실제 폭 튜닝은 매 프레임 geometry(width=gw)로 제어한다.
+            width=1,
             height=100,
             flags=_splitter_guard_window_flags(),
         )
@@ -693,7 +703,36 @@ def _tick_viewport_split_splitter_guard(ext: Any) -> None:
         return
     if _ensure_splitter_guard_window(ext) is None:
         return
-    _apply_splitter_guard_geometry(ext, rect)
+    # 호출 빈도 최소화(기능 유지): geometry set은 rect 변화 시에만,
+    # 그러나 드래그 차단이 풀리지 않게 visible/top_modal은 매 프레임 유지한다.
+    eps = 0.25  # sub-pixel 떨림 무시
+    last = getattr(ext, "_tbs_split_splitter_guard_last_rect", None)
+    need_apply = True
+    if isinstance(last, tuple) and len(last) == 4:
+        try:
+            need_apply = any(abs(float(a) - float(b)) > float(eps) for a, b in zip(last, rect))
+        except Exception:
+            need_apply = True
+    if need_apply:
+        _apply_splitter_guard_geometry(ext, rect)
+        try:
+            ext._tbs_split_splitter_guard_last_rect = tuple(float(x) for x in rect)
+        except Exception:
+            pass
+    # rect 변화가 없어도 modal/visible 이 풀릴 수 있어 매 프레임 재확인한다.
+    win = getattr(ext, "_tbs_split_splitter_guard_win", None)
+    if win is None:
+        return
+    try:
+        win.visible = True
+    except Exception:
+        pass
+    try:
+        top_modal = getattr(win, "set_top_modal", None)
+        if callable(top_modal):
+            top_modal()
+    except Exception:
+        pass
 
 
 def _install_viewport_split_splitter_guard(ext: Any) -> None:
