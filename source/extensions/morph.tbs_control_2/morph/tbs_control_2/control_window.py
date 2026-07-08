@@ -274,6 +274,7 @@ from .control_sim_bar_graph import (
     build_ep_bar_from_progress_items,
     build_bar_graph_copy_document,
     build_prerun_export_document,
+    build_prerun_export_document_web_slim,
     format_row_state_duration_summary,
     merge_bar_row_segments,
     overlay_bar_rows_tip_from_occ,
@@ -8775,6 +8776,19 @@ def _finalize_prerun_ui_assets(
                     out_path = out_dir / f"prerun_screen{si}_{stamp}.json"
                     write_prerun_export_json(str(out_path), export_doc)
                     print(f"[SIM] 프리런 export JSON (화면{si}): {out_path}", flush=True)
+                    try:
+                        slim_doc = build_prerun_export_document_web_slim(export_doc)
+                        out_path_slim = out_dir / f"prerun_screen{si}_{stamp}_temp.json"
+                        write_prerun_export_json(str(out_path_slim), slim_doc)
+                        print(
+                            f"[SIM] 프리런 export JSON (웹 슬림·화면{si}): {out_path_slim}",
+                            flush=True,
+                        )
+                    except Exception as ex2:
+                        print(
+                            f"[SIM] 프리런 export JSON 슬림 저장 실패(화면{si}): {ex2}",
+                            flush=True,
+                        )
                 except Exception as ex:
                     print(f"[SIM] 프리런 export JSON 저장 실패(화면{si}): {ex}", flush=True)
         except Exception as ex:

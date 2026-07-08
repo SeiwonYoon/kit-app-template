@@ -1257,6 +1257,89 @@ def write_prerun_export_json(path: str, doc: Dict[str, Any]) -> None:
         json.dump(doc, f, ensure_ascii=False, indent=2)
 
 
+def build_prerun_export_document_web_slim(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Web 전송용 프리런 export JSON 간소화.
+
+    NOTE:
+    - 원본 doc(Kit 내부용/디스크 저장용)는 그대로 두고, 웹/슬림 파일에만 적용한다.
+    - 규칙은 문서 `docs/tbs_control_2_prerun_web_payload_slimming_plan_ko.md`를 따른다.
+    """
+    out: Dict[str, Any] = dict(doc or {})
+
+    # 7.0.1 Top-level 제거
+    out.pop("version", None)
+    sim = out.get("sim")
+    if isinstance(sim, dict):
+        sim2 = dict(sim)
+        sim2.pop("ep_count_idx", None)
+        out["sim"] = sim2
+
+    # 7.0.2 timeline 제거 + 7.0.3 timetable_rows 축소
+    tl = out.get("timeline")
+    if isinstance(tl, dict):
+        tl2 = dict(tl)
+        for k in ("item_count", "final_sim_time_sec", "total_est_sec", "seek_snapshots_count"):
+            tl2.pop(k, None)
+
+        # timetable_rows: meta row list -> filtered json_obj -> drop fields -> stringify
+        rows_in = tl2.get("timetable_rows")
+        rows_out: List[str] = []
+        if isinstance(rows_in, list):
+            for row in rows_in:
+                if not isinstance(row, dict):
+                    continue
+                jo = row.get("json_obj")
+                if not isinstance(jo, dict):
+                    continue
+                kind = str(jo.get("kind", "") or "").strip().lower()
+                ev = str(jo.get("event", "") or "").strip()
+                keep = False
+                if kind == "event" and ev in ("FOUP_PROCESS_START", "FOUP_PROCESS_END"):
+                    keep = True
+                elif kind == "step" and bool(str(jo.get("anim", "") or "").strip()):
+                    keep = True
+                if not keep:
+                    continue
+                jo2 = dict(jo)
+                # 필드 삭제: screen/kind/process_time_priority
+                for k in ("screen", "kind", "process_time_priority"):
+                    jo2.pop(k, None)
+                try:
+                    rows_out.append(json.dumps(jo2, ensure_ascii=False, separators=(",", ":")))
+                except Exception:
+                    # stringify 실패 시 행을 버린다(웹 payload 안정성 우선)
+                    continue
+        tl2["timetable_rows"] = rows_out
+        out["timeline"] = tl2
+
+    # 7.0.4 bar_graph.segments 축소: dict -> [state, dur_sec]
+    bg = out.get("bar_graph")
+    if isinstance(bg, dict):
+        bg2 = dict(bg)
+        segs = bg2.get("segments")
+        if isinstance(segs, dict):
+            segs2: Dict[str, Any] = {}
+            for row_name, seg_list in segs.items():
+                if not isinstance(seg_list, list):
+                    continue
+                new_list: List[Any] = []
+                for s in seg_list:
+                    if not isinstance(s, dict):
+                        continue
+                    st = s.get("state")
+                    dur = s.get("dur_sec")
+                    if st is None or dur is None:
+                        continue
+                    new_list.append([st, dur])
+                segs2[str(row_name)] = new_list
+            bg2["segments"] = segs2
+        bg = bg2
+        out["bar_graph"] = bg
+
+    return out
+
+
 __all__ = [
     "BAR_STATES",
     "BAR_STATE_COLORS",
@@ -1275,6 +1358,7 @@ __all__ = [
     "build_ep_bar_from_timeline_replay",
     "build_bar_graph_copy_document",
     "build_prerun_export_document",
+    "build_prerun_export_document_web_slim",
     "compute_duration_sec_by_row",
     "format_row_state_duration_summary",
     "merge_bar_row_segments",
