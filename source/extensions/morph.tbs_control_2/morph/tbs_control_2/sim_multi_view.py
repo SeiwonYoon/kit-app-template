@@ -6316,13 +6316,27 @@ def _snapshot_hud_placer_offset_x(ext: Any, screen_1based: int, panel_w: int, ma
     return max(0, 360 - panel_w - margin)
 
 
+def _viewport_snapshot_hud_enabled() -> bool:
+    try:
+        from .sim_control_defaults import SHOW_VIEWPORT_SNAPSHOT_HUD
+
+        return bool(SHOW_VIEWPORT_SNAPSHOT_HUD)
+    except Exception:
+        return False
+
+
 def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
     """
     각 분할 타일의 ``ViewportWindow.get_frame`` 레이어에 우측 상단 2D 패널을 붙인다(별도 ``ui.Window`` 없음).
 
     - **화면1**: 항상 ``_capture_sim_settings_dict_for_hud_fn()`` 제어창 값으로 표시하고, post_update 로 저빈도 텍스트 갱신.
     - **화면2~**: ``_sim_per_screen_snapshots`` 가 있으면 해당 dict, 없으면 제어창 캡처로 표시.
+
+    ``SHOW_VIEWPORT_SNAPSHOT_HUD=False`` 이면 기존 레이어만 제거하고 종료.
     """
+    if not _viewport_snapshot_hud_enabled():
+        destroy_viewport_snapshot_hud_layers(ext)
+        return
     destroy_viewport_snapshot_hud_layers(ext)
     try:
         n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
@@ -6424,6 +6438,9 @@ def sync_viewport_snapshot_hud_layers(ext: Any) -> None:
 
 def schedule_viewport_snapshot_hud_refresh(ext: Any) -> None:
     """Dock/뷰포트 레이아웃이 잡힌 뒤 HUD 를 다시 붙이기 위해 몇 프레임 뒤에 실행한다."""
+    if not _viewport_snapshot_hud_enabled():
+        destroy_viewport_snapshot_hud_layers(ext)
+        return
     if _widget_split_startup_in_progress(ext):
         return
     try:
