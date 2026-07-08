@@ -229,6 +229,12 @@ def _destroy_all_aux_workspace_windows(ext: Any = None) -> None:
 
 
 def _stage_has_usd_lights(stage: Any) -> bool:
+    """
+    Stage 에 UsdLux.LightAPI 조명이 하나라도 있으면 True.
+
+    용도: `_ensure_aux_stage_default_lighting` 에서 fallback DomeLight 를
+    만들기 전에 “이미 조명이 있는지” 판정. (있으면 fallback 생략)
+    """
     try:
         from pxr import UsdLux
 
@@ -241,7 +247,13 @@ def _stage_has_usd_lights(stage: Any) -> bool:
 
 
 def _stage_lux_prim_paths(stage: Any) -> List[str]:
-    """Stage 내 UsdLux 조명 prim 경로 목록."""
+    """
+    Stage 내 UsdLux / typed light prim 경로 목록.
+
+    P0-B 조명 동기화·진단에서 main vs aux Lux 구성을 비교할 때 사용.
+    LightAPI 뿐 아니라 DomeLight/DistantLight 등 typeName 도 포함한다
+    (Kit Viewport LightRig 가 typed prim 으로만 잡히는 경우 대비).
+    """
     paths: List[str] = []
     if stage is None:
         return paths
@@ -265,6 +277,108 @@ def _stage_lux_prim_paths(stage: Any) -> List[str]:
     except Exception:
         pass
     return paths
+
+
+def _remove_aux_fallback_dome_light(stage: Any, *, label: str = "") -> bool:
+    """
+    aux stage 에서 `/World/TBS_DefaultDomeLight`(fallback, intensity=300) 제거.
+
+    배경 (P0-B):
+      LightRig 를 aux session 에 복제해도, early fallback DomeLight 가
+      남아 있으면 이중 조명 → 화면2가 계속 밝게/washed-out 로 보임.
+      session EditContext 만의 `RemovePrim` 은 root 등 다른 layer 에
+      authored 된 fallback 에 no-op 인 경우가 있음.
+
+    동작:
+      1) GetUsedLayers(+session/root) 중 spec 소유 layer 에서 RemovePrim
+      2) session EditContext stage.RemovePrim 재시도
+      3) 그래도 composed 에 남으면 SetActive(False) 로 Hydra 비표시
+
+    Returns:
+      삭제/비활성 시도가 있었으면 True. 로그: [TBS/p0b-rig-clone] remove_fallback
+    """
+    if stage is None:
+        return False
+    path_str = "/World/TBS_DefaultDomeLight"
+    try:
+        from pxr import Sdf, Usd
+    except Exception:
+        return False
+
+    prim = stage.GetPrimAtPath(path_str)
+    if prim is None or not prim.IsValid():
+        return False
+
+    removed = False
+    path = Sdf.Path(path_str)
+
+    # 1) Prefer delete on the layer that actually owns the spec.
+    layers: list[Any] = []
+    try:
+        layers = list(stage.GetUsedLayers())  # type: ignore[attr-defined]
+    except Exception:
+        layers = []
+    try:
+        sess = stage.GetSessionLayer()
+        root = stage.GetRootLayer()
+        if sess is not None and sess not in layers:
+            layers.insert(0, sess)
+        if root is not None and root not in layers:
+            layers.append(root)
+    except Exception:
+        pass
+
+    for lyr in layers:
+        try:
+            if lyr is None:
+                continue
+            if Sdf.FindSpec(lyr, path) is None:
+                continue
+            lyr.RemovePrim(path)  # type: ignore[attr-defined]
+            removed = True
+        except Exception:
+            try:
+                # Some builds expose RemovePrimAtPath.
+                fn = getattr(lyr, "RemovePrimAtPath", None)
+                if callable(fn):
+                    fn(path)
+                    removed = True
+            except Exception:
+                continue
+
+    # 2) Session EditContext RemovePrim as additional best-effort.
+    try:
+        sess = stage.GetSessionLayer()
+        if sess is not None:
+            with Usd.EditContext(stage, sess):
+                stage.RemovePrim(path)
+                removed = True
+    except Exception:
+        pass
+
+    # 3) If still composed, deactivate (hide from Hydra) as last resort.
+    still = stage.GetPrimAtPath(path_str)
+    if still is not None and still.IsValid():
+        try:
+            sess = stage.GetSessionLayer()
+            if sess is not None:
+                with Usd.EditContext(stage, sess):
+                    still.SetActive(False)
+                    removed = True
+        except Exception:
+            pass
+
+    try:
+        after = stage.GetPrimAtPath(path_str)
+        gone = after is None or (not after.IsValid()) or (not after.IsActive())
+        print(
+            f"[TBS/p0b-rig-clone] remove_fallback label={label!r} "
+            f"removed={removed} gone={gone}",
+            flush=True,
+        )
+    except Exception:
+        pass
+    return removed
 
 
 def _ensure_world_xform(stage: Any) -> None:
@@ -300,12 +414,39 @@ def _ensure_prim_ancestor_xforms(stage: Any, prim_path: str) -> None:
 
 def _sync_aux_stage_lighting_from_main(aux_ctx_name: str) -> int:
     """
-    화면1(default ctx) UsdLux 스펙을 화면2 aux session layer 로 복제.
-    generic DomeLight 대신 화면1과 동일 조명 환경을 목표로 한다.
+    화면1(default ctx) UsdLux 스펙 → 화면2 aux session layer 복제 (early path).
+
+    목적 (P0-B / Viewport Widget 톤):
+      generic `/World/TBS_DefaultDomeLight` 대신
+      `/OmniKit_Viewport_LightRig/...` 등 화면1과 동일 Lux 환경을 먼저 심는다.
+
+    호출 시점:
+      `_ensure_aux_stage_default_lighting` (aux USD settle 후, Widget #2 생성 전).
+      READY 시점 LightRig 는 아직 안 보일 수 있어 copied=0 → fallback 경로로
+      떨어질 수 있음. 그 경우 post-READY
+      `_clone_default_light_rig_from_main_to_aux` 가 재시도한다.
+
+    Returns:
+      복제에 성공한 Lux prim 개수 (0 이면 fallback DomeLight 생성 허용).
     """
     aux_ctx_name = str(aux_ctx_name or "").strip()
     if not aux_ctx_name:
         return 0
+    try:
+        from .sim_viewport_p0b_diag import log_p0b_call_order, p0b_disable_clone
+
+        if p0b_disable_clone():
+            log_p0b_call_order(
+                "_sync_aux_stage_lighting_from_main:SKIP_DISABLE_CLONE",
+                aux_ctx=aux_ctx_name,
+            )
+            return 0
+        log_p0b_call_order(
+            "_sync_aux_stage_lighting_from_main:enter",
+            aux_ctx=aux_ctx_name,
+        )
+    except Exception:
+        pass
     try:
         from .sim_control_defaults import VIEWPORT_AUX_LIGHTING_SYNC_FROM_MAIN
 
@@ -328,30 +469,92 @@ def _sync_aux_stage_lighting_from_main(aux_ctx_name: str) -> int:
 
     copied = 0
     try:
-        from pxr import Sdf, Usd, UsdUtils
+        from pxr import Sdf, Usd
 
-        main_layer = main_stage.GetRootLayer()
+        main_root = main_stage.GetRootLayer()
+        main_session = main_stage.GetSessionLayer()
         session = aux_stage.GetSessionLayer()
-        if main_layer is None or session is None:
+        if session is None or (main_root is None and main_session is None):
             return 0
 
-        stale = aux_stage.GetPrimAtPath("/World/TBS_DefaultDomeLight")
-        if stale is not None and stale.IsValid():
-            with Usd.EditContext(aux_stage, session):
+        _remove_aux_fallback_dome_light(aux_stage, label="sync-before-copy")
+
+        def _stage_layer_stack(stage: Any) -> list[Any]:
+            try:
+                # USD: returns session+root stack (strong->weak). API varies by build.
+                fn = getattr(stage, "GetLayerStack", None)
+                if callable(fn):
+                    out = fn()
+                    if isinstance(out, (list, tuple)):
+                        return list(out)
+            except Exception:
+                pass
+            layers: list[Any] = []
+            try:
+                if stage is not None:
+                    sess = stage.GetSessionLayer()
+                    root = stage.GetRootLayer()
+                    if sess is not None:
+                        layers.append(sess)
+                    if root is not None:
+                        layers.append(root)
+            except Exception:
+                pass
+            return layers
+
+        def _find_spec_layer(stage: Any, path: Sdf.Path) -> Any:
+            # LightRig specs are frequently authored into a session sublayer
+            # (not the session layer itself). Search the whole composed layer stack.
+            for lyr in _stage_layer_stack(stage):
                 try:
-                    aux_stage.RemovePrim(Sdf.Path("/World/TBS_DefaultDomeLight"))
+                    if lyr is not None and Sdf.FindSpec(lyr, path) is not None:
+                        return lyr
                 except Exception:
-                    pass
+                    continue
+            return None
+
+        def _copy_spec_tree(src_layer: Any, dst_layer: Any, prim_path: Sdf.Path) -> bool:
+            # Copy ancestors first to ensure prim path exists in dst session.
+            # (Avoid relying on Xform.Define guesses for Scope/Xform differences.)
+            copied_any = False
+            try:
+                cur = prim_path
+                chain: list[Sdf.Path] = []
+                while cur is not None and not cur.IsEmpty() and cur != Sdf.Path.absoluteRootPath:
+                    chain.append(cur)
+                    cur = cur.GetParentPath()
+                for p in reversed(chain):
+                    try:
+                        if Sdf.FindSpec(dst_layer, p) is None and Sdf.FindSpec(src_layer, p) is not None:
+                            Sdf.CopySpec(src_layer, p, dst_layer, p)
+                            copied_any = True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            # Finally copy the exact prim spec (again) to be safe.
+            try:
+                if Sdf.FindSpec(src_layer, prim_path) is not None:
+                    Sdf.CopySpec(src_layer, prim_path, dst_layer, prim_path)
+                    copied_any = True
+            except Exception:
+                pass
+            return copied_any
 
         src_paths = _stage_lux_prim_paths(main_stage)
         with Usd.EditContext(aux_stage, session):
             for src_path in src_paths:
-                _ensure_prim_ancestor_xforms(aux_stage, src_path)
                 dst_prim = aux_stage.GetPrimAtPath(src_path)
                 if dst_prim is not None and dst_prim.IsValid():
                     continue
                 try:
-                    UsdUtils.CopySpec(main_layer, Sdf.Path(src_path), session, Sdf.Path(src_path))
+                    src_sdf = Sdf.Path(src_path)
+                    src_layer = _find_spec_layer(main_stage, src_sdf)
+                    if src_layer is None:
+                        continue
+                    # Copy full prim tree (ancestors + prim spec) into aux session.
+                    # This prevents copied=0 when the spec lives in a session sublayer.
+                    _copy_spec_tree(src_layer, session, src_sdf)
                     if aux_stage.GetPrimAtPath(src_path).IsValid():
                         copied += 1
                 except Exception:
@@ -375,16 +578,82 @@ def _sync_aux_stage_lighting_from_main(aux_ctx_name: str) -> int:
             )
         except Exception:
             pass
+    try:
+        from .sim_viewport_p0b_diag import log_p0b_call_order
+
+        log_p0b_call_order(
+            "_sync_aux_stage_lighting_from_main:exit",
+            aux_ctx=aux_ctx_name,
+            extra=f"copied={copied}",
+        )
+    except Exception:
+        pass
     return copied
 
 
 def _ensure_aux_stage_default_lighting(ctx_name: str) -> None:
-    """보조 스테이지 조명 — 화면1 복제 우선, 없으면 generic DomeLight fallback."""
+    """
+    보조(aux) 스테이지 조명 확보.
+
+    1) `_sync_aux_stage_lighting_from_main` 으로 화면1 Lux 복제 시도
+    2) 실패(copied=0) 이고 Lux 가 전혀 없으면
+       `/World/TBS_DefaultDomeLight` (intensity=300) fallback 추가
+
+    주의 (P0-B):
+      fallback 은 검정(완전 암전) 방지를 위한 임시책이며,
+      LightRig 복제 성공 후에는 `_remove_aux_fallback_dome_light` 로
+      반드시 제거해야 화면2 톤이 밝게 남지 않는다.
+      로그: `[TBS multi-sim] 보조 스테이지 fallback DomeLight 추가`
+
+    로그 확정(Q1/Q5): intensity=300 fallback 이 우측 wash-out 직접 원인.
+    기본: fallback 생성 안 함. `TBS_P0B_ALLOW_FALLBACK=1` 일 때만 Define.
+    (`TBS_P0B_DISABLE_FALLBACK=1` 도 동일하게 차단.)
+    """
     ctx_name = str(ctx_name or "").strip()
     if not ctx_name:
         return
+    try:
+        from .sim_viewport_p0b_diag import (
+            _env_flag,
+            log_p0b_call_order,
+            p0b_disable_fallback,
+        )
+
+        # Log-backed (frame 98): fallback DomeLight intensity=300 IS the wash-out.
+        # Default: never create it. Opt-in only via TBS_P0B_ALLOW_FALLBACK=1.
+        if p0b_disable_fallback() or not _env_flag("TBS_P0B_ALLOW_FALLBACK"):
+            # Still attempt early LightRig sync; skip intensity=300 fallback only.
+            log_p0b_call_order(
+                "_ensure_aux_stage_default_lighting:enter_no_fallback",
+                aux_ctx=ctx_name,
+                extra="allow_fallback=0",
+            )
+            synced_early = _sync_aux_stage_lighting_from_main(ctx_name)
+            log_p0b_call_order(
+                "_ensure_aux_stage_default_lighting:exit_sync_only",
+                aux_ctx=ctx_name,
+                extra=f"synced={synced_early}",
+            )
+            return
+        log_p0b_call_order(
+            "_ensure_aux_stage_default_lighting:enter",
+            aux_ctx=ctx_name,
+            extra="allow_fallback=1",
+        )
+    except Exception:
+        pass
     synced = _sync_aux_stage_lighting_from_main(ctx_name)
     if synced > 0:
+        try:
+            from .sim_viewport_p0b_diag import log_p0b_call_order
+
+            log_p0b_call_order(
+                "_ensure_aux_stage_default_lighting:exit_synced",
+                aux_ctx=ctx_name,
+                extra=f"synced={synced}",
+            )
+        except Exception:
+            pass
         return
     ctx = _named_usd_context(ctx_name)
     if ctx is None:
@@ -396,6 +665,15 @@ def _ensure_aux_stage_default_lighting(ctx_name: str) -> None:
     if stage is None:
         return
     if _stage_has_usd_lights(stage):
+        try:
+            from .sim_viewport_p0b_diag import log_p0b_call_order
+
+            log_p0b_call_order(
+                "_ensure_aux_stage_default_lighting:exit_has_lux",
+                aux_ctx=ctx_name,
+            )
+        except Exception:
+            pass
         return
     try:
         from pxr import Gf, UsdLux
@@ -404,6 +682,12 @@ def _ensure_aux_stage_default_lighting(ctx_name: str) -> None:
         light_path = "/World/TBS_DefaultDomeLight"
         if stage.GetPrimAtPath(light_path).IsValid():
             return
+        try:
+            from .sim_viewport_p0b_diag import log_fallback_create_stack
+
+            log_fallback_create_stack(ctx_name=ctx_name, light_path=light_path)
+        except Exception:
+            pass
         dome = UsdLux.DomeLight.Define(stage, light_path)
         dome.CreateIntensityAttr(300.0)
         dome.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
@@ -411,6 +695,15 @@ def _ensure_aux_stage_default_lighting(ctx_name: str) -> None:
             print(
                 f"[TBS multi-sim] 보조 스테이지 fallback DomeLight 추가 ctx={ctx_name!r}",
                 flush=True,
+            )
+        except Exception:
+            pass
+        try:
+            from .sim_viewport_p0b_diag import log_p0b_call_order
+
+            log_p0b_call_order(
+                "_ensure_aux_stage_default_lighting:exit_created_fallback",
+                aux_ctx=ctx_name,
             )
         except Exception:
             pass
@@ -422,6 +715,479 @@ def _ensure_aux_stage_default_lighting(ctx_name: str) -> None:
             )
         except Exception:
             pass
+
+
+def _clone_default_light_rig_from_main_to_aux(ext: Any) -> int:
+    """
+    Post-READY: Kit 기본 `/OmniKit_Viewport_LightRig` 를 main → aux session 복제.
+
+    P0-B 톤 불일치의 핵심 fix 경로.
+    - main 에 LightRig Lux 가 있고 aux 에 없을 때만 동작
+    - authoring layer 는 GetUsedLayers + GetPrimAtPath/rootPrims 로 탐색
+      (session/root FindSpec 만으로는 miss 하는 Kit 빌드가 있음)
+    - Sdf.CopySpec 으로 subtree 복사 (실패 시 개별 light prim 복사 fallback)
+    - 복사 후 `/World/TBS_DefaultDomeLight` 강제 제거
+      (남아 있으면 intensity=300 이 LightRig 와 겹쳐 화면2가 밝음)
+
+    호출: `finalize_widget_split_startup()` READY 직후.
+    LightRig 생성 타이밍이 native/active viewport lifecycle 에 묶여
+    early sync(copied=0) 가 자주 나므로 *READY 이후*에 의도적으로 호출.
+
+    Returns:
+      copied 개수(성공 시 보통 1). has_rig 없고 fallback만이면 0.
+      로그: [TBS/p0b-rig-clone]
+
+    This is intentionally called *after* startup READY because LightRig creation timing appears
+    tied to the native/active viewport lifecycle; early CopySpec attempts can see copied=0.
+
+    실험 5: `TBS_P0B_DISABLE_CLONE=1` 이면 전체 skip.
+    """
+    try:
+        from .sim_viewport_p0b_diag import log_p0b_call_order, p0b_disable_clone
+
+        if p0b_disable_clone():
+            log_p0b_call_order("_clone_default_light_rig_from_main_to_aux:SKIP_DISABLE_CLONE")
+            try:
+                print("[TBS/p0b-rig-clone] skip: TBS_P0B_DISABLE_CLONE=1", flush=True)
+            except Exception:
+                pass
+            return 0
+        log_p0b_call_order("_clone_default_light_rig_from_main_to_aux:enter")
+    except Exception:
+        pass
+    try:
+        if not is_split_widget_layout_active(ext):
+            try:
+                print("[TBS/p0b-rig-clone] skip: split_widget_layout_inactive", flush=True)
+            except Exception:
+                pass
+            return 0
+    except Exception as exc:
+        try:
+            print(f"[TBS/p0b-rig-clone] skip: layout_check_err={exc}", flush=True)
+        except Exception:
+            pass
+        return 0
+
+    try:
+        aux_ctx = _tile_usd_context_name(1)
+    except Exception:
+        aux_ctx = "morph_tbs_split_aux_1"
+
+    main_ctx = _named_usd_context("")
+    aux_ctx_obj = _named_usd_context(aux_ctx)
+    if main_ctx is None or aux_ctx_obj is None:
+        try:
+            print(
+                f"[TBS/p0b-rig-clone] skip: ctx_none main={main_ctx is None} aux={aux_ctx_obj is None}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return 0
+    try:
+        main_stage = main_ctx.get_stage() if hasattr(main_ctx, "get_stage") else None
+        aux_stage = aux_ctx_obj.get_stage() if hasattr(aux_ctx_obj, "get_stage") else None
+    except Exception:
+        return 0
+    if main_stage is None or aux_stage is None:
+        try:
+            print(
+                f"[TBS/p0b-rig-clone] skip: stage_none main={main_stage is None} aux={aux_stage is None}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return 0
+
+    # Quick checks using the same detector as coupling diag.
+    try:
+        main_lux = _stage_lux_prim_paths(main_stage)
+        aux_lux = _stage_lux_prim_paths(aux_stage)
+    except Exception:
+        main_lux, aux_lux = [], []
+    need = any(p.startswith("/OmniKit_Viewport_LightRig/") for p in main_lux) and not any(
+        p.startswith("/OmniKit_Viewport_LightRig/") for p in aux_lux
+    )
+    if not need:
+        try:
+            print(
+                f"[TBS/p0b-rig-clone] skip: need=False main_lux={main_lux!r} aux_lux={aux_lux!r}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return 0
+
+    copied = 0
+    try:
+        from pxr import Sdf, Usd
+
+        def _layer_has_spec(layer: Any, path: Sdf.Path) -> bool:
+            if layer is None:
+                return False
+            # 1) Fast path: Sdf.FindSpec
+            try:
+                if Sdf.FindSpec(layer, path) is not None:
+                    return True
+            except Exception:
+                pass
+            # 2) Some builds behave differently; try layer.GetPrimAtPath
+            try:
+                gp = getattr(layer, "GetPrimAtPath", None)
+                if callable(gp) and gp(path) is not None:
+                    return True
+                if callable(gp) and gp(str(path)) is not None:
+                    return True
+            except Exception:
+                pass
+            # 3) Fallback: scan rootPrims list (should be small)
+            try:
+                for rp in getattr(layer, "rootPrims", []) or []:
+                    try:
+                        if getattr(rp, "path", None) == path:
+                            return True
+                        if str(getattr(rp, "path", "")) == str(path):
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return False
+
+        def _collect_used_layers(stage: Any) -> list[Any]:
+            layers: list[Any] = []
+            try:
+                layers = list(stage.GetUsedLayers())  # type: ignore[attr-defined]
+            except Exception:
+                layers = []
+            try:
+                s = stage.GetSessionLayer()
+                r = stage.GetRootLayer()
+                # Prefer session first: root often has empty LightRig *name* only.
+                ordered: list[Any] = []
+                for lyr in (s, r):
+                    if lyr is not None and lyr not in ordered:
+                        ordered.append(lyr)
+                for lyr in layers:
+                    if lyr is not None and lyr not in ordered:
+                        ordered.append(lyr)
+                return ordered
+            except Exception:
+                return layers
+
+        def _find_spec_layer_anywhere(stage: Any, path: Sdf.Path) -> Any:
+            """Find any used layer that has a prim spec at path (session preferred)."""
+            if stage is None:
+                return None
+            for lyr in _collect_used_layers(stage):
+                try:
+                    if _layer_has_spec(lyr, path):
+                        return lyr
+                except Exception:
+                    continue
+            return None
+
+        def _layer_authors_lux_child(layer: Any, lux_path: Sdf.Path) -> bool:
+            """True only if the layer has a real light child spec (not LightRig shell alone)."""
+            if layer is None:
+                return False
+            if not _layer_has_spec(layer, lux_path):
+                return False
+            # Reject root USD shells that only declare the LightRig root name.
+            try:
+                ident = str(getattr(layer, "identifier", "") or "")
+                if ident.endswith(".usd") or ident.endswith(".usda") or ident.endswith(".usdc"):
+                    # File layers may still author real lux — require Dome/Distant leaf.
+                    leaf = str(lux_path).rsplit("/", 1)[-1]
+                    if leaf not in ("DomeLight", "DistantLight", "RectLight", "DiskLight", "SphereLight"):
+                        return False
+            except Exception:
+                pass
+            return True
+
+        def _find_layer_with_actual_lux(stage: Any, lux_paths: List[str]) -> Any:
+            """
+            Prefer a layer that authors at least one real LightRig *light* child
+            (Dome/Distant), not merely an empty `/OmniKit_Viewport_LightRig` shell
+            that often sits on the root USD file.
+
+            Log-backed: previous code fell through to master_1.usd shell → copied=0.
+            NEVER return root file as last-resort for LightRig root name alone.
+            """
+            if stage is None:
+                return None
+            # 1) Explicit: main session first if it lists LightRig among rootPrims
+            try:
+                sess = stage.GetSessionLayer()
+                if sess is not None:
+                    for p in lux_paths:
+                        if not str(p).startswith("/OmniKit_Viewport_LightRig/"):
+                            continue
+                        try:
+                            sp = Sdf.Path(str(p))
+                        except Exception:
+                            continue
+                        if _layer_authors_lux_child(sess, sp):
+                            return sess
+                    # Session has LightRig rootPrim but children may be nested — still prefer
+                    # session over root file when LightRig appears in session.rootPrims.
+                    try:
+                        for rp in getattr(sess, "rootPrims", []) or []:
+                            if str(getattr(rp, "path", "")) == "/OmniKit_Viewport_LightRig":
+                                return sess
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            for p in lux_paths:
+                if not str(p).startswith("/OmniKit_Viewport_LightRig/"):
+                    continue
+                try:
+                    sp = Sdf.Path(str(p))
+                except Exception:
+                    continue
+                for lyr in _collect_used_layers(stage):
+                    try:
+                        if _layer_authors_lux_child(lyr, sp):
+                            return lyr
+                    except Exception:
+                        continue
+            # Do NOT fall back to root shell (master_*.usd) — that caused copied=0.
+            return None
+
+        def _author_lightrig_from_composed(src_stage: Any, dst_stage: Any, dst_sess: Any, lux_paths: List[str]) -> int:
+            """
+            When Sdf.CopySpec cannot find an authoring layer, recreate LightRig Lux
+            on aux session from *composed* main-stage attribute values.
+            """
+            n = 0
+            try:
+                from pxr import Gf, UsdGeom, UsdLux
+            except Exception:
+                return 0
+            with Usd.EditContext(dst_stage, dst_sess):
+                # Ensure LightRig / Lights xforms exist
+                try:
+                    if not dst_stage.GetPrimAtPath("/OmniKit_Viewport_LightRig").IsValid():
+                        UsdGeom.Xform.Define(dst_stage, "/OmniKit_Viewport_LightRig")
+                    if not dst_stage.GetPrimAtPath("/OmniKit_Viewport_LightRig/Lights").IsValid():
+                        UsdGeom.Xform.Define(dst_stage, "/OmniKit_Viewport_LightRig/Lights")
+                except Exception:
+                    pass
+                for p in lux_paths:
+                    if not str(p).startswith("/OmniKit_Viewport_LightRig/"):
+                        continue
+                    try:
+                        src_prim = src_stage.GetPrimAtPath(p)
+                        if src_prim is None or not src_prim.IsValid():
+                            continue
+                        tname = str(src_prim.GetTypeName() or "")
+                        if tname == "DomeLight":
+                            dome = UsdLux.DomeLight.Define(dst_stage, p)
+                            src_dome = UsdLux.DomeLight(src_prim)
+                            try:
+                                iv = src_dome.GetIntensityAttr().Get()
+                                dome.CreateIntensityAttr(float(iv if iv is not None else 1.0))
+                            except Exception:
+                                dome.CreateIntensityAttr(1.0)
+                            try:
+                                col = src_dome.GetColorAttr().Get()
+                                if col is not None:
+                                    dome.CreateColorAttr(col)
+                            except Exception:
+                                pass
+                            n += 1
+                        elif tname == "DistantLight":
+                            dist = UsdLux.DistantLight.Define(dst_stage, p)
+                            src_dist = UsdLux.DistantLight(src_prim)
+                            try:
+                                iv = src_dist.GetIntensityAttr().Get()
+                                dist.CreateIntensityAttr(float(iv if iv is not None else 1.0))
+                            except Exception:
+                                dist.CreateIntensityAttr(1.0)
+                            try:
+                                # Copy transform from source prim if present
+                                xf = UsdGeom.Xformable(src_prim)
+                                dst_xf = UsdGeom.Xformable(dist.GetPrim())
+                                ops = xf.GetOrderedXformOps()
+                                if ops:
+                                    # Clear and re-apply local transform matrix
+                                    m = xf.GetLocalTransformation()
+                                    dst_xf.ClearXformOpOrder()
+                                    dst_xf.AddTransformOp().Set(m)
+                            except Exception:
+                                pass
+                            n += 1
+                    except Exception:
+                        continue
+            return n
+
+        def _copy_light_prims(src_stage: Any, dst_stage: Any, dst_sess: Any, lux_paths: List[str]) -> int:
+            """Copy each LightRig light prim (and ancestors) into aux session. Returns count."""
+            n = 0
+            with Usd.EditContext(dst_stage, dst_sess):
+                for p in lux_paths:
+                    if not str(p).startswith("/OmniKit_Viewport_LightRig/"):
+                        continue
+                    try:
+                        sp = Sdf.Path(str(p))
+                    except Exception:
+                        continue
+                    sl = _find_spec_layer_anywhere(src_stage, sp)
+                    if sl is None:
+                        continue
+                    # Copy ancestor chain so nested Lights/ under LightRig exists.
+                    try:
+                        cur = sp
+                        chain: list[Sdf.Path] = []
+                        while cur is not None and not cur.IsEmpty() and cur != Sdf.Path.absoluteRootPath:
+                            chain.append(cur)
+                            cur = cur.GetParentPath()
+                        for anc in reversed(chain):
+                            try:
+                                if Sdf.FindSpec(dst_sess, anc) is None and _layer_has_spec(sl, anc):
+                                    Sdf.CopySpec(sl, anc, dst_sess, anc)
+                            except Exception:
+                                continue
+                        if dst_stage.GetPrimAtPath(sp).IsValid():
+                            n += 1
+                    except Exception:
+                        continue
+            return n
+
+        main_root = main_stage.GetRootLayer()
+        main_sess = main_stage.GetSessionLayer()
+        aux_sess = aux_stage.GetSessionLayer()
+        if aux_sess is None:
+            try:
+                print("[TBS/p0b-rig-clone] skip: aux_session=None", flush=True)
+            except Exception:
+                pass
+            return 0
+
+        # Prefer layer with real Lux children (usually main session), NOT root shell.
+        src_layer = _find_layer_with_actual_lux(main_stage, list(main_lux or []))
+        try:
+            print(
+                f"[TBS/p0b-rig-clone] src_layer={getattr(src_layer,'identifier',None)!r}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
+        # Primary: copy each LightRig light prim from the layer that actually authors them.
+        copied = _copy_light_prims(main_stage, aux_stage, aux_sess, list(main_lux or []))
+
+        # Secondary: also try whole-subtree CopySpec when we have a good src_layer.
+        if copied <= 0 and src_layer is not None:
+            rig = Sdf.Path("/OmniKit_Viewport_LightRig")
+            with Usd.EditContext(aux_stage, aux_sess):
+                try:
+                    Sdf.CopySpec(src_layer, rig, aux_sess, rig)
+                    copied = 1 if aux_stage.GetPrimAtPath(
+                        "/OmniKit_Viewport_LightRig/Lights/DomeLight"
+                    ).IsValid() else 0
+                except Exception:
+                    copied = 0
+
+        # Tertiary (log-backed): root shell CopySpec fails → author from composed main values.
+        try:
+            aux_check = _stage_lux_prim_paths(aux_stage)
+        except Exception:
+            aux_check = []
+        if not any(p.startswith("/OmniKit_Viewport_LightRig/") for p in aux_check):
+            authored = _author_lightrig_from_composed(
+                main_stage, aux_stage, aux_sess, list(main_lux or [])
+            )
+            try:
+                print(
+                    f"[TBS/p0b-rig-clone] composed_author n={authored} "
+                    f"src_layer={getattr(src_layer,'identifier',None)!r}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            if authored > 0:
+                copied = authored
+
+        # Verify Lux *before* stripping fallback — empty lights ⇒ black silhouette.
+        try:
+            aux_mid = _stage_lux_prim_paths(aux_stage)
+        except Exception:
+            aux_mid = []
+        has_rig_mid = any(p.startswith("/OmniKit_Viewport_LightRig/") for p in aux_mid)
+
+        if has_rig_mid:
+            # Only now remove intensity=300 fallback (safe).
+            _remove_aux_fallback_dome_light(aux_stage, label="after-rig-clone")
+        else:
+            try:
+                print(
+                    "[TBS/p0b-rig-clone] no_lightrig_after_clone: "
+                    f"(copied={copied} aux_mid={aux_mid!r}) — "
+                    "NOT injecting TBS_DefaultDomeLight (wash-out cause; see Q1/Q5 logs)",
+                    flush=True,
+                )
+            except Exception:
+                pass
+
+        try:
+            aux_after = _stage_lux_prim_paths(aux_stage)
+        except Exception:
+            aux_after = []
+        try:
+            active_after: List[str] = []
+            for p in aux_after:
+                prim = aux_stage.GetPrimAtPath(p)
+                if prim is not None and prim.IsValid() and prim.IsActive():
+                    active_after.append(p)
+            aux_after = active_after
+        except Exception:
+            pass
+        has_rig = any(p.startswith("/OmniKit_Viewport_LightRig/") for p in aux_after)
+        has_fallback = any(p == "/World/TBS_DefaultDomeLight" for p in aux_after)
+        # Success = LightRig present. Fallback absence is preferred but not required
+        # if Kit refuses to compose the cloned lights.
+        ok = bool(has_rig)
+        if not ok:
+            try:
+                print(
+                    f"[TBS/p0b-rig-clone] FAILED copied={copied} "
+                    f"has_rig={has_rig} has_fallback={has_fallback} "
+                    f"main_lux={main_lux!r} aux_after={aux_after!r}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                from .sim_viewport_p0b_diag import p0b_log
+
+                p0b_log(
+                    f"[TBS/p0b-rig-clone] copied={copied} ok={ok} "
+                    f"has_rig={has_rig} has_fallback={has_fallback} "
+                    f"aux_after={aux_after!r}"
+                )
+            except Exception:
+                pass
+        try:
+            from .sim_viewport_p0b_diag import log_p0b_call_order
+
+            log_p0b_call_order(
+                "_clone_default_light_rig_from_main_to_aux:exit",
+                aux_ctx=str(aux_ctx),
+                extra=f"copied={copied} ok={ok} has_rig={has_rig} has_fallback={has_fallback}",
+            )
+        except Exception:
+            pass
+        return copied if has_rig else 0
+    except Exception as exc:
+        try:
+            print(f"[TBS/p0b-rig-clone] err={exc}", flush=True)
+        except Exception:
+            pass
+        return 0
 
 
 async def connect_widget_tile_main_stage(ext: Any, token: int = 0) -> bool:
@@ -1893,6 +2659,12 @@ def _sync_aux_tile_render_from_main(ext: Any) -> None:
     보조 타일 — RenderProduct 가 이미 있으면 메인 Widget API 시각 프로필만 동기화.
     Hydra 엔진 공유·viewport_changed 호출 없음.
     """
+    try:
+        from .sim_viewport_p0b_diag import log_p0b_call_order
+
+        log_p0b_call_order("_sync_aux_tile_render_from_main:enter")
+    except Exception:
+        pass
     if not bool(getattr(ext, "_tbs_aux_stage_connected", False)):
         return
     tiles = getattr(ext, "_tbs_split_widget_tiles", None)
@@ -1917,6 +2689,24 @@ def _sync_aux_tile_render_from_main(ext: Any) -> None:
         if main_api is not None and ref_api is None:
             _copy_visual_render_profile_only(main_api, aux_api)
         _kick_viewport_widget_render(aux_rec)
+    try:
+        from .sim_viewport_p0b_diag import log_p0b_call_order
+
+        tiles = getattr(ext, "_tbs_split_widget_tiles", None)
+        main_api2 = None
+        aux_api2 = None
+        if isinstance(tiles, dict):
+            mr = tiles.get("Viewport")
+            ar = tiles.get(_tile_win_name(1))
+            main_api2 = mr.get("api") if isinstance(mr, dict) else None
+            aux_api2 = ar.get("api") if isinstance(ar, dict) else None
+        log_p0b_call_order(
+            "_sync_aux_tile_render_from_main:exit",
+            main_api=main_api2,
+            aux_api=aux_api2,
+        )
+    except Exception:
+        pass
 
 
 def _api_projection_ready(api: Any) -> bool:
@@ -2486,6 +3276,16 @@ async def _connect_widget_tile_aux_stage(ext: Any, token: int, sn: int) -> bool:
     master_2 / aux USD 준비 후 화면2 Widget 에 Stage·Context 연결.
     ``ViewportWidget()`` 호출 없음.
     """
+    try:
+        from .sim_viewport_p0b_diag import log_p0b_call_order
+
+        log_p0b_call_order(
+            "_connect_widget_tile_aux_stage:enter",
+            aux_ctx=_tile_usd_context_name(1),
+            extra=f"token={token} sn={sn}",
+        )
+    except Exception:
+        pass
     if bool(getattr(ext, "_tbs_aux_stage_connected", False)):
         return True
     if not _aux_stage_ready(ext):
@@ -3210,6 +4010,15 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
     layout-first startup 종료 시 1회만:
     Stage 연결 · geometry · navigation · HUD (Widget 재생성 없음).
     """
+    try:
+        from .sim_viewport_p0b_diag import log_p0b_call_order
+
+        log_p0b_call_order(
+            "finalize_widget_split_startup:enter",
+            extra=f"token={token} n={n}",
+        )
+    except Exception:
+        pass
     if not is_split_widget_layout_active(ext):
         return
     if int(getattr(ext, "_sim_multi_view_apply_token", 0) or 0) != int(token):
@@ -3365,6 +4174,36 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
         install_camera_change_tracker(ext)
     except Exception:
         pass
+
+    # P0-B diagnostics — opt-in only (TBS_P0B_DIAG=1). Tone fix path runs below.
+    try:
+        from .sim_viewport_p0b_diag import (
+            p0b_diag_enabled,
+            run_p0b_diagnostics,
+            run_p0b_fix_if_needed,
+        )
+
+        if p0b_diag_enabled():
+            main_api = get_split_viewport_api(ext, "Viewport")
+            aux_api = get_split_viewport_api(ext, aux_wn)
+            run_p0b_diagnostics(
+                main_api=main_api,
+                aux_api=aux_api,
+                main_ctx="",
+                aux_ctx=_tile_usd_context_name(1),
+            )
+            run_p0b_fix_if_needed(main_ctx="", aux_ctx=_tile_usd_context_name(1))
+    except Exception:
+        pass
+
+    # P0-B: clone main LightRig into aux session to match tone.
+    try:
+        _clone_default_light_rig_from_main_to_aux(ext)
+    except Exception as exc:
+        try:
+            print(f"[TBS/p0b-rig-clone] finalize err={exc}", flush=True)
+        except Exception:
+            pass
 
     try:
         total = int(getattr(ext, "_tbs_widget_create_total", 0) or 0)
