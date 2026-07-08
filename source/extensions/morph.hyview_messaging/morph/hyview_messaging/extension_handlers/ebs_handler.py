@@ -470,6 +470,28 @@ class EBSHandler(BaseHandler):
 
             result1.update(res_list[1])
 
+        # Web payload slimming: 원본(result0/1)은 유지하되 전송 직전에만 slim 변환을 적용.
+        # (Kit 내부 SSOT/디스크 저장/재생 로직에는 영향 없음)
+        try:
+            from morph.tbs_control_2.control_sim_bar_graph import (
+                build_prerun_export_document_web_slim,
+            )
+
+            result0_slim = (
+                build_prerun_export_document_web_slim(dict(result0))
+                if isinstance(result0, dict) and result0
+                else {}
+            )
+            result1_slim = (
+                build_prerun_export_document_web_slim(dict(result1))
+                if isinstance(result1, dict) and result1
+                else {}
+            )
+        except Exception:
+            # 슬림 변환 실패 시 원본 전송(기능 보존)
+            result0_slim = dict(result0)
+            result1_slim = dict(result1)
+
 
 
         # TODO: 설정 완료 후 호출 (웹 모니터·타임라인에 results 반영)
@@ -484,7 +506,7 @@ class EBSHandler(BaseHandler):
 
                 "message": "success",
 
-                "data": {"results": [dict(result0), dict(result1)]},
+                "data": {"results": [result0_slim, result1_slim]},
 
             },
 
