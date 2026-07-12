@@ -107,6 +107,19 @@ from ..tbs_sim_bridge import (
 from .base_handler import BaseHandler
 
 
+# T2V_request_start_simulation configs[n] → V2T slim 응답 sim echo (Kit 시뮬 미사용)
+_START_SIM_IDENTITY_KEYS: tuple = ("fab_id", "model_id", "eqp_id")
+
+
+def _merge_start_identity_into_slim(result_slim: Dict[str, Any], conf: Any) -> None:
+    """요청 configs[n] 의 MES 식별 필드를 slim ``sim`` 에 merge."""
+    if not isinstance(result_slim, dict) or not isinstance(conf, dict):
+        return
+    sim = result_slim.setdefault("sim", {})
+    if not isinstance(sim, dict):
+        return
+    sim.update({k: conf.get(k) for k in _START_SIM_IDENTITY_KEYS})
+
 
 
 
@@ -378,7 +391,9 @@ class EBSHandler(BaseHandler):
 
         print(f"[EBSHandler] _on_req_start_simulation - {event.payload}")
 
-
+        start_configs = event.payload.get("configs", [])
+        if not isinstance(start_configs, list):
+            start_configs = []
 
         # 프리런 결과를 콜백에서 채울 버퍼 (현재는 dispatch 시 bridge data 직접 사용)
 
@@ -396,7 +411,7 @@ class EBSHandler(BaseHandler):
 
             dispatch=lambda name, body: self._dispatch_start_simulation_response(
 
-                name, body, result0, result1
+                name, body, result0, result1, start_configs
 
             ),
 
@@ -417,6 +432,8 @@ class EBSHandler(BaseHandler):
         result0: Dict[str, Any],
 
         result1: Dict[str, Any],
+
+        start_configs: List[Any],
 
     ) -> None:
 
@@ -492,7 +509,11 @@ class EBSHandler(BaseHandler):
             result0_slim = dict(result0)
             result1_slim = dict(result1)
 
-
+        # MES 식별 필드 echo — T2V configs → V2T slim sim (시뮬 엔진·Kit 내부 SSOT 무영향)
+        if len(start_configs) > 0:
+            _merge_start_identity_into_slim(result0_slim, start_configs[0])
+        if len(start_configs) > 1:
+            _merge_start_identity_into_slim(result1_slim, start_configs[1])
 
         # TODO: 설정 완료 후 호출 (웹 모니터·타임라인에 results 반영)
 
