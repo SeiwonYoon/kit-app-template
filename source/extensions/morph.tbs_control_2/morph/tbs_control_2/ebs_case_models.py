@@ -223,6 +223,19 @@ def _ep_count_from_snap_value(raw: Any, *, default: int = 2) -> int:
         return 3 if int(default) >= 3 else 2
 
 
+def ep_count_from_snapshot(snap: Any, *, default: int = 2) -> int:
+    """스냅샷 dict → EP 개수 (2 또는 3). Kit 내부 SSOT."""
+    if isinstance(snap, dict):
+        if "ep_count" in snap:
+            return _ep_count_from_snap_value(snap.get("ep_count"), default=default)
+        if "ep_count_idx" in snap:
+            try:
+                return 3 if int(snap.get("ep_count_idx")) >= 1 else 2
+            except Exception:
+                pass
+    return _ep_count_from_snap_value(default, default=default)
+
+
 def capture_case_sim_settings(ext: Any, case_id: int) -> Dict[str, Any]:
     """CASE 실시간 UI → 시뮬 엔진용 dict (화면별 전체 설정)."""
     cid = int(case_id)
@@ -231,7 +244,8 @@ def capture_case_sim_settings(ext: Any, case_id: int) -> Dict[str, Any]:
         idx = int(get_sim_ep_count_idx_for_case(ext, cid))
     except Exception:
         idx = int(_SIM_DEF.ep_count_idx)
-    d["ep_count"] = _ep_count_from_snap_value(3 if idx == 1 else 2)
+    d["ep_count_idx"] = idx
+    d["ep_count"] = 3 if idx == 1 else 2
     d["ebs_enabled"] = bool(get_sim_ebs_enabled_for_case(ext, cid))
     try:
         m = get_case_model(ext, cid, "lot_count")
@@ -284,9 +298,9 @@ def apply_case_sim_settings(ext: Any, case_id: int, snap: Dict[str, Any]) -> Non
     if not isinstance(snap, dict) or not snap:
         return
     cid = int(case_id)
-    ep_in_snap = "ep_count" in snap
+    ep_in_snap = "ep_count" in snap or "ep_count_idx" in snap
     if ep_in_snap:
-        idx = 1 if _ep_count_from_snap_value(snap.get("ep_count")) >= 3 else 0
+        idx = 1 if ep_count_from_snapshot(snap) >= 3 else 0
         if cid == CASE_A:
             from .ebs_control_panel_ui import _sync_ep_count_combo_widgets
 

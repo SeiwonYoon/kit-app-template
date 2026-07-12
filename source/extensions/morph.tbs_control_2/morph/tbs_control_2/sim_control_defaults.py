@@ -67,6 +67,10 @@ SIM_RENEWAL_DEBUG: bool = True
 # False 면 get_frame 레이어를 마운트하지 않는다.
 SHOW_VIEWPORT_EBS_CONTROL_HUD: bool = True
 
+# Viewport 우측 상단 시뮬 설정 스냅샷 HUD (화면1 | 시뮬 설정, EP/LOT/초기적재 등).
+# False 면 ``sync_viewport_snapshot_hud_layers`` 가 패널을 붙이지 않는다.
+SHOW_VIEWPORT_SNAPSHOT_HUD: bool = False
+
 # 앱 시작 시 2분할(화면2개)로 시작할지 여부.
 # True  → **레이아웃 먼저**: 2분할 Dock(50:50) + 각 화면 독립 stage 컨텍스트를 만든 뒤
 #         화면1에 default_load_usd_path, 화면2에 default_aux_load_usd_path 를 순서대로 로드.
@@ -78,7 +82,7 @@ MAX_VIEWPORT_SPLIT_COUNT: int = 2
 
 # True: ViewportWidget 2분할 host (독립 usd_context·stage).
 # False: Dock + create_viewport_window (TBS_SimSplit_*). TBS_SIM_VIEWPORT_WIDGET_SPLIT=0 도 False.
-USE_VIEWPORT_WIDGET_SPLIT: bool = False
+USE_VIEWPORT_WIDGET_SPLIT: bool = True
 
 # RenderProduct 생성 원인 조사 (증상 수정 아님 — 관측·실험 전용).
 # True → [TBS/rp-invest] / [TBS/rp-timeline] 상세 로그.
@@ -130,7 +134,7 @@ SIM_PRERUN_CONSOLE_LOG: bool = False
 # 프리런 완료 시 ``data/sim_prerun/prerun_screen{N}_*.json`` 파일 저장 여부.
 # False → 메모리(``_sim_prerun_export_json_by_screen``)·재생용 export 문서만 유지, 디스크에는 쓰지 않음.
 # True  → 화면별 JSON 파일 생성(기존 동작).
-SIM_PRERUN_EXPORT_JSON: bool = False
+SIM_PRERUN_EXPORT_JSON: bool = True
 
 # 막대그래프 "미리보기"(전체 막대 노출) 체크박스의 앱 시작 시 기본값.
 # True  → 시작부터 미리보기 ON(막대 전체가 보이고 진행 마스크 숨김).
@@ -142,6 +146,7 @@ __all__ = [
     "SIM_CONTROL_DEFAULTS",
     "SIM_RENEWAL_DEBUG",
     "SHOW_VIEWPORT_EBS_CONTROL_HUD",
+    "SHOW_VIEWPORT_SNAPSHOT_HUD",
     "START_WITH_DUAL_SCREEN",
     "MAX_VIEWPORT_SPLIT_COUNT",
     "USE_VIEWPORT_WIDGET_SPLIT",

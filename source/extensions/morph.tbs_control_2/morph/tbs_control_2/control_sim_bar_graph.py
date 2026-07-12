@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .ebs_case_models import ep_count_from_snapshot
 from .control_sim_prerun_playback import (
     SimPreRunResult,
     SimTimelineItem,
@@ -1168,12 +1169,8 @@ def build_prerun_export_document(
 ) -> Dict[str, Any]:
     """웹·외부 연동용 프리런 통합 JSON (막대 세그먼트 + 상태별 누적 초 포함)."""
     snap = dict(sim_snapshot or {})
-    try:
-        ep_count_idx = int(snap.get("ep_count_idx", 0) or 0)
-    except Exception:
-        ep_count_idx = 0
-    ep_count_idx = 1 if int(ep_count_idx) >= 1 else 0
-    ep_count = 3 if ep_count_idx else 2
+    ep_count = ep_count_from_snapshot(snap, default=2)
+    ep_count_idx = 1 if ep_count >= 3 else 0
     ebs_enable = bool(snap.get("ebs_enabled", True))
     try:
         speed = max(0.1, float(sim_speed if sim_speed is not None else snap.get("speed", 1.0) or 1.0))
