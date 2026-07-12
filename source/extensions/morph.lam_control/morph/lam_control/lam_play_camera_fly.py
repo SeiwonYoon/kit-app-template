@@ -63,11 +63,55 @@ def _tuple_to_matrix(values: Tuple[float, ...]) -> Gf.Matrix4d:
     return m
 
 
+def _resolve_camera_up_vector(
+    eye: Tuple[float, float, float],
+    target: Tuple[float, float, float],
+    up_hint: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    """카메라 forward 와 up 이 평행하면 안전한 대체 up 선택 (탑뷰 -Z 시선 등)."""
+    fwd = _vec3(target) - _vec3(eye)
+    if fwd.GetLength() < 1e-9:
+        return (0.0, 0.0, 1.0)
+    fwd.Normalize()
+    up_v = _vec3(up_hint)
+    if up_v.GetLength() < 1e-9:
+        up_v = Gf.Vec3d(0.0, 0.0, 1.0)
+    else:
+        up_v.Normalize()
+    if abs(float(fwd * up_v)) <= 0.99:
+        return (float(up_v[0]), float(up_v[1]), float(up_v[2]))
+    best = Gf.Vec3d(0.0, 0.0, 1.0)
+    best_align = abs(float(fwd * best))
+    for cand in (Gf.Vec3d(0.0, 1.0, 0.0), Gf.Vec3d(1.0, 0.0, 0.0)):
+        align = abs(float(fwd * cand))
+        if align < best_align:
+            best_align = align
+            best = cand
+    return (float(best[0]), float(best[1]), float(best[2]))
+
+
+def _matrix_rotation_rows_sane(m: Gf.Matrix4d, *, max_len: float = 4.0) -> bool:
+    """회전 행 길이가 비정상(폭주 scale)인지 검사."""
+    for i in range(3):
+        row = Gf.Vec3d(float(m[i][0]), float(m[i][1]), float(m[i][2]))
+        ln = row.GetLength()
+        if ln > max_len or (ln > 1e-9 and ln < 0.05):
+            return False
+    return True
+
+
+def _invalidate_camera_prim_baseline(prim_path: str) -> None:
+    path = str(prim_path or "").strip()
+    if path:
+        _camera_prim_baselines.pop(path, None)
+
+
 def _write_prim_local_xform(
     prim_path: str,
     local_matrix: Gf.Matrix4d,
     *,
     coi: Optional[Gf.Vec3d] = None,
+    force_reset_ops: bool = False,
 ) -> bool:
     stage = _get_stage()
     path = str(prim_path or "").strip()
@@ -78,20 +122,14 @@ def _write_prim_local_xform(
         return False
     xformable = UsdGeom.Xformable(cam_prim)
     old_local = xformable.GetLocalTransformation(Usd.TimeCode.Default())
-    ctx_name = _resolve_usd_context_name()
-    try:
-        import omni.kit.commands as cmds  # type: ignore
-
-        cmds.execute(
-            "TransformPrimCommand",
-            path=path,
-            new_transform_matrix=local_matrix,
-            old_transform_matrix=old_local,
-            time_code=Usd.TimeCode.Default(),
-            usd_context_name=ctx_name,
+    if not _matrix_rotation_rows_sane(local_matrix):
+        print(
+            f"{_PRINT_PREFIX} 거부 — 비정상 camera matrix path={path!r}",
+            flush=True,
         )
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} TransformPrimCommand failed: {exc}", flush=True)
+        return False
+    ctx_name = _resolve_usd_context_name()
+    if force_reset_ops:
         try:
             edit = Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer()))
             with edit:
@@ -99,9 +137,33 @@ def _write_prim_local_xform(
                 xformable.ClearXformOpOrder()
                 op = xformable.AddTransformOp()
                 op.Set(local_matrix)
-        except Exception as exc2:
-            print(f"{_PRINT_PREFIX} USD xform set failed: {exc2}", flush=True)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} USD xform reset failed: {exc}", flush=True)
             return False
+    else:
+        try:
+            import omni.kit.commands as cmds  # type: ignore
+
+            cmds.execute(
+                "TransformPrimCommand",
+                path=path,
+                new_transform_matrix=local_matrix,
+                old_transform_matrix=old_local,
+                time_code=Usd.TimeCode.Default(),
+                usd_context_name=ctx_name,
+            )
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} TransformPrimCommand failed: {exc}", flush=True)
+            try:
+                edit = Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer()))
+                with edit:
+                    xformable = UsdGeom.Xformable(cam_prim)
+                    xformable.ClearXformOpOrder()
+                    op = xformable.AddTransformOp()
+                    op.Set(local_matrix)
+            except Exception as exc2:
+                print(f"{_PRINT_PREFIX} USD xform set failed: {exc2}", flush=True)
+                return False
     if coi is not None:
         try:
             edit = Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer()))
@@ -942,12 +1004,161 @@ def get_play_camera_preset() -> CameraViewSnapshot:
     )
 
 
+def _snapshot_from_preset_spec(spec: Any) -> Optional[CameraViewSnapshot]:
+    if spec is None:
+        return None
+    try:
+        return CameraViewSnapshot(
+            eye_xyz=tuple(float(x) for x in spec.eye_xyz),
+            target_xyz=tuple(float(x) for x in spec.target_xyz),
+        )
+    except Exception:
+        return None
+
+
+def play_camera_prim_view_spec() -> Optional[CameraViewSnapshot]:
+    """config PLAY_CAMERA_PRIM_VIEW (None 이면 prim 현재 상태 사용)."""
+    try:
+        from .lam_viewport_overlay_config import PLAY_CAMERA_PRIM_VIEW  # type: ignore
+    except Exception:
+        return None
+    return _snapshot_from_preset_spec(PLAY_CAMERA_PRIM_VIEW)
+
+
+def top_view_camera_prim_view_spec() -> Optional[CameraViewSnapshot]:
+    """config TOP_VIEW_CAMERA_PRIM_VIEW (None 이면 prim 현재 상태 사용)."""
+    try:
+        from .lam_viewport_overlay_config import TOP_VIEW_CAMERA_PRIM_VIEW  # type: ignore
+    except Exception:
+        return None
+    return _snapshot_from_preset_spec(TOP_VIEW_CAMERA_PRIM_VIEW)
+
+
+def _up_from_preset_spec(spec: Any) -> Tuple[float, float, float]:
+    if spec is None:
+        return (0.0, 0.0, 1.0)
+    try:
+        return tuple(float(x) for x in spec.up_xyz)
+    except Exception:
+        return (0.0, 0.0, 1.0)
+
+
+def _capture_world_up_from_active_camera() -> Tuple[float, float, float]:
+    """활성 카메라 prim 월드 up (config up_xyz 캡처용)."""
+    stage = _get_stage()
+    path = _active_camera_path_str()
+    if not stage or not path:
+        return (0.0, 0.0, 1.0)
+    prim = stage.GetPrimAtPath(path)
+    if not prim or not prim.IsValid():
+        return (0.0, 0.0, 1.0)
+    try:
+        xfc = UsdGeom.XformCache(Usd.TimeCode.Default())
+        world = xfc.GetLocalToWorldTransform(prim)
+        up = world.TransformDir(Gf.Vec3d(0.0, 1.0, 0.0))
+        if up.GetLength() < 1e-9:
+            return (0.0, 0.0, 1.0)
+        up.Normalize()
+        return (float(up[0]), float(up[1]), float(up[2]))
+    except Exception:
+        return (0.0, 0.0, 1.0)
+
+
+def apply_view_to_camera_prim(
+    prim_path: str,
+    snap: CameraViewSnapshot,
+    *,
+    up_xyz: Optional[Tuple[float, float, float]] = None,
+    log_context: str = "",
+) -> bool:
+    """USD Camera prim 에 eye/target 뷰 기록 (COI=거리 → 줌까지 고정).
+
+    config 의 *_CAMERA_PRIM_VIEW 스펙을 진입 시마다 강제 적용해
+    이전 세션/조작에서 남은 줌 상태가 이어지지 않게 한다.
+    """
+    path = str(prim_path or "").strip()
+    if not path or _is_session_camera_path(path):
+        return False
+    stage = _get_stage()
+    if not stage:
+        return False
+    cam_prim = stage.GetPrimAtPath(path)
+    if not cam_prim or not cam_prim.IsValid():
+        return False
+    dist = (_vec3(snap.target_xyz) - _vec3(snap.eye_xyz)).GetLength()
+    if dist < 1e-6:
+        return False
+    up_hint = tuple(float(x) for x in up_xyz) if up_xyz is not None else (0.0, 0.0, 1.0)
+    up = _resolve_camera_up_vector(snap.eye_xyz, snap.target_xyz, up_hint)
+    new_local = _camera_local_matrix(cam_prim, snap.eye_xyz, snap.target_xyz, up)
+    ok = _write_prim_local_xform(
+        path,
+        new_local,
+        coi=Gf.Vec3d(0.0, 0.0, -dist),
+        force_reset_ops=True,
+    )
+    if ok:
+        _invalidate_camera_prim_baseline(path)
+    tag = f" ({log_context})" if log_context else ""
+    print(
+        f"{_PRINT_PREFIX} Camera prim 뷰 스펙 적용{tag} path={path!r} "
+        f"dist={dist:.3f} up=({up[0]:.3f},{up[1]:.3f},{up[2]:.3f}) ok={ok}",
+        flush=True,
+    )
+    return ok
+
+
+def apply_play_camera_prim_view_spec() -> bool:
+    """Play prim 모드 — config 스펙이 있으면 prim 에 뷰·줌 강제 (없으면 no-op)."""
+    if play_camera_use_preset_coords():
+        return False
+    spec = play_camera_prim_view_spec()
+    if spec is None:
+        return False
+    try:
+        from .lam_viewport_overlay_config import PLAY_CAMERA_PRIM_VIEW  # type: ignore
+
+        up = _up_from_preset_spec(PLAY_CAMERA_PRIM_VIEW)
+    except Exception:
+        up = (0.0, 0.0, 1.0)
+    return apply_view_to_camera_prim(
+        play_camera_prim_path(),
+        spec,
+        up_xyz=up,
+        log_context="play_prim_view",
+    )
+
+
+def apply_top_view_camera_prim_view_spec() -> bool:
+    """탑뷰 prim 모드 — config 스펙이 있으면 prim 에 뷰·줌 강제 (없으면 no-op)."""
+    if top_view_use_preset_coords():
+        return False
+    spec = top_view_camera_prim_view_spec()
+    if spec is None:
+        return False
+    try:
+        from .lam_viewport_overlay_config import TOP_VIEW_CAMERA_PRIM_VIEW  # type: ignore
+
+        up = _up_from_preset_spec(TOP_VIEW_CAMERA_PRIM_VIEW)
+    except Exception:
+        up = (0.0, 0.0, 1.0)
+    return apply_view_to_camera_prim(
+        top_view_camera_prim_path(),
+        spec,
+        up_xyz=up,
+        log_context="top_view_prim_view",
+    )
+
+
 def get_play_camera_target_snapshot() -> Optional[CameraViewSnapshot]:
     if play_camera_use_preset_coords():
         return get_play_camera_preset()
     path = play_camera_prim_path()
     if not path:
         return None
+    spec = play_camera_prim_view_spec()
+    if spec is not None:
+        return spec
     return get_camera_prim_baseline_view(path)
 
 
@@ -959,6 +1170,9 @@ def get_top_view_target_snapshot() -> Optional[CameraViewSnapshot]:
     path = top_view_camera_prim_path()
     if not path:
         return None
+    spec = top_view_camera_prim_view_spec()
+    if spec is not None:
+        return spec
     return get_camera_prim_baseline_view(path)
 
 
@@ -975,7 +1189,9 @@ def play_camera_target_configured() -> bool:
     path = play_camera_prim_path()
     if not path:
         return False
-    snap = snapshot_from_prim_path(path)
+    snap = play_camera_prim_view_spec()
+    if snap is None:
+        snap = snapshot_from_prim_path(path)
     if snap is None:
         snap = get_camera_prim_baseline_view(path)
     if snap is None:
@@ -1000,7 +1216,9 @@ def top_view_target_configured() -> bool:
     path = top_view_camera_prim_path()
     if not path:
         return False
-    snap = snapshot_from_prim_path(path)
+    snap = top_view_camera_prim_view_spec()
+    if snap is None:
+        snap = snapshot_from_prim_path(path)
     if snap is None:
         snap = get_camera_prim_baseline_view(path)
     if snap is None:
@@ -1072,12 +1290,18 @@ def views_are_close(
     return dot >= math.cos(math.radians(max(0.0, deg)))
 
 
-def format_config_snippet(snap: CameraViewSnapshot) -> str:
+def format_config_snippet(
+    snap: CameraViewSnapshot,
+    *,
+    up_xyz: Tuple[float, float, float] = (0.0, 0.0, 1.0),
+) -> str:
     e = snap.eye_xyz
     t = snap.target_xyz
+    u = up_xyz
     coords = (
         f"    eye_xyz=({e[0]:.6f}, {e[1]:.6f}, {e[2]:.6f}),\n"
         f"    target_xyz=({t[0]:.6f}, {t[1]:.6f}, {t[2]:.6f}),\n"
+        f"    up_xyz=({u[0]:.6f}, {u[1]:.6f}, {u[2]:.6f}),\n"
     )
     return (
         "# lam_viewport_overlay_config.py 에 붙여넣기\n"
@@ -1088,6 +1312,14 @@ def format_config_snippet(snap: CameraViewSnapshot) -> str:
         "# 탑뷰 보기 — TOP_VIEW_PRESET 에 붙여넣기\n"
         "TOP_VIEW_PRESET_ENABLED = True\n"
         "TOP_VIEW_PRESET = PlayCameraPresetSpec(\n"
+        f"{coords}"
+        ")\n\n"
+        "# Camera prim 모드(USE_PRESET_COORDS=False) — Play 시점 줌 고정\n"
+        "PLAY_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(\n"
+        f"{coords}"
+        ")\n\n"
+        "# Camera prim 모드 — 탑뷰 줌 고정 (TOP_VIEW_CAMERA_PRIM_VIEW 에 붙여넣기)\n"
+        "TOP_VIEW_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(\n"
         f"{coords}"
         ")\n"
     )
@@ -1105,7 +1337,7 @@ def log_play_camera_preset_capture() -> bool:
     print(
         f"{_PRINT_PREFIX} 현재 뷰 캡처 (eye→target 거리 "
         f"{(_vec3(snap.target_xyz) - _vec3(snap.eye_xyz)).GetLength():.3f} m):\n"
-        f"{format_config_snippet(snap)}",
+        f"{format_config_snippet(snap, up_xyz=_capture_world_up_from_active_camera())}",
         flush=True,
     )
     return True
@@ -1116,31 +1348,29 @@ def _camera_world_from_eye_target(
     target: Tuple[float, float, float],
     up: Tuple[float, float, float],
 ) -> Gf.Matrix4d:
-    """Kit 카메라 월드 행렬 (local -Z → target). SetLookAt 은 view 행렬이므로 역행렬."""
-    view = Gf.Matrix4d(1.0)
-    view.SetLookAt(_vec3(eye), _vec3(target), _vec3(up))
-    try:
-        return view.GetInverse()
-    except Exception:
-        fwd = (_vec3(target) - _vec3(eye))
-        if fwd.GetLength() < 1e-9:
-            return Gf.Matrix4d(1.0)
-        fwd.Normalize()
-        up_v = _vec3(up)
-        if abs(float(fwd * up_v)) > 0.99:
-            up_v = Gf.Vec3d(0.0, 1.0, 0.0)
-        right = Gf.Cross(fwd, up_v)
-        if right.GetLength() < 1e-9:
-            return Gf.Matrix4d(1.0)
-        right.Normalize()
-        up_c = Gf.Cross(right, fwd)
-        up_c.Normalize()
-        m = Gf.Matrix4d(1.0)
-        m.SetRow(0, Gf.Vec4d(right[0], right[1], right[2], 0.0))
-        m.SetRow(1, Gf.Vec4d(up_c[0], up_c[1], up_c[2], 0.0))
-        m.SetRow(2, Gf.Vec4d(-fwd[0], -fwd[1], -fwd[2], 0.0))
-        m.SetRow(3, Gf.Vec4d(eye[0], eye[1], eye[2], 1.0))
-        return m
+    """Kit 카메라 월드 행렬 (local -Z → target).
+
+    SetLookAt 은 forward/up 평행 시 특이 행렬을 반환할 수 있어
+    항상 직교 기저를 직접 구성한다.
+    """
+    fwd = _vec3(target) - _vec3(eye)
+    if fwd.GetLength() < 1e-9:
+        return Gf.Matrix4d(1.0)
+    fwd.Normalize()
+    up_resolved = _resolve_camera_up_vector(eye, target, up)
+    up_v = _vec3(up_resolved)
+    right = Gf.Cross(fwd, up_v)
+    if right.GetLength() < 1e-9:
+        return Gf.Matrix4d(1.0)
+    right.Normalize()
+    up_c = Gf.Cross(right, fwd)
+    up_c.Normalize()
+    m = Gf.Matrix4d(1.0)
+    m.SetRow(0, Gf.Vec4d(right[0], right[1], right[2], 0.0))
+    m.SetRow(1, Gf.Vec4d(up_c[0], up_c[1], up_c[2], 0.0))
+    m.SetRow(2, Gf.Vec4d(-fwd[0], -fwd[1], -fwd[2], 0.0))
+    m.SetRow(3, Gf.Vec4d(eye[0], eye[1], eye[2], 1.0))
+    return m
 
 
 def _camera_local_matrix(
@@ -1181,6 +1411,7 @@ def apply_camera_view(
             up = tuple(float(x) for x in PLAY_CAMERA_PRESET.up_xyz)
         except Exception:
             up = (0.0, 0.0, 1.0)
+    up = _resolve_camera_up_vector(snap.eye_xyz, snap.target_xyz, up)
 
     dist = (_vec3(snap.target_xyz) - _vec3(snap.eye_xyz)).GetLength()
     if dist < 1e-6:
@@ -1268,24 +1499,14 @@ def kickoff_fly_to_target(
     up = up_xyz if up_xyz is not None else (0.0, 0.0, 1.0)
     tag = log_context or "fly"
     assign_path = str(assign_prim_path or "").strip()
-    if assign_path:
-        ensure_camera_prim_baseline(assign_path)
-        ensure_session_perspective_camera(log_label=tag, restore_navigation=False)
-        print(
-            f"{_PRINT_PREFIX} Camera prim 직접 bind (Persp fly 생략) "
-            f"context={tag} path={assign_path!r}",
-            flush=True,
-        )
-        ok = _finish_fly_to_target(
-            target,
-            up_xyz=up,
-            assign_prim_path=assign_path,
-            log_context=f"{tag}_bind",
-        )
-        done.set()
-        return ok
-    ensure_session_perspective_camera(log_label=tag, restore_navigation=False)
     current = capture_current_view()
+    ensure_session_perspective_camera(log_label=tag, restore_navigation=False)
+    if current is not None:
+        apply_camera_view(
+            current,
+            up_xyz=up,
+            camera_path=_PERSP_CAMERA_PATH,
+        )
     if current is None:
         ok = _finish_fly_to_target(
             target,
@@ -1422,31 +1643,23 @@ def kickoff_play_camera_fly(done: threading.Event) -> bool:
     use_prim = not play_camera_use_preset_coords()
     prim_path = play_assign_prim_path()
     up = get_session_fly_up_xyz(play=True)
-    if prim_path:
-        ensure_camera_prim_baseline(prim_path)
 
     def _kickoff_on_main() -> None:
         nonlocal fly_started
         try:
-            if use_prim and prim_path:
-                ensure_session_perspective_camera(
-                    log_label="play_fly",
-                    restore_navigation=False,
-                )
-                print(
-                    f"{_PRINT_PREFIX} Play Camera prim 직접 bind (Persp fly 생략) "
-                    f"path={prim_path!r}",
-                    flush=True,
-                )
-                if _finish_fly_to_target(
-                    target,
-                    up_xyz=up,
-                    assign_prim_path=prim_path,
-                    log_context="play_bind",
-                ):
-                    fly_started = True
-                return
             current = capture_current_view()
+            if use_prim and prim_path:
+                apply_play_camera_prim_view_spec()
+            ensure_session_perspective_camera(
+                log_label="play_fly",
+                restore_navigation=False,
+            )
+            if current is not None:
+                apply_camera_view(
+                    current,
+                    up_xyz=up,
+                    camera_path=_PERSP_CAMERA_PATH,
+                )
             if current is None:
                 print(
                     f"{_PRINT_PREFIX} 현재 뷰 읽기 실패 — target 직접 적용 시도",
@@ -1459,6 +1672,7 @@ def kickoff_play_camera_fly(done: threading.Event) -> bool:
                     log_context="play_no_current",
                 ):
                     fly_started = True
+                    done.set()
                 return
             if views_are_close(current, target):
                 print(
@@ -1472,6 +1686,7 @@ def kickoff_play_camera_fly(done: threading.Event) -> bool:
                     log_context="play_sync",
                 )
                 fly_started = True
+                done.set()
                 return
             print(
                 f"{_PRINT_PREFIX} fly 시작 "
@@ -1541,7 +1756,10 @@ __all__ = [
     "CameraPrimBaseline",
     "CameraViewSnapshot",
     "apply_camera_view",
+    "apply_play_camera_prim_view_spec",
     "apply_session_view_to_target",
+    "apply_top_view_camera_prim_view_spec",
+    "apply_view_to_camera_prim",
     "camera_prim_up_xyz",
     "bind_viewport_to_camera_prim",
     "capture_current_view",
@@ -1556,6 +1774,7 @@ __all__ = [
     "log_play_camera_preset_capture",
     "play_camera_fly_duration_sec",
     "play_camera_preset_configured",
+    "play_camera_prim_view_spec",
     "play_camera_target_configured",
     "play_assign_prim_path",
     "play_camera_bind_viewport_to_usd_prim",
@@ -1577,6 +1796,7 @@ __all__ = [
     "switch_to_perspective_viewport",
     "top_view_assign_prim_path",
     "top_view_camera_prim_path",
+    "top_view_camera_prim_view_spec",
     "top_view_target_configured",
     "top_view_use_preset_coords",
     "views_are_close",

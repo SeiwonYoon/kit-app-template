@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ STARTUP_CHECK_PLAY_CAMERA_FLY: bool = True  # Play 시 preset 뷰로 fly (일시
 # True(기본)=PLAY_CAMERA_PRESET 좌표 fly (현재와 동일)
 # False=PLAY_CAMERA_PRIM_PATH USD Camera prim 뷰로 fly
 # ---------------------------------------------------------------------------
-PLAY_CAMERA_USE_PRESET_COORDS: bool = True
+PLAY_CAMERA_USE_PRESET_COORDS: bool = False
 PLAY_CAMERA_PRIM_PATH: str = "/Camera"  # stage 트리 기준 실제 경로로 수정
 # Camera prim 모드(USE_PRESET_COORDS=False)에서는 fly 후 viewport 가 USD Camera 에 bind 됨.
 # 아래 플래그는 레거시·문서용 (동작에는 영향 없음).
@@ -63,13 +63,27 @@ PLAY_CAMERA_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
     target_xyz=(-1503.170796, 1208.681599, 294.489204),
 )
 
+# ---------------------------------------------------------------------------
+# Camera prim 모드(USE_PRESET_COORDS=False) 뷰·줌 스펙 — preset 과 동일 워크플로.
+# None = 저장 안 함 → 진입 시점의 USD Camera prim 현재 상태 그대로 사용 (기존 동작).
+# 값 설정 = 진입할 때마다 prim 을 이 뷰(eye/target 거리 = 줌)로 강제 → 항상 일정.
+# 「뷰저장」 버튼: prim 모드에서 누르면 아래 블록용 스니펫을 콘솔에 출력.
+# ---------------------------------------------------------------------------
+# PLAY_CAMERA_PRIM_VIEW: Optional[PlayCameraPresetSpec] = None
+# 예) 캡처 후 붙여넣기:
+PLAY_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(
+    eye_xyz=(299.167590, -1152.897089, 3570.668411),
+    target_xyz=(65.168036, 106.145030, 1397.976655),
+    up_xyz=(-0.157417, 0.846988, 0.507771),
+)
+
 
 # ---------------------------------------------------------------------------
 # Viewport 「탑뷰 보기」 — preset 뷰 고정 + 카메라 조작 잠금 (lam_viewport_top_view.py)
 # True(기본)=TOP_VIEW_PRESET 좌표 (현재와 동일)
 # False=TOP_VIEW_CAMERA_PRIM_PATH USD Camera prim 뷰로 fly 후 고정
 # ---------------------------------------------------------------------------
-TOP_VIEW_USE_PRESET_COORDS: bool = True
+TOP_VIEW_USE_PRESET_COORDS: bool = False
 TOP_VIEW_CAMERA_PRIM_PATH: str = "/Camera"  # stage 트리 기준 실제 경로로 수정
 # Camera prim 모드(USE_PRESET_COORDS=False)에서는 fly 후 viewport 가 USD Camera 에 bind 됨.
 TOP_VIEW_BIND_VIEWPORT_TO_USD_PRIM: bool = True
@@ -79,6 +93,16 @@ TOP_VIEW_PRESET_ENABLED: bool = True
 TOP_VIEW_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
     eye_xyz=(239.023316, 4175.874309, 12994.797994),
     target_xyz=(13.721364, 3544.061638, 2916.364276),
+)
+
+# Camera prim 모드(TOP_VIEW_USE_PRESET_COORDS=False) 뷰·줌 스펙 — Play 쪽과 동일 규칙.
+# None = prim 현재 상태 사용 / 값 설정 = 탑뷰 진입 시마다 이 뷰·줌으로 강제.
+TOP_VIEW_CAMERA_PRIM_VIEW: Optional[PlayCameraPresetSpec] = None
+# 예) 캡처 후 붙여넣기:
+TOP_VIEW_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(
+    eye_xyz=(0.000000, 0.000000, 3473.719917),
+    target_xyz=(0.000000, 0.000000, 1343.485827),
+    up_xyz=(0.000000, 1.000000, 0.000000),
 )
 
 
@@ -388,11 +412,13 @@ __all__ = [
     "PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC",
     "PlayCameraPresetSpec",
     "PLAY_CAMERA_PRESET",
+    "PLAY_CAMERA_PRIM_VIEW",
     "TOP_VIEW_USE_PRESET_COORDS",
     "TOP_VIEW_CAMERA_PRIM_PATH",
     "TOP_VIEW_BIND_VIEWPORT_TO_USD_PRIM",
     "TOP_VIEW_PRESET_ENABLED",
     "TOP_VIEW_PRESET",
+    "TOP_VIEW_CAMERA_PRIM_VIEW",
     "TRAFFIC_LIGHT_EMISSIVE_ENABLED",
     "TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MIN_SEC",
     "TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MAX_SEC",

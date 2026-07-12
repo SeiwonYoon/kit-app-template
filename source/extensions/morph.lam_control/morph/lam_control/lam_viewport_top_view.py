@@ -604,6 +604,7 @@ def apply_top_view_target() -> bool:
     """탑뷰 시점 적용 — camera prim 모드는 즉시 bind, preset 모드만 Persp 좌표 적용."""
     from .lam_play_camera_fly import (
         _finish_fly_to_target,
+        apply_top_view_camera_prim_view_spec,
         ensure_camera_prim_baseline,
         ensure_session_perspective_camera,
         get_session_fly_up_xyz,
@@ -617,6 +618,7 @@ def apply_top_view_target() -> bool:
         return apply_top_view_preset()
     prim_path = top_view_assign_prim_path()
     if prim_path:
+        apply_top_view_camera_prim_view_spec()
         ensure_camera_prim_baseline(prim_path)
     ensure_session_perspective_camera(
         log_label="top_view_apply",
@@ -685,23 +687,37 @@ def _start_camera_prim_fly_async(viewport_api: Any) -> bool:
     import threading
 
     from .lam_play_camera_fly import (
+        _PERSP_CAMERA_PATH,
+        apply_camera_view,
+        apply_top_view_camera_prim_view_spec,
         capture_current_view,
         ensure_camera_prim_baseline,
         ensure_session_perspective_camera,
+        get_session_fly_up_xyz,
         get_top_view_target_snapshot,
-        get_up_for_top_view_target,
         kickoff_fly_to_target,
         top_view_assign_prim_path,
         top_view_camera_prim_path,
     )
 
     prim = top_view_assign_prim_path()
+    current = capture_current_view()
+    if current is None:
+        return False
+    up = get_session_fly_up_xyz(top_view=True)
     if prim:
+        apply_top_view_camera_prim_view_spec()
         ensure_camera_prim_baseline(prim)
     ensure_session_perspective_camera(
         log_label="top_view_fly",
         restore_navigation=False,
     )
+    if current is not None:
+        apply_camera_view(
+            current,
+            up_xyz=up,
+            camera_path=_PERSP_CAMERA_PATH,
+        )
     _set_viewport_input_enabled(viewport_api, False)
     target = get_top_view_target_snapshot()
     if target is None:
@@ -711,15 +727,6 @@ def _start_camera_prim_fly_async(viewport_api: Any) -> bool:
             flush=True,
         )
         return False
-    up = get_up_for_top_view_target()
-    if not top_view_use_preset_coords():
-        from .lam_play_camera_fly import get_session_fly_up_xyz
-
-        up = get_session_fly_up_xyz(top_view=True)
-    current = capture_current_view()
-    if current is None:
-        return False
-    prim = top_view_assign_prim_path()
     done = threading.Event()
     _cancel_top_view_fly()
     _state["fly_pending"] = True
