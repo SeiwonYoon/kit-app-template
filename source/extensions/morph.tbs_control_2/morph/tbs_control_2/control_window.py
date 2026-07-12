@@ -11615,6 +11615,18 @@ def on_sim_start_clicked(ext: Any) -> None:
 
     target_screens_raw = getattr(ext, "_sim_startup_target_screens", None)
     partial_startup = isinstance(target_screens_raw, (list, tuple)) and len(target_screens_raw) > 0
+    if not partial_startup:
+        try:
+            from .control_sim_screen_playback import is_simulation_in_progress
+
+            if is_simulation_in_progress(ext):
+                try:
+                    _append_sim_log(ext, "[SIM] 시뮬레이션 진행 중 — 시작(재시작)을 건너뜁니다.")
+                except Exception:
+                    pass
+                return
+        except Exception:
+            pass
     target_screens: List[int] = []
     if partial_startup:
         for x in target_screens_raw:

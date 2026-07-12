@@ -476,6 +476,13 @@ def any_playback_still_active(ext: Any) -> bool:
     return False
 
 
+def is_simulation_in_progress(ext: Any) -> bool:
+    """프리런 계산 중이거나 타임라인 재생 중이면 True (시작/play 재시작 금지)."""
+    if bool(getattr(ext, "_sim_prerun_ui_busy", False)):
+        return True
+    return any_playback_still_active(ext)
+
+
 def cleanup_playback_subscription_if_idle(ext: Any) -> None:
     """모든 화면 재생이 끝났으면 UI tick 구독·플래그를 정리한다."""
     if any_playback_still_active(ext):
@@ -698,6 +705,7 @@ __all__ = [
     "sim_log_ui_drain_limit",
     "sim_log_ui_history_drain_limit",
     "any_playback_still_active",
+    "is_simulation_in_progress",
     "cleanup_playback_subscription_if_idle",
     "stop_playback_for_screen",
     "stop_playback_runtime",

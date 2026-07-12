@@ -466,21 +466,27 @@ def handle_control_simulation(
     speed_requested = _parse_requested_speed(pl.get("speed"))
 
     def _work() -> Dict[str, Any]:
+        from morph.tbs_control_2.control_sim_screen_playback import is_simulation_in_progress
         from morph.tbs_control_2.control_window import on_sim_start_clicked, on_sim_stop_clicked
 
         ext = require_tbs_extension_instance()
-        _set_sim_speed(ext, speed_requested)
 
         if action == "pause":
+            _set_sim_speed(ext, speed_requested)
             on_sim_stop_clicked(ext)
-            active = "pause"
-        elif action == "play":
-            on_sim_start_clicked(ext)
-            active = "play"
-        else:
-            return _err(f"unknown action: {action!r}", data={"active": "", "speed": _SIM_SPEED_DEFAULT})
+            return _ok({"active": "pause", "speed": _read_sim_speed(ext)})
 
-        return _ok({"active": active, "speed": _read_sim_speed(ext)})
+        if action == "play":
+            if is_simulation_in_progress(ext):
+                return _err(
+                    "play 중 — 시뮬레이션이 이미 진행 중입니다",
+                    data={"active": "play", "speed": _read_sim_speed(ext)},
+                )
+            _set_sim_speed(ext, speed_requested)
+            on_sim_start_clicked(ext)
+            return _ok({"active": "play", "speed": _read_sim_speed(ext)})
+
+        return _err(f"unknown action: {action!r}", data={"active": "", "speed": _SIM_SPEED_DEFAULT})
 
     _schedule_hyview_main_work(
         "control_simulation",
