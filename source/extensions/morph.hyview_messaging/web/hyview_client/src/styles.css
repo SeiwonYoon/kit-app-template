@@ -33,6 +33,43 @@ code {
   }
 }
 
+.main-grid.http-only {
+  grid-template-columns: 1fr;
+}
+
+.mode-switch {
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.status-pill {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  background: #444;
+}
+
+.status-pill.ok {
+  background: #1b6b3a;
+}
+
+.status-pill.warn {
+  background: #6b5a1b;
+}
+
+.http-info-panel {
+  background: #24242e;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.http-info-panel pre {
+  background: #111;
+  padding: 0.75rem;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
 .stream-panel,
 .ebs-panel {
   background: #24242e;

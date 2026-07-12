@@ -1,6 +1,19 @@
-# HyView 로컬 스트리밍 클라이언트 (방법 A)
+# HyView 로컬 클라이언트 (스트리밍 + HTTP 디버그)
 
-실무 HyView 와 **동일한 경로**로 Kit `ebs_handler` 를 검증하는 브라우저 클라이언트입니다.
+실무 HyView 와 **동일한 T2V/V2T 계약**으로 Kit `ebs_handler` 를 검증합니다.
+
+## 빠른 시작 — HTTP 디버그 (스트리밍 불필요) ★ 권장
+
+1. **`morph.editor.kit`** 실행 (일반 에디터 kit)
+2. Kit 콘솔: `[HyViewDebugHttp] listening http://127.0.0.1:8721`
+3. `npm run dev` → http://localhost:5173 → **「HTTP 디버그 (8721)」** 선택
+4. EP / 시뮬 시작 등 클릭 → **마지막 V2T** 확인
+
+상세: [`docs/tbs_control_2_hyview_debug_http_ko.md`](../../../docs/tbs_control_2_hyview_debug_http_ko.md)
+
+---
+
+## Livestream 모드 (실무 동일 경로)
 
 ```
 브라우저 (본 앱)
@@ -8,9 +21,7 @@
   └─ T2V / V2T    ← omni.kit.livestream.messaging → morph.hyview_messaging / EBSHandler
 ```
 
-HTTP 브리지(8720) / `tbs_kit_remote` 는 **제거**되었습니다.
-
-## 사전 조건
+## 사전 조건 (Livestream)
 
 - Node.js 18+
 - Chromium 계열 브라우저

@@ -110,6 +110,9 @@ from .base_handler import BaseHandler
 # T2V_request_start_simulation configs[n] → V2T slim 응답 sim echo (Kit 시뮬 미사용)
 _START_SIM_IDENTITY_KEYS: tuple = ("fab_id", "model_id", "eqp_id")
 
+# V2T_response_simulation_timeline — 화면당 timetable_rows chunk 행 수 (slim string[] 기준)
+_TIMELINE_CHUNK_ROWS: int = 20
+
 
 def _merge_start_identity_into_slim(result_slim: Dict[str, Any], conf: Any) -> None:
     """요청 configs[n] 의 MES 식별 필드를 slim ``sim`` 에 merge."""
@@ -119,6 +122,56 @@ def _merge_start_identity_into_slim(result_slim: Dict[str, Any], conf: Any) -> N
     if not isinstance(sim, dict):
         return
     sim.update({k: conf.get(k) for k in _START_SIM_IDENTITY_KEYS})
+
+
+def _slim_timetable_rows(result_slim: Dict[str, Any]) -> List[str]:
+    """slim 결과에서 ``timeline.timetable_rows`` (string[]) 추출."""
+    tl = result_slim.get("timeline") if isinstance(result_slim, dict) else None
+    if not isinstance(tl, dict):
+        return []
+    rows = tl.get("timetable_rows")
+    if not isinstance(rows, list):
+        return []
+    return [str(r) for r in rows if r is not None and str(r).strip()]
+
+
+def _clear_slim_timetable_rows(result_slim: Dict[str, Any]) -> None:
+    """start_simulation 응답용 — timeline.timetable_rows 를 빈 배열로."""
+    if not isinstance(result_slim, dict):
+        return
+    tl = result_slim.get("timeline")
+    if isinstance(tl, dict):
+        tl["timetable_rows"] = []
+    else:
+        result_slim["timeline"] = {"timetable_rows": []}
+
+
+def _timeline_chunk_count(rows: List[Any], chunk_size: int) -> int:
+    if chunk_size <= 0 or not rows:
+        return 0
+    return (len(rows) + chunk_size - 1) // chunk_size
+
+
+def _slice_timetable_chunk(rows: List[str], chunk_size: int, offset: int) -> List[str]:
+    start = int(offset) * int(chunk_size)
+    if start >= len(rows):
+        return []
+    return list(rows[start : start + int(chunk_size)])
+
+
+def _build_timeline_chunk_payload(
+    rows_by_case: List[List[str]],
+    *,
+    offset: int,
+    end: bool,
+    chunk_size: int,
+) -> Dict[str, Any]:
+    timelines: List[Dict[str, Any]] = []
+    for rows in rows_by_case[:2]:
+        timelines.append({"timetable_rows": _slice_timetable_chunk(rows, chunk_size, offset)})
+    while len(timelines) < 2:
+        timelines.append({"timetable_rows": []})
+    return {"offset": int(offset), "end": bool(end), "timelines": timelines}
 
 
 
@@ -140,6 +193,8 @@ class EBSHandler(BaseHandler):
             "V2T_response_ebs_enable",
 
             "V2T_response_start_simulation",
+
+            "V2T_response_simulation_timeline",
 
             "V2T_response_control_simulation",
 
@@ -244,6 +299,50 @@ class EBSHandler(BaseHandler):
             return
 
         self._dispatch_v2t_ok(event_name, ok_data)
+
+
+
+    def _dispatch_simulation_timeline_chunks(self, rows_by_case: List[List[str]]) -> None:
+        """slim timetable_rows 를 chunk 단위로 ``V2T_response_simulation_timeline`` 전송."""
+        chunk_size = max(1, int(_TIMELINE_CHUNK_ROWS))
+        cases = [
+            list(rows_by_case[0]) if len(rows_by_case) > 0 else [],
+            list(rows_by_case[1]) if len(rows_by_case) > 1 else [],
+        ]
+        num_chunks = max(
+            _timeline_chunk_count(cases[0], chunk_size),
+            _timeline_chunk_count(cases[1], chunk_size),
+        )
+        if num_chunks <= 0:
+            num_chunks = 1
+
+        for offset in range(num_chunks):
+            end = offset >= num_chunks - 1
+            try:
+                data = _build_timeline_chunk_payload(
+                    cases,
+                    offset=offset,
+                    end=end,
+                    chunk_size=chunk_size,
+                )
+                self.dispatch_event(
+                    "V2T_response_simulation_timeline",
+                    {"code": 0, "message": "success", "data": data},
+                )
+            except Exception as exc:
+                self.dispatch_event(
+                    "V2T_response_simulation_timeline",
+                    {
+                        "code": 1,
+                        "message": str(exc),
+                        "data": {
+                            "offset": int(offset),
+                            "end": True,
+                            "timelines": [{"timetable_rows": []}, {"timetable_rows": []}],
+                        },
+                    },
+                )
+                return
 
 
 
@@ -515,7 +614,11 @@ class EBSHandler(BaseHandler):
         if len(start_configs) > 1:
             _merge_start_identity_into_slim(result1_slim, start_configs[1])
 
-        # TODO: 설정 완료 후 호출 (웹 모니터·타임라인에 results 반영)
+        # timetable_rows 는 start 응답에서 비우고, chunk 이벤트로 분할 전송
+        rows0 = _slim_timetable_rows(result0_slim)
+        rows1 = _slim_timetable_rows(result1_slim)
+        _clear_slim_timetable_rows(result0_slim)
+        _clear_slim_timetable_rows(result1_slim)
 
         self.dispatch_event(
 
@@ -532,6 +635,8 @@ class EBSHandler(BaseHandler):
             },
 
         )
+
+        self._dispatch_simulation_timeline_chunks([rows0, rows1])
 
 
 

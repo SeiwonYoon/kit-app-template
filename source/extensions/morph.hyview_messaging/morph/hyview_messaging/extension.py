@@ -1,4 +1,5 @@
 from .extension_handlers import HANDLERS
+from .hyview_debug_http_bridge import start_hyview_debug_http_bridge, stop_hyview_debug_http_bridge
 from .stage_loading import LoadingManager
 from .stage_management import StageManager
 
@@ -10,6 +11,7 @@ class Extension(omni.ext.IExt):
         self._loading_manager: LoadingManager = LoadingManager()
         self._stage_manager: StageManager = StageManager()
         self._handlers = [handler_class() for handler_class in HANDLERS]
+        start_hyview_debug_http_bridge()
         try:
             import carb
 
@@ -20,6 +22,7 @@ class Extension(omni.ext.IExt):
             pass
 
     def on_shutdown(self):
+        stop_hyview_debug_http_bridge()
         if self._loading_manager:
             self._loading_manager.on_shutdown()
             self._loading_manager = None
