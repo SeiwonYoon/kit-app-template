@@ -32,6 +32,12 @@ export type HyViewV2TRecord = {
 
 const DEFAULT_HTTP_BASE = "http://127.0.0.1:8721";
 
+/** Kit ``hyview_event_contract.py`` 와 동기화 — rename 시 양쪽 수정 */
+export const HYVIEW_EVENTS = {
+  T2V_REQUEST_SEEK_SIMULATION: "T2V_request_seek_simulation",
+  V2T_RESPONSE_SEEK_SIMULATION: "V2T_response_seek_simulation",
+} as const;
+
 let transportMode: HyViewTransportMode =
   typeof window !== "undefined" && new URLSearchParams(window.location.search).get("mode") === "stream"
     ? "stream"
@@ -148,4 +154,12 @@ export async function requestControlSimulation(
     payload.speed = speed;
   }
   await sendT2V("T2V_request_control_simulation", payload);
+}
+
+/** T2V — 시뮬 시간 seek (막대그래프 클릭과 동일, t=sim seconds) */
+export async function requestSeekSimulation(caseIndex: number, t: number): Promise<void> {
+  await sendT2V(HYVIEW_EVENTS.T2V_REQUEST_SEEK_SIMULATION, {
+    case: caseIndex,
+    t: Number(t),
+  });
 }

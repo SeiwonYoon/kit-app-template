@@ -4,6 +4,7 @@ import {
   requestControlSimulation,
   requestEbsEnable,
   requestEqpChange,
+  requestSeekSimulation,
   requestStartSimulation,
 } from "./hyviewMessaging";
 
@@ -38,6 +39,8 @@ export default function EbsSimPanel({ messagingReady, transportMode, onLog, last
   const [case0, setCase0] = useState<CaseForm>(defaultCase);
   const [case1, setCase1] = useState<CaseForm>(defaultCase);
   const [speed, setSpeed] = useState(1.0);
+  const [seekCase, setSeekCase] = useState(0);
+  const [seekT, setSeekT] = useState(60);
   const [busy, setBusy] = useState(false);
 
   const guard = useCallback(() => {
@@ -99,6 +102,12 @@ export default function EbsSimPanel({ messagingReady, transportMode, onLog, last
 
   const onPause = () => {
     void run("T2V_request_control_simulation pause", () => requestControlSimulation("pause"));
+  };
+
+  const onSeek = () => {
+    void run(`T2V_request_seek_simulation case=${seekCase} t=${seekT}`, () =>
+      requestSeekSimulation(seekCase, seekT),
+    );
   };
 
   const renderCase = (
@@ -177,6 +186,26 @@ export default function EbsSimPanel({ messagingReady, transportMode, onLog, last
         </button>
         <button type="button" onClick={onPause} disabled={!messagingReady || busy}>
           Pause
+        </button>
+        <label>
+          Seek case
+          <select value={seekCase} onChange={(e) => setSeekCase(Number(e.target.value))}>
+            <option value={0}>0 (화면1)</option>
+            <option value={1}>1 (화면2)</option>
+          </select>
+        </label>
+        <label>
+          Seek t (sim sec)
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={seekT}
+            onChange={(e) => setSeekT(Number(e.target.value))}
+          />
+        </label>
+        <button type="button" onClick={onSeek} disabled={!messagingReady || busy}>
+          Seek
         </button>
       </section>
 

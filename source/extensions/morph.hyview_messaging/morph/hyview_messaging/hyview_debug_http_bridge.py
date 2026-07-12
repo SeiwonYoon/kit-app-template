@@ -23,14 +23,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import carb
 from carb.eventdispatcher import get_eventdispatcher
 
-# ebs_handler.get_outgoing_events() 와 동기화 (신규 V2T 추가 시 여기도)
-_V2T_EVENT_TYPES: Tuple[str, ...] = (
-    "V2T_response_eqp_change",
-    "V2T_response_ebs_enable",
-    "V2T_response_start_simulation",
-    "V2T_response_control_simulation",
-    "V2T_response_simulation_timeline",
-)
+from .hyview_event_contract import ALL_V2T_EVENT_TYPES
+
+# hyview_event_contract.ALL_V2T_EVENT_TYPES 와 동기화 (신규 V2T 추가 시 contract 먼저)
+_V2T_EVENT_TYPES: Tuple[str, ...] = ALL_V2T_EVENT_TYPES
 
 _DEFAULT_PORT = 8721
 _DEFAULT_BIND = "127.0.0.1"

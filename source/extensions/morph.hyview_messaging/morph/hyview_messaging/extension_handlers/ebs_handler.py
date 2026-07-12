@@ -100,10 +100,18 @@ from ..tbs_sim_bridge import (
 
     handle_eqp_change,
 
+    handle_seek_simulation,
+
     handle_start_simulation,
 
 )
 
+from ..hyview_event_contract import (
+    PAYLOAD_CASE,
+    PAYLOAD_T,
+    T2V_REQUEST_SEEK_SIMULATION,
+    V2T_RESPONSE_SEEK_SIMULATION,
+)
 from .base_handler import BaseHandler
 
 
@@ -198,6 +206,8 @@ class EBSHandler(BaseHandler):
 
             "V2T_response_control_simulation",
 
+            V2T_RESPONSE_SEEK_SIMULATION,
+
         ]
 
 
@@ -215,6 +225,8 @@ class EBSHandler(BaseHandler):
             "T2V_request_start_simulation": self._on_req_start_simulation,
 
             "T2V_request_control_simulation": self._on_req_control_simulation,
+
+            T2V_REQUEST_SEEK_SIMULATION: self._on_req_seek_simulation,
 
         }
 
@@ -713,5 +725,57 @@ class EBSHandler(BaseHandler):
         # TODO: 시뮬레이션 제어 (play / pause / speed)
 
         handle_control_simulation(event.payload, dispatch=_on_bridge_done)
+
+
+    def _on_req_seek_simulation(self, event: carb.events.IEvent) -> None:
+
+        """
+
+        T2V_request_seek_simulation — 막대그래프 시간축 클릭과 동일 seek.
+
+        요청: ``{"case": 0|1, "t": <sim_seconds>}``
+
+        응답 data: ``{"case", "t", "t_requested", "row_index"}``
+
+        """
+
+        print(f"[EBSHandler] _on_req_seek_simulation - {event.payload}")
+
+        pl = event.payload if isinstance(event.payload, dict) else {}
+        case_index = pl.get(PAYLOAD_CASE, 0)
+        t_req = pl.get(PAYLOAD_T)
+
+        def _err_data() -> Dict[str, Any]:
+            return {
+                PAYLOAD_CASE: case_index,
+                PAYLOAD_T: t_req,
+                "row_index": None,
+            }
+
+        def _on_bridge_done(bridge_res: Dict[str, Any]) -> None:
+
+            if int(bridge_res.get("code", 0)) != 0:
+
+                self._dispatch_v2t_err(
+
+                    V2T_RESPONSE_SEEK_SIMULATION,
+
+                    str(bridge_res.get("message", "failed")),
+
+                    _err_data(),
+
+                )
+
+                return
+
+            res_data = bridge_res.get("data")
+
+            if not isinstance(res_data, dict):
+
+                res_data = {}
+
+            self._dispatch_v2t_ok(V2T_RESPONSE_SEEK_SIMULATION, res_data)
+
+        handle_seek_simulation(event.payload, dispatch=_on_bridge_done)
 
 

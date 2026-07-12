@@ -497,5 +497,128 @@ def handle_control_simulation(
     )
 
 
+def handle_seek_simulation(
+    payload: Any,
+    *,
+    dispatch: Callable[[Dict[str, Any]], None],
+) -> None:
+    """웹 seek — 막대그래프 시간축 클릭과 동일 (``_on_bar_timeline_seek``)."""
+    from .hyview_event_contract import (
+        DATA_CASE,
+        DATA_ROW_INDEX,
+        DATA_T,
+        DATA_T_REQUESTED,
+        PAYLOAD_CASE,
+        PAYLOAD_T,
+    )
+
+    pl = _event_payload_to_dict(payload)
+    try:
+        case_index = int(pl.get(PAYLOAD_CASE, 0))
+    except Exception:
+        case_index = 0
+    if case_index not in (0, 1):
+        dispatch(
+            _err(
+                f"invalid {PAYLOAD_CASE}: {case_index!r} (0 or 1)",
+                data={DATA_CASE: case_index, DATA_T: pl.get(PAYLOAD_T)},
+            )
+        )
+        return
+
+    t_raw = pl.get(PAYLOAD_T)
+    if t_raw is None:
+        dispatch(
+            _err(
+                f"missing {PAYLOAD_T}",
+                data={DATA_CASE: case_index, DATA_T: None, DATA_ROW_INDEX: None},
+            )
+        )
+        return
+    try:
+        t_requested = float(t_raw)
+    except Exception:
+        dispatch(
+            _err(
+                f"invalid {PAYLOAD_T}: {t_raw!r}",
+                data={DATA_CASE: case_index, DATA_T: t_raw, DATA_ROW_INDEX: None},
+            )
+        )
+        return
+
+    def _work() -> Dict[str, Any]:
+        from morph.tbs_control_2.control_sim_timetable_ui import refresh_timetable_row_highlight
+        from morph.tbs_control_2.control_window import (
+            _fast_apply_prerun_seek,
+            _resolve_timetable_row_index_for_sim_time,
+        )
+
+        ext = require_tbs_extension_instance()
+        screen = _case_index_to_screen(case_index)
+        err_base = {
+            DATA_CASE: case_index,
+            DATA_T: float(t_requested),
+            DATA_T_REQUESTED: float(t_requested),
+            DATA_ROW_INDEX: None,
+        }
+
+        results = getattr(ext, "_sim_prerun_results_by_screen", None)
+        if not isinstance(results, dict) or results.get(int(screen)) is None:
+            return _err(
+                "prerun not loaded — start_simulation 후 seek 가능",
+                data=err_base,
+            )
+
+        row_idx = _resolve_timetable_row_index_for_sim_time(
+            ext,
+            int(screen),
+            float(t_requested),
+        )
+        if row_idx is None:
+            return _err("no timetable rows for seek", data=err_base)
+
+        try:
+            t_target, _play_cursor = _fast_apply_prerun_seek(
+                ext,
+                screen=int(screen),
+                row_index=int(row_idx),
+            )
+            try:
+                refresh_timetable_row_highlight(
+                    ext,
+                    screen=int(screen),
+                    sim_now=float(t_target),
+                )
+            except Exception:
+                pass
+            print(
+                f"[HyView/bridge] seek_simulation case={case_index} screen={screen} "
+                f"t_req={float(t_requested):.2f} → t={float(t_target):.2f} row={int(row_idx)}",
+                flush=True,
+            )
+        except Exception as exc:
+            return _err(
+                f"seek failed: {exc}",
+                data={**err_base, DATA_ROW_INDEX: int(row_idx)},
+            )
+
+        return _ok(
+            {
+                DATA_CASE: case_index,
+                DATA_T: float(t_target),
+                DATA_T_REQUESTED: float(t_requested),
+                DATA_ROW_INDEX: int(row_idx),
+            }
+        )
+
+    _schedule_hyview_main_work(
+        "seek_simulation",
+        _work,
+        dispatch,
+        case=case_index,
+        t=t_requested,
+    )
+
+
 def payload_from_event(event: Any) -> Dict[str, Any]:
     return _event_payload_to_dict(getattr(event, "payload", None))

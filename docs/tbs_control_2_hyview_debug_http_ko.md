@@ -128,9 +128,27 @@ npm run dev
 
 ---
 
-### Step 6 — Play / Pause (선택)
+### Step 6 — Play / Pause / Seek (선택)
 
 프리런 후 **Play** → `V2T_response_control_simulation` 확인.
+
+**Seek** (막대그래프 시간축 클릭과 동일) — `t`는 **시뮬레이션 시간(초)**:
+
+```json
+{ "event_type": "T2V_request_seek_simulation", "payload": { "case": 0, "t": 120.0 } }
+```
+
+성공 응답 `V2T_response_seek_simulation`:
+
+```json
+{ "code": 0, "data": { "case": 0, "t": 118.5, "t_requested": 120.0, "row_index": 12 } }
+```
+
+- `t_requested`: 웹이 보낸 값
+- `t`: 실제 적용된 sim 시각 (타임테이블 행 기준으로 스냅)
+- `row_index`: 선택된 타임테이블 행
+
+이벤트명·필드 rename 시 `hyview_event_contract.py` 를 먼저 수정.
 
 ---
 
