@@ -6157,6 +6157,15 @@ class LamSimulationCsvPlayWindow:
                     self._scheduler,
                 )
                 try:
+                    from .lam_viewport_overlay_state import set_toggle_play_prim_hide
+
+                    set_toggle_play_prim_hide(True)
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} play prim hide checkbox (stop_reset): {exc}",
+                        flush=True,
+                    )
+                try:
                     from .lam_play_prim_hide import apply_play_prim_hide_phase
 
                     apply_play_prim_hide_phase("play_stop_reset")
