@@ -63,8 +63,8 @@ def _apply_prefix(path: str) -> str:
 WAFER_PRIM_BY_SLOT_KEY: Dict[str, str] = {
     # --- FOUP 1 (foup1_1 .. foup1_25) ---
     "foup1_1": "/LAM_WaferPosition_v01/LAM_WaferPosition_v01/WaferPosition_Root/LoadPortWafer/FOUP_01_Wafer_Pos/Foup_01_Wafer_01",
-    "foup1_2": "/LAM_WaferPosition_v01/LAM_WaferPosition_v01/WaferPosition_Root/LoadPortWafer/FOUP_01_Wafer_Pos/Foup_01_Wafer_02",
-    "foup1_3": "/LAM_WaferPosition_v01/LAM_WaferPosition_v01/WaferPosition_Root/LoadPortWafer/FOUP_01_Wafer_Pos/Foup_01_Wafer_03",
+    "foup1_2": "/wafer_01/_02",
+    "foup1_3": "/wafer_01/_03",
     "foup1_4": "/LAM_WaferPosition_v01/LAM_WaferPosition_v01/WaferPosition_Root/LoadPortWafer/FOUP_01_Wafer_Pos/Foup_01_Wafer_04",
     "foup1_5": "/LAM_WaferPosition_v01/LAM_WaferPosition_v01/WaferPosition_Root/LoadPortWafer/FOUP_01_Wafer_Pos/Foup_01_Wafer_05",
     "foup1_6": "/LAM_WaferPosition_v01/LAM_WaferPosition_v01/WaferPosition_Root/LoadPortWafer/FOUP_01_Wafer_Pos/Foup_01_Wafer_06",

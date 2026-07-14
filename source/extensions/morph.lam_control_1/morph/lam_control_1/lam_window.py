@@ -33,8 +33,8 @@ from .lam_sequence_editor import LamSequenceEditor
 from .simulation_play import LamSimulationCsvPlayWindow
 from .lam_viewport import LamViewport
 from .lam_csv_viewport_hud import (
-    LAM_CSV_VIEWPORT_CONTROLS_ENABLED,
     LamCsvViewportControlsHud,
+    viewport_csv_panel_enabled,
 )
 from .lam_viewport_status_panel import LamViewportStatusPanel
 from .lam_viewport_foup_status_3d import LamFoupStatus3dPanel
@@ -540,28 +540,28 @@ class LamWindow:
         self._wafer_foup_labels.sync_layers(delay_frames=delay_frames)
 
     def _sync_csv_viewport_hud(self) -> None:
-        """``LAM_CSV_VIEWPORT_CONTROLS_ENABLED`` 일 때만 Viewport CSV 미니 패널."""
-        if not LAM_CSV_VIEWPORT_CONTROLS_ENABLED:
-            if self._csv_viewport_hud is not None:
-                try:
-                    self._csv_viewport_hud.destroy()
-                except Exception:
-                    pass
-                self._csv_viewport_hud = None
-            return
+        """defaults에서 허용할 때만 Viewport 우상단 CSV 미니 패널을 표시."""
         if self._csv_sim_windows.get(1) is None:
             self._ensure_csv_sim_play_window(1)
         csv_win = self._primary_csv_sim_window()
         assert csv_win is not None
         csv_win.ensure_playback_models()
         apply_startup_checkbox_side_effects()
-        if self._csv_viewport_hud is None:
-            self._csv_viewport_hud = LamCsvViewportControlsHud(
-                csv_win,
-                lam_window=self,
-                viewport=self._viewport,
-            )
-        self._csv_viewport_hud.sync_layers()
+        if viewport_csv_panel_enabled():
+            if self._csv_viewport_hud is None:
+                self._csv_viewport_hud = LamCsvViewportControlsHud(
+                    csv_win,
+                    lam_window=self,
+                    viewport=self._viewport,
+                )
+            self._csv_viewport_hud.sync_layers()
+        else:
+            if self._csv_viewport_hud is not None:
+                try:
+                    self._csv_viewport_hud.destroy()
+                except Exception:
+                    pass
+                self._csv_viewport_hud = None
         try:
             from .lam_sim_control_defaults import SHOW_VIEWPORT_STATUS_PANEL
         except Exception:

@@ -5138,6 +5138,16 @@ class LamSimulationCsvPlayWindow:
         """Viewport 라벨 동기용 ``LamWindow`` 참조 (본창·HUD 체크박스)."""
         self._lam_window_ref = lam_window
 
+    def mount_screen_visibility_checkboxes_ui(self, ui: Any) -> None:
+        """화면1·2 CSV 재생창 공통 화면 표시 체크박스."""
+        lam = self._lam_window_ref
+        ext = getattr(lam, "_kit_ext", None) if lam is not None else None
+        if ext is None:
+            return
+        from .lam_screen_visibility import mount_screen_visibility_checkboxes
+
+        mount_screen_visibility_checkboxes(ext, ui, row_height=22)
+
     def _resolve_lam_window(self, lam_window: Any = None) -> Any:
         return lam_window if lam_window is not None else self._lam_window_ref
 
@@ -5568,9 +5578,13 @@ class LamSimulationCsvPlayWindow:
             with ui.VStack(spacing=6):
                 if self._screen > 1:
                     ui.Label(
-                        f"화면 {self._screen} — 독립 CSV·재생·오버레이 (HUD는 화면1만)",
+                        f"화면 {self._screen} — 독립 CSV·재생·오버레이",
                         height=20,
                     )
+                try:
+                    self.mount_screen_visibility_checkboxes_ui(ui)
+                except Exception as exc:
+                    self._log(f"screen visibility checkboxes UI: {exc}")
                 ui.Label(
                     "CSV: dwell [Play] | 매크로: ``atm_foup1_pick(7)`` 또는 ``atm_foup1_pick(slot_number=7)`` "
                     "(한 줄 = 함수 하나, JSON 은 lam/lam_event_sequences/)",

@@ -6,7 +6,7 @@
 - **합성 USD** — LAM Window 「② 기존 합성 USD 열기」와 동일 경로 모델 + Open Master
 - **CSV Play** — 폴더·파일·목록/타임라인/Play/중지·배속·공정만보기(1x)·재생 타임라인
 
-**on/off:** ``LAM_CSV_VIEWPORT_CONTROLS_ENABLED`` (본 파일 상단).
+**on/off:** ``lam_sim_control_defaults.SHOW_VIEWPORT_CSV_PANEL``.
 """
 
 from __future__ import annotations
@@ -33,6 +33,18 @@ _TOP_SPACER_H = 12
 _TIMELINE_H = 200
 _CHECKBOX_LABEL_WIDTH = 52
 _CHECKBOX_ROW_HEIGHT = 22
+
+
+def viewport_csv_panel_enabled() -> bool:
+    """우상단 CSV HUD 표시 여부 (기존 상수와 defaults 설정 모두 존중)."""
+    try:
+        from .lam_sim_control_defaults import SHOW_VIEWPORT_CSV_PANEL
+
+        return bool(LAM_CSV_VIEWPORT_CONTROLS_ENABLED) and bool(
+            SHOW_VIEWPORT_CSV_PANEL
+        )
+    except Exception:
+        return bool(LAM_CSV_VIEWPORT_CONTROLS_ENABLED)
 
 
 def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]:
@@ -105,7 +117,7 @@ class LamCsvViewportControlsHud:
 
     def sync_layers(self, *, delay_frames: int = 8) -> None:
         """Viewport 가 준비된 뒤 패널을 붙인다 (몇 프레임 지연)."""
-        if not LAM_CSV_VIEWPORT_CONTROLS_ENABLED:
+        if not viewport_csv_panel_enabled():
             self._destroy_layer()
             return
         self._sched_token += 1
@@ -564,4 +576,5 @@ class LamCsvViewportControlsHud:
 __all__ = [
     "LAM_CSV_VIEWPORT_CONTROLS_ENABLED",
     "LamCsvViewportControlsHud",
+    "viewport_csv_panel_enabled",
 ]

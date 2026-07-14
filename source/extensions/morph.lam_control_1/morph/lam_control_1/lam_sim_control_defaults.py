@@ -63,6 +63,9 @@ UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT: bool = True
 # Viewport 좌상단 STATUS 패널 (EQ MODEL / Time / Current State). False → 미표시.
 SHOW_VIEWPORT_STATUS_PANEL: bool = False
 
+# Viewport 우상단 CSV 시뮬 재생 HUD. False → 미표시.
+SHOW_VIEWPORT_CSV_PANEL: bool = False
+
 # CSV 시뮬 재생 ui.Window — 타임라인 ScrollingFrame 아래(이벤트 함수·매크로·로그) 숨김.
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
@@ -108,6 +111,7 @@ __all__ = [
     "UI_SHOW_LAM_SEQUENCE_EDITOR_DEFAULT",
     "UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT",
     "SHOW_VIEWPORT_STATUS_PANEL",
+    "SHOW_VIEWPORT_CSV_PANEL",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
     "default_viewport_split_count",
     "default_csv_play_screen_count",
