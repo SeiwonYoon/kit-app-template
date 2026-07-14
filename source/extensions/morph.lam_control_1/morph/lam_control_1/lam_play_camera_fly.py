@@ -448,23 +448,34 @@ def bind_viewport_to_camera_prim(
     prim_path: str,
     *,
     log_context: str = "",
+    viewport_api: Any = None,
+    usd_context_name: str = "",
 ) -> bool:
     """viewport 를 USD Camera prim look-through 로 전환."""
     path = str(prim_path or "").strip()
     if not path:
         return False
-    stage = _get_stage()
-    if stage is None:
-        return False
-    prim = stage.GetPrimAtPath(path)
-    if not prim or not prim.IsValid():
-        print(
-            f"{_PRINT_PREFIX} viewport Camera bind 실패 — prim 없음 path={path!r}",
-            flush=True,
-        )
-        return False
-    ensure_camera_prim_baseline(path)
-    ok = set_viewport_camera_prim_path(path)
+    ctx = str(usd_context_name or "").strip()
+    with camera_fly_usd_context(ctx or None):
+        stage = _get_stage()
+        if stage is None:
+            return False
+        prim = stage.GetPrimAtPath(path)
+        if not prim or not prim.IsValid():
+            print(
+                f"{_PRINT_PREFIX} viewport Camera bind 실패 — prim 없음 path={path!r}",
+                flush=True,
+            )
+            return False
+        ensure_camera_prim_baseline(path)
+        if viewport_api is not None:
+            ok = set_viewport_camera_prim_path_on_api(
+                viewport_api,
+                path,
+                usd_context_name=ctx or _resolve_usd_context_name(),
+            )
+        else:
+            ok = set_viewport_camera_prim_path(path)
     tag = f" ({log_context})" if log_context else ""
     if ok:
         print(
@@ -485,16 +496,56 @@ def _finish_fly_to_target(
     up_xyz: Tuple[float, float, float],
     assign_prim_path: str = "",
     log_context: str = "",
+    viewport_api: Any = None,
+    usd_context_name: str = "",
 ) -> bool:
     """fly 종료·동기화 — camera prim 모드면 bind, preset 모드면 session view 적용."""
     path = str(assign_prim_path or "").strip()
+    ctx = str(usd_context_name or "").strip()
     if path:
-        return bind_viewport_to_camera_prim(path, log_context=log_context or "fly_end")
-    return apply_session_view_to_target(
-        target,
-        up_xyz=up_xyz,
-        log_context=log_context or "fly_end",
-    )
+        return bind_viewport_to_camera_prim(
+            path,
+            log_context=log_context or "fly_end",
+            viewport_api=viewport_api,
+            usd_context_name=ctx,
+        )
+    with camera_fly_usd_context(ctx or None):
+        ok = apply_session_view_to_target(
+            target,
+            up_xyz=up_xyz,
+            log_context=log_context or "fly_end",
+        )
+        if viewport_api is not None:
+            set_viewport_camera_prim_path_on_api(
+                viewport_api,
+                _PERSP_CAMERA_PATH,
+                usd_context_name=ctx or _resolve_usd_context_name(),
+            )
+        return ok
+
+
+def capture_view_for_viewport(
+    viewport_api: Any,
+    usd_context_name: str = "",
+) -> Optional[CameraViewSnapshot]:
+    """지정 viewport/context 의 현재 카메라 뷰 스냅샷."""
+    ctx = str(usd_context_name or "").strip()
+    with camera_fly_usd_context(ctx or None):
+        path = ""
+        try:
+            cp = getattr(viewport_api, "camera_path", None) if viewport_api is not None else None
+            if cp is not None:
+                path = str(cp).strip()
+        except Exception:
+            path = ""
+        if path:
+            snap = snapshot_from_prim_path(path)
+            if snap is not None:
+                return snap
+        snap = snapshot_from_prim_path(_PERSP_CAMERA_PATH)
+        if snap is not None:
+            return snap
+        return capture_current_view()
 
 
 def _iter_viewport_apis() -> List[Any]:
@@ -589,7 +640,14 @@ def restore_perspective_on_viewport(
     except Exception:
         pass
     if viewport_api is not None:
-        ok = set_viewport_camera_prim_path_on_api(viewport_api, _PERSP_CAMERA_PATH) or ok
+        ok = (
+            set_viewport_camera_prim_path_on_api(
+                viewport_api,
+                _PERSP_CAMERA_PATH,
+                usd_context_name=ctx,
+            )
+            or ok
+        )
     return ok
 
 
@@ -1494,6 +1552,25 @@ def apply_camera_view(
     return _write_prim_local_xform(path, new_local, coi=coi_val)
 
 
+def _apply_fly_frame_view(
+    snap: CameraViewSnapshot,
+    *,
+    up_xyz: Tuple[float, float, float],
+    fly_camera_path: str = "",
+) -> bool:
+    """fly 한 프레임 — session Persp 또는 USD Camera prim."""
+    path = str(fly_camera_path or "").strip()
+    if path and not _is_session_camera_path(path):
+        return bool(apply_view_to_camera_prim(path, snap, up_xyz=up_xyz))
+    return bool(
+        apply_camera_view(
+            snap,
+            up_xyz=up_xyz,
+            camera_path=path or _PERSP_CAMERA_PATH,
+        )
+    )
+
+
 def _start_fly_animation(
     start: CameraViewSnapshot,
     end: CameraViewSnapshot,
@@ -1501,12 +1578,16 @@ def _start_fly_animation(
     *,
     on_complete: Optional[Any] = None,
     up_xyz: Optional[Tuple[float, float, float]] = None,
+    usd_context_name: str = "",
+    fly_camera_path: str = "",
 ) -> None:
     """main 스레드에서만 호출 — update 구독만 걸고 즉시 반환 (메인 wait 금지)."""
     dur = play_camera_fly_duration_sec()
     t0 = time.perf_counter()
     sub_box: List[Any] = [None]
     up = up_xyz if up_xyz is not None else (0.0, 0.0, 1.0)
+    ctx = str(usd_context_name or "").strip()
+    fly_path = str(fly_camera_path or "").strip()
 
     def _finish() -> None:
         try:
@@ -1523,18 +1604,19 @@ def _start_fly_animation(
         done.set()
 
     def _tick(_event) -> None:
-        elapsed = time.perf_counter() - t0
-        u = _smoothstep01(elapsed / dur) if dur > 1e-9 else 1.0
-        eye = _lerp3(start.eye_xyz, end.eye_xyz, u)
-        tgt = _lerp3(start.target_xyz, end.target_xyz, u)
-        apply_camera_view(
-            CameraViewSnapshot(eye_xyz=eye, target_xyz=tgt),
-            up_xyz=up,
-            camera_path=_PERSP_CAMERA_PATH,
-        )
-        if u >= 1.0 - 1e-9:
-            apply_camera_view(end, up_xyz=up, camera_path=_PERSP_CAMERA_PATH)
-            _finish()
+        with camera_fly_usd_context(ctx or None):
+            elapsed = time.perf_counter() - t0
+            u = _smoothstep01(elapsed / dur) if dur > 1e-9 else 1.0
+            eye = _lerp3(start.eye_xyz, end.eye_xyz, u)
+            tgt = _lerp3(start.target_xyz, end.target_xyz, u)
+            _apply_fly_frame_view(
+                CameraViewSnapshot(eye_xyz=eye, target_xyz=tgt),
+                up_xyz=up,
+                fly_camera_path=fly_path,
+            )
+            if u >= 1.0 - 1e-9:
+                _apply_fly_frame_view(end, up_xyz=up, fly_camera_path=fly_path)
+                _finish()
 
     try:
         import omni.kit.app as _app  # type: ignore
@@ -1544,17 +1626,19 @@ def _start_fly_animation(
             _tick,
             name="morph.lam_control_1:play_camera_fly",
         )
-        apply_camera_view(
-            CameraViewSnapshot(
-                eye_xyz=start.eye_xyz,
-                target_xyz=start.target_xyz,
-            ),
-            up_xyz=up,
-            camera_path=_PERSP_CAMERA_PATH,
-        )
+        with camera_fly_usd_context(ctx or None):
+            _apply_fly_frame_view(
+                CameraViewSnapshot(
+                    eye_xyz=start.eye_xyz,
+                    target_xyz=start.target_xyz,
+                ),
+                up_xyz=up,
+                fly_camera_path=fly_path,
+            )
     except Exception as exc:
         print(f"{_PRINT_PREFIX} update subscribe failed: {exc}", flush=True)
-        apply_camera_view(end, up_xyz=up, camera_path=_PERSP_CAMERA_PATH)
+        with camera_fly_usd_context(ctx or None):
+            _apply_fly_frame_view(end, up_xyz=up, fly_camera_path=fly_path)
         _finish()
 
 
@@ -1565,6 +1649,8 @@ def kickoff_fly_to_target(
     assign_prim_path: str = "",
     up_xyz: Optional[Tuple[float, float, float]] = None,
     log_context: str = "",
+    viewport_api: Any = None,
+    usd_context_name: str = "",
 ) -> bool:
     """main 스레드에서 fly 시작만 걸고 즉시 반환. 완료는 ``done``."""
     if done is None:
@@ -1572,50 +1658,71 @@ def kickoff_fly_to_target(
     up = up_xyz if up_xyz is not None else (0.0, 0.0, 1.0)
     tag = log_context or "fly"
     assign_path = str(assign_prim_path or "").strip()
-    current = capture_current_view()
-    ensure_session_perspective_camera(log_label=tag, restore_navigation=False)
-    if current is not None:
-        apply_camera_view(
+    ctx = str(usd_context_name or "").strip()
+    with camera_fly_usd_context(ctx or None):
+        if viewport_api is not None:
+            current = capture_view_for_viewport(viewport_api, ctx)
+        else:
+            current = capture_current_view()
+        if viewport_api is not None:
+            restore_perspective_on_viewport(viewport_api, ctx)
+        else:
+            ensure_session_perspective_camera(log_label=tag, restore_navigation=False)
+        if current is not None:
+            apply_camera_view(
+                current,
+                up_xyz=up,
+                camera_path=_PERSP_CAMERA_PATH,
+            )
+        if current is None:
+            ok = _finish_fly_to_target(
+                target,
+                up_xyz=up,
+                assign_prim_path=assign_prim_path,
+                log_context=f"{tag}_direct",
+                viewport_api=viewport_api,
+                usd_context_name=ctx,
+            )
+            done.set()
+            return ok
+        if views_are_close(current, target):
+            print(f"{_PRINT_PREFIX} 현재 뷰 ≈ target — fly 생략, camera/view 동기화", flush=True)
+            _finish_fly_to_target(
+                target,
+                up_xyz=up,
+                assign_prim_path=assign_prim_path,
+                log_context=f"{tag}_sync",
+                viewport_api=viewport_api,
+                usd_context_name=ctx,
+            )
+            done.set()
+            return True
+
+        def _complete() -> None:
+            _finish_fly_to_target(
+                target,
+                up_xyz=up,
+                assign_prim_path=assign_prim_path,
+                log_context=f"{tag}_fly_end",
+                viewport_api=viewport_api,
+                usd_context_name=ctx,
+            )
+
+        print(
+            f"{_PRINT_PREFIX} fly 시작 ({play_camera_fly_duration_sec():.2f}s) "
+            f"context={tag}"
+            f"{' bind=' + assign_prim_path if assign_prim_path else ' session_persp'}",
+            flush=True,
+        )
+        _start_fly_animation(
             current,
-            up_xyz=up,
-            camera_path=_PERSP_CAMERA_PATH,
-        )
-    if current is None:
-        ok = _finish_fly_to_target(
             target,
+            done,
+            on_complete=_complete,
             up_xyz=up,
-            assign_prim_path=assign_prim_path,
-            log_context=f"{tag}_direct",
+            usd_context_name=ctx,
         )
-        done.set()
-        return ok
-    if views_are_close(current, target):
-        print(f"{_PRINT_PREFIX} 현재 뷰 ≈ target — fly 생략, camera/view 동기화", flush=True)
-        _finish_fly_to_target(
-            target,
-            up_xyz=up,
-            assign_prim_path=assign_prim_path,
-            log_context=f"{tag}_sync",
-        )
-        done.set()
         return True
-
-    def _complete() -> None:
-        _finish_fly_to_target(
-            target,
-            up_xyz=up,
-            assign_prim_path=assign_prim_path,
-            log_context=f"{tag}_fly_end",
-        )
-
-    print(
-        f"{_PRINT_PREFIX} fly 시작 ({play_camera_fly_duration_sec():.2f}s) "
-        f"context={tag}"
-        f"{' bind=' + assign_prim_path if assign_prim_path else ' session_persp'}",
-        flush=True,
-    )
-    _start_fly_animation(current, target, done, on_complete=_complete, up_xyz=up)
-    return True
 
 
 def run_sync_fly_to_target(
@@ -1807,6 +1914,164 @@ def kickoff_play_camera_fly(done: threading.Event) -> bool:
     return bool(fly_started)
 
 
+def kickoff_play_camera_fly_for_screen(
+    done: threading.Event,
+    *,
+    viewport_api: Any,
+    usd_context_name: str,
+) -> bool:
+    """화면2+ Play — 전역 토글/active Viewport 무시, 지정 타일·context 만 fly."""
+    if done is None:
+        raise ValueError("done event required")
+    if viewport_api is None:
+        done.set()
+        return False
+    if not play_camera_target_configured():
+        done.set()
+        return False
+
+    ctx = str(usd_context_name or "").strip()
+    target = None
+    with camera_fly_usd_context(ctx or None):
+        target = get_play_camera_target_snapshot()
+    if target is None:
+        done.set()
+        return False
+
+    fly_started = False
+    err: List[Optional[BaseException]] = [None]
+    use_prim = not play_camera_use_preset_coords()
+    prim_path = play_assign_prim_path()
+    up = get_session_fly_up_xyz(play=True)
+
+    def _kickoff_on_main() -> None:
+        nonlocal fly_started
+        try:
+            # 화면1 과 동일: 현재 뷰를 먼저 캡처한 뒤 target 준비.
+            # Camera prim 모드(화면2+): aux 에 Persp 가 없을 수 있어
+            # /Camera 에 시작점을 쓰고 look-through 한 채 fly (Persp 우회).
+            with camera_fly_usd_context(ctx or None):
+                current = capture_view_for_viewport(viewport_api, ctx)
+                if current is None:
+                    print(
+                        f"{_PRINT_PREFIX} screen 현재 뷰 읽기 실패 — target 직접 적용",
+                        flush=True,
+                    )
+                    if use_prim and prim_path:
+                        apply_play_camera_prim_view_spec()
+                    if _finish_fly_to_target(
+                        target,
+                        up_xyz=up,
+                        assign_prim_path=prim_path,
+                        log_context="play_screen_no_current",
+                        viewport_api=viewport_api,
+                        usd_context_name=ctx,
+                    ):
+                        fly_started = True
+                        done.set()
+                    return
+                if views_are_close(current, target):
+                    print(
+                        f"{_PRINT_PREFIX} screen 현재 뷰 ≈ target — fly 생략, 동기화 "
+                        f"ctx={ctx!r}",
+                        flush=True,
+                    )
+                    if use_prim and prim_path:
+                        apply_play_camera_prim_view_spec()
+                    _finish_fly_to_target(
+                        target,
+                        up_xyz=up,
+                        assign_prim_path=prim_path,
+                        log_context="play_screen_sync",
+                        viewport_api=viewport_api,
+                        usd_context_name=ctx,
+                    )
+                    fly_started = True
+                    done.set()
+                    return
+
+                fly_path = ""
+                if use_prim and prim_path:
+                    # 시작점을 Camera 에 쓰고 look-through — fly 중 시야가 보간됨
+                    ensure_camera_prim_baseline(prim_path)
+                    apply_view_to_camera_prim(prim_path, current, up_xyz=up)
+                    if not set_viewport_camera_prim_path_on_api(
+                        viewport_api,
+                        prim_path,
+                        usd_context_name=ctx,
+                    ):
+                        print(
+                            f"{_PRINT_PREFIX} screen Camera look-through 실패 "
+                            f"path={prim_path!r} ctx={ctx!r}",
+                            flush=True,
+                        )
+                    fly_path = prim_path
+                else:
+                    restore_perspective_on_viewport(viewport_api, ctx)
+                    if not apply_camera_view(
+                        current,
+                        up_xyz=up,
+                        camera_path=_PERSP_CAMERA_PATH,
+                    ):
+                        print(
+                            f"{_PRINT_PREFIX} screen fly Persp 시작점 적용 실패 "
+                            f"ctx={ctx!r}",
+                            flush=True,
+                        )
+                    fly_path = _PERSP_CAMERA_PATH
+
+                print(
+                    f"{_PRINT_PREFIX} screen fly 시작 "
+                    f"ctx={ctx!r} ({play_camera_fly_duration_sec():.2f}s)"
+                    f"{' bind=' + prim_path if prim_path else ' session_persp'}",
+                    flush=True,
+                )
+                fly_started = True
+
+                def _complete() -> None:
+                    if use_prim and prim_path:
+                        apply_play_camera_prim_view_spec()
+                    _finish_fly_to_target(
+                        target,
+                        up_xyz=up,
+                        assign_prim_path=prim_path,
+                        log_context="play_screen_fly_end",
+                        viewport_api=viewport_api,
+                        usd_context_name=ctx,
+                    )
+
+                _start_fly_animation(
+                    current,
+                    target,
+                    done,
+                    on_complete=_complete,
+                    up_xyz=up,
+                    usd_context_name=ctx,
+                    fly_camera_path=fly_path,
+                )
+        except BaseException as e:
+            err[0] = e
+            raise
+        finally:
+            if not fly_started:
+                done.set()
+
+    try:
+        from .lam_sequence_engine import _dispatch_main_wait  # type: ignore
+
+        if not _dispatch_main_wait(_kickoff_on_main, timeout=5.0):
+            print(f"{_PRINT_PREFIX} screen fly kickoff timeout", flush=True)
+            done.set()
+            return False
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen fly kickoff failed: {exc}", flush=True)
+        done.set()
+        return False
+    if err[0] is not None:
+        print(f"{_PRINT_PREFIX} screen fly error: {err[0]}", flush=True)
+    return bool(fly_started)
+
+
 def run_play_camera_fly_before_start() -> None:
     """Play worker — fly 완료까지 대기 (레거시·단독 호출용)."""
     if not will_run_play_camera_fly():
@@ -1855,6 +2120,7 @@ __all__ = [
     "play_camera_use_preset_coords",
     "kickoff_fly_to_target",
     "kickoff_play_camera_fly",
+    "kickoff_play_camera_fly_for_screen",
     "planned_camera_fly_duration_sec",
     "restore_camera_prim_baseline",
     "restore_kit_default_perspective",
@@ -1868,6 +2134,7 @@ __all__ = [
     "set_viewport_camera_prim_path_on_api",
     "ensure_session_perspective_camera",
     "snapshot_from_prim_path",
+    "capture_view_for_viewport",
     "stop_play_camera_baseline_hold",
     "switch_to_perspective_viewport",
     "top_view_assign_prim_path",

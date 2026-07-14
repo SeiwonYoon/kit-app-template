@@ -292,6 +292,7 @@ def bind_viewport_camera_for_screen(
         return False
     from .lam_play_camera_fly import (
         _PERSP_CAMERA_PATH,
+        _finish_fly_to_target,
         apply_camera_view,
         apply_play_camera_prim_view_spec,
         apply_top_view_camera_prim_view_spec,
@@ -300,7 +301,7 @@ def bind_viewport_camera_for_screen(
         ensure_camera_prim_baseline,
         get_play_camera_target_snapshot,
         get_session_fly_up_xyz,
-        get_top_view_preset_snapshot,
+        get_top_view_target_snapshot,
         play_assign_prim_path,
         play_camera_prim_path,
         play_camera_target_configured,
@@ -318,7 +319,7 @@ def bind_viewport_camera_for_screen(
             return False
         use_preset = top_view_use_preset_coords()
         prim_path = top_view_assign_prim_path() or top_view_camera_prim_path()
-        snap = get_top_view_preset_snapshot()
+        snap = get_top_view_target_snapshot()
         up = get_session_fly_up_xyz(top_view=True)
     else:
         if not play_camera_target_configured():
@@ -329,50 +330,71 @@ def bind_viewport_camera_for_screen(
         up = get_session_fly_up_xyz(play=True)
 
     _ensure_viewport_api_context(vp_api, ctx)
+    ctx_s = str(ctx or "")
     ok = False
     with camera_fly_usd_context(ctx):
-        # 1) 항상 해당 context Perspective 에 목표 뷰 적용 (화면1 kickoff 과 동일)
-        restore_perspective_on_viewport(vp_api, str(ctx or ""))
-        if snap is not None:
-            ok = bool(
-                apply_camera_view(
-                    snap,
-                    up_xyz=up,
-                    camera_path=_PERSP_CAMERA_PATH,
-                )
-            )
-        # 2) Camera prim 경로가 있으면 prim 에도 쓰고 viewport bind
-        if prim_path:
-            if use_preset and snap is not None:
-                apply_view_to_camera_prim(prim_path, snap, up_xyz=up)
-            elif mode == "top_view":
+        # Camera prim 모드: 화면1 apply_top_view_target / play finish 와 동일 —
+        # prim 스펙 적용 후 해당 타일 viewport 만 bind (Persp 스냅 불필요).
+        if prim_path and not use_preset:
+            if mode == "top_view":
                 apply_top_view_camera_prim_view_spec()
             else:
                 apply_play_camera_prim_view_spec()
             ensure_camera_prim_baseline(prim_path)
-            resolved_path = prim_path
-            if runtime.stage is not None:
-                try:
-                    from .lam_multi_viewport_widget import _resolve_camera_path_for_stage
-
-                    got = _resolve_camera_path_for_stage(runtime.stage, prim_path)
-                    if got is not None:
-                        resolved_path = str(got)
-                except Exception:
-                    pass
-            if set_viewport_camera_prim_path_on_api(
-                vp_api,
-                resolved_path,
-                usd_context_name=str(ctx or ""),
-            ):
-                ok = True
+            if snap is None:
+                snap = (
+                    get_top_view_target_snapshot()
+                    if mode == "top_view"
+                    else get_play_camera_target_snapshot()
+                )
+            if snap is not None:
+                ok = bool(
+                    _finish_fly_to_target(
+                        snap,
+                        up_xyz=up,
+                        assign_prim_path=prim_path,
+                        log_context=f"screen{runtime.screen}_{mode}",
+                        viewport_api=vp_api,
+                        usd_context_name=ctx_s,
+                    )
+                )
         else:
-            if set_viewport_camera_prim_path_on_api(
-                vp_api,
-                _PERSP_CAMERA_PATH,
-                usd_context_name=str(ctx or ""),
-            ):
-                ok = True or ok
+            # Preset 모드: 해당 context Persp 에 목표 좌표 적용
+            restore_perspective_on_viewport(vp_api, ctx_s)
+            if snap is not None:
+                ok = bool(
+                    apply_camera_view(
+                        snap,
+                        up_xyz=up,
+                        camera_path=_PERSP_CAMERA_PATH,
+                    )
+                )
+            if prim_path and snap is not None:
+                apply_view_to_camera_prim(prim_path, snap, up_xyz=up)
+                ensure_camera_prim_baseline(prim_path)
+                resolved_path = prim_path
+                if runtime.stage is not None:
+                    try:
+                        from .lam_multi_viewport_widget import _resolve_camera_path_for_stage
+
+                        got = _resolve_camera_path_for_stage(runtime.stage, prim_path)
+                        if got is not None:
+                            resolved_path = str(got)
+                    except Exception:
+                        pass
+                if set_viewport_camera_prim_path_on_api(
+                    vp_api,
+                    resolved_path,
+                    usd_context_name=ctx_s,
+                ):
+                    ok = True
+            else:
+                if set_viewport_camera_prim_path_on_api(
+                    vp_api,
+                    _PERSP_CAMERA_PATH,
+                    usd_context_name=ctx_s,
+                ):
+                    ok = True or ok
 
     if ok:
         print(
@@ -412,13 +434,53 @@ def apply_top_view_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> bo
         set_toggle_top_view(bool(enabled), from_ui_model=False)
         return True
     vp_api = runtime.viewport_api
+    if vp_api is None and runtime.lam_window is not None:
+        # 타일 생성 직후 runtime 스냅샷이 비어 있을 수 있음 — 재조회
+        refreshed = resolve_csv_screen_runtime(
+            runtime.lam_window,
+            runtime.screen,
+            csv_window=runtime.csv_window,
+            require_aux=False,
+        )
+        if refreshed is not None and refreshed.viewport_api is not None:
+            runtime.viewport_api = refreshed.viewport_api
+            runtime.viewport_window = refreshed.viewport_window
+            if refreshed.context_name:
+                runtime.context_name = refreshed.context_name
+            if refreshed.stage is not None:
+                runtime.stage = refreshed.stage
+            vp_api = refreshed.viewport_api
     if vp_api is None:
+        print(
+            f"{_PRINT_PREFIX} screen{runtime.screen} top view skip — viewport_api 없음",
+            flush=True,
+        )
         return False
+    ctx = str(runtime.context_name or "").strip()
+    from .lam_viewport_top_view import set_viewport_top_view_navigation_locked
+
     if enabled:
-        return bind_viewport_camera_for_screen(runtime, "top_view")
+        ok = bind_viewport_camera_for_screen(runtime, "top_view")
+        if ok:
+            set_viewport_top_view_navigation_locked(vp_api, True)
+            print(
+                f"{_PRINT_PREFIX} screen{runtime.screen} top view ON + nav lock",
+                flush=True,
+            )
+        else:
+            print(
+                f"{_PRINT_PREFIX} screen{runtime.screen} top view bind 실패",
+                flush=True,
+            )
+        return ok
     from .lam_play_camera_fly import restore_perspective_on_viewport
 
-    restore_perspective_on_viewport(vp_api, str(runtime.context_name or ""))
+    restore_perspective_on_viewport(vp_api, ctx)
+    set_viewport_top_view_navigation_locked(vp_api, False)
+    print(
+        f"{_PRINT_PREFIX} screen{runtime.screen} top view OFF + Perspective",
+        flush=True,
+    )
     return True
 
 
@@ -581,6 +643,18 @@ def sync_csv_screen_overlays(lam_window: Any, screen: int) -> None:
                 f"vp={runtime.viewport_api is not None}",
                 flush=True,
             )
+    if runtime.screen > 1 and (
+        not runtime.context_name
+        or runtime.viewport_api is None
+        or runtime.stage is None
+    ):
+        # 한 번 더 타일 resolve (Dock LAM_SimSplit / Widget 준비 지연)
+        runtime = resolve_csv_screen_runtime(
+            lam_window,
+            si,
+            csv_window=csv_win,
+            require_aux=False,
+        ) or runtime
     missing = []
     if runtime.screen > 1:
         if not runtime.context_name:
@@ -640,20 +714,21 @@ def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
     if need_cam:
         try:
             from .lam_play_camera_fly import (
-                camera_fly_usd_context,
-                kickoff_play_camera_fly,
-                planned_camera_fly_duration_sec,
+                kickoff_play_camera_fly_for_screen,
+                play_camera_fly_duration_sec,
             )
 
-            # 먼저 해당 타일·context 에 목표 뷰 bind
-            bind_ok = bind_viewport_camera_for_screen(runtime, "play_camera")
-            # 가능하면 화면1 과 동일하게 fly 애니메이션 (aux stage Persp)
+            # 화면1 과 동일: fly 전에 target bind 하지 않는다.
+            # (사전 bind 하면 current≈target 로 fly 가 즉시 스킵됨)
             done = threading.Event()
-            with camera_fly_usd_context(runtime.context_name):
-                started = kickoff_play_camera_fly(done)
+            started = kickoff_play_camera_fly_for_screen(
+                done,
+                viewport_api=runtime.viewport_api,
+                usd_context_name=str(runtime.context_name or ""),
+            )
             if started:
                 deadline = time.monotonic() + max(
-                    0.5, float(planned_camera_fly_duration_sec()) + 1.0
+                    0.5, float(play_camera_fly_duration_sec()) + 1.0
                 )
                 while not done.is_set():
                     if csv_playback_stop_requested(screen=si):
@@ -661,9 +736,12 @@ def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
                     if time.monotonic() >= deadline:
                         break
                     time.sleep(0.05)
-            elif not bind_ok:
+            else:
+                # fly 시작 실패 시에만 즉시 bind (시점만이라도 맞춤)
+                bind_ok = bind_viewport_camera_for_screen(runtime, "play_camera")
                 print(
-                    f"{_PRINT_PREFIX} screen{si} play camera fly/bind 실패",
+                    f"{_PRINT_PREFIX} screen{si} play camera fly kickoff 실패 "
+                    f"— bind fallback ok={bind_ok}",
                     flush=True,
                 )
         except Exception as exc:

@@ -1008,6 +1008,35 @@ def _release_input_lock_for_viewport(st: dict) -> None:
     st["locked_models"] = []
 
 
+def set_viewport_top_view_navigation_locked(
+    viewport_api: Any,
+    locked: bool,
+) -> None:
+    """화면2+ 탑뷰용 — 지정 viewport 의 카메라 조작만 잠금/해제."""
+    if viewport_api is None:
+        return
+    st = _vp_top_view_state(viewport_api)
+    if locked:
+        for attr in ("enable_input", "inputs_enabled"):
+            if hasattr(viewport_api, attr):
+                try:
+                    setattr(viewport_api, attr, False)
+                except Exception:
+                    pass
+        _acquire_input_lock_for_viewport(viewport_api, st)
+        st["active"] = True
+    else:
+        for attr in ("enable_input", "inputs_enabled"):
+            if hasattr(viewport_api, attr):
+                try:
+                    setattr(viewport_api, attr, True)
+                except Exception:
+                    pass
+        _set_manipulator_navigation_enabled(viewport_api, True, active_only=True)
+        _release_input_lock_for_viewport(st)
+        st["active"] = False
+
+
 def sync_top_view_on_viewport(
     viewport_api: Any,
     *,
@@ -1052,6 +1081,7 @@ __all__ = [
     "restore_viewport_camera_navigation",
     "schedule_restore_viewport_navigation",
     "schedule_top_view_after_stage_ready",
+    "set_viewport_top_view_navigation_locked",
     "sync_top_view_on_viewport",
     "top_view_preset_configured",
     "warmup_camera_bindings_defaults",
