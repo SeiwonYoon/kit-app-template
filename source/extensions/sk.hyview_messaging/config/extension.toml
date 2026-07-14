@@ -1,0 +1,15 @@
+[package]
+title = "HyView Messaging (LAM)"
+version = "0.1.0"
+description = "HyView livestream T2V/V2T — morph.lam_control_1 Federation 시뮬 브리지."
+category = "Messaging"
+keywords = ["kit", "messaging", "hyview", "lam", "livestream"]
+repository = "https://github.com/NVIDIA-Omniverse/kit-app-template"
+
+[dependencies]
+"omni.kit.livestream.messaging" = {}
+"omni.kit.livestream.webrtc" = {}
+"morph.lam_control_1" = {}
+
+[[python.module]]
+name = "sk.hyview_messaging"

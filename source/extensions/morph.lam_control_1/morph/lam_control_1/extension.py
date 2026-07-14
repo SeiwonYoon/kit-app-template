@@ -11,6 +11,7 @@ from typing import Any
 import omni.ext
 
 from .lam_extension_singleton import clear_lam_extension_instance, set_lam_extension_instance
+from .kit_main_dispatch import ensure_kit_main_dispatch
 from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_multi_viewport import detach_stage_visibility_subscription, teardown_lam_multi_viewports
 from .lam_playback_scheduler import PlaybackScheduler
@@ -106,6 +107,7 @@ class LamControlExtension(omni.ext.IExt):
     def on_startup(self, ext_id: str) -> None:  # noqa: D401
         print(f"{_PRINT_PREFIX} on_startup ext_id={ext_id}", flush=True)
         set_lam_extension_instance(self)
+        ensure_kit_main_dispatch()
         try:
             import carb  # type: ignore
             import importlib
@@ -188,6 +190,13 @@ class LamControlExtension(omni.ext.IExt):
         self._lam_window = self._window
         self._window.set_master_open_listener(_on_master_opened_for_split)
         self._window.show()
+        try:
+            from .lam_sim_control_defaults import FEDERATION_TEST_WINDOW_AUTO_SHOW
+
+            if bool(FEDERATION_TEST_WINDOW_AUTO_SHOW):
+                self._window._open_federation_test()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} federation test window auto-show failed: {exc}", flush=True)
 
         try:
             from .lam_aux_kit_window_ui import sync_aux_kit_window_visibility

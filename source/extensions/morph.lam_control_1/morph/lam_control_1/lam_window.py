@@ -25,6 +25,7 @@ from .lam_composition_discovery import CompositionDiscovery
 from .lam_external_event_runner import LamExternalEventRunner
 from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_json_test_window import LamJsonTestWindow
+from .lam_federation_test_window import LamFederationTestWindow
 from .lam_master_stage import MasterStage
 from .lam_multi_usd_loader import MultiUsdLoader
 from .lam_playback_scheduler import PlaybackScheduler
@@ -115,6 +116,7 @@ class LamWindow:
         self._registry.add_listener(self._invalidate_attr_caches)
         self._sequence_editor: Optional[LamSequenceEditor] = None
         self._json_test_window: Optional[LamJsonTestWindow] = None
+        self._federation_test_window: Optional[LamFederationTestWindow] = None
         self._csv_sim_windows: Dict[int, LamSimulationCsvPlayWindow] = {}
         self._csv_viewport_hud: Optional[LamCsvViewportControlsHud] = None
         self._wafer_foup_labels: Optional[LamWaferFoupViewportLabels] = None
@@ -449,6 +451,12 @@ class LamWindow:
                             ui.Button("LAM Sequence Editor 열기", clicked_fn=self._open_editor, width=200)
                             ui.Button("JSON 테스트 창 열기", clicked_fn=self._open_json_test, width=180)
                             ui.Button(
+                                "Federation API 테스트",
+                                clicked_fn=self._open_federation_test,
+                                width=180,
+                                tooltip="HyView Federation POST / pagination / 파싱·시뮬 검증",
+                            )
+                            ui.Button(
                                 "CSV 시뮬 재생창 포커스",
                                 clicked_fn=self._open_csv_sim_play,
                                 width=160,
@@ -663,6 +671,12 @@ class LamWindow:
         except Exception:
             pass
         self._json_test_window = None
+        try:
+            if self._federation_test_window is not None:
+                self._federation_test_window.destroy()
+        except Exception:
+            pass
+        self._federation_test_window = None
         for win in list(self._csv_sim_windows.values()):
             try:
                 win.destroy()
@@ -1077,6 +1091,11 @@ class LamWindow:
                 evaluator=self._evaluator,
             )
         self._json_test_window.show()
+
+    def _open_federation_test(self) -> None:
+        if self._federation_test_window is None:
+            self._federation_test_window = LamFederationTestWindow(self._kit_ext)
+        self._federation_test_window.show()
 
     def _open_csv_sim_play(self) -> None:
         """이미 떠 있는 화면별 CSV 재생창을 앞으로 가져온다."""

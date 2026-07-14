@@ -69,6 +69,33 @@ SHOW_VIEWPORT_CSV_PANEL: bool = False
 # CSV 시뮬 재생 ui.Window — 타임라인 ScrollingFrame 아래(이벤트 함수·매크로·로그) 숨김.
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
+# ---------------------------------------------------------------------------
+# Federation API (HyView / 웹 T2V → Kit fetch)
+# ---------------------------------------------------------------------------
+# POST 대상 — 실무 내부망. 로컬·테스트 창에서도 편집 가능.
+FEDERATION_QUERY_URL: str = (
+    "http://federation.digitaltwin.internal/queries/mcc-target-prev-lot-history/run"
+)
+# 페이지당 row 수 — sk.hyview_messaging.lam_handler_config 에서 override 가능.
+FEDERATION_FETCH_LIMIT: int = 1000
+# 화면당 전체 pagination fetch 타임아웃 [s].
+FEDERATION_FETCH_TIMEOUT_SEC: float = 300.0
+# True → HTTP 대신 data/federation_fixture 샘플 JSON (오프라인 파서 검증).
+FEDERATION_USE_FIXTURE: bool = False
+# True → 앱 시작 시 「LAM Federation API Test」 테스트 창을 자동으로 연다.
+# False여도 LAM 메인 창의 「Federation API 테스트」 버튼으로 수동 실행 가능.
+FEDERATION_TEST_WINDOW_AUTO_SHOW: bool = True
+# 응답 로그에 rows 앞 N개만 출력 (0 = metadata만).
+FEDERATION_LOG_ROW_SAMPLE: int = 5
+# True → 응답 JSON 전체를 콘솔에 출력 (대량 데이터 주의).
+FEDERATION_LOG_FULL_RESPONSE: bool = False
+
+# 인증 — 비우면 헤더 없이 POST. 실무 확인 후 값만 채우면 된다.
+# Bearer 예: FEDERATION_BEARER_TOKEN = "eyJ..."
+FEDERATION_BEARER_TOKEN: str = ""
+# 추가 헤더 예: {"X-API-Key": "..."}
+FEDERATION_EXTRA_HEADERS: dict = {}
+
 
 def default_viewport_split_count() -> int:
     """로드·유지할 화면 런타임 수. 표시 개수와 무관하게 항상 2."""
@@ -113,6 +140,15 @@ __all__ = [
     "SHOW_VIEWPORT_STATUS_PANEL",
     "SHOW_VIEWPORT_CSV_PANEL",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
+    "FEDERATION_QUERY_URL",
+    "FEDERATION_FETCH_LIMIT",
+    "FEDERATION_FETCH_TIMEOUT_SEC",
+    "FEDERATION_USE_FIXTURE",
+    "FEDERATION_TEST_WINDOW_AUTO_SHOW",
+    "FEDERATION_LOG_ROW_SAMPLE",
+    "FEDERATION_LOG_FULL_RESPONSE",
+    "FEDERATION_BEARER_TOKEN",
+    "FEDERATION_EXTRA_HEADERS",
     "default_viewport_split_count",
     "default_csv_play_screen_count",
     "default_visible_screens",

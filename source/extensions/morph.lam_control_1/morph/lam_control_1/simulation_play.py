@@ -2318,6 +2318,38 @@ def prepare_csv_playback(
     return build_and_cache_csv_playback(path, progress_tick=progress_tick)
 
 
+def build_and_cache_from_dwells(
+    virtual_path: Path,
+    dwells: List["DwellRecord"],
+    *,
+    progress_tick: Optional[Callable[[int, int], None]] = None,
+) -> CachedCsvPlayback:
+    """API 파싱 결과 dwell → 재생 plan 빌드 → 세션 캐시 (가상 path)."""
+    path = virtual_path.resolve()
+    t0 = time.perf_counter()
+    prog: Optional[_ThrottledBuildProgress] = None
+    if progress_tick is not None:
+        prog = _ThrottledBuildProgress(
+            _estimate_csv_build_units(dwells), progress_tick
+        )
+    schedule, blocks = build_csv_playback_plan(dwells, progress=prog)
+    t_end = float(dwells[-1].end_sec) if dwells else 0.0
+    cached = CachedCsvPlayback(
+        path=path,
+        mtime_ns=0,
+        size=len(dwells),
+        config_tag=_csv_playback_config_tag(),
+        dwells=dwells,
+        schedule=schedule,
+        blocks=blocks,
+        build_ms=(time.perf_counter() - t0) * 1000.0,
+    )
+    key = f"{path}|api|{_csv_playback_config_tag()}|n={len(dwells)}|t={t_end:.3f}"
+    with _csv_playback_cache_lock:
+        _csv_playback_cache[key] = cached
+    return cached
+
+
 def build_csv_timed_playback_blocks(dwells: List[DwellRecord]) -> List[CsvTimedPlaybackBlock]:
     """CSV 시각 동기 재생용 블록만 반환."""
     _, blocks = build_csv_playback_plan(dwells)
@@ -4582,12 +4614,13 @@ def run_simulation_from_csv(
     clear_csv_play_timeline_highlight(screen=si)
     set_csv_playback_compact_log(True)
     try:
-        path = resolve_csv_path(csv_path)
         from_cache = False
-        if prepared is not None and prepared.path.resolve() == path.resolve():
+        if prepared is not None:
             cached = prepared
             from_cache = True
+            path = prepared.path
         else:
+            path = resolve_csv_path(csv_path)
             hit = get_cached_csv_playback(path)
             from_cache = hit is not None
             cached = hit if from_cache else build_and_cache_csv_playback(path)
