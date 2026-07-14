@@ -1836,6 +1836,17 @@ async def _finish_startup_dual_orchestration(ext: Any) -> None:
         apply_viewport_split_tab_chrome(sn)
         if viewport_split_user_resize_locked():
             apply_viewport_split_user_resize_lock(ext)
+        # 화면1·2 runtime hydrate 후 초기 표시 마스크 적용.
+        # 새로 표시되는 화면은 정지(초기화) 완료 후 노출된다.
+        try:
+            from .lam_screen_visibility import apply_startup_screen_visibility
+
+            apply_startup_screen_visibility(ext)
+        except Exception as exc:
+            print(
+                f"[LAM multi-sim] startup screen visibility 실패: {exc}",
+                flush=True,
+            )
 
 
 def _dual_path_split_defer_skip_shell(ext: Any) -> bool:

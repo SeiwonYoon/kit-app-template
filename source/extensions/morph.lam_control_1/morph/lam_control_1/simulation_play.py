@@ -4085,12 +4085,10 @@ def reset_csv_play_stop_initial_state(
     )
 
     try:
-        if ctx:
-            _ltx.stop_translate_animations_for_context(ctx)
-            _lrx.stop_rotate_animations_for_context(ctx)
-        else:
-            _ltx.stop_all_translate_animations()
-            _lrx.stop_all_rotate_animations()
+        # 화면1(default context="")도 해당 context만 중지한다.
+        # stop_all_*은 화면2 aux 애니메이션까지 끊으므로 화면별 reset에서 금지.
+        _ltx.stop_translate_animations_for_context(ctx)
+        _lrx.stop_rotate_animations_for_context(ctx)
     except Exception as exc:
         print(f"{_PRINT_PREFIX}   애니 중지 경고: {exc}", flush=True)
 
@@ -6630,8 +6628,16 @@ class LamSimulationCsvPlayWindow:
             done_log="일시정지 완료 — [재생] 으로 이어서 Play 하세요.",
         )
 
-    def _on_csv_stop_reset_clicked(self) -> None:
-        """정지(초기화) — 재생 위치 삭제 + prim TBS 0 + FOUP show / 기타 hide."""
+    def _on_csv_stop_reset_clicked(
+        self,
+        on_complete: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """정지(초기화).
+
+        ``on_complete``는 재생 worker 종료와 stage 초기화가 모두 끝난 뒤
+        Kit main thread에서 호출된다. 화면 표시 전환이 이전 위치를 노출하지
+        않도록 하기 위한 완료 신호다.
+        """
         clear_csv_play_pause_checkpoint(screen=self._screen)
         self._reset_timeline_playback_highlight_ui()
         try:
@@ -6647,13 +6653,15 @@ class LamSimulationCsvPlayWindow:
                 screen=self._screen,
                 kit_ext=getattr(self._lam_window_ref, "_kit_ext", None),
             )
-            self._schedule_reap_csv_play_thread_after_stop(timeout=45.0)
-        try:
-            from .lam_traffic_light_emissive import on_csv_playback_paused_or_stopped
+        # 일반 정지 버튼만 전역 신호등 상태를 갱신한다.
+        # 화면 표시 전 초기화(on_complete 지정)는 다른 화면 재생에 영향 금지.
+        if on_complete is None:
+            try:
+                from .lam_traffic_light_emissive import on_csv_playback_paused_or_stopped
 
-            on_csv_playback_paused_or_stopped()
-        except Exception:
-            pass
+                on_csv_playback_paused_or_stopped()
+            except Exception:
+                pass
         self._log(
             "정지(초기화) 시작 — Z/팔 TBS→0, FOUP 75 show, "
             "나머지 슬롯·팔 wafer hide (백그라운드)"
@@ -6662,6 +6670,9 @@ class LamSimulationCsvPlayWindow:
         def _worker() -> None:
             with csv_play_screen_binding(self._screen):
                 try:
+                    # 기존 재생이 완전히 끝난 뒤 초기화한다. 재생 write와 reset 경합 방지.
+                    if not self._reap_csv_play_thread(timeout=45.0):
+                        raise RuntimeError("기존 CSV 재생 worker 종료 시간 초과")
                     kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
                     cn = None
                     if self._screen > 1 and kit_ext is not None:
@@ -6737,11 +6748,17 @@ class LamSimulationCsvPlayWindow:
                     self._log(
                         "정지(초기화) 완료 — 위치(TBS)·visibility 복원 (콘솔 [LAM/Sim] 확인)"
                     )
-                    clear_csv_playback_stop(screen=self._screen)
                 except Exception as exc:
                     err = f"정지(초기화) 오류: {exc}"
                     print(f"{_PRINT_PREFIX} {err}", flush=True)
                     self._log(err)
+                finally:
+                    clear_csv_playback_stop(screen=self._screen)
+                    if callable(on_complete):
+                        try:
+                            _post_kit_main_thread(on_complete)
+                        except Exception:
+                            pass
 
         threading.Thread(
             target=_worker,

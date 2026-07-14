@@ -83,6 +83,20 @@ class LamCsvViewportControlsHud:
         self._root: Any = None
         self._hud_combo: Any = None
         self._sched_token: int = 0
+        self._mounted_window: Any = None
+
+    def _resolve_hud_window(self) -> Optional[Any]:
+        ext = getattr(self._lam, "_kit_ext", None) if self._lam is not None else None
+        if ext is not None:
+            try:
+                from .lam_screen_visibility import hud_viewport_window
+
+                vw = hud_viewport_window(ext)
+                if vw is not None and callable(getattr(vw, "get_frame", None)):
+                    return vw
+            except Exception:
+                pass
+        return _resolve_viewport_window(self._viewport)
 
     def destroy(self) -> None:
         self._csv.register_hud_timeline_ui(None)
@@ -100,7 +114,7 @@ class LamCsvViewportControlsHud:
         def _try_mount(remaining: int) -> None:
             if token != self._sched_token:
                 return
-            vw = _resolve_viewport_window(self._viewport)
+            vw = self._resolve_hud_window()
             if vw is not None:
                 self._mount_on_viewport(vw)
                 return
@@ -124,8 +138,9 @@ class LamCsvViewportControlsHud:
     def _destroy_layer(self) -> None:
         self._csv.register_hud_timeline_ui(None)
         self._root = None
+        vw = self._mounted_window
+        self._mounted_window = None
         try:
-            vw = _resolve_viewport_window(self._viewport)
             if vw is None:
                 return
             slot = _FRAME_SLOT
@@ -144,6 +159,7 @@ class LamCsvViewportControlsHud:
 
         self._csv.ensure_playback_models()
         self._destroy_layer()
+        self._mounted_window = vw
 
         names = self._csv.csv_file_display_names()
         idx = self._csv.get_csv_combo_index()
@@ -185,6 +201,27 @@ class LamCsvViewportControlsHud:
                                                 "color": 0xFFFFFFFF,
                                             },
                                         )
+                                        try:
+                                            ext = (
+                                                getattr(self._lam, "_kit_ext", None)
+                                                if self._lam is not None
+                                                else None
+                                            )
+                                            if ext is not None:
+                                                from .lam_screen_visibility import (
+                                                    mount_screen_visibility_checkboxes,
+                                                )
+
+                                                mount_screen_visibility_checkboxes(
+                                                    ext,
+                                                    ui,
+                                                    row_height=_CHECKBOX_ROW_HEIGHT,
+                                                )
+                                        except Exception as exc:
+                                            print(
+                                                f"{_PRINT_PREFIX} screen visibility UI: {exc}",
+                                                flush=True,
+                                            )
                                         # if master_model is not None and lam is not None:
                                         #     ui.Label("합성 USD", height=14)
                                         #     ui.StringField(

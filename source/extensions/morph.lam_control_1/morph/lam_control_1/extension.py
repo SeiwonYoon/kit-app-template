@@ -23,12 +23,13 @@ _PRINT_PREFIX = "[LAM]"
 
 
 def _start_with_dual_screen_enabled() -> bool:
+    """화면 표시 개수와 무관하게 화면1·2 런타임은 항상 준비."""
     try:
-        from .lam_sim_control_defaults import START_WITH_DUAL_SCREEN
+        from .lam_sim_control_defaults import default_viewport_split_count
 
-        return bool(START_WITH_DUAL_SCREEN)
+        return int(default_viewport_split_count()) >= 2
     except Exception:
-        return False
+        return True
 
 
 def _trigger_master_autoload_after_dual_layout(ext: Any) -> None:
@@ -141,6 +142,12 @@ class LamControlExtension(omni.ext.IExt):
             from .lam_aux_kit_window_ui import init_lam_aux_kit_window_models
 
             init_lam_aux_kit_window_models(self)
+        except Exception:
+            pass
+        try:
+            from .lam_screen_visibility import init_screen_visibility_models
+
+            init_screen_visibility_models(self)
         except Exception:
             pass
 

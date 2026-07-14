@@ -12,12 +12,16 @@ from __future__ import annotations
 # True  → 화면별 JSON 파일 생성.
 CSV_PRERUN_EXPORT_JSON: bool = True
 
-# 앱 시작 시 2분할(화면2개)로 시작할지 여부.
-# True  → **레이아웃 먼저**: 2분할 Dock(50:50) 또는 ViewportWidget 50:50 + 독립 stage 컨텍스트를 만든 뒤
-#         화면1에 ``lam_window.default_load_usd_path``,
-#         화면2에 ``lam_window.default_aux_load_usd_path`` 를 순서대로 로드.
-# False → 화면 1개로 시작.
+# 하위 호환용. LAM은 이제 화면1·2 런타임을 항상 모두 로드한다.
 START_WITH_DUAL_SCREEN: bool = True
+
+# 앱 시작 시 실제로 표시할 화면. 최소 하나는 반드시 True.
+# 둘 다 True  → Dock 50:50
+# 화면1만 True → 화면1 100%, 화면2 숨김
+# 화면2만 True → 화면1 숨김, 화면2 100%
+# 숨겨진 화면의 USD/context/runtime은 계속 유지되며 다시 표시할 때 정지·초기화된다.
+STARTUP_SHOW_SCREEN_1: bool = True
+STARTUP_SHOW_SCREEN_2: bool = True
 
 # 뷰포트 분할 UI·적용 상한 (1 또는 2만 사용).
 MAX_VIEWPORT_SPLIT_COUNT: int = 2
@@ -64,25 +68,29 @@ CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 
 def default_viewport_split_count() -> int:
-    """앱 시작 시 ``ext._sim_viewport_split_count`` / 분할 초기값."""
-    return 2 if bool(START_WITH_DUAL_SCREEN) else 1
+    """로드·유지할 화면 런타임 수. 표시 개수와 무관하게 항상 2."""
+    return 2
 
 
 def default_csv_play_screen_count() -> int:
-    """활성 CSV 시뮬 재생 창 개수 (1 또는 2)."""
-    try:
-        n = int(MAX_VIEWPORT_SPLIT_COUNT)
-    except Exception:
-        n = 2
-    n = max(1, min(n, 4))
-    if not bool(START_WITH_DUAL_SCREEN):
-        return 1
-    return max(2, n) if n >= 2 else 2
+    """화면별 CSV 시뮬 재생 창 수. 표시 여부와 무관하게 항상 2."""
+    return 2
+
+
+def default_visible_screens() -> tuple[bool, bool]:
+    """초기 화면 표시 마스크. 둘 다 False이면 안전하게 화면1을 표시."""
+    show_1 = bool(STARTUP_SHOW_SCREEN_1)
+    show_2 = bool(STARTUP_SHOW_SCREEN_2)
+    if not show_1 and not show_2:
+        show_1 = True
+    return show_1, show_2
 
 
 __all__ = [
     "CSV_PRERUN_EXPORT_JSON",
     "START_WITH_DUAL_SCREEN",
+    "STARTUP_SHOW_SCREEN_1",
+    "STARTUP_SHOW_SCREEN_2",
     "MAX_VIEWPORT_SPLIT_COUNT",
     "USE_VIEWPORT_WIDGET_SPLIT",
     "VIEWPORT_RP_DIAG_ENABLED",
@@ -103,4 +111,5 @@ __all__ = [
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
     "default_viewport_split_count",
     "default_csv_play_screen_count",
+    "default_visible_screens",
 ]
