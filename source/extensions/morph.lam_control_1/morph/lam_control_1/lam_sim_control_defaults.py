@@ -77,7 +77,7 @@ FEDERATION_QUERY_URL: str = (
     "http://federation.digitaltwin.internal/queries/mcc-target-prev-lot-history/run"
 )
 # 페이지당 row 수 — sk.hyview_messaging.lam_handler_config 에서 override 가능.
-FEDERATION_FETCH_LIMIT: int = 1000
+FEDERATION_FETCH_LIMIT: int = 50
 # 화면당 전체 pagination fetch 타임아웃 [s].
 FEDERATION_FETCH_TIMEOUT_SEC: float = 300.0
 # True → HTTP 대신 data/federation_fixture 샘플 JSON (오프라인 파서 검증).

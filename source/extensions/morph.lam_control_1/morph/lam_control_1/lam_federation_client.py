@@ -114,6 +114,7 @@ def fetch_federation_pages(
     url: str,
     body: Dict[str, Any],
     limit: int,
+    initial_offset: int = 0,
     screen: int = 1,
     bearer_token: str = "",
     extra_headers: Optional[Dict[str, str]] = None,
@@ -133,8 +134,10 @@ def fetch_federation_pages(
     )
     merged_columns: List[str] = []
     merged_rows: List[List[Any]] = []
+    merged_base: Dict[str, Any] = {}
     pages = 0
-    offset = 0
+    offset = max(0, int(initial_offset or 0))
+    first_offset = offset
     last_status = 0
     last_meta: Dict[str, Any] = {}
 
@@ -158,6 +161,13 @@ def fetch_federation_pages(
             raise RuntimeError(f"invalid JSON response at offset={offset}")
         cols = list(data.get("columns") or [])
         rows = list(data.get("rows") or [])
+        if not merged_base:
+            # query_id/execution_mode 등 서버 원본 메타도 최종 원본 JSON에 보존한다.
+            merged_base = {
+                k: v
+                for k, v in data.items()
+                if k not in ("columns", "rows", "row_count", "pagination")
+            }
         if not merged_columns and cols:
             merged_columns = cols
         merged_rows.extend(rows)
@@ -177,17 +187,23 @@ def fetch_federation_pages(
         _log_response_sample(data, row_sample=log_row_sample, full=log_full_response)
         if not has_next:
             break
+        # Federation offset은 페이지 번호가 아니라 rows 행 오프셋이다.
         offset += int(pag.get("limit") or limit or 1)
         if pages > 10000:
             raise RuntimeError("pagination exceeded 10000 pages")
 
     elapsed = time.perf_counter() - t0
     merged = {
-        "query_id": last_meta.get("query_id"),
+        **merged_base,
+        "query_id": last_meta.get("query_id") or merged_base.get("query_id"),
         "columns": merged_columns,
         "rows": merged_rows,
         "row_count": len(merged_rows),
-        "pagination": {"limit": limit, "offset": 0, "has_next": False},
+        "pagination": {
+            "limit": limit,
+            "offset": first_offset,
+            "has_next": False,
+        },
     }
     meta = {
         "http_status": last_status,
@@ -208,16 +224,21 @@ def fetch_single_post(
     *,
     url: str,
     body: Dict[str, Any],
+    limit: int,
+    offset: int = 0,
     bearer_token: str = "",
     extra_headers: Optional[Dict[str, str]] = None,
     timeout_sec: float = 60.0,
     use_fixture: bool = False,
 ) -> Tuple[int, Dict[str, Any], str]:
     """테스트 창용 — pagination 없이 POST 1회."""
+    page_body = dict(body or {})
+    page_body["limit"] = max(1, int(limit or 1))
+    page_body["offset"] = max(0, int(offset or 0))
     if use_fixture:
-        return 200, _load_fixture_page(0), ""
+        return 200, _load_fixture_page(page_body["offset"]), ""
     headers = build_request_headers(bearer_token=bearer_token, extra_headers=extra_headers)
-    return _http_post_json(url, body, headers=headers, timeout_sec=timeout_sec)
+    return _http_post_json(url, page_body, headers=headers, timeout_sec=timeout_sec)
 
 
 __all__ = [

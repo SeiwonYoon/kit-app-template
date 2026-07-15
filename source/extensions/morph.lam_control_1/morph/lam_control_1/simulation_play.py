@@ -5710,56 +5710,56 @@ class LamSimulationCsvPlayWindow:
                             "나머지 슬롯·팔 wafer hide · 재생 위치 삭제"
                         ),
                     )
-                    try:
-                        from omni.ui import SimpleBoolModel  # type: ignore
+                try:
+                    from omni.ui import SimpleBoolModel  # type: ignore
 
-                        if self._process_only_model is None:
-                            try:
-                                from .lam_viewport_overlay_config import (  # type: ignore
-                                    STARTUP_CHECK_PROCESS_ONLY,
-                                )
-
-                                _po_def = bool(STARTUP_CHECK_PROCESS_ONLY)
-                            except Exception:
-                                _po_def = False
-                            self._process_only_model = SimpleBoolModel(_po_def)
-                        with ui.HStack(spacing=4, width=0):
-                            ui.Label("공정만보기", width=72)
-                            ui.CheckBox(
-                                model=self._process_only_model,
-                                width=22,
-                                tooltip=(
-                                    "체크 후 Play: CSV 시각(t) 유지, JSON 없는 빈 대기만 생략 "
-                                    "(배속 1x). ATM 종료 후 VTM 등 레인 간 빈 텀도 생략. "
-                                    "체크 해제 시 기존 시간 재생."
-                                ),
+                    if self._process_only_model is None:
+                        try:
+                            from .lam_viewport_overlay_config import (  # type: ignore
+                                STARTUP_CHECK_PROCESS_ONLY,
                             )
-                    except Exception:
-                        self._process_only_model = None
-                    try:
-                        from omni.ui import SimpleBoolModel  # type: ignore
 
-                        if self._csv_prerun_export_model is None:
-                            try:
-                                from .lam_sim_control_defaults import CSV_PRERUN_EXPORT_JSON
+                            _po_def = bool(STARTUP_CHECK_PROCESS_ONLY)
+                        except Exception:
+                            _po_def = False
+                        self._process_only_model = SimpleBoolModel(_po_def)
+                    with ui.HStack(spacing=4, width=0):
+                        ui.Label("공정만보기", width=72)
+                        ui.CheckBox(
+                            model=self._process_only_model,
+                            width=22,
+                            tooltip=(
+                                "체크 후 Play: CSV 시각(t) 유지, JSON 없는 빈 대기만 생략 "
+                                "(배속 1x). ATM 종료 후 VTM 등 레인 간 빈 텀도 생략. "
+                                "체크 해제 시 기존 시간 재생."
+                            ),
+                        )
+                except Exception:
+                    self._process_only_model = None
+                try:
+                    from omni.ui import SimpleBoolModel  # type: ignore
 
-                                _ex_def = bool(CSV_PRERUN_EXPORT_JSON)
-                            except Exception:
-                                _ex_def = True
-                            self._csv_prerun_export_model = SimpleBoolModel(_ex_def)
-                        with ui.HStack(spacing=4, width=0):
-                            ui.Label("프리런 JSON 저장", width=108)
-                            ui.CheckBox(
-                                model=self._csv_prerun_export_model,
-                                width=22,
-                                tooltip=(
-                                    "Play 시 CSV 프리런 결과를 "
-                                    "data/csv_prerun/prerun_screen*.json 으로 저장"
-                                ),
-                            )
-                    except Exception:
-                        self._csv_prerun_export_model = None
-                    ui.Spacer()
+                    if self._csv_prerun_export_model is None:
+                        try:
+                            from .lam_sim_control_defaults import CSV_PRERUN_EXPORT_JSON
+
+                            _ex_def = bool(CSV_PRERUN_EXPORT_JSON)
+                        except Exception:
+                            _ex_def = True
+                        self._csv_prerun_export_model = SimpleBoolModel(_ex_def)
+                    with ui.HStack(spacing=4, width=0):
+                        ui.Label("프리런 JSON 저장", width=108)
+                        ui.CheckBox(
+                            model=self._csv_prerun_export_model,
+                            width=22,
+                            tooltip=(
+                                "Play 시 CSV 프리런 결과를 "
+                                "data/csv_prerun/prerun_screen*.json 으로 저장"
+                            ),
+                        )
+                except Exception:
+                    self._csv_prerun_export_model = None
+                ui.Spacer()
                 try:
                     self.mount_wafer_label_show_checkbox_ui(ui)
                 except Exception as exc:

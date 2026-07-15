@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .kit_main_dispatch import schedule_on_main_thread
@@ -15,7 +18,11 @@ from .lam_api_timeline_parser import (
     normalize_configs,
 )
 from .lam_csv_play_screen import get_registry_scheduler_for_lam_screen
-from .lam_csv_prerun_playback import build_prerun_result_from_cached, maybe_export_csv_prerun_json
+from .lam_csv_prerun_playback import (
+    build_csv_prerun_export_document,
+    build_prerun_result_from_cached,
+    maybe_export_csv_prerun_json,
+)
 from .lam_federation_client import fetch_federation_pages
 from .lam_screen_visibility import request_screen_visibility
 from .simulation_play import build_and_cache_from_dwells, run_simulation_from_csv
@@ -31,6 +38,273 @@ class ScreenPipelineResult:
     meta: Dict[str, Any]
     prerun: Optional[Any] = None
     cached: Optional[Any] = None
+
+
+def _default_prerun_export_enabled() -> bool:
+    try:
+        from .lam_sim_control_defaults import CSV_PRERUN_EXPORT_JSON
+
+        return bool(CSV_PRERUN_EXPORT_JSON)
+    except Exception:
+        return False
+
+
+def _write_federation_parse_export(
+    *,
+    screen: int,
+    original: Dict[str, Any],
+    parse_stats: Dict[str, Any],
+    dwells: List[Any],
+    prerun: Any,
+) -> Path:
+    """테스트 창 JSON 저장 — 전체 원본 응답과 CSV 동형 프리런 결과를 한 파일에 보존."""
+    out_dir = Path(__file__).resolve().parents[2] / "data" / "api_queries"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = out_dir / f"federation_screen{int(screen)}_{stamp}.json"
+    doc = {
+        "version": 1,
+        "screen": int(screen),
+        "original_response": original,
+        "parsed": {
+            "stats": parse_stats,
+            "dwells": [asdict(d) for d in dwells],
+            "prerun": build_csv_prerun_export_document(prerun),
+        },
+    }
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def _resolve_csv_play_window(lam_window: Any, screen: int) -> Any:
+    """화면별 CSV 재생창 — 타임라인 UI·preflight 진입점."""
+    if lam_window is None:
+        return None
+    ensure = getattr(lam_window, "_ensure_csv_sim_play_window", None)
+    if callable(ensure):
+        try:
+            return ensure(int(screen))
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} ensure csv window screen={screen}: {exc}",
+                flush=True,
+            )
+    wins = getattr(lam_window, "_csv_sim_windows", None)
+    if isinstance(wins, dict):
+        return wins.get(int(screen))
+    return None
+
+
+def _apply_federation_timeline_ui(csv_win: Any, cached: Any) -> None:
+    """CSV Play 와 동일하게 화면별 타임라인 UI 를 새 schedule 로 교체."""
+    if csv_win is None or cached is None:
+        return
+    apply = getattr(csv_win, "_post_apply_cached_timeline_ui", None)
+    if callable(apply):
+        apply(cached, wait=True)
+        return
+    apply2 = getattr(csv_win, "_apply_cached_timeline_ui", None)
+    if callable(apply2):
+        schedule_on_main_thread(lambda: apply2(cached))
+
+
+def _run_federation_play_preflight(csv_win: Any, screen: int, kit_ext: Any) -> bool:
+    """CSV Play 직전과 동일 — 화면1 camera fly / 화면2+ aux preflight."""
+    si = max(1, int(screen))
+    if si <= 1:
+        try:
+            from .lam_play_start_sequence import run_play_start_preflight
+
+            return bool(run_play_start_preflight(resume_from_pause=False))
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} screen1 play preflight: {exc}", flush=True)
+            return False
+    if csv_win is None:
+        return False
+    try:
+        fn = getattr(csv_win, "_run_aux_screen_play_preflight", None)
+        if callable(fn):
+            return bool(fn(kit_ext))
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} play preflight: {exc}", flush=True)
+        return False
+    return False
+
+
+def _start_federation_playback(
+    ext: Any,
+    lam_window: Any,
+    csv_win: Any,
+    screen: int,
+    cached: Any,
+    *,
+    speed_scale: float,
+) -> Optional[str]:
+    """타임라인 반영 후 CSV Play 와 같은 preflight → 재생 경로."""
+    from .lam_csv_play_screen import csv_play_screen_binding
+    from .simulation_play import (
+        clear_csv_play_timeline_highlight,
+        clear_csv_playback_stop,
+        set_csv_play_progress_ui_callback,
+        set_csv_play_timeline_highlight_callback,
+    )
+
+    si = max(1, int(screen))
+    registry, scheduler = get_registry_scheduler_for_lam_screen(
+        lam_window, si, allow_fallback=(si <= 1)
+    )
+    if csv_win is not None:
+        try:
+            csv_win._refresh_play_runtime()
+        except Exception:
+            pass
+        if getattr(csv_win, "_registry", None) is not None:
+            registry = csv_win._registry
+        if getattr(csv_win, "_scheduler", None) is not None:
+            scheduler = csv_win._scheduler
+    if registry is None or scheduler is None:
+        return f"registry/scheduler missing for screen {si}"
+
+    def _on_play_ui(csv_t: float, csv_total: float, wall_el: float, wall_tot: float) -> None:
+        if csv_win is None:
+            return
+        fmt = getattr(csv_win, "_format_play_progress_line", None)
+        set_text = getattr(csv_win, "_set_build_progress_text", None)
+        if not callable(fmt) or not callable(set_text):
+            return
+        line = fmt(csv_t, csv_total, wall_el, wall_tot)
+        schedule_on_main_thread(lambda: set_text(line))
+
+    def _on_timeline_highlight(active_keys: frozenset) -> None:
+        if csv_win is None:
+            return
+        hl = getattr(csv_win, "_apply_schedule_row_highlight", None)
+        if callable(hl):
+            hl(active_keys)
+
+    def _play() -> None:
+        with csv_play_screen_binding(si):
+            try:
+                clear_csv_playback_stop(screen=si)
+                set_csv_play_progress_ui_callback(_on_play_ui, screen=si)
+                set_csv_play_timeline_highlight_callback(
+                    _on_timeline_highlight, screen=si
+                )
+                if not _run_federation_play_preflight(csv_win, si, ext):
+                    print(
+                        f"{_PRINT_PREFIX} screen{si} preflight 중단 — 재생 생략",
+                        flush=True,
+                    )
+                    return
+                try:
+                    from .lam_traffic_light_emissive import on_csv_playback_started
+
+                    on_csv_playback_started()
+                except Exception:
+                    pass
+                run_simulation_from_csv(
+                    registry,
+                    scheduler,
+                    prepared=cached,
+                    speed_scale=speed_scale,
+                    play_screen=si,
+                    kit_ext=ext,
+                    skip_play_prim_hide=True,
+                )
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} screen{si} play failed: {exc}", flush=True)
+            finally:
+                try:
+                    from .lam_traffic_light_emissive import (
+                        on_csv_playback_paused_or_stopped,
+                    )
+
+                    on_csv_playback_paused_or_stopped()
+                except Exception:
+                    pass
+                set_csv_play_progress_ui_callback(None, screen=si)
+                set_csv_play_timeline_highlight_callback(None, screen=si)
+                clear_csv_play_timeline_highlight(screen=si)
+
+    threading.Thread(
+        target=_play,
+        name=f"lam-federation-play-s{si}",
+        daemon=True,
+    ).start()
+    return None
+
+
+def _process_merged_response(
+    ext: Any,
+    lam_window: Any,
+    screen: int,
+    body: Dict[str, Any],
+    merged: Dict[str, Any],
+    *,
+    auto_play: bool,
+    speed_scale: float,
+    save_response_json: bool = False,
+    export_default_prerun: bool = True,
+) -> ScreenPipelineResult:
+    """이미 수집됐거나 사용자가 붙여넣은 응답만 파싱·프리런·재생한다."""
+    meta: Dict[str, Any] = {"screen": screen}
+    try:
+        eqp_id = str(body.get("eqp_id") or "").strip()
+        if not eqp_id:
+            return ScreenPipelineResult(
+                screen, False, "eqp_id missing in config body", meta
+            )
+        dwells, parse_stats = merged_response_to_dwells(merged, eqp_id=eqp_id)
+        meta["parse"] = parse_stats
+        if not dwells:
+            return ScreenPipelineResult(screen, False, "no dwell records after parse", meta)
+        vpath = federation_virtual_path(screen, body)
+        cached = build_and_cache_from_dwells(vpath, dwells)
+        prerun = build_prerun_result_from_cached(cached, screen=screen)
+        if save_response_json:
+            saved = _write_federation_parse_export(
+                screen=screen,
+                original=merged,
+                parse_stats=parse_stats,
+                dwells=dwells,
+                prerun=prerun,
+            )
+            meta["saved_json"] = str(saved)
+        elif export_default_prerun:
+            maybe_export_csv_prerun_json(
+                prerun,
+                export_enabled=_default_prerun_export_enabled(),
+            )
+        meta["prerun"] = {
+            "items": len(prerun.items),
+            "final_csv_time_sec": prerun.final_csv_time_sec,
+            "build_ms": prerun.build_ms,
+        }
+        print(
+            f"{_PRINT_PREFIX} prerun screen={screen} items={len(prerun.items)} "
+            f"duration={prerun.final_csv_time_sec:.1f}s",
+            flush=True,
+        )
+        csv_win = _resolve_csv_play_window(lam_window, screen)
+        # Play 여부와 무관하게 화면별 타임라인은 API 결과로 교체
+        _apply_federation_timeline_ui(csv_win, cached)
+        if auto_play:
+            err = _start_federation_playback(
+                ext,
+                lam_window,
+                csv_win,
+                screen,
+                cached,
+                speed_scale=speed_scale,
+            )
+            if err:
+                return ScreenPipelineResult(screen, False, err, meta)
+        return ScreenPipelineResult(
+            screen, True, "ok", meta, prerun=prerun, cached=cached
+        )
+    except Exception as exc:
+        return ScreenPipelineResult(screen, False, str(exc), meta)
 
 
 def _read_federation_defaults() -> Dict[str, Any]:
@@ -97,51 +371,17 @@ def _process_one_screen(
             log_full_response=log_full_response,
         )
         meta["fetch"] = fetch_meta
-        dwells, parse_stats = merged_response_to_dwells(merged, eqp_id=eqp_id)
-        meta["parse"] = parse_stats
-        if not dwells:
-            return ScreenPipelineResult(screen, False, "no dwell records after parse", meta)
-        vpath = federation_virtual_path(screen, body)
-        cached = build_and_cache_from_dwells(vpath, dwells)
-        prerun = build_prerun_result_from_cached(cached, screen=screen)
-        maybe_export_csv_prerun_json(prerun)
-        meta["prerun"] = {
-            "items": len(prerun.items),
-            "final_csv_time_sec": prerun.final_csv_time_sec,
-            "build_ms": prerun.build_ms,
-        }
-        print(
-            f"{_PRINT_PREFIX} prerun screen={screen} items={len(prerun.items)} "
-            f"duration={prerun.final_csv_time_sec:.1f}s",
-            flush=True,
+        result = _process_merged_response(
+            ext,
+            lam_window,
+            screen,
+            body,
+            merged,
+            auto_play=auto_play,
+            speed_scale=speed_scale,
         )
-        if auto_play:
-            registry, scheduler = get_registry_scheduler_for_lam_screen(
-                lam_window, screen, allow_fallback=False
-            )
-            if registry is None or scheduler is None:
-                return ScreenPipelineResult(
-                    screen, False, f"registry/scheduler missing for screen {screen}", meta
-                )
-
-            def _play() -> None:
-                run_simulation_from_csv(
-                    registry,
-                    scheduler,
-                    prepared=cached,
-                    speed_scale=speed_scale,
-                    play_screen=screen,
-                    kit_ext=ext,
-                )
-
-            threading.Thread(
-                target=_play,
-                name=f"lam-federation-play-s{screen}",
-                daemon=True,
-            ).start()
-        return ScreenPipelineResult(
-            screen, True, "ok", meta, prerun=prerun, cached=cached
-        )
+        result.meta["fetch"] = fetch_meta
+        return result
     except Exception as exc:
         return ScreenPipelineResult(screen, False, str(exc), meta)
 
@@ -261,6 +501,66 @@ def run_federation_start_simulation(
     schedule_on_main_thread(_apply_visibility_then_run)
 
 
+def run_federation_response_simulation(
+    ext: Any,
+    merged_response: Dict[str, Any],
+    body: Dict[str, Any],
+    *,
+    screen: int = 1,
+    on_complete: Optional[Callable[[Dict[str, Any]], None]] = None,
+    auto_play: bool = True,
+    speed_scale: float = 1.0,
+    save_response_json: bool = False,
+) -> None:
+    """응답/로그 편집기의 현재 rows만 파싱·시뮬한다(API 재요청·pagination 없음)."""
+    si = max(1, min(2, int(screen)))
+
+    def _apply_visibility_then_run() -> None:
+        try:
+            request_screen_visibility(ext, si == 1, si == 2)
+        except Exception as exc:
+            _finish(on_complete, _err(f"screen visibility failed: {exc}"))
+            return
+
+        def _work() -> None:
+            lam_window = getattr(ext, "_lam_window", None) or getattr(ext, "_window", None)
+            if lam_window is None:
+                _finish(on_complete, _err("LAM window is not ready"))
+                return
+            result = _process_merged_response(
+                ext,
+                lam_window,
+                si,
+                dict(body or {}),
+                dict(merged_response or {}),
+                auto_play=auto_play,
+                speed_scale=speed_scale,
+                save_response_json=save_response_json,
+                export_default_prerun=False,
+            )
+            if result.ok:
+                _finish(
+                    on_complete,
+                    _ok({"screens": [_result_dict(result)], "source": "response_editor"}),
+                )
+            else:
+                _finish(
+                    on_complete,
+                    _err(
+                        f"screen{si}: {result.message}",
+                        data={"screens": [_result_dict(result)]},
+                    ),
+                )
+
+        threading.Thread(
+            target=_work,
+            name=f"lam-federation-response-s{si}",
+            daemon=True,
+        ).start()
+
+    schedule_on_main_thread(_apply_visibility_then_run)
+
+
 def _ok(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {"code": 0, "message": "success", "data": dict(data or {})}
 
@@ -298,5 +598,6 @@ def _finish(cb: Optional[Callable[[Dict[str, Any]], None]], result: Dict[str, An
 
 __all__ = [
     "ScreenPipelineResult",
+    "run_federation_response_simulation",
     "run_federation_start_simulation",
 ]

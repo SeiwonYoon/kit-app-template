@@ -5,6 +5,6 @@
 우선한다 (bridge 가 여기를 먼저 읽음).
 """
 
-FEDERATION_FETCH_LIMIT: int = 1000
+FEDERATION_FETCH_LIMIT: int = 50
 
 __all__ = ["FEDERATION_FETCH_LIMIT"]

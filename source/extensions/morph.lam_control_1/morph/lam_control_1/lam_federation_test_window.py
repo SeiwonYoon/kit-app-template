@@ -37,11 +37,16 @@ class LamFederationTestWindow:
         self._url_field = None
         self._body_field = None
         self._limit_field = None
+        self._offset_field = None
         self._token_field = None
         self._headers_field = None
         self._fixture_field = None
         self._screen_field = None
+        self._save_json_field = None
         self._log_field = None
+        # UI 표시가 길이 제한으로 잘려도 fetch/병합 원본 전체는 여기 유지한다.
+        self._response_data: Optional[Dict[str, Any]] = None
+        self._display_snapshot = ""
         self._busy = False
 
     def show(self) -> None:
@@ -93,12 +98,73 @@ class LamFederationTestWindow:
             try:
                 prev = str(model.get_value_as_string() or "")
                 chunk = text if text.endswith("\n") else text + "\n"
-                model.set_value((prev + chunk)[-120000:])
+                shown = (prev + chunk)[-120000:]
+                model.set_value(shown)
+                self._display_snapshot = shown
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} log UI update failed: {exc}", flush=True)
                 print(f"{_PRINT_PREFIX} {text}", flush=True)
 
         schedule_on_main_thread(_update_ui)
+
+    def _set_response_data(self, data: Dict[str, Any]) -> None:
+        """전체 응답은 메모리에, 편집기에는 표시 가능한 범위만 넣는다."""
+        self._response_data = dict(data or {})
+        full_text = json.dumps(self._response_data, ensure_ascii=False, indent=2)
+        if len(full_text) <= 120000:
+            shown = full_text
+        else:
+            shown = (
+                full_text[:119800]
+                + "\n\n[UI 표시 생략 — 파싱·시뮬은 메모리의 전체 응답을 사용합니다.]"
+            )
+
+        def _update_ui() -> None:
+            model = _widget_model(self._log_field)
+            if model is not None:
+                model.set_value(shown)
+                self._display_snapshot = shown
+
+        schedule_on_main_thread(_update_ui)
+
+    @staticmethod
+    def _parse_response_text(raw: str) -> Dict[str, Any]:
+        """붙여넣은 JSON 또는 로그 안의 마지막 columns/rows JSON 객체를 찾는다."""
+        text = str(raw or "").strip()
+        if not text:
+            raise ValueError("응답/로그에 파싱할 JSON이 없습니다")
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict) and isinstance(data.get("rows"), list):
+                return data
+        except Exception:
+            pass
+        decoder = json.JSONDecoder()
+        found: Optional[Dict[str, Any]] = None
+        for i, ch in enumerate(text):
+            if ch != "{":
+                continue
+            try:
+                candidate, _end = decoder.raw_decode(text[i:])
+            except Exception:
+                continue
+            if (
+                isinstance(candidate, dict)
+                and isinstance(candidate.get("columns"), list)
+                and isinstance(candidate.get("rows"), list)
+            ):
+                found = candidate
+        if found is None:
+            raise ValueError("응답/로그에서 columns/rows JSON 객체를 찾지 못했습니다")
+        return found
+
+    def _read_response_for_parse(self) -> Dict[str, Any]:
+        model = _widget_model(self._log_field)
+        raw = str(model.get_value_as_string() or "") if model is not None else ""
+        # fetch 결과를 사용자가 수정하지 않았다면 UI truncate와 무관하게 전체 메모리 사용.
+        if self._response_data is not None and raw == self._display_snapshot:
+            return dict(self._response_data)
+        return self._parse_response_text(raw)
 
     def _read_body(self) -> Dict[str, Any]:
         model = _widget_model(self._body_field)
@@ -129,21 +195,26 @@ class LamFederationTestWindow:
         d = self._defaults()
         url_m = _widget_model(self._url_field)
         limit_m = _widget_model(self._limit_field)
+        offset_m = _widget_model(self._offset_field)
         token_m = _widget_model(self._token_field)
         fixture_m = _widget_model(self._fixture_field)
         screen_m = _widget_model(self._screen_field)
+        save_m = _widget_model(self._save_json_field)
 
         url = str(url_m.get_value_as_string() or "").strip() if url_m else d["url"]
         limit = int(float(limit_m.get_value_as_float())) if limit_m else d["limit"]
+        offset = int(float(offset_m.get_value_as_float())) if offset_m else 0
         token = str(token_m.get_value_as_string() or "").strip() if token_m else ""
         use_fixture = bool(fixture_m.get_value_as_bool()) if fixture_m else d["use_fixture"]
         screen = int(float(screen_m.get_value_as_float())) if screen_m else 1
         return {
             "url": url,
             "limit": max(1, limit),
+            "offset": max(0, offset),
             "token": token,
             "use_fixture": use_fixture,
             "screen": max(1, min(2, screen)),
+            "save_json": bool(save_m.get_value_as_bool()) if save_m else False,
             "headers": self._read_headers(),
         }
 
@@ -169,15 +240,22 @@ class LamFederationTestWindow:
                 status, data, raw = fetch_single_post(
                     url=vals["url"],
                     body=body,
+                    limit=vals["limit"],
+                    offset=vals["offset"],
                     bearer_token=vals["token"],
                     extra_headers=vals["headers"],
                     use_fixture=vals["use_fixture"],
                 )
-                self._append_log(f"POST once status={status}")
                 if data:
-                    self._append_log(json.dumps(data, ensure_ascii=False, indent=2)[:80000])
+                    self._set_response_data(data)
                 elif raw:
-                    self._append_log(raw[:80000])
+                    self._response_data = None
+                    self._append_log(raw)
+                print(
+                    f"{_PRINT_PREFIX} POST once status={status} "
+                    f"limit={vals['limit']} offset={vals['offset']}",
+                    flush=True,
+                )
             except Exception as exc:
                 self._append_log(f"ERROR: {exc}")
             finally:
@@ -205,16 +283,19 @@ class LamFederationTestWindow:
                     url=vals["url"],
                     body=body,
                     limit=vals["limit"],
+                    initial_offset=vals["offset"],
                     screen=vals["screen"],
                     bearer_token=vals["token"],
                     extra_headers=vals["headers"],
                     use_fixture=vals["use_fixture"],
                 )
-                self._append_log(
-                    f"fetch all pages={meta.get('pages')} rows={meta.get('total_rows')} "
-                    f"elapsed={meta.get('elapsed_sec'):.2f}s"
+                self._set_response_data(merged)
+                print(
+                    f"{_PRINT_PREFIX} fetch all pages={meta.get('pages')} "
+                    f"rows={meta.get('total_rows')} "
+                    f"elapsed={meta.get('elapsed_sec'):.2f}s",
+                    flush=True,
                 )
-                self._append_log(json.dumps(merged, ensure_ascii=False, indent=2)[:80000])
             except Exception as exc:
                 self._append_log(f"ERROR: {exc}")
             finally:
@@ -230,29 +311,34 @@ class LamFederationTestWindow:
         screen = vals["screen"]
         try:
             body = self._read_body()
+            merged = self._read_response_for_parse()
         except Exception as exc:
             self._append_log(f"ERROR: {exc}")
             self._set_busy(False)
             return
-        payload = {"configs": [{}, {}]}
-        payload["configs"][screen - 1] = body
-
         def _done(result: Dict[str, Any]) -> None:
-            self._append_log(json.dumps(result, ensure_ascii=False, indent=2)[:40000])
+            # 응답 원문은 편집기에 유지하고 결과 요약은 콘솔 및 끝부분에 기록.
+            print(
+                f"{_PRINT_PREFIX} parse/sim result: "
+                f"{json.dumps(result, ensure_ascii=False)}",
+                flush=True,
+            )
+            self._append_log(
+                "\n--- 파싱·시뮬 결과 ---\n"
+                + json.dumps(result, ensure_ascii=False, indent=2)
+            )
             self._set_busy(False)
 
-        from .lam_federation_pipeline import run_federation_start_simulation
+        from .lam_federation_pipeline import run_federation_response_simulation
 
-        run_federation_start_simulation(
+        run_federation_response_simulation(
             self._ext,
-            payload,
+            merged,
+            body,
+            screen=screen,
             on_complete=_done,
             auto_play=True,
-            limit_override=vals["limit"],
-            url_override=vals["url"],
-            use_fixture_override=vals["use_fixture"],
-            bearer_token_override=vals["token"],
-            extra_headers_override=vals["headers"],
+            save_response_json=vals["save_json"],
         )
 
     def _build(self) -> None:
@@ -278,8 +364,11 @@ class LamFederationTestWindow:
                     self._url_field.model.set_value(d["url"])
                 with ui.HStack(height=0):
                     ui.Label("limit", width=80)
-                    self._limit_field = ui.FloatField()
+                    self._limit_field = ui.FloatField(width=80)
                     self._limit_field.model.set_value(float(d["limit"]))
+                    ui.Label("offset", width=50)
+                    self._offset_field = ui.FloatField(width=80)
+                    self._offset_field.model.set_value(0.0)
                     ui.Label("screen", width=50)
                     self._screen_field = ui.FloatField(width=60)
                     self._screen_field.model.set_value(1.0)
@@ -308,5 +397,9 @@ class LamFederationTestWindow:
                     ui.Button("POST 1회", clicked_fn=self._on_fetch_once, width=100)
                     ui.Button("전체 fetch", clicked_fn=self._on_fetch_all, width=100)
                     ui.Button("파싱·시뮬", clicked_fn=self._on_parse_sim, width=100)
+                    ui.Spacer(width=12)
+                    ui.Label("JSON 저장", width=70)
+                    self._save_json_field = ui.CheckBox(width=20)
+                    self._save_json_field.model.set_value(False)
                 ui.Label("응답 / 로그")
-                self._log_field = ui.StringField(multiline=True, height=280, read_only=True)
+                self._log_field = ui.StringField(multiline=True, height=280, read_only=False)
