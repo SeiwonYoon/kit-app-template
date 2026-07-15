@@ -6,6 +6,8 @@ import json
 import threading
 from typing import Any, Dict, Optional
 
+from .kit_main_dispatch import schedule_on_main_thread
+
 _PRINT_PREFIX = "[LAM/fed-test]"
 WINDOW_TITLE = "LAM Federation API Test"
 
@@ -19,18 +21,27 @@ _DEFAULT_BODY = {
 }
 
 
+def _widget_model(widget: Any) -> Any:
+    """``ui.StringField`` / ``FloatField`` / ``CheckBox`` → 내부 AbstractValueModel."""
+    if widget is None:
+        return None
+    return getattr(widget, "model", None)
+
+
 class LamFederationTestWindow:
     def __init__(self, kit_ext: Any) -> None:
         self._ext = kit_ext
         self._window = None
-        self._url_model = None
-        self._body_model = None
-        self._limit_model = None
-        self._token_model = None
-        self._headers_model = None
-        self._fixture_model = None
-        self._screen_model = None
-        self._log_model = None
+        # 이름에 model 이 있어도 실제로는 Field/CheckBox 위젯을 저장한다.
+        # 값 접근은 반드시 ``_widget_model(w)`` / ``w.model`` 을 사용한다.
+        self._url_field = None
+        self._body_field = None
+        self._limit_field = None
+        self._token_field = None
+        self._headers_field = None
+        self._fixture_field = None
+        self._screen_field = None
+        self._log_field = None
         self._busy = False
 
     def show(self) -> None:
@@ -72,17 +83,28 @@ class LamFederationTestWindow:
             }
 
     def _append_log(self, text: str) -> None:
-        if self._log_model is None:
-            print(f"{_PRINT_PREFIX} {text}", flush=True)
-            return
-        prev = str(self._log_model.get_value_as_string() or "")
-        chunk = text if text.endswith("\n") else text + "\n"
-        self._log_model.set_value((prev + chunk)[-120000:])
+        """로그 갱신 — 백그라운드에서 호출되어도 메인 스레드로 마샬링."""
+
+        def _update_ui() -> None:
+            model = _widget_model(self._log_field)
+            if model is None:
+                print(f"{_PRINT_PREFIX} {text}", flush=True)
+                return
+            try:
+                prev = str(model.get_value_as_string() or "")
+                chunk = text if text.endswith("\n") else text + "\n"
+                model.set_value((prev + chunk)[-120000:])
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} log UI update failed: {exc}", flush=True)
+                print(f"{_PRINT_PREFIX} {text}", flush=True)
+
+        schedule_on_main_thread(_update_ui)
 
     def _read_body(self) -> Dict[str, Any]:
+        model = _widget_model(self._body_field)
         raw = ""
-        if self._body_model is not None:
-            raw = str(self._body_model.get_value_as_string() or "").strip()
+        if model is not None:
+            raw = str(model.get_value_as_string() or "").strip()
         if not raw:
             return dict(_DEFAULT_BODY)
         data = json.loads(raw)
@@ -91,9 +113,10 @@ class LamFederationTestWindow:
         return data
 
     def _read_headers(self) -> Dict[str, str]:
+        model = _widget_model(self._headers_field)
         raw = ""
-        if self._headers_model is not None:
-            raw = str(self._headers_model.get_value_as_string() or "").strip()
+        if model is not None:
+            raw = str(model.get_value_as_string() or "").strip()
         if not raw:
             return {}
         data = json.loads(raw)
@@ -102,12 +125,19 @@ class LamFederationTestWindow:
         return {str(k): str(v) for k, v in data.items()}
 
     def _ui_values(self) -> Dict[str, Any]:
+        """메인(UI) 스레드에서만 호출 — 위젯 model 값을 스냅샷."""
         d = self._defaults()
-        url = str(self._url_model.get_value_as_string() or "").strip() if self._url_model else d["url"]
-        limit = int(float(self._limit_model.get_value_as_float())) if self._limit_model else d["limit"]
-        token = str(self._token_model.get_value_as_string() or "").strip() if self._token_model else ""
-        use_fixture = bool(self._fixture_model.get_value_as_bool()) if self._fixture_model else d["use_fixture"]
-        screen = int(float(self._screen_model.get_value_as_float())) if self._screen_model else 1
+        url_m = _widget_model(self._url_field)
+        limit_m = _widget_model(self._limit_field)
+        token_m = _widget_model(self._token_field)
+        fixture_m = _widget_model(self._fixture_field)
+        screen_m = _widget_model(self._screen_field)
+
+        url = str(url_m.get_value_as_string() or "").strip() if url_m else d["url"]
+        limit = int(float(limit_m.get_value_as_float())) if limit_m else d["limit"]
+        token = str(token_m.get_value_as_string() or "").strip() if token_m else ""
+        use_fixture = bool(fixture_m.get_value_as_bool()) if fixture_m else d["use_fixture"]
+        screen = int(float(screen_m.get_value_as_float())) if screen_m else 1
         return {
             "url": url,
             "limit": max(1, limit),
@@ -125,12 +155,17 @@ class LamFederationTestWindow:
             return
         self._set_busy(True)
         vals = self._ui_values()
+        try:
+            body = self._read_body()
+        except Exception as exc:
+            self._append_log(f"ERROR: {exc}")
+            self._set_busy(False)
+            return
 
         def _work() -> None:
             try:
                 from .lam_federation_client import fetch_single_post
 
-                body = self._read_body()
                 status, data, raw = fetch_single_post(
                     url=vals["url"],
                     body=body,
@@ -155,12 +190,17 @@ class LamFederationTestWindow:
             return
         self._set_busy(True)
         vals = self._ui_values()
+        try:
+            body = self._read_body()
+        except Exception as exc:
+            self._append_log(f"ERROR: {exc}")
+            self._set_busy(False)
+            return
 
         def _work() -> None:
             try:
                 from .lam_federation_client import fetch_federation_pages
 
-                body = self._read_body()
                 merged, meta = fetch_federation_pages(
                     url=vals["url"],
                     body=body,
@@ -188,7 +228,12 @@ class LamFederationTestWindow:
         self._set_busy(True)
         vals = self._ui_values()
         screen = vals["screen"]
-        body = self._read_body()
+        try:
+            body = self._read_body()
+        except Exception as exc:
+            self._append_log(f"ERROR: {exc}")
+            self._set_busy(False)
+            return
         payload = {"configs": [{}, {}]}
         payload["configs"][screen - 1] = body
 
@@ -229,34 +274,34 @@ class LamFederationTestWindow:
                 )
                 with ui.HStack(height=0):
                     ui.Label("URL", width=80)
-                    self._url_model = ui.StringField()
-                    self._url_model.model.set_value(d["url"])
+                    self._url_field = ui.StringField()
+                    self._url_field.model.set_value(d["url"])
                 with ui.HStack(height=0):
                     ui.Label("limit", width=80)
-                    self._limit_model = ui.FloatField()
-                    self._limit_model.model.set_value(float(d["limit"]))
+                    self._limit_field = ui.FloatField()
+                    self._limit_field.model.set_value(float(d["limit"]))
                     ui.Label("screen", width=50)
-                    self._screen_model = ui.FloatField(width=60)
-                    self._screen_model.model.set_value(1.0)
+                    self._screen_field = ui.FloatField(width=60)
+                    self._screen_field.model.set_value(1.0)
                     ui.Label("fixture", width=50)
-                    self._fixture_model = ui.CheckBox()
-                    self._fixture_model.model.set_value(d["use_fixture"])
+                    self._fixture_field = ui.CheckBox()
+                    self._fixture_field.model.set_value(d["use_fixture"])
                 with ui.HStack(height=0):
                     ui.Label("Bearer", width=80)
-                    self._token_model = ui.StringField(password=True)
-                    self._token_model.model.set_value(d["token"])
+                    self._token_field = ui.StringField(password=True)
+                    self._token_field.model.set_value(d["token"])
                 with ui.HStack(height=0):
                     ui.Label("headers", width=80)
-                    self._headers_model = ui.StringField()
+                    self._headers_field = ui.StringField()
                     try:
-                        self._headers_model.model.set_value(
+                        self._headers_field.model.set_value(
                             json.dumps(d["headers"], ensure_ascii=False)
                         )
                     except Exception:
-                        self._headers_model.model.set_value("{}")
+                        self._headers_field.model.set_value("{}")
                 ui.Label("Request body (JSON)")
-                self._body_model = ui.StringField(multiline=True, height=120)
-                self._body_model.model.set_value(
+                self._body_field = ui.StringField(multiline=True, height=120)
+                self._body_field.model.set_value(
                     json.dumps(_DEFAULT_BODY, ensure_ascii=False, indent=2)
                 )
                 with ui.HStack(height=0):
@@ -264,4 +309,4 @@ class LamFederationTestWindow:
                     ui.Button("전체 fetch", clicked_fn=self._on_fetch_all, width=100)
                     ui.Button("파싱·시뮬", clicked_fn=self._on_parse_sim, width=100)
                 ui.Label("응답 / 로그")
-                self._log_model = ui.StringField(multiline=True, height=280, read_only=True)
+                self._log_field = ui.StringField(multiline=True, height=280, read_only=True)
