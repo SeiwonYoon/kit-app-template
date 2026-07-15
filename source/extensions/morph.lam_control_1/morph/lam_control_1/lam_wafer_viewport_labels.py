@@ -28,17 +28,18 @@ from .lam_wafer_prim_paths import (
 )
 
 
-_runtime_wafer_labels_ui_enabled: bool = True
+_runtime_wafer_labels_ui_enabled: Dict[int, bool] = {1: True}
 
 
-def set_wafer_labels_ui_enabled(enabled: bool) -> None:
-    """공정만보기 HUD 「웨이퍼번호보기」 체크박스 → 런타임 표시 on/off."""
-    global _runtime_wafer_labels_ui_enabled
-    _runtime_wafer_labels_ui_enabled = bool(enabled)
+def set_wafer_labels_ui_enabled(enabled: bool, *, screen: int = 1) -> None:
+    """「웨이퍼번호보기」 체크박스 → 화면별 런타임 표시 on/off."""
+    si = max(1, int(screen or 1))
+    _runtime_wafer_labels_ui_enabled[si] = bool(enabled)
 
 
-def get_wafer_labels_ui_enabled() -> bool:
-    return bool(_runtime_wafer_labels_ui_enabled)
+def get_wafer_labels_ui_enabled(screen: int = 1) -> bool:
+    si = max(1, int(screen or 1))
+    return bool(_runtime_wafer_labels_ui_enabled.get(si, False))
 
 
 def wafer_label_tracking_enabled() -> bool:
@@ -46,9 +47,9 @@ def wafer_label_tracking_enabled() -> bool:
     return bool(IS_LABEL_SHOW)
 
 
-def wafer_viewport_labels_enabled() -> bool:
-    """Viewport 3D 라벨 그리기 — ``IS_LABEL_SHOW`` × UI 체크박스."""
-    return wafer_label_tracking_enabled() and get_wafer_labels_ui_enabled()
+def wafer_viewport_labels_enabled(screen: int = 1) -> bool:
+    """Viewport 3D 라벨 그리기 — ``IS_LABEL_SHOW`` × 해당 화면 UI 체크."""
+    return wafer_label_tracking_enabled() and get_wafer_labels_ui_enabled(screen)
 
 if TYPE_CHECKING:
     from .lam_master_stage import LamMasterStage
@@ -477,7 +478,14 @@ class WaferNumberLabelTracker:
         for key in keys:
             self._prim_to_label[key] = label
 
-    def on_visibility(self, prim_path: str, visible: bool, ctx: Dict[str, str]) -> None:
+    def on_visibility(
+        self,
+        prim_path: str,
+        visible: bool,
+        ctx: Dict[str, str],
+        *,
+        screen: int = 1,
+    ) -> None:
         """``lam_sequence_engine`` PRIM_VISIBILITY 직후 호출.
 
         pick: hide SLOT → 번호 보관, show ARM → 동일 번호 부여.
@@ -489,15 +497,26 @@ class WaferNumberLabelTracker:
         if not p:
             return
 
+        si = max(1, int(screen or 1))
         stage: Optional[Usd.Stage] = None
         try:
-            import omni.usd as ou  # type: ignore
+            from .lam_csv_play_screen import get_stage_for_screen
+            from .lam_extension_singleton import get_lam_extension_instance
 
-            ctx_usd = ou.get_context("")
-            if ctx_usd is not None:
-                stage = ctx_usd.get_stage()
+            ext = get_lam_extension_instance()
+            if ext is not None:
+                stage = get_stage_for_screen(ext, si)
         except Exception:
             stage = None
+        if stage is None:
+            try:
+                import omni.usd as ou  # type: ignore
+
+                ctx_usd = ou.get_context("")
+                if ctx_usd is not None:
+                    stage = ctx_usd.get_stage()
+            except Exception:
+                stage = None
 
         slot_p = (ctx.get("slot_wafer_path") or "").strip()
         arm_p = (ctx.get("arm_wafer_path") or "").strip()
@@ -574,8 +593,8 @@ class WaferNumberLabelTracker:
                         changed = True
             if changed:
                 self._bump_revision()
-        if changed and wafer_viewport_labels_enabled():
-            notify_wafer_label_tracker_changed()
+        if changed and wafer_label_tracking_enabled():
+            notify_wafer_label_tracker_changed(si)
 
     def iter_drawable_labels(self, stage: Usd.Stage) -> List[Tuple[str, str]]:
         """stage 에 존재하는 mapped prim — visibility 는 그리기 단계에서만 참고."""
@@ -637,36 +656,56 @@ class WaferNumberLabelTracker:
             return len(self._prim_to_label)
 
 
-_tracker: Optional[WaferNumberLabelTracker] = None
-_active_label_overlay: Optional["LamWaferFoupViewportLabels"] = None
+_trackers: Dict[int, WaferNumberLabelTracker] = {}
+_trackers_lock = threading.Lock()
+_active_label_overlays: Dict[int, "LamWaferFoupViewportLabels"] = {}
 
 
-def teardown_wafer_viewport_labels() -> None:
-    """체크 해제·확장 종료 시 SceneView·post_update poll 을 완전히 끈다."""
-    global _active_label_overlay
-    inst = _active_label_overlay
-    _active_label_overlay = None
-    if inst is not None:
-        inst.destroy()
+def teardown_wafer_viewport_labels(screen: Optional[int] = None) -> None:
+    """SceneView·post_update poll 해제.
+
+    ``screen`` 지정 시 해당 화면만. ``None`` 이면 전체(확장 unload).
+    """
+    global _active_label_overlays
+    if screen is None:
+        overlays = list(_active_label_overlays.values())
+        _active_label_overlays = {}
+    else:
+        si = max(1, int(screen))
+        inst = _active_label_overlays.pop(si, None)
+        overlays = [inst] if inst is not None else []
+    for inst in overlays:
+        try:
+            # destroy 가 overlay dict 를 다시 pop 해도 안전
+            inst.destroy(permanent=True)
+        except Exception:
+            pass
 
 
-def get_wafer_label_tracker() -> WaferNumberLabelTracker:
-    global _tracker
-    if _tracker is None:
-        _tracker = WaferNumberLabelTracker()
-    return _tracker
+def get_wafer_label_tracker(screen: int = 1) -> WaferNumberLabelTracker:
+    """화면별 웨이퍼 번호 tracker (화면1·2 교차 오염 방지)."""
+    si = max(1, int(screen or 1))
+    with _trackers_lock:
+        t = _trackers.get(si)
+        if t is None:
+            t = WaferNumberLabelTracker()
+            _trackers[si] = t
+        return t
 
 
-def notify_wafer_label_tracker_changed() -> None:
+def notify_wafer_label_tracker_changed(screen: Optional[int] = None) -> None:
     """트래커 갱신 직후 Viewport 3D 라벨 SceneView 를 다음 post_update 에 다시 그린다."""
-    inst = _active_label_overlay
-    if inst is None:
-        return
-    try:
-        inst._last_tracker_revision = -1
-        inst._schedule_rebuild_labels()
-    except Exception:
-        pass
+    if screen is None:
+        overlays = list(_active_label_overlays.values())
+    else:
+        inst = _active_label_overlays.get(max(1, int(screen)))
+        overlays = [inst] if inst is not None else []
+    for inst in overlays:
+        try:
+            inst._last_tracker_revision = -1
+            inst._schedule_rebuild_labels()
+        except Exception:
+            pass
 
 
 class LamWaferFoupViewportLabels:
@@ -707,21 +746,19 @@ class LamWaferFoupViewportLabels:
         return self._ext_id
 
     def _wafer_labels_ui_on(self) -> bool:
-        if self._screen <= 1:
-            return wafer_viewport_labels_enabled()
         if not wafer_label_tracking_enabled():
             return False
+        # 화면1·2 모두 해당 CSV 창 체크박스 / per-screen UI 플래그 사용
         m = getattr(self._csv_window, "_wafer_label_show_model", None)
-        if m is None:
-            return False
-        for attr in ("get_value_as_bool", "as_bool", "get_value"):
-            try:
-                fn = getattr(m, attr, None)
-                if callable(fn):
-                    return bool(fn())
-            except Exception:
-                continue
-        return False
+        if m is not None:
+            for attr in ("get_value_as_bool", "as_bool", "get_value"):
+                try:
+                    fn = getattr(m, attr, None)
+                    if callable(fn):
+                        return bool(fn())
+                except Exception:
+                    continue
+        return get_wafer_labels_ui_enabled(self._screen)
 
     def _resolve_viewport_for_panel(self) -> Optional[Any]:
         if self._screen > 1:
@@ -755,11 +792,11 @@ class LamWaferFoupViewportLabels:
         )
 
     def destroy(self, *, permanent: bool = True) -> None:
-        global _active_label_overlay
+        global _active_label_overlays
         was_built = bool(self._built)
         if permanent:
-            if _active_label_overlay is self:
-                _active_label_overlay = None
+            if _active_label_overlays.get(self._screen) is self:
+                _active_label_overlays.pop(self._screen, None)
             self._teardown = True
         self._sched_token += 1
         self._stop_position_poll()
@@ -829,7 +866,7 @@ class LamWaferFoupViewportLabels:
             def _on_post_update(_event) -> None:
                 if not self._can_operate() or not self._built or not self._labels_root:
                     return
-                tracker = get_wafer_label_tracker()
+                tracker = get_wafer_label_tracker(self._screen)
                 if tracker.revision != self._last_tracker_revision:
                     self._rebuild_labels()
                 self._tick_all_label_positions()
@@ -964,8 +1001,8 @@ class LamWaferFoupViewportLabels:
                 self._labels_root = None
                 return
         self._built = True
-        global _active_label_overlay
-        _active_label_overlay = self
+        global _active_label_overlays
+        _active_label_overlays[self._screen] = self
         self._rebuild_labels()
 
     def _prim_world_pos(
@@ -991,9 +1028,9 @@ class LamWaferFoupViewportLabels:
         stage = self._get_stage()
         if not stage:
             return
-        static_entries, dynamic_entries = get_wafer_label_tracker().iter_visible_labels_split(
-            stage
-        )
+        static_entries, dynamic_entries = get_wafer_label_tracker(
+            self._screen
+        ).iter_visible_labels_split(stage)
         entries = list(static_entries) + list(dynamic_entries)
         if not entries:
             return
@@ -1008,7 +1045,7 @@ class LamWaferFoupViewportLabels:
             self._label_transforms.clear()
             return
 
-        tracker = get_wafer_label_tracker()
+        tracker = get_wafer_label_tracker(self._screen)
         rev = tracker.revision
         if (
             rev == self._last_tracker_revision

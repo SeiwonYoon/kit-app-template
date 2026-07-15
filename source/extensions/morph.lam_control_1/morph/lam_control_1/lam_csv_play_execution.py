@@ -111,6 +111,7 @@ def get_csv_sequence_runner(lam_window: Any, binding: CsvPlayExecutionBinding) -
         id(binding.registry),
         id(binding.scheduler),
         str(binding.usd_context_name or ""),
+        int(binding.screen),
     )
     cached = runners.get(key)
     if (
@@ -122,6 +123,7 @@ def get_csv_sequence_runner(lam_window: Any, binding: CsvPlayExecutionBinding) -
         binding.registry,
         binding.scheduler,
         usd_context_name=binding.usd_context_name,
+        play_screen=binding.screen,
     )
     runner._binding_sig = sig  # type: ignore[attr-defined]
     runners[key] = runner

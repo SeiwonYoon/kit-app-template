@@ -139,40 +139,54 @@ def zero_tbs_offset_rotate_at_path(
         pop_usd_context_name(prev)
 
 
-def read_tbs_offset_rotate_xyz_deg(prim_path: str) -> tuple[float, float, float]:
+def read_tbs_offset_rotate_xyz_deg(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+) -> tuple[float, float, float]:
     """현재 prim 의 `TBS_OFFSET` RotateXYZ 값을 (rx,ry,rz) deg 로 반환 — **read-only**.
 
     `lam_sequence_engine` 의 `rotate_from_initial` 분기가 "현재 각도" 를 읽을 때 사용.
 
+    ``usd_context_name`` 이 있으면 해당 화면 stage 에서 읽는다
+    (화면2 absolute ROTATE 가 화면1 현재각을 읽지 않도록).
+
     **중요**: 본 함수는 `AddRotateXYZOp` 등 어떤 USD write 도 수행하지 않는다.
     op 가 아직 author 되지 않았으면 `(0,0,0)` 을 반환한다 (TBS_OFFSET 가 없으면 회전 0
-    이라는 정의와 일치). main thread 밖에서 호출되어도 안전하도록 read-only.
+    이라는 정의와 일치).
     """
-    stage = _stage()
-    if not stage:
-        return (0.0, 0.0, 0.0)
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return (0.0, 0.0, 0.0)
+    ctx = _resolve_ctx(usd_context_name)
+    from .lam_usd_stage_context import pop_usd_context_name, push_usd_context_name
+
+    prev = push_usd_context_name(ctx)
     try:
-        x = UsdGeom.Xformable(prim)
-        if not x:
+        stage = _stage()
+        if not stage:
             return (0.0, 0.0, 0.0)
-        for op in x.GetOrderedXformOps():
-            try:
-                if (
-                    op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ
-                    and _OFFSET_SUFFIX in op.GetName()
-                ):
-                    v = op.Get()
-                    if v is None:
-                        return (0.0, 0.0, 0.0)
-                    return (float(v[0]), float(v[1]), float(v[2]))
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return (0.0, 0.0, 0.0)
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return (0.0, 0.0, 0.0)
+        try:
+            x = UsdGeom.Xformable(prim)
+            if not x:
+                return (0.0, 0.0, 0.0)
+            for op in x.GetOrderedXformOps():
+                try:
+                    if (
+                        op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ
+                        and _OFFSET_SUFFIX in op.GetName()
+                    ):
+                        v = op.Get()
+                        if v is None:
+                            return (0.0, 0.0, 0.0)
+                        return (float(v[0]), float(v[1]), float(v[2]))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return (0.0, 0.0, 0.0)
+    finally:
+        pop_usd_context_name(prev)
 
 
 # ----------------------------------------------------------------- public (run)

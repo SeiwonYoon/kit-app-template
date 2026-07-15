@@ -110,16 +110,31 @@ def _set_prim_translate(prim, position) -> None:
         pass
 
 
-def read_tbs_offset_translate_xyz(prim_path: str) -> tuple[float, float, float]:
-    """prim 의 ``TBS_OFFSET`` TranslateOp 현재값 (x, y, z). 없으면 (0,0,0)."""
-    stage = _stage()
-    if not stage:
-        return (0.0, 0.0, 0.0)
-    prim = stage.GetPrimAtPath(prim_path)
-    if not prim or not prim.IsValid():
-        return (0.0, 0.0, 0.0)
-    v = _get_prim_local_translate(prim)
-    return (float(v[0]), float(v[1]), float(v[2]))
+def read_tbs_offset_translate_xyz(
+    prim_path: str,
+    *,
+    usd_context_name: Optional[str] = None,
+) -> tuple[float, float, float]:
+    """prim 의 ``TBS_OFFSET`` TranslateOp 현재값 (x, y, z). 없으면 (0,0,0).
+
+    ``usd_context_name`` 이 있으면 해당 화면 stage 에서 읽는다
+    (화면2 absolute MOVE 가 화면1 현재값을 읽지 않도록).
+    """
+    ctx = _resolve_ctx(usd_context_name)
+    from .lam_usd_stage_context import pop_usd_context_name, push_usd_context_name
+
+    prev = push_usd_context_name(ctx)
+    try:
+        stage = _stage()
+        if not stage:
+            return (0.0, 0.0, 0.0)
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return (0.0, 0.0, 0.0)
+        v = _get_prim_local_translate(prim)
+        return (float(v[0]), float(v[1]), float(v[2]))
+    finally:
+        pop_usd_context_name(prev)
 
 
 def zero_tbs_offset_translate_at_path(

@@ -112,7 +112,7 @@ TOP_VIEW_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(
 # FOUP1~3 × 25슬롯(총 75) prim 위 번호 라벨 표시 여부.
 # False(기본): FOUP 슬롯 번호는 숨기고, 팔·aligner·chamber 등 나머지 슬롯만 표시.
 # True: FOUP 75슬롯에도 카세트 번호(01~25) 표시.
-WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS: bool = False
+WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS: bool = True
 
 
 # ---------------------------------------------------------------------------

@@ -476,6 +476,7 @@ class LamSequenceRunner:
         on_step_resolved: Optional[Callable[[int, dict, ResolveResult], None]] = None,
         *,
         usd_context_name: Optional[str] = None,
+        play_screen: Optional[int] = None,
     ) -> None:
         self._registry = registry
         self._scheduler = scheduler
@@ -483,8 +484,12 @@ class LamSequenceRunner:
         self._usd_context_name: Optional[str] = (
             str(usd_context_name).strip() if usd_context_name else None
         ) or None
+        try:
+            self._play_screen: int = max(1, int(play_screen or 1))
+        except Exception:
+            self._play_screen = 1
         self._stop_flag = threading.Event()
-        self._hide = LamHideController()
+        self._hide = LamHideController(usd_context_name=self._usd_context_name)
         # 첫 step 메타 (TBS 와 동일 schema 호환)
         self._start_from_current: bool = False
         self._start_from_current_paths: List[str] = []
@@ -1237,44 +1242,50 @@ class LamSequenceRunner:
         # USD write 는 반드시 main thread 에서 (lam_sequence_engine 상단 _dispatch_main 주석 참조).
         def _do_in_main() -> None:
             ctx_nm = self._usd_context_name
-            for p in paths:
-                try:
-                    _ltx.stop_prim_translate_animation(p, ctx_nm)
-                    if from_initial:
-                        cur = _ltx.read_tbs_offset_translate_xyz(p)
-                        ddx = float(dx) - float(cur[0])
-                        ddy = float(dy) - float(cur[1])
-                        ddz = float(dz) - float(cur[2])
-                        if abs(ddx) < 1e-9 and abs(ddy) < 1e-9 and abs(ddz) < 1e-9:
+            prev = _push_lam_stage_context(ctx_nm)
+            try:
+                for p in paths:
+                    try:
+                        _ltx.stop_prim_translate_animation(p, ctx_nm)
+                        if from_initial:
+                            cur = _ltx.read_tbs_offset_translate_xyz(
+                                p, usd_context_name=ctx_nm
+                            )
+                            ddx = float(dx) - float(cur[0])
+                            ddy = float(dy) - float(cur[1])
+                            ddz = float(dz) - float(cur[2])
+                            if abs(ddx) < 1e-9 and abs(ddy) < 1e-9 and abs(ddz) < 1e-9:
+                                _seq_log(
+                                    f"{_PRINT_PREFIX} (main) step[{idx}] MOVE(initial) skip path={p!r} "
+                                    f"already at target ({dx},{dy},{dz})",
+                                    flush=True,
+                                )
+                                continue
+                            seg_delta = (ddx, ddy, ddz)
+                        else:
+                            seg_delta = (dx, dy, dz)
+                        _ltx.run_prim_translate_animation(
+                            p,
+                            [{"duration": duration, "delta": seg_delta}],
+                            loop=False,
+                            speed_ref=sp,
+                            usd_context_name=ctx_nm,
+                        )
+                        if from_initial:
                             _seq_log(
-                                f"{_PRINT_PREFIX} (main) step[{idx}] MOVE(initial) skip path={p!r} "
-                                f"already at target ({dx},{dy},{dz})",
+                                f"{_PRINT_PREFIX} (main) MOVE(initial) prim={p} "
+                                f"target=({dx},{dy},{dz}) delta={seg_delta} dur={duration}",
                                 flush=True,
                             )
-                            continue
-                        seg_delta = (ddx, ddy, ddz)
-                    else:
-                        seg_delta = (dx, dy, dz)
-                    _ltx.run_prim_translate_animation(
-                        p,
-                        [{"duration": duration, "delta": seg_delta}],
-                        loop=False,
-                        speed_ref=sp,
-                        usd_context_name=ctx_nm,
-                    )
-                    if from_initial:
-                        _seq_log(
-                            f"{_PRINT_PREFIX} (main) MOVE(initial) prim={p} "
-                            f"target=({dx},{dy},{dz}) delta={seg_delta} dur={duration}",
-                            flush=True,
-                        )
-                    else:
-                        _seq_log(
-                            f"{_PRINT_PREFIX} (main) MOVE prim={p} d={seg_delta} dur={duration}",
-                            flush=True,
-                        )
-                except Exception as exc:
-                    _seq_log(f"{_PRINT_PREFIX} (main) MOVE failed prim={p}: {exc}", flush=True)
+                        else:
+                            _seq_log(
+                                f"{_PRINT_PREFIX} (main) MOVE prim={p} d={seg_delta} dur={duration}",
+                                flush=True,
+                            )
+                    except Exception as exc:
+                        _seq_log(f"{_PRINT_PREFIX} (main) MOVE failed prim={p}: {exc}", flush=True)
+            finally:
+                _pop_lam_stage_context(prev)
 
         _seq_log(f"{_PRINT_PREFIX} _start_move idx={idx} dispatching to main thread", flush=True)
         _dispatch_main(_do_in_main)
@@ -1319,6 +1330,7 @@ class LamSequenceRunner:
 
         def _do_in_main() -> None:
             ctx_nm = self._usd_context_name
+            prev = _push_lam_stage_context(ctx_nm)
             try:
                 # 1) 충돌 방지: 진행 중인 translate / rotate 모두 stop.
                 for p in paths:
@@ -1342,7 +1354,9 @@ class LamSequenceRunner:
                 per_prim_payload: Dict[str, tuple[float, float, float]] = {}
                 if from_initial:
                     for p in paths:
-                        cur = _lrx.read_tbs_offset_rotate_xyz_deg(p)
+                        cur = _lrx.read_tbs_offset_rotate_xyz_deg(
+                            p, usd_context_name=ctx_nm
+                        )
                         drx = _wrap_to_180(float(rx) - float(cur[0]))
                         dry = _wrap_to_180(float(ry) - float(cur[1]))
                         drz = _wrap_to_180(float(rz) - float(cur[2]))
@@ -1386,6 +1400,8 @@ class LamSequenceRunner:
                     )
             except Exception as exc:
                 _seq_log(f"{_PRINT_PREFIX} (main) ROTATE failed: {exc}", flush=True)
+            finally:
+                _pop_lam_stage_context(prev)
 
         _seq_log(
             f"{_PRINT_PREFIX} _start_rotate idx={idx} dispatching to main thread "
@@ -1415,26 +1431,37 @@ class LamSequenceRunner:
             return max(0.0, tail)
 
         def _do_in_main() -> None:
-            st = _stage()
-            if st is None:
-                return
-            for p in paths:
-                try:
-                    prim = st.GetPrimAtPath(p)
-                    if not prim or not prim.IsValid():
-                        continue
-                    img = UsdGeom.Imageable(prim)
-                    if not img:
-                        continue
-                    if visible:
-                        img.MakeVisible()
-                    else:
-                        img.MakeInvisible()
-                except Exception as exc:
-                    _seq_log(
-                        f"{_PRINT_PREFIX} (main) SET_PRIM_VISIBILITY failed path={p}: {exc}",
-                        flush=True,
-                    )
+            ctx_nm = self._usd_context_name
+            prev = _push_lam_stage_context(ctx_nm)
+            try:
+                from .lam_usd_stage_context import get_stage_for_context_name
+
+                st = (
+                    get_stage_for_context_name(ctx_nm)
+                    if ctx_nm
+                    else _stage()
+                )
+                if st is None:
+                    return
+                for p in paths:
+                    try:
+                        prim = st.GetPrimAtPath(p)
+                        if not prim or not prim.IsValid():
+                            continue
+                        img = UsdGeom.Imageable(prim)
+                        if not img:
+                            continue
+                        if visible:
+                            img.MakeVisible()
+                        else:
+                            img.MakeInvisible()
+                    except Exception as exc:
+                        _seq_log(
+                            f"{_PRINT_PREFIX} (main) SET_PRIM_VISIBILITY failed path={p}: {exc}",
+                            flush=True,
+                        )
+            finally:
+                _pop_lam_stage_context(prev)
 
         _dispatch_main_wait(_do_in_main, timeout=5.0)
         label_ctx = step.get("_lam_wafer_label_ctx")
@@ -1446,9 +1473,10 @@ class LamSequenceRunner:
                 )
 
                 if wafer_label_tracking_enabled():
-                    tracker = get_wafer_label_tracker()
+                    si = int(getattr(self, "_play_screen", 1) or 1)
+                    tracker = get_wafer_label_tracker(si)
                     for p in paths:
-                        tracker.on_visibility(p, visible, label_ctx)
+                        tracker.on_visibility(p, visible, label_ctx, screen=si)
             except Exception:
                 pass
         _seq_log(

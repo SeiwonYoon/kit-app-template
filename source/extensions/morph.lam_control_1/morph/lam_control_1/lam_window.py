@@ -50,7 +50,6 @@ from .lam_viewport_overlay_state import (
 from .lam_viewport_startup_focus import schedule_startup_viewport_focus_after_stage_ready
 from .lam_wafer_viewport_labels import (
     LamWaferFoupViewportLabels,
-    wafer_viewport_labels_enabled,
 )
 
 
@@ -525,27 +524,52 @@ class LamWindow:
             pass
 
     def _sync_wafer_foup_viewport_labels_only(self, *, delay_frames: int = 12) -> None:
-        """Viewport 3D 라벨 SceneView 마운트/해제 (체크 상태는 ``apply_wafer_label_visibility_from_ui``)."""
-        if not wafer_viewport_labels_enabled():
-            try:
-                from .lam_wafer_viewport_labels import teardown_wafer_viewport_labels
+        """화면1 Viewport 3D 라벨 SceneView 마운트/해제 (화면2 는 건드리지 않음).
 
-                teardown_wafer_viewport_labels()
+        HUD sync 는 foup/device 만 다루므로 웨이퍼 번호는 여기서 직접 mount 한다.
+        ``sync_csv_viewport_overlays_for_screen(1)`` 재호출 금지(순환·조기 return).
+        """
+        try:
+            from .lam_wafer_viewport_labels import (
+                teardown_wafer_viewport_labels,
+                wafer_viewport_labels_enabled,
+            )
+        except Exception:
+            return
+
+        if not wafer_viewport_labels_enabled(1):
+            try:
+                teardown_wafer_viewport_labels(screen=1)
             except Exception:
-                if self._wafer_foup_labels is not None:
-                    try:
-                        self._wafer_foup_labels.destroy()
-                    except Exception:
-                        pass
+                pass
+            by = getattr(self, "_wafer_foup_labels_by_screen", None)
+            if isinstance(by, dict):
+                by.pop(1, None)
             self._wafer_foup_labels = None
             return
-        if self._wafer_foup_labels is None:
-            self._wafer_foup_labels = LamWaferFoupViewportLabels(
+
+        csv_win = self._primary_csv_sim_window()
+        by = getattr(self, "_wafer_foup_labels_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            self._wafer_foup_labels_by_screen = by
+        wafer = by.get(1)
+        if wafer is None:
+            wafer = LamWaferFoupViewportLabels(
                 viewport=self._viewport,
                 master=self._master,
                 ext_id=self._ext_id,
+                screen=1,
+                csv_window=csv_win,
+                kit_ext=self._kit_ext,
             )
-        self._wafer_foup_labels.sync_layers(delay_frames=delay_frames)
+            by[1] = wafer
+        else:
+            wafer._csv_window = csv_win
+            if self._master is not None:
+                wafer._master = self._master
+        self._wafer_foup_labels = wafer
+        wafer.sync_layers(delay_frames=delay_frames)
 
     def _sync_csv_viewport_hud(self) -> None:
         """defaults에서 허용할 때만 Viewport 우상단 CSV 미니 패널을 표시."""
@@ -867,22 +891,20 @@ class LamWindow:
 
     def _refresh_wafer_labels_after_master_open(self, *, delay_frames: int = 24) -> None:
         """Open Master 후 체크 ON 이면 트래커·SceneView 를 stage 경로에 맞게 다시 맞춘다."""
-        try:
-            from .lam_wafer_viewport_labels import wafer_viewport_labels_enabled
-        except Exception:
-            wafer_viewport_labels_enabled = lambda: False  # type: ignore
-
-        if not wafer_viewport_labels_enabled():
-            self._sync_wafer_foup_viewport_labels_only(delay_frames=delay_frames)
-            return
-        csv_win = self._primary_csv_sim_window()
-        if csv_win is not None:
+        # 화면별로 독립 적용 — 전역 게이트로 전부 끄지 않음
+        for si, csv_win in list(getattr(self, "_csv_sim_windows", {}).items()):
+            if csv_win is None:
+                continue
             try:
                 csv_win.apply_wafer_label_visibility_from_ui(lam_window=self)
-                return
-            except Exception:
-                pass
-        self._sync_wafer_foup_viewport_labels_only(delay_frames=delay_frames)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} wafer label refresh screen{si} failed: {exc}",
+                    flush=True,
+                )
+        # CSV 창이 아직 없으면 화면1만 기존 경로
+        if not getattr(self, "_csv_sim_windows", None):
+            self._sync_wafer_foup_viewport_labels_only(delay_frames=delay_frames)
 
     def _schedule_autoload_master_on_startup(self) -> None:
         """`load_automatically` 시 합성 로드를 몇 프레임 뒤에 실행.

@@ -38,6 +38,11 @@ _OFFSET_SUFFIX = "TBS_OFFSET"
 
 def _stage():
     try:
+        from .lam_usd_stage_context import get_stage_for_thread_context
+
+        st = get_stage_for_thread_context()
+        if st is not None:
+            return st
         import omni.usd as ou  # type: ignore
 
         ctx = ou.get_context()

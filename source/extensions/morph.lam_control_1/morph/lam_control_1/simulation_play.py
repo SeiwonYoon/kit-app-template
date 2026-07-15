@@ -3299,7 +3299,9 @@ def _run_lam_sim_steps_cancellable(
             runner = get_csv_sequence_runner(lam_window, binding)
             ctx_run = binding.usd_context_name
         else:
-            runner = LamSequenceRunner(registry, scheduler, usd_context_name=ctx)
+            runner = LamSequenceRunner(
+                registry, scheduler, usd_context_name=ctx, play_screen=si
+            )
             ctx_run = ctx
         _csv_play_register_runner(runner, screen=si)
         try:
@@ -3821,7 +3823,11 @@ def _set_wafer_prim_visible(stage: Any, path: str, visible: bool) -> bool:
         return False
 
 
-def apply_csv_play_initial_wafer_visibility_on_stage(stage: Any) -> Tuple[int, int]:
+def apply_csv_play_initial_wafer_visibility_on_stage(
+    stage: Any,
+    *,
+    screen: int = 1,
+) -> Tuple[int, int]:
     """FOUP1~3×25 show, 그 외 슬롯·팔 wafer hide (stage 에 존재하는 경로만).
 
     Returns:
@@ -3829,6 +3835,7 @@ def apply_csv_play_initial_wafer_visibility_on_stage(stage: Any) -> Tuple[int, i
     """
     from .lam_wafer_prim_paths import resolve_wafer_prim_path_on_stage
 
+    si = max(1, int(screen))
     wafer_map = load_wafer_prim_by_slot_key()
     if not stage or not wafer_map:
         return (0, 0)
@@ -3857,27 +3864,20 @@ def apply_csv_play_initial_wafer_visibility_on_stage(stage: Any) -> Tuple[int, i
 
     print(
         f"{_PRINT_PREFIX} CSV Play 웨이퍼 visibility: "
-        f"FOUP show {show_ok} · 기타 hide {hide_ok}",
+        f"화면{si} FOUP show {show_ok} · 기타 hide {hide_ok}",
         flush=True,
     )
     try:
         from .lam_wafer_viewport_labels import (
             get_wafer_label_tracker,
-            wafer_viewport_labels_enabled,
+            notify_wafer_label_tracker_changed,
         )
 
-        if wafer_viewport_labels_enabled():
-            get_wafer_label_tracker().reset_foup_baseline(wafer_map, stage=stage)
-            try:
-                from .lam_wafer_viewport_labels import _active_label_overlay
-
-                overlay = _active_label_overlay
-                if overlay is not None:
-                    overlay._schedule_rebuild_labels()
-            except Exception:
-                pass
-        else:
-            get_wafer_label_tracker().clear()
+        tracker = get_wafer_label_tracker(si)
+        # UI 체크와 무관하게 tracking baseline 유지 (표시만 화면별 on/off).
+        # 예전: UI OFF 이면 clear → 화면1 재체크 시 번호가 안 나오는 원인.
+        tracker.reset_foup_baseline(wafer_map, stage=stage)
+        notify_wafer_label_tracker_changed(si)
     except Exception:
         pass
     return (show_ok, hide_ok)
@@ -4070,7 +4070,7 @@ def apply_csv_play_initial_wafer_visibility_for_screen(
                 flush=True,
             )
             return
-        apply_csv_play_initial_wafer_visibility_on_stage(st)
+        apply_csv_play_initial_wafer_visibility_on_stage(st, screen=si)
 
     if wait:
         if _dispatch_main_wait(_do_in_main, timeout=15.0):
@@ -4159,7 +4159,7 @@ def reset_csv_play_stop_initial_state(
                 )
             _snap_csv_play_robot_z_home(st)
             _snap_csv_play_scaffold_motion_prims_home(st)
-            apply_csv_play_initial_wafer_visibility_on_stage(st)
+            apply_csv_play_initial_wafer_visibility_on_stage(st, screen=si)
         finally:
             pop_usd_context_name(prev)
 
@@ -5044,18 +5044,18 @@ class LamSimulationCsvPlayWindow:
             self._process_only_model = SimpleBoolModel(bool(STARTUP_CHECK_PROCESS_ONLY))
         if self._wafer_label_show_model is None:
             self._wafer_label_show_model = SimpleBoolModel(bool(STARTUP_CHECK_WAFER_LABELS))
-            if self._uses_global_overlay_models():
-                try:
-                    from .lam_wafer_prim_paths import IS_LABEL_SHOW  # type: ignore
-                    from .lam_wafer_viewport_labels import (  # type: ignore
-                        set_wafer_labels_ui_enabled,
-                    )
+            try:
+                from .lam_wafer_prim_paths import IS_LABEL_SHOW  # type: ignore
+                from .lam_wafer_viewport_labels import (  # type: ignore
+                    set_wafer_labels_ui_enabled,
+                )
 
-                    set_wafer_labels_ui_enabled(
-                        bool(IS_LABEL_SHOW) and bool(STARTUP_CHECK_WAFER_LABELS)
-                    )
-                except Exception:
-                    pass
+                set_wafer_labels_ui_enabled(
+                    bool(IS_LABEL_SHOW) and bool(STARTUP_CHECK_WAFER_LABELS),
+                    screen=max(1, int(self._screen)),
+                )
+            except Exception:
+                pass
         # 화면1·HUD 는 전역 모델 공유. 화면2+ 는 창별 로컬 모델(화면1에 반영되지 않음).
         use_global = self._uses_global_overlay_models()
         if self._foup_status_show_model is None:
@@ -5453,18 +5453,13 @@ class LamSimulationCsvPlayWindow:
             return False
 
     def apply_wafer_label_visibility_from_ui(self, lam_window: Any = None) -> None:
-        """HUD/본창 「웨이퍼번호보기」 — 3D 라벨 표시만 on/off (웨이퍼 visibility·트래커 맵 유지)."""
+        """HUD/본창 「웨이퍼번호보기」 — 해당 화면 3D 라벨만 on/off (다른 화면 유지)."""
+        si = max(1, int(self._screen))
         lam = self._resolve_lam_window(lam_window)
-        if self._screen > 1:
-            if lam is not None:
-                try:
-                    lam.sync_csv_viewport_overlays_for_screen(self._screen)
-                except Exception as exc:
-                    self._log(f"wafer label viewport sync failed (화면{self._screen}): {exc}")
-            return
         try:
             from .lam_wafer_prim_paths import IS_LABEL_SHOW
             from .lam_wafer_viewport_labels import (
+                get_wafer_label_tracker,
                 notify_wafer_label_tracker_changed,
                 set_wafer_labels_ui_enabled,
                 teardown_wafer_viewport_labels,
@@ -5472,27 +5467,67 @@ class LamSimulationCsvPlayWindow:
             )
 
             ui_on = self.read_wafer_label_show_enabled()
-            set_wafer_labels_ui_enabled(bool(IS_LABEL_SHOW) and ui_on)
-            if not wafer_viewport_labels_enabled():
+            set_wafer_labels_ui_enabled(bool(IS_LABEL_SHOW) and ui_on, screen=si)
+
+            if not wafer_viewport_labels_enabled(si):
                 try:
-                    teardown_wafer_viewport_labels()
+                    teardown_wafer_viewport_labels(screen=si)
                 except Exception:
                     pass
-        except Exception as exc:
-            self._log(f"wafer label UI sync failed: {exc}")
-            return
-        lam = self._resolve_lam_window(lam_window)
-        if lam is not None:
-            try:
-                lam._sync_wafer_foup_viewport_labels_only()
-            except Exception as exc:
-                self._log(f"wafer label viewport sync failed: {exc}")
+                if lam is not None:
+                    by = getattr(lam, "_wafer_foup_labels_by_screen", None)
+                    if isinstance(by, dict):
+                        by.pop(si, None)
+                    if si <= 1:
+                        try:
+                            lam._wafer_foup_labels = None
+                        except Exception:
+                            pass
                 return
-        if wafer_viewport_labels_enabled():
+
+            # ON: tracker 가 비어 있으면 FOUP baseline 복구 (Play 중 UI OFF 로 clear 된 경우)
             try:
-                notify_wafer_label_tracker_changed()
+                tracker = get_wafer_label_tracker(si)
+                if tracker.mapped_prim_count() <= 0:
+                    stage = None
+                    if lam is not None:
+                        try:
+                            from .lam_csv_play_screen import get_stage_for_screen
+
+                            ext = getattr(lam, "_kit_ext", None)
+                            stage = get_stage_for_screen(ext, si) if ext is not None else None
+                        except Exception:
+                            stage = None
+                    if stage is None and si <= 1:
+                        try:
+                            from .lam_prim_utils import get_stage
+
+                            stage = get_stage()
+                        except Exception:
+                            stage = None
+                    if stage is not None:
+                        wm = load_wafer_prim_by_slot_key()
+                        if wm:
+                            tracker.reset_foup_baseline(wm, stage=stage)
+            except Exception as exc:
+                self._log(f"wafer label baseline restore failed (화면{si}): {exc}")
+
+            if lam is not None:
+                try:
+                    if hasattr(lam, "sync_csv_viewport_overlays_for_screen"):
+                        lam.sync_csv_viewport_overlays_for_screen(si)
+                    elif si <= 1 and hasattr(lam, "_sync_wafer_foup_viewport_labels_only"):
+                        lam._sync_wafer_foup_viewport_labels_only()
+                except Exception as exc:
+                    self._log(f"wafer label viewport sync failed (화면{si}): {exc}")
+                    return
+            try:
+                notify_wafer_label_tracker_changed(si)
             except Exception:
                 pass
+        except Exception as exc:
+            self._log(f"wafer label UI sync failed (화면{si}): {exc}")
+            return
 
     def register_hud_timeline_ui(
         self,

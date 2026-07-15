@@ -26,7 +26,10 @@ _PRINT_PREFIX = "[LAM/HIDE]"
 class LamHideController:
     """1 시퀀스 동안의 hide 상태를 refcount 로 관리."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, usd_context_name: Optional[str] = None) -> None:
+        self._usd_context_name: Optional[str] = (
+            str(usd_context_name).strip() if usd_context_name else None
+        ) or None
         self._refcount: Dict[str, int] = {}
         self._lock = threading.Lock()
         self._unhide_thread: Optional[threading.Thread] = None
@@ -130,11 +133,21 @@ class LamHideController:
 
     def _set_visible(self, path: str, visible: bool) -> None:
         try:
-            import omni.usd as ou  # type: ignore
             from pxr import UsdGeom  # type: ignore
 
-            ctx = ou.get_context()
-            stage = ctx.get_stage() if ctx else None
+            from .lam_usd_stage_context import (
+                get_stage_for_context_name,
+                get_stage_for_thread_context,
+            )
+
+            stage = None
+            if self._usd_context_name:
+                stage = get_stage_for_context_name(self._usd_context_name)
+            if stage is None:
+                stage = get_stage_for_thread_context()
+            if stage is None:
+                ctx = ou.get_context()
+                stage = ctx.get_stage() if ctx else None
             if stage is None:
                 return
             prim = stage.GetPrimAtPath(path)

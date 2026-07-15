@@ -603,8 +603,18 @@ def sync_csv_screen_overlays(lam_window: Any, screen: int) -> None:
     """화면별 CSV 창 설정 → 해당 화면 viewport/USD 만 동기화 (진입점)."""
     si = max(1, int(screen))
     if si <= 1:
+        # 화면1: HUD(foup/device/status) + 웨이퍼 번호(별도 SceneView).
+        # 예전엔 HUD 만 하고 return → 화면1 「웨이퍼번호보기」 체크해도 안 나옴.
         if hasattr(lam_window, "_sync_csv_viewport_hud"):
             lam_window._sync_csv_viewport_hud()
+        if hasattr(lam_window, "_sync_wafer_foup_viewport_labels_only"):
+            try:
+                lam_window._sync_wafer_foup_viewport_labels_only(delay_frames=0)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} screen1 wafer label sync: {exc}",
+                    flush=True,
+                )
         return
     csv_win = getattr(lam_window, "_csv_sim_windows", {}).get(si)
     if csv_win is None and hasattr(lam_window, "_ensure_csv_sim_play_window"):
