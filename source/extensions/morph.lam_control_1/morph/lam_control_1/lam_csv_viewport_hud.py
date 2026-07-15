@@ -347,7 +347,7 @@ class LamCsvViewportControlsHud:
                                                         width=20,
                                                         height=_CHECKBOX_ROW_HEIGHT,
                                                         tooltip=(
-                                                            "체크 후 Play: CSV 시각 유지, "
+                                                            "재생 중에도 즉시 전환: CSV 시각 유지, "
                                                             "JSON 없는 빈 대기만 생략(배속 1x). "
                                                             "체크 해제 시 기존 시간 재생."
                                                         ),

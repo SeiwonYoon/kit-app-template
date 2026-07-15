@@ -167,9 +167,19 @@ def request_screen_visibility(
     show_2: bool,
     *,
     startup: bool = False,
+    on_complete: Optional[Callable[[], None]] = None,
 ) -> None:
-    """표시 전환 요청. 새로 보일 화면을 정지·초기화한 뒤 레이아웃을 바꾼다."""
+    """표시 전환 요청. 새로 보일 화면을 정지·초기화한 뒤 레이아웃을 바꾼다.
+
+    ``on_complete`` — 레이아웃·wake 적용이 끝난 뒤(메인/async 컨텍스트) 1회 호출.
+    이미 동일 표시 상태면 레이아웃을 다시 돌리지 않고 즉시 호출한다.
+    """
     if ext is None:
+        if callable(on_complete):
+            try:
+                on_complete()
+            except Exception:
+                pass
         return
     init_screen_visibility_models(ext)
     show_1, show_2 = bool(show_1), bool(show_2)
@@ -178,10 +188,24 @@ def request_screen_visibility(
         show_1, show_2 = current if any(current) else (True, False)
     _set_models(ext, show_1, show_2)
 
-    gen = int(getattr(ext, "_lam_screen_visibility_generation", 0) or 0) + 1
-    ext._lam_screen_visibility_generation = gen
     desired = (show_1, show_2)
     previous = getattr(ext, "_lam_screen_visibility_applied", None)
+
+    def _notify_done() -> None:
+        if not callable(on_complete):
+            return
+        try:
+            on_complete()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} on_complete 실패: {exc}", flush=True)
+
+    # 이미 적용된 표시면 초기화/레이아웃 경합 없이 바로 진행 (파싱·시뮬 camera fly 보호)
+    if (not startup) and previous == desired:
+        _notify_done()
+        return
+
+    gen = int(getattr(ext, "_lam_screen_visibility_generation", 0) or 0) + 1
+    ext._lam_screen_visibility_generation = gen
     if startup or previous is None:
         reset_screens = [si for si, shown in enumerate(desired, start=1) if shown]
     else:
@@ -194,10 +218,19 @@ def request_screen_visibility(
     def _apply_if_current() -> None:
         if int(getattr(ext, "_lam_screen_visibility_generation", 0) or 0) != gen:
             return
+
+        async def _run_layout_then_notify() -> None:
+            try:
+                await _apply_layout_async(ext, desired, gen)
+            finally:
+                if int(getattr(ext, "_lam_screen_visibility_generation", 0) or 0) == gen:
+                    _notify_done()
+
         try:
-            asyncio.ensure_future(_apply_layout_async(ext, desired, gen))
+            asyncio.ensure_future(_run_layout_then_notify())
         except Exception as exc:
             print(f"{_PRINT_PREFIX} layout schedule 실패: {exc}", flush=True)
+            _notify_done()
 
     if not reset_screens:
         _apply_if_current()

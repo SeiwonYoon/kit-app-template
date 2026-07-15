@@ -146,6 +146,8 @@ def _start_federation_playback(
     from .simulation_play import (
         clear_csv_play_timeline_highlight,
         clear_csv_playback_stop,
+        get_csv_play_live_speed_scale,
+        set_csv_play_live_speed_ui_reader,
         set_csv_play_progress_ui_callback,
         set_csv_play_timeline_highlight_callback,
     )
@@ -163,8 +165,36 @@ def _start_federation_playback(
             registry = csv_win._registry
         if getattr(csv_win, "_scheduler", None) is not None:
             scheduler = csv_win._scheduler
+        # 공정만보기 실시간 전환·일시정지 이어서 재생이 같은 캐시를 쓰도록 고정
+        try:
+            csv_win._prepared_playback = cached
+        except Exception:
+            pass
     if registry is None or scheduler is None:
         return f"registry/scheduler missing for screen {si}"
+    process_only = False
+    if csv_win is not None:
+        try:
+            csv_win.ensure_playback_models()
+        except Exception:
+            pass
+        try:
+            process_only = bool(csv_win._read_process_only())
+        except Exception:
+            process_only = False
+        try:
+            wire = getattr(csv_win, "_wire_process_only_model_live_update", None)
+            if callable(wire):
+                wire()
+        except Exception:
+            pass
+        try:
+            wire_sp = getattr(csv_win, "_wire_speed_model_live_update", None)
+            if callable(wire_sp):
+                wire_sp()
+        except Exception:
+            pass
+    play_speed = 1.0 if process_only else float(speed_scale)
 
     def _on_play_ui(csv_t: float, csv_total: float, wall_el: float, wall_tot: float) -> None:
         if csv_win is None:
@@ -180,13 +210,20 @@ def _start_federation_playback(
         if csv_win is None:
             return
         hl = getattr(csv_win, "_apply_schedule_row_highlight", None)
-        if callable(hl):
-            hl(active_keys)
+        if not callable(hl):
+            return
+        keys = frozenset(active_keys)
+        schedule_on_main_thread(lambda k=keys: hl(k))
 
     def _play() -> None:
         with csv_play_screen_binding(si):
             try:
                 clear_csv_playback_stop(screen=si)
+                if csv_win is not None:
+                    set_csv_play_live_speed_ui_reader(
+                        lambda: get_csv_play_live_speed_scale(screen=si),
+                        screen=si,
+                    )
                 set_csv_play_progress_ui_callback(_on_play_ui, screen=si)
                 set_csv_play_timeline_highlight_callback(
                     _on_timeline_highlight, screen=si
@@ -207,7 +244,8 @@ def _start_federation_playback(
                     registry,
                     scheduler,
                     prepared=cached,
-                    speed_scale=speed_scale,
+                    speed_scale=play_speed,
+                    process_only=process_only,
                     play_screen=si,
                     kit_ext=ext,
                     skip_play_prim_hide=True,
@@ -223,15 +261,28 @@ def _start_federation_playback(
                     on_csv_playback_paused_or_stopped()
                 except Exception:
                     pass
+                set_csv_play_live_speed_ui_reader(None, screen=si)
                 set_csv_play_progress_ui_callback(None, screen=si)
                 set_csv_play_timeline_highlight_callback(None, screen=si)
                 clear_csv_play_timeline_highlight(screen=si)
+                if csv_win is not None and getattr(
+                    csv_win, "_csv_play_thread", None
+                ) is threading.current_thread():
+                    csv_win._csv_play_thread = None
 
-    threading.Thread(
+    play_thread = threading.Thread(
         target=_play,
         name=f"lam-federation-play-s{si}",
         daemon=True,
-    ).start()
+    )
+    if csv_win is not None:
+        # CSV 창의 일시정지 및 공정만보기 실시간 전환이 API 재생도 추적하도록 연결.
+        csv_win._csv_play_thread = play_thread
+        try:
+            csv_win._prepared_playback = cached
+        except Exception:
+            pass
+    play_thread.start()
     return None
 
 
@@ -484,19 +535,23 @@ def run_federation_start_simulation(
         )
 
     def _apply_visibility_then_run() -> None:
-        try:
-            request_screen_visibility(ext, show_1, show_2)
-        except Exception as exc:
-            _finish(on_complete, _err(f"screen visibility failed: {exc}"))
-            return
-
         def _run_fetch() -> None:
             t0 = time.perf_counter()
             result = _work_after_visibility()
             result.setdefault("data", {})["elapsed_sec"] = time.perf_counter() - t0
             _finish(on_complete, result)
 
-        threading.Thread(target=_run_fetch, name="lam-federation-start", daemon=True).start()
+        def _after_visibility() -> None:
+            threading.Thread(
+                target=_run_fetch, name="lam-federation-start", daemon=True
+            ).start()
+
+        try:
+            request_screen_visibility(
+                ext, show_1, show_2, on_complete=_after_visibility
+            )
+        except Exception as exc:
+            _finish(on_complete, _err(f"screen visibility failed: {exc}"))
 
     schedule_on_main_thread(_apply_visibility_then_run)
 
@@ -516,12 +571,6 @@ def run_federation_response_simulation(
     si = max(1, min(2, int(screen)))
 
     def _apply_visibility_then_run() -> None:
-        try:
-            request_screen_visibility(ext, si == 1, si == 2)
-        except Exception as exc:
-            _finish(on_complete, _err(f"screen visibility failed: {exc}"))
-            return
-
         def _work() -> None:
             lam_window = getattr(ext, "_lam_window", None) or getattr(ext, "_window", None)
             if lam_window is None:
@@ -552,11 +601,19 @@ def run_federation_response_simulation(
                     ),
                 )
 
-        threading.Thread(
-            target=_work,
-            name=f"lam-federation-response-s{si}",
-            daemon=True,
-        ).start()
+        def _after_visibility() -> None:
+            threading.Thread(
+                target=_work,
+                name=f"lam-federation-response-s{si}",
+                daemon=True,
+            ).start()
+
+        try:
+            request_screen_visibility(
+                ext, si == 1, si == 2, on_complete=_after_visibility
+            )
+        except Exception as exc:
+            _finish(on_complete, _err(f"screen visibility failed: {exc}"))
 
     schedule_on_main_thread(_apply_visibility_then_run)
 

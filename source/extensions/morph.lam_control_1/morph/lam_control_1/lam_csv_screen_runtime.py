@@ -593,10 +593,24 @@ def sync_csv_screen_3d_overlays(runtime: CsvScreenRuntime) -> None:
 
 
 def apply_csv_screen_viewport_effects(runtime: CsvScreenRuntime) -> None:
-    """체크박스 스냅샷 → 해당 화면 prim 숨김·탑뷰만 적용 (3D 라벨은 별도 sync)."""
+    """체크박스 스냅샷 → 해당 화면 prim 숨김·탑뷰만 적용 (3D 라벨은 별도 sync).
+
+    play camera fly 가 켜져 있으면 탑뷰 즉시 bind 를 하지 않는다.
+    (표시 전환 overlay sync 가 fly 직전에 시점을 낚아채는 현상 방지 —
+    Play preflight 가 fly 를 담당한다.)
+    """
     settings = capture_csv_overlay_settings(runtime.csv_window)
     apply_prim_hide_for_screen(runtime, enabled=bool(settings.get("play_prim_hide")))
-    apply_top_view_for_screen(runtime, enabled=bool(settings.get("top_view")))
+    want_top = bool(settings.get("top_view"))
+    want_fly = bool(settings.get("play_camera_fly"))
+    if want_top and want_fly:
+        print(
+            f"{_PRINT_PREFIX} screen{runtime.screen} top view overlay skip — "
+            "play camera fly 우선 (preflight 에서 처리)",
+            flush=True,
+        )
+        return
+    apply_top_view_for_screen(runtime, enabled=want_top)
 
 
 def sync_csv_screen_overlays(lam_window: Any, screen: int) -> None:

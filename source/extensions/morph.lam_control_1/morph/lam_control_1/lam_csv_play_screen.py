@@ -63,6 +63,8 @@ class CsvPlayScreenSession:
     global_end_lock: threading.Lock = field(default_factory=threading.Lock)
     global_wall_end: float = 0.0
     global_csv_end: float = 0.0
+    # Play 진행률 ticker 중지 — 화면별로 분리 (전역이면 화면1 stop 이 화면2 ticker 도 끊음)
+    progress_stop: threading.Event = field(default_factory=threading.Event)
 
 
 def csv_play_screen_session(screen: Optional[int] = None) -> CsvPlayScreenSession:
