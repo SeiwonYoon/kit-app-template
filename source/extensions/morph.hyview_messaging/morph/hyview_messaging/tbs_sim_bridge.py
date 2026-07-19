@@ -620,5 +620,42 @@ def handle_seek_simulation(
     )
 
 
+def handle_time_sync(
+    payload: Any,
+    *,
+    dispatch: Callable[[Dict[str, Any]], None],
+) -> None:
+    """웹 진행시간 드리프트 보정 — Kit 현재 sim 진행 시각(초) 반환.
+
+    요청: ``{}`` (필드 없음)
+    성공 data: ``{"time": <sim_seconds>}`` — 화면1(case0) 시계 기준.
+    """
+    from .hyview_event_contract import DATA_TIME
+
+    def _work() -> Dict[str, Any]:
+        from morph.tbs_control_2.control_sim_multi_playback import get_sim_playback_player
+        from morph.tbs_control_2.control_window import _resolve_ep_timeline_sim_time
+
+        ext = require_tbs_extension_instance()
+        t_now = 0.0
+        # 화면1 플레이어가 있으면 sim_now 우선, 없으면 EP 타임라인 공용 resolve.
+        player = get_sim_playback_player(ext, 1)
+        if player is not None:
+            try:
+                t_now = float(player.sim_now(1))
+            except Exception:
+                t_now = 0.0
+        if t_now <= 1e-9:
+            try:
+                t_now = float(_resolve_ep_timeline_sim_time(ext, 1, ""))
+            except Exception:
+                t_now = 0.0
+        t_out = round(max(0.0, float(t_now)), 2)
+        print(f"[HyView/bridge] time_sync → time={t_out}", flush=True)
+        return _ok({DATA_TIME: t_out})
+
+    _schedule_hyview_main_work("time_sync", _work, dispatch)
+
+
 def payload_from_event(event: Any) -> Dict[str, Any]:
     return _event_payload_to_dict(getattr(event, "payload", None))

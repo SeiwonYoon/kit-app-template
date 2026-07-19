@@ -1157,6 +1157,60 @@ def _timetable_meta_to_dict(m: TimetableRowMeta) -> Dict[str, Any]:
     }
 
 
+def _empty_pct_key(row_name: str) -> str:
+    """막대 행 이름 → empty 비율 키. 예: ``ALL_EP`` → ``all_ep_empty_pct``."""
+    return f"{str(row_name or '').strip().lower()}_empty_pct"
+
+
+def compute_bar_graph_empty_pct(bar: EpBarPrecomputed, row_order: List[str]) -> Dict[str, float]:
+    """막대별 empty 상태 비율(%) — 행 총 시간 대비 empty 누적 초.
+
+    ``bar_graph.empty_pct`` 로 export 된다. 예:
+    ``{"all_ep_empty_pct": 32.5, "ep1_empty_pct": 40.0, ...}``
+    """
+    out: Dict[str, float] = {}
+    durs_by_row = bar.duration_sec_by_row or {}
+    for row_name in row_order or []:
+        durs = durs_by_row.get(row_name)
+        if not isinstance(durs, dict):
+            out[_empty_pct_key(row_name)] = 0.0
+            continue
+        row_total = sum(float(v or 0.0) for v in durs.values())
+        empty_sec = float(durs.get(BAR_STATE_EMPTY, 0.0) or 0.0)
+        pct = (empty_sec / row_total * 100.0) if row_total > 1e-9 else 0.0
+        out[_empty_pct_key(row_name)] = round(pct, 2)
+    return out
+
+
+def compute_cumulative_empty_pct(segs: List[Dict[str, Any]], t: float) -> float:
+    """막대 세그먼트를 ``t`` 초까지 잘라, 진행 시간 대비 empty 누적 비율(%).
+
+    timetable 행별 ``all_ep_empty_pct`` 계산에 사용한다 (t<=0 이면 0.0).
+    """
+    t_end = float(t or 0.0)
+    if t_end <= 1e-9:
+        return 0.0
+    cursor = 0.0
+    empty_acc = 0.0
+    for seg in segs or []:
+        if not isinstance(seg, dict):
+            continue
+        dur = max(0.0, float(seg.get("dur", 0.0) or 0.0))
+        if dur <= 0.0:
+            continue
+        seg_start = cursor
+        seg_end = cursor + dur
+        cursor = seg_end
+        overlap = min(seg_end, t_end) - seg_start
+        if overlap <= 0.0:
+            break
+        if bar_state_from_seg(seg) == BAR_STATE_EMPTY:
+            empty_acc += overlap
+        if seg_end >= t_end:
+            break
+    return round(min(100.0, empty_acc / t_end * 100.0), 2)
+
+
 def build_prerun_export_document(
     *,
     screen: int,
@@ -1196,10 +1250,18 @@ def build_prerun_export_document(
             if isinstance(s, dict) and float(s.get("dur", 0.0)) > 1e-9
         ]
 
+    # timetable 각 행 — 해당 행 t 시점까지 ALL_EP 진행 시간 대비 empty 누적 % 를 동봉.
+    all_ep_segs = bar.rows.get("ALL_EP", []) if isinstance(bar.rows, dict) else []
     tt_rows = []
     for m in timetable_metas or []:
         if isinstance(m, TimetableRowMeta):
-            tt_rows.append(_timetable_meta_to_dict(m))
+            row = _timetable_meta_to_dict(m)
+            jo = row.get("json_obj")
+            if isinstance(jo, dict):
+                jo["all_ep_empty_pct"] = compute_cumulative_empty_pct(
+                    all_ep_segs, float(m.t)
+                )
+            tt_rows.append(row)
 
     timeline_summary = {
         "item_count": len(result.items or ()),
@@ -1245,6 +1307,7 @@ def build_prerun_export_document(
             "segments": segments_out,
             "duration_sec_by_row": dict(bar.duration_sec_by_row or {}),
             "duration_sec_totals": duration_sec_totals,
+            "empty_pct": compute_bar_graph_empty_pct(bar, row_order),
         },
     }
 
@@ -1279,9 +1342,11 @@ def build_prerun_export_document_web_slim(doc: Dict[str, Any]) -> Dict[str, Any]
         for k in ("item_count", "final_sim_time_sec", "total_est_sec", "seek_snapshots_count"):
             tl2.pop(k, None)
 
-        # timetable_rows: meta row list -> filtered json_obj -> drop fields -> stringify
+        # timetable_rows: meta row list -> filtered json_obj -> drop fields
+        # (string 화하지 않고 object 그대로 둔다 — 웹은 t 배열만 받고,
+        #  개별 행은 T2V_request_time_table 로 이 object 를 그대로 조회한다.)
         rows_in = tl2.get("timetable_rows")
-        rows_out: List[str] = []
+        rows_out: List[Dict[str, Any]] = []
         if isinstance(rows_in, list):
             for row in rows_in:
                 if not isinstance(row, dict):
@@ -1302,11 +1367,7 @@ def build_prerun_export_document_web_slim(doc: Dict[str, Any]) -> Dict[str, Any]
                 # 필드 삭제: screen/kind/process_time_priority
                 for k in ("screen", "kind", "process_time_priority"):
                     jo2.pop(k, None)
-                try:
-                    rows_out.append(json.dumps(jo2, ensure_ascii=False, separators=(",", ":")))
-                except Exception:
-                    # stringify 실패 시 행을 버린다(웹 payload 안정성 우선)
-                    continue
+                rows_out.append(jo2)
         tl2["timetable_rows"] = rows_out
         out["timeline"] = tl2
 
@@ -1356,6 +1417,8 @@ __all__ = [
     "build_bar_graph_copy_document",
     "build_prerun_export_document",
     "build_prerun_export_document_web_slim",
+    "compute_bar_graph_empty_pct",
+    "compute_cumulative_empty_pct",
     "compute_duration_sec_by_row",
     "format_row_state_duration_summary",
     "merge_bar_row_segments",

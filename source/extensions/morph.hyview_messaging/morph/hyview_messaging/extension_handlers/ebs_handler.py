@@ -104,13 +104,20 @@ from ..tbs_sim_bridge import (
 
     handle_start_simulation,
 
+    handle_time_sync,
+
 )
 
 from ..hyview_event_contract import (
     PAYLOAD_CASE,
     PAYLOAD_T,
+    PAYLOAD_TIME,
     T2V_REQUEST_SEEK_SIMULATION,
+    T2V_REQUEST_TIME_SYNC,
+    T2V_REQUEST_TIME_TABLE,
     V2T_RESPONSE_SEEK_SIMULATION,
+    V2T_RESPONSE_TIME_SYNC,
+    V2T_RESPONSE_TIME_TABLE,
 )
 from .base_handler import BaseHandler
 
@@ -118,8 +125,11 @@ from .base_handler import BaseHandler
 # T2V_request_start_simulation configs[n] → V2T slim 응답 sim echo (Kit 시뮬 미사용)
 _START_SIM_IDENTITY_KEYS: tuple = ("fab_id", "model_id", "eqp_id")
 
-# V2T_response_simulation_timeline — 화면당 timetable_rows chunk 행 수 (slim string[] 기준)
-_TIMELINE_CHUNK_ROWS: int = 20
+# T2V_request_time_table — 요청 time ↔ 행 t 매칭 허용 오차 (t 는 소수 2자리 기준)
+_TIME_TABLE_MATCH_TOL: float = 0.005
+
+# 같은 t 에 행이 여러 개면 이 이벤트가 아닌 행을 우선 응답한다
+_TIME_TABLE_DEPRIORITIZED_EVENTS: tuple = ("FOUP_PROCESS_START", "FOUP_PROCESS_END")
 
 
 def _merge_start_identity_into_slim(result_slim: Dict[str, Any], conf: Any) -> None:
@@ -132,54 +142,61 @@ def _merge_start_identity_into_slim(result_slim: Dict[str, Any], conf: Any) -> N
     sim.update({k: conf.get(k) for k in _START_SIM_IDENTITY_KEYS})
 
 
-def _slim_timetable_rows(result_slim: Dict[str, Any]) -> List[str]:
-    """slim 결과에서 ``timeline.timetable_rows`` (string[]) 추출."""
+def _slim_timetable_row_objects(result_slim: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """slim 결과에서 ``timeline.timetable_rows`` (object[]) 추출."""
     tl = result_slim.get("timeline") if isinstance(result_slim, dict) else None
     if not isinstance(tl, dict):
         return []
     rows = tl.get("timetable_rows")
     if not isinstance(rows, list):
         return []
-    return [str(r) for r in rows if r is not None and str(r).strip()]
+    return [dict(r) for r in rows if isinstance(r, dict)]
 
 
-def _clear_slim_timetable_rows(result_slim: Dict[str, Any]) -> None:
-    """start_simulation 응답용 — timeline.timetable_rows 를 빈 배열로."""
+def _replace_timetable_rows_with_times(
+    result_slim: Dict[str, Any],
+    rows: List[Dict[str, Any]],
+) -> None:
+    """start_simulation 응답용 — timetable_rows 를 t 숫자 배열로 치환.
+
+    개별 행 object 는 웹이 ``T2V_request_time_table`` 로 시간별 조회한다.
+    """
+    times: List[float] = []
+    for r in rows:
+        try:
+            times.append(float(r.get("t", 0.0) or 0.0))
+        except Exception:
+            continue
     if not isinstance(result_slim, dict):
         return
     tl = result_slim.get("timeline")
     if isinstance(tl, dict):
-        tl["timetable_rows"] = []
+        tl["timetable_rows"] = times
     else:
-        result_slim["timeline"] = {"timetable_rows": []}
+        result_slim["timeline"] = {"timetable_rows": times}
 
 
-def _timeline_chunk_count(rows: List[Any], chunk_size: int) -> int:
-    if chunk_size <= 0 or not rows:
-        return 0
-    return (len(rows) + chunk_size - 1) // chunk_size
-
-
-def _slice_timetable_chunk(rows: List[str], chunk_size: int, offset: int) -> List[str]:
-    start = int(offset) * int(chunk_size)
-    if start >= len(rows):
-        return []
-    return list(rows[start : start + int(chunk_size)])
-
-
-def _build_timeline_chunk_payload(
-    rows_by_case: List[List[str]],
-    *,
-    offset: int,
-    end: bool,
-    chunk_size: int,
+def _find_timetable_row_at_time(
+    rows: List[Dict[str, Any]],
+    time_req: float,
 ) -> Dict[str, Any]:
-    timelines: List[Dict[str, Any]] = []
-    for rows in rows_by_case[:2]:
-        timelines.append({"timetable_rows": _slice_timetable_chunk(rows, chunk_size, offset)})
-    while len(timelines) < 2:
-        timelines.append({"timetable_rows": []})
-    return {"offset": int(offset), "end": bool(end), "timelines": timelines}
+    """요청 time 과 t 가 일치하는 행 1개 선택.
+
+    같은 t 행이 여러 개면 FOUP_PROCESS_START/END 가 아닌 행 우선.
+    못 찾으면 빈 dict.
+    """
+    matched = [
+        r
+        for r in rows
+        if abs(float(r.get("t", 0.0) or 0.0) - float(time_req)) <= _TIME_TABLE_MATCH_TOL
+    ]
+    if not matched:
+        return {}
+    for r in matched:
+        ev = str(r.get("event", "") or "").strip()
+        if ev not in _TIME_TABLE_DEPRIORITIZED_EVENTS:
+            return dict(r)
+    return dict(matched[0])
 
 
 
@@ -187,6 +204,10 @@ def _build_timeline_chunk_payload(
 class EBSHandler(BaseHandler):
 
     """EBS·시뮬 T2V / V2T 핸들러 (livestream messaging)."""
+
+    # start_simulation 성공 시 case 별 slim timetable 행(object) 보관 —
+    # 웹 T2V_request_time_table 시간별 조회용. [case0 rows, case1 rows]
+    _timetable_rows_by_case: List[List[Dict[str, Any]]] = [[], []]
 
 
 
@@ -202,11 +223,13 @@ class EBSHandler(BaseHandler):
 
             "V2T_response_start_simulation",
 
-            "V2T_response_simulation_timeline",
-
             "V2T_response_control_simulation",
 
             V2T_RESPONSE_SEEK_SIMULATION,
+
+            V2T_RESPONSE_TIME_TABLE,
+
+            V2T_RESPONSE_TIME_SYNC,
 
         ]
 
@@ -227,6 +250,10 @@ class EBSHandler(BaseHandler):
             "T2V_request_control_simulation": self._on_req_control_simulation,
 
             T2V_REQUEST_SEEK_SIMULATION: self._on_req_seek_simulation,
+
+            T2V_REQUEST_TIME_TABLE: self._on_req_time_table,
+
+            T2V_REQUEST_TIME_SYNC: self._on_req_time_sync,
 
         }
 
@@ -311,50 +338,6 @@ class EBSHandler(BaseHandler):
             return
 
         self._dispatch_v2t_ok(event_name, ok_data)
-
-
-
-    def _dispatch_simulation_timeline_chunks(self, rows_by_case: List[List[str]]) -> None:
-        """slim timetable_rows 를 chunk 단위로 ``V2T_response_simulation_timeline`` 전송."""
-        chunk_size = max(1, int(_TIMELINE_CHUNK_ROWS))
-        cases = [
-            list(rows_by_case[0]) if len(rows_by_case) > 0 else [],
-            list(rows_by_case[1]) if len(rows_by_case) > 1 else [],
-        ]
-        num_chunks = max(
-            _timeline_chunk_count(cases[0], chunk_size),
-            _timeline_chunk_count(cases[1], chunk_size),
-        )
-        if num_chunks <= 0:
-            num_chunks = 1
-
-        for offset in range(num_chunks):
-            end = offset >= num_chunks - 1
-            try:
-                data = _build_timeline_chunk_payload(
-                    cases,
-                    offset=offset,
-                    end=end,
-                    chunk_size=chunk_size,
-                )
-                self.dispatch_event(
-                    "V2T_response_simulation_timeline",
-                    {"code": 0, "message": "success", "data": data},
-                )
-            except Exception as exc:
-                self.dispatch_event(
-                    "V2T_response_simulation_timeline",
-                    {
-                        "code": 1,
-                        "message": str(exc),
-                        "data": {
-                            "offset": int(offset),
-                            "end": True,
-                            "timelines": [{"timetable_rows": []}, {"timetable_rows": []}],
-                        },
-                    },
-                )
-                return
 
 
 
@@ -626,11 +609,13 @@ class EBSHandler(BaseHandler):
         if len(start_configs) > 1:
             _merge_start_identity_into_slim(result1_slim, start_configs[1])
 
-        # timetable_rows 는 start 응답에서 비우고, chunk 이벤트로 분할 전송
-        rows0 = _slim_timetable_rows(result0_slim)
-        rows1 = _slim_timetable_rows(result1_slim)
-        _clear_slim_timetable_rows(result0_slim)
-        _clear_slim_timetable_rows(result1_slim)
+        # timetable_rows: start 응답에는 t 숫자 배열만 싣는다.
+        # 행 object 는 case 별로 보관 — 웹이 T2V_request_time_table 로 시간별 조회.
+        rows0 = _slim_timetable_row_objects(result0_slim)
+        rows1 = _slim_timetable_row_objects(result1_slim)
+        self._timetable_rows_by_case = [rows0, rows1]
+        _replace_timetable_rows_with_times(result0_slim, rows0)
+        _replace_timetable_rows_with_times(result1_slim, rows1)
 
         self.dispatch_event(
 
@@ -647,8 +632,6 @@ class EBSHandler(BaseHandler):
             },
 
         )
-
-        self._dispatch_simulation_timeline_chunks([rows0, rows1])
 
 
 
@@ -777,5 +760,104 @@ class EBSHandler(BaseHandler):
             self._dispatch_v2t_ok(V2T_RESPONSE_SEEK_SIMULATION, res_data)
 
         handle_seek_simulation(event.payload, dispatch=_on_bridge_done)
+
+
+    # ------------------------------------------------------------------
+
+    # T2V — 시간별 timetable 행 조회
+
+    # ------------------------------------------------------------------
+
+
+    def _on_req_time_table(self, event: carb.events.IEvent) -> None:
+
+        """
+        T2V_request_time_table — start 응답 t 배열의 특정 시간 행 조회.
+
+        요청: ``{"case": 0|1, "time": 6.09}``
+        응답 data: ``{"time": 6.09, "case": 0, "time_table": {행 object}}``
+        (같은 t 에 행이 여러 개면 FOUP_PROCESS_START/END 아닌 행 우선)
+        """
+
+        print(f"[EBSHandler] _on_req_time_table - {event.payload}")
+
+        pl = event.payload if isinstance(event.payload, dict) else {}
+        try:
+            case_index = int(pl.get(PAYLOAD_CASE, 0) or 0)
+        except Exception:
+            case_index = 0
+        try:
+            time_req = float(pl.get(PAYLOAD_TIME, 0.0) or 0.0)
+        except Exception:
+            time_req = 0.0
+
+        data: Dict[str, Any] = {
+            PAYLOAD_TIME: time_req,
+            PAYLOAD_CASE: case_index,
+            "time_table": {},
+        }
+
+        if case_index not in (0, 1):
+            self._dispatch_v2t_err(
+                V2T_RESPONSE_TIME_TABLE, f"invalid case: {case_index}", data
+            )
+            return
+
+        rows = []
+        try:
+            rows = self._timetable_rows_by_case[case_index]
+        except Exception:
+            rows = []
+        if not rows:
+            self._dispatch_v2t_err(
+                V2T_RESPONSE_TIME_TABLE,
+                "no timetable rows (start_simulation not completed?)",
+                data,
+            )
+            return
+
+        row = _find_timetable_row_at_time(rows, time_req)
+        if not row:
+            self._dispatch_v2t_err(
+                V2T_RESPONSE_TIME_TABLE, f"no row at time {time_req}", data
+            )
+            return
+
+        data["time_table"] = row
+        self._dispatch_v2t_ok(V2T_RESPONSE_TIME_TABLE, data)
+
+
+    # ------------------------------------------------------------------
+
+    # T2V — 웹·Kit 시뮬레이션 진행시간 동기화
+
+    # ------------------------------------------------------------------
+
+
+    def _on_req_time_sync(self, event: carb.events.IEvent) -> None:
+
+        """
+        T2V_request_time_sync — 웹 진행시간이 틀어졌을 때 Kit 시각으로 동기화.
+
+        요청: ``{}``
+        응답 data: ``{"time": 6.09}`` (Kit 현재 시뮬레이션 진행 초, 화면1 기준)
+        """
+
+        print(f"[EBSHandler] _on_req_time_sync - {event.payload}")
+
+        def _on_bridge_done(bridge_res: Dict[str, Any]) -> None:
+            if int(bridge_res.get("code", 0)) != 0:
+                self._dispatch_v2t_err(
+                    V2T_RESPONSE_TIME_SYNC,
+                    str(bridge_res.get("message", "failed")),
+                    {"time": 0.0},
+                )
+                return
+            res_data = bridge_res.get("data")
+            if not isinstance(res_data, dict):
+                res_data = {"time": 0.0}
+            self._dispatch_v2t_ok(V2T_RESPONSE_TIME_SYNC, res_data)
+
+        handle_time_sync(event.payload if isinstance(event.payload, dict) else {}, dispatch=_on_bridge_done)
 
 
