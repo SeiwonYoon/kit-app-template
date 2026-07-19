@@ -11,7 +11,7 @@ from typing import Any
 import omni.ext
 
 from .lam_extension_singleton import clear_lam_extension_instance, set_lam_extension_instance
-from .kit_main_dispatch import ensure_kit_main_dispatch
+from .kit_main_dispatch import ensure_kit_main_dispatch, shutdown_kit_main_dispatch
 from .lam_instance_registry import AnimationInstanceRegistry
 from .lam_multi_viewport import detach_stage_visibility_subscription, teardown_lam_multi_viewports
 from .lam_playback_scheduler import PlaybackScheduler
@@ -257,6 +257,10 @@ class LamControlExtension(omni.ext.IExt):
         self._lam_scheduler = None
         try:
             self._lam_auto_dual_layout_done = False
+        except Exception:
+            pass
+        try:
+            shutdown_kit_main_dispatch()
         except Exception:
             pass
         clear_lam_extension_instance()
