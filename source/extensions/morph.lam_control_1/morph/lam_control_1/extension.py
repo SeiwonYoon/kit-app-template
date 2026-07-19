@@ -190,14 +190,8 @@ class LamControlExtension(omni.ext.IExt):
         self._lam_window = self._window
         self._window.set_master_open_listener(_on_master_opened_for_split)
         self._window.show()
-        try:
-            from .lam_sim_control_defaults import FEDERATION_TEST_WINDOW_AUTO_SHOW
-
-            if bool(FEDERATION_TEST_WINDOW_AUTO_SHOW):
-                self._window._open_federation_test()
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} federation test window auto-show failed: {exc}", flush=True)
-
+        # federation auto_show / ui_show 창 표시는 USD 로드 직전(_try_autoload_master_on_startup)
+        # 에서 설정 기준으로 한 번에 반영한다. 여기서 미리 열지 않는다(True → USD 직전 표시).
         try:
             from .lam_aux_kit_window_ui import sync_aux_kit_window_visibility
 

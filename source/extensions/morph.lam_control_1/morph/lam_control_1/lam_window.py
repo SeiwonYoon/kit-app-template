@@ -251,6 +251,32 @@ class LamWindow:
         except Exception as exc:
             print(f"{_PRINT_PREFIX} aux window visibility sync: {exc}", flush=True)
 
+    def _apply_startup_aux_window_visibility(self) -> None:
+        """USD 로드 직전 — ui_show 설정·federation auto_show 를 창 visible 에 반영.
+
+        설정 True 인 창만 표시하고 False 는 감춘다. 이 지점을 표시의 단일
+        소스로 삼아, 콜드 스타트·리로드·Kit 크롬 숨김 여부와 무관하게 동일하게
+        동작한다(True → USD 로드 직전 표시 / False → 계속 숨김).
+        """
+        self._sync_aux_kit_window_visibility()
+        try:
+            from .lam_sim_control_defaults import FEDERATION_TEST_WINDOW_AUTO_SHOW
+
+            if bool(FEDERATION_TEST_WINDOW_AUTO_SHOW):
+                self._open_federation_test()
+            elif self._federation_test_window is not None:
+                win = getattr(self._federation_test_window, "_window", None)
+                if win is not None:
+                    try:
+                        win.visible = False
+                    except Exception:
+                        pass
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} federation auto-show (startup, USD 직전): {exc}",
+                flush=True,
+            )
+
     def _show_all_csv_sim_play_windows(self) -> None:
         """앱 기동 시 화면별 CSV 재생창 생성·표시 (visible 은 HUD 체크박스가 결정)."""
         ext = self._kit_ext
@@ -972,6 +998,8 @@ class LamWindow:
             except Exception:
                 pass
         self._log(f"자동 로드 시작: {resolved}")
+        # USD 로드 직전 — 설정(ui_show/federation auto_show) 을 창 표시에 반영.
+        self._apply_startup_aux_window_visibility()
         self._open_master_at_path(resolved, log_prefix="자동 로드")
 
     def run_master_autoload_now(self) -> None:

@@ -43,9 +43,14 @@ _PROTECTED_TITLES = frozenset(
         "LAM Multi-USD Load",
         "LAM Sequence Editor",
         "LAM CSV 시뮬 재생",
+        "LAM Federation API Test",
         "Viewport",
     }
 )
+
+# 화면2+ CSV 재생창은 제목에 ``— 화면N`` 이 붙어 정확 일치가 안 되므로 접두로 보호.
+# LAM 자체 창의 표시 여부는 ui_show 설정/체크박스가 단독 관리한다(크롬 숨김 무관).
+_PROTECTED_TITLE_PREFIXES = ("LAM CSV 시뮬 재생",)
 
 # lam_multi_viewport._split_window_name → Workspace 창 이름 ``LAM_SimSplit_1`` …
 _PROTECTED_NAME_PREFIXES = ("LAM_SimSplit", "lam_simsplit")
@@ -87,6 +92,9 @@ def _should_protect_window(label: str) -> bool:
     if label in _PROTECTED_TITLES:
         return True
     stripped = label.strip()
+    for pref in _PROTECTED_TITLE_PREFIXES:
+        if stripped.startswith(pref):
+            return True
     for pref in _PROTECTED_NAME_PREFIXES:
         if stripped.startswith(pref):
             return True
