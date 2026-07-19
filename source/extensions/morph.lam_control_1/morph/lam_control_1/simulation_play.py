@@ -7094,18 +7094,10 @@ class LamSimulationCsvPlayWindow:
                         usd_context_name=cn,
                         screen=self._screen,
                     )
-                    try:
-                        if self._screen <= 1:
-                            from .lam_viewport_overlay_state import set_toggle_play_prim_hide
-
-                            set_toggle_play_prim_hide(True)
-                        elif self._read_bool_model(self._play_prim_hide_model):
-                            pass
-                    except Exception as exc:
-                        print(
-                            f"{_PRINT_PREFIX} play prim hide checkbox (stop_reset): {exc}",
-                            flush=True,
-                        )
+                    # 정지(초기화)는 「prim숨김」 체크 상태를 강제로 바꾸지 않는다.
+                    # (STARTUP_CHECK_PLAY_PRIM_HIDE=False 인데 기동 초기화가
+                    # 체크를 ON 으로 뒤집던 문제 — play_stop_reset phase 가
+                    # 현재 체크 상태를 읽어 숨김 유지/복원을 알아서 분기한다.)
                     try:
                         if cn:
                             from .lam_play_prim_hide import (

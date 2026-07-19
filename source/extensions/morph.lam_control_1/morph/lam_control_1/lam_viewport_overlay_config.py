@@ -17,10 +17,10 @@ from typing import Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 STARTUP_CHECK_PROCESS_ONLY: bool = False  # 공정만보기
 STARTUP_CHECK_WAFER_LABELS: bool = False  # 웨이퍼번호보기
-STARTUP_CHECK_FOUP_STATUS: bool = True  # FOUP상태보기
-STARTUP_CHECK_DEVICE_LABELS: bool = True  # 기기정보보기
+STARTUP_CHECK_FOUP_STATUS: bool = False  # FOUP상태보기
+STARTUP_CHECK_DEVICE_LABELS: bool = False  # 기기정보보기
 STARTUP_CHECK_PICK_WHITELIST: bool = False  # 선택제한 (Viewport 클릭 whitelist)
-STARTUP_CHECK_PLAY_PRIM_HIDE: bool = True  # prim숨김 (Viewport HUD · CSV 본창)
+STARTUP_CHECK_PLAY_PRIM_HIDE: bool = False  # prim숨김 (Viewport HUD · CSV 본창)
 STARTUP_CHECK_PLAY_CAMERA_FLY: bool = True  # Play 시 preset 뷰로 fly (일시정지 이어서 제외)
 
 
