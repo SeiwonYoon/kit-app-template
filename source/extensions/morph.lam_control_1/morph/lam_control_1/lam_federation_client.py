@@ -47,7 +47,15 @@ def build_request_headers(
     return headers
 
 
-def _log_response_sample(data: Dict[str, Any], *, row_sample: int, full: bool) -> None:
+def _log_response_sample(
+    data: Dict[str, Any],
+    *,
+    row_sample: int,
+    full: bool,
+    quiet: bool = False,
+) -> None:
+    if quiet:
+        return
     cols = list(data.get("columns") or [])
     rows = list(data.get("rows") or [])
     pag = dict(data.get("pagination") or {})
@@ -122,14 +130,20 @@ def fetch_federation_pages(
     use_fixture: bool = False,
     log_row_sample: int = 5,
     log_full_response: bool = False,
+    quiet: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """``has_next=false`` 까지 pagination fetch 후 rows 병합."""
+    """``has_next=false`` 까지 pagination fetch 후 rows 병합.
+
+    ``quiet=True`` 이면 페이지별 columns/rows 샘플 로그를 생략하고
+    start/done 요약만 남긴다 (``FEDERATION_VERBOSE_PARSE_LOG=False``).
+    """
     t0 = time.perf_counter()
     headers = build_request_headers(bearer_token=bearer_token, extra_headers=extra_headers)
     safe_body = {k: v for k, v in dict(body or {}).items()}
     print(
         f"{_PRINT_PREFIX} fetch start screen={screen} url={url!r} limit={limit} "
-        f"token={_mask_token(bearer_token)} body={safe_body}",
+        f"token={_mask_token(bearer_token)}"
+        + ("" if quiet else f" body={safe_body}"),
         flush=True,
     )
     merged_columns: List[str] = []
@@ -179,12 +193,15 @@ def fetch_federation_pages(
             "page_rows": len(rows),
             "pagination": pag,
         }
-        print(
-            f"{_PRINT_PREFIX} page {pages} offset={offset} status={status} "
-            f"rows={len(rows)} has_next={has_next} meta={last_meta}",
-            flush=True,
-        )
-        _log_response_sample(data, row_sample=log_row_sample, full=log_full_response)
+        if not quiet:
+            print(
+                f"{_PRINT_PREFIX} page {pages} offset={offset} status={status} "
+                f"rows={len(rows)} has_next={has_next} meta={last_meta}",
+                flush=True,
+            )
+            _log_response_sample(
+                data, row_sample=log_row_sample, full=log_full_response, quiet=False
+            )
         if not has_next:
             break
         # Federation offset은 페이지 번호가 아니라 rows 행 오프셋이다.

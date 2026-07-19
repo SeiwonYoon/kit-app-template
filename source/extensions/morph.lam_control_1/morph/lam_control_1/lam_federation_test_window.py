@@ -279,6 +279,12 @@ class LamFederationTestWindow:
             try:
                 from .lam_federation_client import fetch_federation_pages
 
+                try:
+                    from .lam_sim_control_defaults import FEDERATION_VERBOSE_PARSE_LOG
+
+                    quiet = not bool(FEDERATION_VERBOSE_PARSE_LOG)
+                except Exception:
+                    quiet = True
                 merged, meta = fetch_federation_pages(
                     url=vals["url"],
                     body=body,
@@ -288,6 +294,7 @@ class LamFederationTestWindow:
                     bearer_token=vals["token"],
                     extra_headers=vals["headers"],
                     use_fixture=vals["use_fixture"],
+                    quiet=quiet,
                 )
                 self._set_response_data(merged)
                 print(

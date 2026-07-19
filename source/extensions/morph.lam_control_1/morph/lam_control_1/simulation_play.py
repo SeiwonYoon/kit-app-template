@@ -106,6 +106,9 @@ FOUP1_CASSETTE_ID_MAX: int = 25
 _PRINT_PREFIX: str = "[LAM/SIMPLAY]"
 # CSV Play 콘솔: True 이면 한 줄 요약만 (진행시간·동작·JSON·실행여부)
 _csv_play_compact_log: bool = False
+# compact 로그 중첩 카운트 (화면1·2 병렬 빌드 시 한쪽 finally 가 다른 쪽을 끄지 않게)
+_csv_play_compact_log_refs: int = 0
+_csv_play_compact_log_lock = threading.Lock()
 # CSV Play 빌드 배치: True 이면 ensure/refresh 를 plan 시작 시 1회만 (이벤트 빌드 가속)
 _csv_bulk_build_active: bool = False
 # path+mtime → 재생 계획 캐시 (Kit 세션 메모리, 파일 수정 시 무효화)
@@ -352,9 +355,18 @@ LAM_SIM_LAST_BUILT_JSON: str = ""
 
 
 def set_csv_playback_compact_log(enabled: bool) -> None:
-    """CSV Play 중 상세 로그 억제 (LAM/EVENT, LAM/SEQ, dwell 타임라인 등)."""
-    global _csv_play_compact_log
-    _csv_play_compact_log = bool(enabled)
+    """CSV Play 중 상세 로그 억제 (LAM/EVENT, LAM/SEQ, dwell 타임라인 등).
+
+    중첩 호출을 지원한다 — 병렬 화면 빌드에서 ``True`` 두 번·``False`` 두 번이
+    섞여도 마지막 ``False`` 전까지 compact 가 유지된다.
+    """
+    global _csv_play_compact_log, _csv_play_compact_log_refs
+    with _csv_play_compact_log_lock:
+        if enabled:
+            _csv_play_compact_log_refs += 1
+        else:
+            _csv_play_compact_log_refs = max(0, _csv_play_compact_log_refs - 1)
+        _csv_play_compact_log = _csv_play_compact_log_refs > 0
 
 
 def is_csv_playback_compact_log() -> bool:

@@ -103,6 +103,7 @@ def merged_response_to_dwells(
     merged: Dict[str, Any],
     *,
     eqp_id: str,
+    quiet: bool = False,
 ) -> Tuple[List[DwellRecord], Dict[str, Any]]:
     """병합 API 응답 → dwell 타임라인 + 파싱 통계."""
     columns = list(merged.get("columns") or [])
@@ -120,11 +121,12 @@ def merged_response_to_dwells(
         "duplicates": dup,
         "lots_to_foup": lot_map,
     }
-    print(
-        f"{_PRINT_PREFIX} parse: rows={stats['input_rows']} parsed={stats['parsed_rows']} "
-        f"dwells={stats['dwells']} skip={skipped} dup={dup}",
-        flush=True,
-    )
+    if not quiet:
+        print(
+            f"{_PRINT_PREFIX} parse: rows={stats['input_rows']} parsed={stats['parsed_rows']} "
+            f"dwells={stats['dwells']} skip={skipped} dup={dup}",
+            flush=True,
+        )
     return dwells, stats
 
 

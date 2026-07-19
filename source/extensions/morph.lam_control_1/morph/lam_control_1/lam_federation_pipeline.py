@@ -286,6 +286,16 @@ def _start_federation_playback(
     return None
 
 
+def _federation_verbose_parse_log() -> bool:
+    """``FEDERATION_VERBOSE_PARSE_LOG`` — False 이면 파싱·빌드 상세 로그 억제."""
+    try:
+        from .lam_sim_control_defaults import FEDERATION_VERBOSE_PARSE_LOG
+
+        return bool(FEDERATION_VERBOSE_PARSE_LOG)
+    except Exception:
+        return False
+
+
 def _process_merged_response(
     ext: Any,
     lam_window: Any,
@@ -299,14 +309,21 @@ def _process_merged_response(
     export_default_prerun: bool = True,
 ) -> ScreenPipelineResult:
     """이미 수집됐거나 사용자가 붙여넣은 응답만 파싱·프리런·재생한다."""
+    from .simulation_play import set_csv_playback_compact_log
+
     meta: Dict[str, Any] = {"screen": screen}
+    quiet = not _federation_verbose_parse_log()
+    if quiet:
+        set_csv_playback_compact_log(True)
     try:
         eqp_id = str(body.get("eqp_id") or "").strip()
         if not eqp_id:
             return ScreenPipelineResult(
                 screen, False, "eqp_id missing in config body", meta
             )
-        dwells, parse_stats = merged_response_to_dwells(merged, eqp_id=eqp_id)
+        dwells, parse_stats = merged_response_to_dwells(
+            merged, eqp_id=eqp_id, quiet=quiet
+        )
         meta["parse"] = parse_stats
         if not dwells:
             return ScreenPipelineResult(screen, False, "no dwell records after parse", meta)
@@ -334,7 +351,7 @@ def _process_merged_response(
         }
         print(
             f"{_PRINT_PREFIX} prerun screen={screen} items={len(prerun.items)} "
-            f"duration={prerun.final_csv_time_sec:.1f}s",
+            f"duration={prerun.final_csv_time_sec:.1f}s build={prerun.build_ms:.0f}ms",
             flush=True,
         )
         csv_win = _resolve_csv_play_window(lam_window, screen)
@@ -356,19 +373,30 @@ def _process_merged_response(
         )
     except Exception as exc:
         return ScreenPipelineResult(screen, False, str(exc), meta)
+    finally:
+        if quiet:
+            set_csv_playback_compact_log(False)
 
 
 def _read_federation_defaults() -> Dict[str, Any]:
     try:
         from . import lam_sim_control_defaults as d
 
+        verbose = bool(getattr(d, "FEDERATION_VERBOSE_PARSE_LOG", False))
+        log_row_sample = int(getattr(d, "FEDERATION_LOG_ROW_SAMPLE", 5) or 5)
+        log_full_response = bool(getattr(d, "FEDERATION_LOG_FULL_RESPONSE", False))
+        if not verbose:
+            # 상세 로그 OFF — 페이지 샘플·전체 dump 억제
+            log_row_sample = 0
+            log_full_response = False
         return {
             "url": str(getattr(d, "FEDERATION_QUERY_URL", "") or ""),
             "limit": int(getattr(d, "FEDERATION_FETCH_LIMIT", 1000) or 1000),
             "timeout_sec": float(getattr(d, "FEDERATION_FETCH_TIMEOUT_SEC", 300.0) or 300.0),
             "use_fixture": bool(getattr(d, "FEDERATION_USE_FIXTURE", False)),
-            "log_row_sample": int(getattr(d, "FEDERATION_LOG_ROW_SAMPLE", 5) or 5),
-            "log_full_response": bool(getattr(d, "FEDERATION_LOG_FULL_RESPONSE", False)),
+            "verbose_parse_log": verbose,
+            "log_row_sample": log_row_sample,
+            "log_full_response": log_full_response,
             "bearer_token": str(getattr(d, "FEDERATION_BEARER_TOKEN", "") or ""),
             "extra_headers": dict(getattr(d, "FEDERATION_EXTRA_HEADERS", {}) or {}),
         }
@@ -378,7 +406,8 @@ def _read_federation_defaults() -> Dict[str, Any]:
             "limit": 1000,
             "timeout_sec": 300.0,
             "use_fixture": False,
-            "log_row_sample": 5,
+            "verbose_parse_log": False,
+            "log_row_sample": 0,
             "log_full_response": False,
             "bearer_token": "",
             "extra_headers": {},
@@ -420,6 +449,7 @@ def _process_one_screen(
             use_fixture=use_fixture,
             log_row_sample=log_row_sample,
             log_full_response=log_full_response,
+            quiet=not _federation_verbose_parse_log(),
         )
         meta["fetch"] = fetch_meta
         result = _process_merged_response(

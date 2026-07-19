@@ -86,9 +86,16 @@ FEDERATION_USE_FIXTURE: bool = False
 # False여도 LAM 메인 창의 「Federation API 테스트」 버튼으로 수동 실행 가능.
 FEDERATION_TEST_WINDOW_AUTO_SHOW: bool = True
 # 응답 로그에 rows 앞 N개만 출력 (0 = metadata만).
+# ``FEDERATION_VERBOSE_PARSE_LOG=False`` 이면 이 값은 무시되고 샘플을 출력하지 않는다.
 FEDERATION_LOG_ROW_SAMPLE: int = 5
 # True → 응답 JSON 전체를 콘솔에 출력 (대량 데이터 주의).
+# ``FEDERATION_VERBOSE_PARSE_LOG=False`` 이면 강제 False.
 FEDERATION_LOG_FULL_RESPONSE: bool = False
+# False → 파싱·재생계획 생성의 상세 콘솔 로그 억제 (속도 개선).
+#   - fetch 페이지별 columns/rows 샘플 미출력
+#   - 이벤트 JSON/Z/스텝 상세 로그 미출력
+# True → 기존처럼 파싱·빌드 상세 로그 출력 (디버깅용).
+FEDERATION_VERBOSE_PARSE_LOG: bool = False
 
 # 인증 — 비우면 헤더 없이 POST. 실무 확인 후 값만 채우면 된다.
 # Bearer 예: FEDERATION_BEARER_TOKEN = "eyJ..."
@@ -147,6 +154,7 @@ __all__ = [
     "FEDERATION_TEST_WINDOW_AUTO_SHOW",
     "FEDERATION_LOG_ROW_SAMPLE",
     "FEDERATION_LOG_FULL_RESPONSE",
+    "FEDERATION_VERBOSE_PARSE_LOG",
     "FEDERATION_BEARER_TOKEN",
     "FEDERATION_EXTRA_HEADERS",
     "default_viewport_split_count",
