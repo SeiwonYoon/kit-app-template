@@ -23,7 +23,19 @@ from morph.lam_control_1.kit_main_dispatch import schedule_on_main_thread
 from morph.lam_control_1.lam_extension_singleton import require_lam_extension_instance
 from morph.lam_control_1.lam_federation_pipeline import run_federation_start_simulation
 
-from .hyview_event_contract import V2T_RESPONSE_START_SIMULATION
+from .hyview_event_contract import (
+    PAYLOAD_CASE,
+    PAYLOAD_EQP_INFO_SHOW,
+    PAYLOAD_FOUP_INFO_SHOW,
+    PAYLOAD_PRIM_HIDE,
+    PAYLOAD_PROC_ONLY,
+    PAYLOAD_SHOW_TOP_VIEW,
+    PAYLOAD_SPEED,
+    PAYLOAD_WAFER_NUMBER_SHOW,
+    V2T_RESPONSE_CONTROL_SIMULATION,
+    V2T_RESPONSE_START_SIMULATION,
+    V2T_RESPONSE_STOP_SIMULATION,
+)
 from .lam_handler_config import FEDERATION_FETCH_LIMIT
 
 # 응답 형식 미정 — case0·case1 빈 결과 placeholder (TBS ``_EMPTY_START_RESULT`` 대응)
@@ -89,4 +101,114 @@ def handle_start_simulation(
     schedule_on_main_thread(_run)
 
 
-__all__ = ["handle_start_simulation"]
+def handle_stop_simulation(
+    payload: Dict[str, Any],
+    *,
+    dispatch: Callable[[str, Dict[str, Any]], None],
+    event_name: str = V2T_RESPONSE_STOP_SIMULATION,
+) -> None:
+    """T2V_request_stop_simulation — ``case`` 화면만 중지 (0=화면1, 1=화면2).
+
+    UI 「정지(초기화)」와 동일한 화면별 경로를 사용해 다른 화면 재생에 영향을
+    주지 않는다. 중지·초기화 완료 콜백에서 ``dispatch(event_name, {code, message,
+    data:{case}})`` 를 호출한다.
+    """
+    pl = dict(payload or {})
+    raw_case = pl.get(PAYLOAD_CASE, 0)
+
+    def _run() -> None:
+        try:
+            case_index = int(raw_case)
+        except Exception:
+            case_index = -1
+        if case_index not in (0, 1):
+            dispatch(
+                event_name,
+                _err(f"invalid case: {raw_case!r}", data={PAYLOAD_CASE: raw_case}),
+            )
+            return
+        screen = case_index + 1
+        try:
+            ext = require_lam_extension_instance()
+            lam_win = getattr(ext, "_lam_window", None)
+            csv_win = (
+                lam_win._ensure_csv_sim_play_window(screen)
+                if lam_win is not None
+                else None
+            )
+            if csv_win is None:
+                raise RuntimeError(f"screen{screen} CSV play window unavailable")
+
+            def _on_stop_done() -> None:
+                dispatch(event_name, _ok({PAYLOAD_CASE: case_index}))
+
+            csv_win._on_csv_stop_reset_clicked(on_complete=_on_stop_done)
+        except Exception as exc:
+            dispatch(event_name, _err(str(exc), data={PAYLOAD_CASE: case_index}))
+
+    schedule_on_main_thread(_run)
+
+
+def handle_control_simulation(
+    payload: Dict[str, Any],
+    *,
+    dispatch: Callable[[str, Dict[str, Any]], None],
+    event_name: str = V2T_RESPONSE_CONTROL_SIMULATION,
+) -> None:
+    """T2V_control_simulation — ``case`` 화면에 전달된 항목만 실시간 적용.
+
+    payload 에 존재하는 키만 반영하고 나머지는 현재 상태 유지. 응답 ``data`` 는
+    전달받은 payload 를 그대로 echo 한다(성공/실패 공통).
+    """
+    pl = dict(payload or {})
+    raw_case = pl.get(PAYLOAD_CASE, 0)
+
+    def _run() -> None:
+        try:
+            case_index = int(raw_case)
+        except Exception:
+            case_index = -1
+        if case_index not in (0, 1):
+            dispatch(event_name, _err(f"invalid case: {raw_case!r}", data=dict(pl)))
+            return
+        screen = case_index + 1
+        try:
+            kwargs: Dict[str, Any] = {}
+            if PAYLOAD_PROC_ONLY in pl:
+                kwargs["proc_only"] = bool(pl[PAYLOAD_PROC_ONLY])
+            if PAYLOAD_SHOW_TOP_VIEW in pl:
+                kwargs["top_view"] = bool(pl[PAYLOAD_SHOW_TOP_VIEW])
+            if PAYLOAD_FOUP_INFO_SHOW in pl:
+                kwargs["foup_info_show"] = bool(pl[PAYLOAD_FOUP_INFO_SHOW])
+            if PAYLOAD_EQP_INFO_SHOW in pl:
+                kwargs["eqp_info_show"] = bool(pl[PAYLOAD_EQP_INFO_SHOW])
+            if PAYLOAD_WAFER_NUMBER_SHOW in pl:
+                kwargs["wafer_number_show"] = bool(pl[PAYLOAD_WAFER_NUMBER_SHOW])
+            if PAYLOAD_PRIM_HIDE in pl:
+                kwargs["prim_hide"] = bool(pl[PAYLOAD_PRIM_HIDE])
+            if PAYLOAD_SPEED in pl:
+                kwargs["speed"] = float(pl[PAYLOAD_SPEED])
+
+            ext = require_lam_extension_instance()
+            lam_win = getattr(ext, "_lam_window", None)
+            csv_win = (
+                lam_win._ensure_csv_sim_play_window(screen)
+                if lam_win is not None
+                else None
+            )
+            if csv_win is None:
+                raise RuntimeError(f"screen{screen} CSV play window unavailable")
+
+            csv_win.apply_web_live_controls(**kwargs)
+            dispatch(event_name, _ok(dict(pl)))
+        except Exception as exc:
+            dispatch(event_name, _err(str(exc), data=dict(pl)))
+
+    schedule_on_main_thread(_run)
+
+
+__all__ = [
+    "handle_start_simulation",
+    "handle_stop_simulation",
+    "handle_control_simulation",
+]

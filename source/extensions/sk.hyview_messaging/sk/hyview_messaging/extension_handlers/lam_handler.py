@@ -7,6 +7,11 @@ LamHandler — HyView livestream 메시징 ↔ LAM Federation 시뮬 API 진입�
 
   - 시뮬 시작 요청 키: ``configs``
   - 시뮬 시작 응답 키: ``data.results``  (형식 미정 — 빈 dict 2칸 placeholder)
+  - 시뮬 중지 요청 키: ``case``  (0=화면1, 1=화면2)
+  - 시뮬 중지 응답 키: ``data.case``  (요청 case echo)
+  - 실시간 제어 요청 키: ``case`` + optional(proc_only·show_top_view·foup_info_show·
+    eqp_info_show·wafer_number_show·prim_hide·speed) — 있는 항목만 적용
+  - 실시간 제어 응답 키: ``data`` = 전달 payload echo
   - 실패 code: ``1`` (성공 ``0``)
 
 ================================================================================
@@ -29,11 +34,20 @@ import carb
 import carb.events
 
 from ..hyview_event_contract import (
+    PAYLOAD_CASE,
     PAYLOAD_CONFIGS,
+    T2V_CONTROL_SIMULATION,
     T2V_REQUEST_START_SIMULATION,
+    T2V_REQUEST_STOP_SIMULATION,
+    V2T_RESPONSE_CONTROL_SIMULATION,
     V2T_RESPONSE_START_SIMULATION,
+    V2T_RESPONSE_STOP_SIMULATION,
 )
-from ..lam_sim_bridge import handle_start_simulation
+from ..lam_sim_bridge import (
+    handle_control_simulation,
+    handle_start_simulation,
+    handle_stop_simulation,
+)
 from .base_handler import BaseHandler
 
 
@@ -44,12 +58,16 @@ class LamHandler(BaseHandler):
         """Kit → 웹(V2T) 로 보낼 수 있는 이벤트명 목록 (livestream 등록용)."""
         return [
             V2T_RESPONSE_START_SIMULATION,
+            V2T_RESPONSE_STOP_SIMULATION,
+            V2T_RESPONSE_CONTROL_SIMULATION,
         ]
 
     def get_event_handlers(self) -> Dict[str, Callable]:
         """웹 → Kit(T2V) 이벤트명 → 핸들러 매핑."""
         return {
             T2V_REQUEST_START_SIMULATION: self._on_req_start_simulation,
+            T2V_REQUEST_STOP_SIMULATION: self._on_req_stop_simulation,
+            T2V_CONTROL_SIMULATION: self._on_req_control_simulation,
         }
 
     # ------------------------------------------------------------------
@@ -128,3 +146,70 @@ class LamHandler(BaseHandler):
 
         # 성공 — 응답 형식 미정: 빈 results 2칸 + success
         self._dispatch_v2t_ok(event_name, {"results": results})
+
+    # ------------------------------------------------------------------
+    # T2V — 시뮬 중지 (화면별)
+    # ------------------------------------------------------------------
+
+    def _on_req_stop_simulation(self, event: carb.events.IEvent) -> None:
+        """
+        T2V_request_stop_simulation — 화면별 시뮬레이션 중지.
+
+        요청: ``{"case": 0}``  (0=화면1, 1=화면2)
+        성공 응답 data: ``{"case": case_index}``
+        """
+        # [1] T2V 수신 로그 — 이 줄이 즉시 찍히면 livestream 메시징 수신 OK
+        print(f"[LamHandler] _on_req_stop_simulation - {event.payload}")
+
+        payload = dict(getattr(event, "payload", None) or {})
+        case_index = payload.get(PAYLOAD_CASE, 0)
+
+        # [2] bridge 완료 콜백 — 화면 중지·초기화 끝난 뒤 V2T 전송
+        def _on_bridge_done(event_name: str, bridge_body: Dict[str, Any]) -> None:
+            code = int(bridge_body.get("code", 0))
+            message = str(bridge_body.get("message", "success"))
+            data = bridge_body.get("data")
+            if not isinstance(data, dict):
+                data = {}
+            case_echo = data.get(PAYLOAD_CASE, case_index)
+            if code != 0:
+                self._dispatch_v2t_err(event_name, message, {PAYLOAD_CASE: case_echo})
+                return
+            self._dispatch_v2t_ok(event_name, {PAYLOAD_CASE: case_echo})
+
+        # [3] Kit 시뮬 중지 위임 — 해당 화면만 정지(초기화), 다른 화면 무영향 (비동기)
+        handle_stop_simulation(payload, dispatch=_on_bridge_done)
+
+    # ------------------------------------------------------------------
+    # T2V — 실시간 제어 (전달된 항목만 화면별 적용)
+    # ------------------------------------------------------------------
+
+    def _on_req_control_simulation(self, event: carb.events.IEvent) -> None:
+        """
+        T2V_control_simulation — 화면별 오버레이/배속 실시간 제어.
+
+        요청: ``{"case": 0, "proc_only": true, "show_top_view": false,
+                 "foup_info_show": true, "eqp_info_show": true,
+                 "wafer_number_show": false, "prim_hide": true, "speed": 2.0}``
+        (case 외 항목은 모두 optional — 존재하는 항목만 적용)
+        응답 data: 전달받은 payload 를 그대로 echo.
+        """
+        # [1] T2V 수신 로그 — 이 줄이 즉시 찍히면 livestream 메시징 수신 OK
+        print(f"[LamHandler] _on_req_control_simulation - {event.payload}")
+
+        payload = dict(getattr(event, "payload", None) or {})
+
+        # [2] bridge 완료 콜백 — 적용 끝난 뒤 전달 내용 echo + success 여부 전송
+        def _on_bridge_done(event_name: str, bridge_body: Dict[str, Any]) -> None:
+            code = int(bridge_body.get("code", 0))
+            message = str(bridge_body.get("message", "success"))
+            data = bridge_body.get("data")
+            if not isinstance(data, dict):
+                data = {}
+            if code != 0:
+                self._dispatch_v2t_err(event_name, message, data)
+                return
+            self._dispatch_v2t_ok(event_name, data)
+
+        # [3] Kit 실시간 제어 위임 — 해당 화면 모델만 갱신 (비동기, 메인 스레드)
+        handle_control_simulation(payload, dispatch=_on_bridge_done)

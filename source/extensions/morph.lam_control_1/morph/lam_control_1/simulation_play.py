@@ -5635,6 +5635,65 @@ class LamSimulationCsvPlayWindow:
             self._log(f"wafer label UI sync failed (화면{si}): {exc}")
             return
 
+    def apply_web_live_controls(
+        self,
+        *,
+        proc_only: Optional[bool] = None,
+        top_view: Optional[bool] = None,
+        foup_info_show: Optional[bool] = None,
+        eqp_info_show: Optional[bool] = None,
+        wafer_number_show: Optional[bool] = None,
+        prim_hide: Optional[bool] = None,
+        speed: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """웹 T2V_control_simulation — 전달된 항목만 이 화면에 실시간 반영.
+
+        각 omni.ui 모델 ``set_value`` 가 화면별 overlay/카메라 동기화를 자동 유발한다
+        (화면2+ 로컬 훅 / 화면1 전역 훅). 반드시 Kit main(UI) thread 에서 호출.
+        ``None`` 인 항목은 현재 상태를 유지한다. 적용된 항목 dict 를 돌려준다.
+        """
+        self.ensure_playback_models()
+        applied: Dict[str, Any] = {}
+
+        if foup_info_show is not None and self._foup_status_show_model is not None:
+            self._foup_status_show_model.set_value(bool(foup_info_show))
+            applied["foup_info_show"] = bool(foup_info_show)
+
+        if eqp_info_show is not None and self._device_labels_show_model is not None:
+            self._device_labels_show_model.set_value(bool(eqp_info_show))
+            applied["eqp_info_show"] = bool(eqp_info_show)
+
+        if wafer_number_show is not None and self._wafer_label_show_model is not None:
+            self._wafer_label_show_model.set_value(bool(wafer_number_show))
+            try:
+                self.apply_wafer_label_visibility_from_ui()
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} web control wafer(화면{self._screen}): {exc}",
+                    flush=True,
+                )
+            applied["wafer_number_show"] = bool(wafer_number_show)
+
+        if top_view is not None and self._top_view_model is not None:
+            self._top_view_model.set_value(bool(top_view))
+            applied["show_top_view"] = bool(top_view)
+
+        if prim_hide is not None and self._play_prim_hide_model is not None:
+            self._play_prim_hide_model.set_value(bool(prim_hide))
+            applied["prim_hide"] = bool(prim_hide)
+
+        # 배속은 공정만보기 전환 이전에 적용 (proc_only ON 시 1x 강제 정책 존중).
+        if speed is not None and self._speed_model is not None:
+            self._speed_model.set_value(float(speed))
+            applied["speed"] = float(speed)
+
+        # proc_only 는 pause/resume 을 유발하므로 다른 설정 반영 후 마지막에 전환.
+        if proc_only is not None and self._process_only_model is not None:
+            self._process_only_model.set_value(bool(proc_only))
+            applied["proc_only"] = bool(proc_only)
+
+        return applied
+
     def register_hud_timeline_ui(
         self,
         rows_stack: Any,
