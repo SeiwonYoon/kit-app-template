@@ -47,11 +47,18 @@ class CameraPrimBaseline:
 
 
 _camera_prim_baselines: Dict[str, CameraPrimBaseline] = {}
+_play_stop_persp_restore_sub: Any = None
 
 
 def _is_session_camera_path(path: str) -> bool:
     p = str(path or "").strip()
     return not p or p == _PERSP_CAMERA_PATH or "Persp" in p
+
+
+def _is_user_camera_prim_path(path: str) -> bool:
+    """Stage USD Camera prim (Perspective / OmniverseKit_Persp 제외)."""
+    p = str(path or "").strip()
+    return bool(p) and not _is_session_camera_path(p)
 
 
 def _matrix_to_tuple(m: Gf.Matrix4d) -> Tuple[float, ...]:
@@ -503,9 +510,16 @@ def _finish_fly_to_target(
     path = str(assign_prim_path or "").strip()
     ctx = str(usd_context_name or "").strip()
     if path:
+        tag = log_context or "fly_end"
+        apply_view_to_camera_prim(
+            path,
+            target,
+            up_xyz=up_xyz,
+            log_context=f"{tag}_prim",
+        )
         return bind_viewport_to_camera_prim(
             path,
-            log_context=log_context or "fly_end",
+            log_context=tag,
             viewport_api=viewport_api,
             usd_context_name=ctx,
         )
@@ -531,21 +545,7 @@ def capture_view_for_viewport(
     """지정 viewport/context 의 현재 카메라 뷰 스냅샷."""
     ctx = str(usd_context_name or "").strip()
     with camera_fly_usd_context(ctx or None):
-        path = ""
-        try:
-            cp = getattr(viewport_api, "camera_path", None) if viewport_api is not None else None
-            if cp is not None:
-                path = str(cp).strip()
-        except Exception:
-            path = ""
-        if path:
-            snap = snapshot_from_prim_path(path)
-            if snap is not None:
-                return snap
-        snap = snapshot_from_prim_path(_PERSP_CAMERA_PATH)
-        if snap is not None:
-            return snap
-        return capture_current_view()
+        return _capture_view_preferring_live_state(viewport_api=viewport_api)
 
 
 def _iter_viewport_apis() -> List[Any]:
@@ -1051,11 +1051,20 @@ def _snapshot_from_camera_prim() -> Optional[CameraViewSnapshot]:
         return None
 
 
-def _snapshot_from_viewport_state() -> Optional[CameraViewSnapshot]:
+def _snapshot_from_viewport_state(
+    viewport_api: Any = None,
+) -> Optional[CameraViewSnapshot]:
     try:
         from omni.kit.viewport.utility.camera_state import ViewportCameraState  # type: ignore
 
-        st = ViewportCameraState()
+        st = None
+        if viewport_api is not None:
+            try:
+                st = ViewportCameraState(viewport_api)
+            except Exception:
+                st = None
+        if st is None:
+            st = ViewportCameraState()
         eye = getattr(st, "position_world", None)
         if eye is None:
             return None
@@ -1078,12 +1087,41 @@ def _snapshot_from_viewport_state() -> Optional[CameraViewSnapshot]:
         return None
 
 
-def capture_current_view() -> Optional[CameraViewSnapshot]:
-    """캡처·적용 모두 prim+COI 우선 (일관성)."""
+def _capture_view_preferring_live_state(
+    *,
+    viewport_api: Any = None,
+    camera_path_hint: str = "",
+) -> Optional[CameraViewSnapshot]:
+    """뷰 캡처 — USD Camera bind 시 viewport 실제 시점(줌 포함) 우선."""
+    path = str(camera_path_hint or "").strip()
+    if not path and viewport_api is not None:
+        try:
+            cp = getattr(viewport_api, "camera_path", None)
+            if cp is not None:
+                path = str(cp).strip()
+        except Exception:
+            path = ""
+    if not path:
+        path = str(_active_camera_path_str() or "").strip()
+
+    if _is_user_camera_prim_path(path):
+        snap = _snapshot_from_viewport_state(viewport_api)
+        if snap is not None:
+            return snap
+        snap = snapshot_from_prim_path(path)
+        if snap is not None:
+            return snap
+        return None
+
     snap = _snapshot_from_camera_prim()
     if snap is not None:
         return snap
-    return _snapshot_from_viewport_state()
+    return _snapshot_from_viewport_state(viewport_api)
+
+
+def capture_current_view() -> Optional[CameraViewSnapshot]:
+    """활성 viewport 시점 캡처 (Camera prim bind 시 줌 반영)."""
+    return _capture_view_preferring_live_state()
 
 
 def get_play_camera_preset() -> CameraViewSnapshot:
@@ -1367,7 +1405,11 @@ def views_are_close(
         return False
     da = _vec3(a.target_xyz) - _vec3(a.eye_xyz)
     db = _vec3(b.target_xyz) - _vec3(b.eye_xyz)
-    if da.GetLength() < 1e-9 or db.GetLength() < 1e-9:
+    dist_a = da.GetLength()
+    dist_b = db.GetLength()
+    if abs(dist_a - dist_b) > eps:
+        return False
+    if dist_a < 1e-9 or dist_b < 1e-9:
         return True
     da.Normalize()
     db.Normalize()
@@ -1419,7 +1461,12 @@ def format_config_snippet(
 
 def log_play_camera_preset_capture() -> bool:
     """현재 뷰포트 시점 캡처 → 콘솔에 config 조각 출력 (UI 버튼용)."""
-    snap = capture_current_view()
+    snap = None
+    vp = _get_active_viewport_api()
+    if vp is not None:
+        snap = capture_view_for_viewport(vp)
+    if snap is None:
+        snap = capture_current_view()
     if snap is None:
         print(
             f"{_PRINT_PREFIX} 캡처 실패 — 활성 뷰포트·카메라·stage 확인",
@@ -1622,13 +1669,13 @@ def kickoff_fly_to_target(
     ctx = str(usd_context_name or "").strip()
     with camera_fly_usd_context(ctx or None):
         if viewport_api is not None:
-            current = capture_view_for_viewport(viewport_api, ctx)
-        else:
-            current = capture_current_view()
-        if viewport_api is not None:
             restore_perspective_on_viewport(viewport_api, ctx)
         else:
             ensure_session_perspective_camera(log_label=tag, restore_navigation=False)
+        if viewport_api is not None:
+            current = capture_view_for_viewport(viewport_api, ctx)
+        else:
+            current = capture_current_view()
         if current is not None:
             apply_camera_view(
                 current,
@@ -1646,7 +1693,7 @@ def kickoff_fly_to_target(
             )
             done.set()
             return ok
-        if views_are_close(current, target):
+        if views_are_close(current, target) and not assign_path:
             print(f"{_PRINT_PREFIX} 현재 뷰 ≈ target — fly 생략, camera/view 동기화", flush=True)
             _finish_fly_to_target(
                 target,
@@ -1723,6 +1770,99 @@ def run_sync_fly_to_target(
     return bool(done.wait(timeout=wait_sec))
 
 
+def _stop_play_stop_perspective_restore_subscription() -> None:
+    global _play_stop_persp_restore_sub
+    sub = _play_stop_persp_restore_sub
+    if sub is not None:
+        try:
+            sub.unsubscribe()
+        except Exception:
+            pass
+    _play_stop_persp_restore_sub = None
+
+
+def _apply_play_stop_perspective_restore(*, log_label: str = "play_stop_reset") -> bool:
+    """Main thread — 탑뷰 hold 해제 후 Perspective 복귀."""
+    try:
+        from .lam_viewport_top_view import release_top_view_camera_hold_for_play_stop
+
+        release_top_view_camera_hold_for_play_stop()
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} top view hold release ({log_label}): {exc}",
+            flush=True,
+        )
+    ok = restore_kit_default_perspective(log_label=log_label)
+    active = str(_active_camera_path_str() or "")
+    if not _is_session_camera_path(active):
+        vp = _get_active_viewport_api()
+        if vp is not None:
+            restore_perspective_on_viewport(vp)
+        active = str(_active_camera_path_str() or "")
+        ok = ok or _is_session_camera_path(active)
+    if not _is_session_camera_path(active):
+        print(
+            f"{_PRINT_PREFIX} Perspective 복귀 재시도 필요 — active={active!r}",
+            flush=True,
+        )
+    try:
+        from .lam_viewport_top_view import restore_viewport_camera_navigation
+
+        restore_viewport_camera_navigation(schedule_frames=8)
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} navigation restore after perspective: {exc}",
+            flush=True,
+        )
+    return bool(ok)
+
+
+def schedule_restore_perspective_after_play_stop(*, delay_frames: int = 12) -> None:
+    """정지 후 race/hold 대비 — main update 에서 Perspective 재적용 예약."""
+    if play_camera_use_preset_coords():
+        return
+    frames_left = [max(0, int(delay_frames))]
+
+    def _tick(_e=None) -> None:
+        global _play_stop_persp_restore_sub
+        if frames_left[0] > 0:
+            frames_left[0] -= 1
+            return
+        _stop_play_stop_perspective_restore_subscription()
+        active = str(_active_camera_path_str() or "")
+        if _is_session_camera_path(active):
+            return
+        _apply_play_stop_perspective_restore(log_label="play_stop_reset_retry")
+
+    if frames_left[0] <= 0:
+        try:
+            from .lam_sequence_engine import _dispatch_main  # type: ignore
+
+            _dispatch_main(
+                lambda: _apply_play_stop_perspective_restore(
+                    log_label="play_stop_reset_immediate",
+                )
+            )
+        except Exception:
+            pass
+        frames_left[0] = max(1, int(delay_frames))
+
+    try:
+        import omni.kit.app as _app  # type: ignore
+
+        stream = _app.get_app().get_update_event_stream()
+        _stop_play_stop_perspective_restore_subscription()
+        _play_stop_persp_restore_sub = stream.create_subscription_to_pop(
+            _tick,
+            name="morph.lam_control_1.play_stop_perspective_restore",
+        )
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} play stop perspective schedule failed: {exc}",
+            flush=True,
+        )
+
+
 def restore_perspective_after_play_camera_mode() -> None:
     """PLAY_CAMERA_USE_PRESET_COORDS=False 일 때 정지 후 Perspective 복귀."""
     stop_play_camera_baseline_hold()
@@ -1730,26 +1870,31 @@ def restore_perspective_after_play_camera_mode() -> None:
         return
 
     def _go() -> None:
-        restore_kit_default_perspective(log_label="play_stop_reset")
-        try:
-            from .lam_viewport_top_view import restore_viewport_camera_navigation
+        _apply_play_stop_perspective_restore(log_label="play_stop_reset")
 
-            restore_viewport_camera_navigation(schedule_frames=8)
-        except Exception as exc:
-            print(
-                f"{_PRINT_PREFIX} navigation restore after perspective: {exc}",
-                flush=True,
-            )
-
+    dispatched = False
     try:
         from .lam_sequence_engine import _dispatch_main_wait  # type: ignore
 
-        _dispatch_main_wait(_go, timeout=5.0)
-    except Exception:
+        dispatched = bool(_dispatch_main_wait(_go, timeout=8.0))
+        if not dispatched:
+            print(
+                f"{_PRINT_PREFIX} play stop perspective dispatch timeout — retry 예약",
+                flush=True,
+            )
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} play stop perspective dispatch failed: {exc}",
+            flush=True,
+        )
         try:
-            switch_to_perspective_viewport()
+            from .lam_sequence_engine import _dispatch_main  # type: ignore
+
+            _dispatch_main(_go)
+            dispatched = True
         except Exception:
             pass
+    schedule_restore_perspective_after_play_stop(delay_frames=12 if dispatched else 2)
 
 
 def will_run_play_camera_fly() -> bool:
@@ -1788,13 +1933,13 @@ def kickoff_play_camera_fly(done: threading.Event) -> bool:
     def _kickoff_on_main() -> None:
         nonlocal fly_started
         try:
-            current = capture_current_view()
-            if use_prim and prim_path:
-                apply_play_camera_prim_view_spec()
             ensure_session_perspective_camera(
                 log_label="play_fly",
                 restore_navigation=False,
             )
+            current = capture_current_view()
+            if use_prim and prim_path:
+                apply_play_camera_prim_view_spec()
             if current is not None:
                 apply_camera_view(
                     current,
@@ -1815,7 +1960,7 @@ def kickoff_play_camera_fly(done: threading.Event) -> bool:
                     fly_started = True
                     done.set()
                 return
-            if views_are_close(current, target):
+            if views_are_close(current, target) and not use_prim:
                 print(
                     f"{_PRINT_PREFIX} 현재 뷰 ≈ target — fly 생략, camera/view 동기화",
                     flush=True,
@@ -1931,7 +2076,7 @@ def kickoff_play_camera_fly_for_screen(
                         fly_started = True
                         done.set()
                     return
-                if views_are_close(current, target):
+                if views_are_close(current, target) and not use_prim:
                     print(
                         f"{_PRINT_PREFIX} screen 현재 뷰 ≈ target — fly 생략, 동기화 "
                         f"ctx={ctx!r}",
@@ -2087,6 +2232,7 @@ __all__ = [
     "restore_kit_default_perspective",
     "restore_perspective_after_play_camera_mode",
     "restore_perspective_on_viewport",
+    "schedule_restore_perspective_after_play_stop",
     "run_play_camera_fly_before_start",
     "run_sync_fly_to_target",
     "sanitize_startup_perspective_view",

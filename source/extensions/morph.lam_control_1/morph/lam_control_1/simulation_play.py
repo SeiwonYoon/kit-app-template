@@ -7204,6 +7204,12 @@ class LamSimulationCsvPlayWindow:
         clear_csv_play_pause_checkpoint(screen=self._screen)
         self._reset_timeline_playback_highlight_ui()
         try:
+            from .lam_play_camera_fly import schedule_restore_perspective_after_play_stop
+
+            schedule_restore_perspective_after_play_stop(delay_frames=0)
+        except Exception:
+            pass
+        try:
             from .lam_viewport_foup_status_3d import reset_foup_play_session
 
             reset_foup_play_session(screen=self._screen)
@@ -7277,7 +7283,10 @@ class LamSimulationCsvPlayWindow:
                             from .lam_csv_screen_runtime import (
                                 resolve_csv_screen_runtime,
                             )
-                            from .lam_play_camera_fly import restore_perspective_on_viewport
+                            from .lam_play_camera_fly import (
+                                restore_perspective_on_viewport,
+                                schedule_restore_perspective_after_play_stop,
+                            )
 
                             rt = resolve_csv_screen_runtime(
                                 self._lam_window_ref,
@@ -7290,6 +7299,9 @@ class LamSimulationCsvPlayWindow:
                                     rt.viewport_api,
                                     str(rt.context_name or ""),
                                 )
+                            schedule_restore_perspective_after_play_stop(
+                                delay_frames=12,
+                            )
                         else:
                             from .lam_play_camera_fly import (
                                 restore_perspective_after_play_camera_mode,

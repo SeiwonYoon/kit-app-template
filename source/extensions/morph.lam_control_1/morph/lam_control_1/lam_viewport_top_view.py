@@ -465,22 +465,15 @@ def restore_viewport_camera_navigation(*, schedule_frames: int = 8) -> None:
 
 def _capture_lock_snapshot() -> Optional["CameraViewSnapshot"]:
     from .lam_play_camera_fly import (
-        CameraViewSnapshot,
         capture_current_view,
-        ensure_camera_prim_baseline,
-        get_camera_prim_baseline_view,
         get_top_view_target_snapshot,
-        top_view_assign_prim_path,
         top_view_use_preset_coords,
     )
 
     if not top_view_use_preset_coords():
-        path = top_view_assign_prim_path()
-        if path:
-            ensure_camera_prim_baseline(path)
-            view = get_camera_prim_baseline_view(path)
-            if view is not None:
-                return view
+        snap = get_top_view_target_snapshot()
+        if snap is not None:
+            return snap
     snap = capture_current_view()
     if snap is not None:
         return snap
@@ -902,6 +895,24 @@ def enable_top_view_mode() -> bool:
     return False
 
 
+def release_top_view_camera_hold_for_play_stop() -> None:
+    """Play 정지 시 탑뷰 hold 가 USD Camera 를 다시 bind 하지 않도록 잠금만 해제 (UI 토글 유지)."""
+    _cancel_top_view_fly()
+    timer = _state.pop("fly_timeout_timer", None)
+    if timer is not None:
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+    if not _state.get("active") and not _state.get("fly_pending"):
+        if not _state.get("locked_models"):
+            return
+    viewport_api = _get_active_viewport_api()
+    _state["active"] = False
+    _stop_hold_subscription()
+    _release_input_lock(viewport_api)
+
+
 def disable_top_view_mode() -> None:
     """카메라 조작 잠금 해제. camera 모드면 Perspective 복귀."""
     from .lam_play_camera_fly import (
@@ -910,6 +921,7 @@ def disable_top_view_mode() -> None:
     )
 
     fly_was_pending = bool(_state.get("fly_pending"))
+    was_active = bool(_state.get("active"))
     _cancel_top_view_fly()
     timer = _state.pop("fly_timeout_timer", None)
     if timer is not None:
@@ -917,8 +929,6 @@ def disable_top_view_mode() -> None:
             timer.cancel()
         except Exception:
             pass
-    if not _state.get("active") and _state.get("hold_sub") is None and not fly_was_pending:
-        return
     viewport_api = _get_active_viewport_api()
     _state["active"] = False
     _stop_hold_subscription()
@@ -927,11 +937,15 @@ def disable_top_view_mode() -> None:
         from .lam_play_camera_fly import restore_kit_default_perspective
 
         restore_kit_default_perspective(log_label="top_view_off")
-    else:
+    elif was_active or fly_was_pending:
         ensure_session_perspective_camera(
             log_label="top_view_off",
             restore_navigation=False,
         )
+    if not was_active and _state.get("hold_sub") is None and not fly_was_pending:
+        if not top_view_use_preset_coords():
+            schedule_restore_viewport_navigation(delay_frames=12)
+        return
     if not top_view_use_preset_coords():
         print(
             f"{_PRINT_PREFIX} 탑뷰 고정 OFF — Perspective 복귀 + 카메라 조작 해제",
@@ -1076,6 +1090,7 @@ __all__ = [
     "disable_top_view_mode",
     "enable_top_view_mode",
     "ensure_active_viewport_navigation_enabled",
+    "release_top_view_camera_hold_for_play_stop",
     "get_top_view_preset_snapshot",
     "is_top_view_mode_active",
     "restore_viewport_camera_navigation",
