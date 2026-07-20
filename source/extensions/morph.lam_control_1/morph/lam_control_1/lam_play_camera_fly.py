@@ -606,18 +606,6 @@ def set_viewport_camera_prim_path_on_api(
             return True
         except Exception:
             pass
-    if ctx:
-        try:
-            import omni.kit.commands as cmds  # type: ignore
-
-            cmds.execute(
-                "SetViewportCamera",
-                camera_path=path,
-                usd_context_name=ctx,
-            )
-            return True
-        except Exception:
-            pass
     return False
 
 
@@ -627,46 +615,19 @@ def restore_perspective_on_viewport(
 ) -> bool:
     """지정 viewport 를 Kit 기본 Perspective 로 복귀."""
     ctx = str(usd_context_name or _resolve_usd_context_name() or "").strip()
-    ok = False
-    try:
-        import omni.kit.commands as cmds  # type: ignore
-
-        cmds.execute(
-            "SetViewportCamera",
-            camera_path=_PERSP_CAMERA_PATH,
-            usd_context_name=ctx,
-        )
-        ok = True
-    except Exception:
-        pass
-    if viewport_api is not None:
-        ok = (
-            set_viewport_camera_prim_path_on_api(
-                viewport_api,
-                _PERSP_CAMERA_PATH,
-                usd_context_name=ctx,
-            )
-            or ok
-        )
-    return ok
+    if viewport_api is None:
+        return False
+    return set_viewport_camera_prim_path_on_api(
+        viewport_api,
+        _PERSP_CAMERA_PATH,
+        usd_context_name=ctx,
+    )
 
 
 def switch_to_perspective_viewport(*, restore_navigation: bool = True) -> bool:
     """Kit 기본 Perspective — session OmniverseKit_Persp (USD Camera bind 해제)."""
-    ctx = _resolve_usd_context_name()
     before = _active_camera_path_str()
     ok = False
-    try:
-        import omni.kit.commands as cmds  # type: ignore
-
-        cmds.execute(
-            "SetViewportCamera",
-            camera_path=_PERSP_CAMERA_PATH,
-            usd_context_name=ctx,
-        )
-        ok = True
-    except Exception:
-        pass
     for api in _iter_viewport_apis():
         try:
             api.camera_path = Sdf.Path(_PERSP_CAMERA_PATH)
