@@ -1,0 +1,18 @@
+문서제목	클래스·메소드
+시스템명	EBS 시뮬레이션 프로그램
+패키지(확장)	morph.tbs_control_2
+작성 기준	source/extensions/morph.tbs_control_2/morph/tbs_control_2/
+관련 웹 연동	morph.hyview_messaging (ebs_handler.py, tbs_sim_bridge.py), HTTP Remote UI (kit_web_api_registry.py)
+정리 방식	클래스 1행 · 동일 클래스 메소드는 「메소드 요약」 열에 통합 (A안)
+
+클래스 ID	클래스명	패키지	파일	메소드 요약
+Extension	TBS Control 확장 진입점	morph.tbs_control_2.extension	extension.py	[on_startup] 확장 시작 처리 | 입력: ext_id | 로직: 싱글톤·디스패치·USD Load·제어창·시퀀스 편집기·듀얼 뷰포트·HyView 설정 | 출력: 없음 // [on_shutdown] 확장 종료 처리 | 로직: 시뮬·애니·뷰포트 정리, 싱글톤 해제 | 출력: 없음
+TbsUsdWindow	TBS Master USD 로드 창	morph.tbs_control_2.tbs_usd_window	tbs_usd_window.py	[__init__] USD 로드 창 초기화 | 로직: omni.ui.Window, 리소스 목록·로드 버튼 | 출력: 없음 // [run_master_autoload_now] Master USD 자동 로드 | 로직: sim_control_defaults 경로 → 화면1 로드 | 출력: 없음 // [_on_load_clicked] USD 수동 로드 | 로직: 선택 USD 오픈, EP/포트 visibility 초기화 | 출력: 없음
+(모듈) control_window	EBS 시뮬레이션 제어창	morph.tbs_control_2.control_window	control_window.py	[build_control_window] 제어창 UI 조립 | 로직: 타임라인·XML·시뮬·EBS·듀얼 화면 UI | 출력: 없음 // [on_sim_start_clicked] 시뮬 시작 | 로직: 스냅샷 → 프리런 → worker. 단독/동시 재생 분기 | 출력: 없음 // [on_sim_stop_clicked] 시뮬 정지 | 출력: 없음 // [on_sim_reset_clicked] 초기화 | 출력: 없음 // [on_sim_start_for_screen] 화면별 시작(CASE A/B) | 출력: 없음 // [on_sim_stop_for_screen] 화면별 정지 | 출력: 없음 // [on_sim_ebs_enabled_changed_for_case] EBS on/off | 로직: 포트 visibility·바 그래프 갱신 | 출력: 없음 // [handle_sim_event_for_animation] 이벤트 애니 | 로직: XML → rules/map → SequenceRunner | 출력: 없음
+SimTimelinePlayer	EBS 시뮬 타임라인 재생기	morph.tbs_control_2.control_sim_prerun_playback	control_sim_prerun_playback.py	[play] 타임라인 재생 | 로직: SimPreRunResult 순차 실행, JSON·바 그래프 연동 | 출력: 없음 // [seek_to_index] 타임라인 탐색 | 로직: 시각 점프, 포트·바 상태 복원 | 출력: 없음
+PlaybackEngine	EBS 재생 엔진	morph.tbs_control_2.control_sim_prerun_playback	control_sim_prerun_playback.py	[run] 재생 루프 | 로직: worker에서 타임라인 순회, 중지 이벤트 폴링 | 출력: 없음
+(모듈) control_sim_multi_playback	듀얼 화면 동시 재생	morph.tbs_control_2.control_sim_multi_playback	control_sim_multi_playback.py	[start_multi_screen_playback] 다중 화면 재생 | 로직: 화면1·2 독립 worker·세션, stop/pause 분리 | 출력: 없음
+(모듈) xml_generator	EBS XML 생성·파싱	morph.tbs_control_2.xml_generator	xml_generator.py	[build_xml_string] XML 생성 | 출력: str // [parse_xml_string] XML 역파싱 | 출력: Optional[dict]
+EBSHandler	EBS HyView T2V 핸들러	morph.hyview_messaging.extension_handlers.ebs_handler	ebs_handler.py	[get_event_handlers] 이벤트 맵 | 로직: start/seek/ebs_enable 등 T2V 매핑 | 출력: Dict // [_on_req_start_simulation] 시뮬 시작 | 로직: tbs_sim_bridge 위임 | 출력: V2T // [_on_req_seek_simulation] 탐색 | 출력: V2T // [_on_req_ebs_enable] EBS 토글 | 출력: V2T
+(모듈) tbs_sim_bridge	HyView–Kit EBS 브리지	morph.hyview_messaging.tbs_sim_bridge	tbs_sim_bridge.py	[handle_start_simulation] 웹 시뮬 시작 | 로직: configs → visibility → 프리런 v2 → 재생 | 출력: dispatch // [handle_seek_simulation] 탐색 | 출력: V2T // [handle_ebs_enable] EBS 토글 | 출력: V2T // [handle_eqp_change] 장비/EP 변경 | 출력: V2T // [handle_control_simulation] start/stop/reset | 출력: V2T
+AnimationInstanceRegistry / PlaybackScheduler	애니 등록소·재생 스케줄러	morph.tbs_control_2.tbs_instance_registry / tbs_playback_scheduler	tbs_instance_registry.py / tbs_playback_scheduler.py	[register] 인스턴스 등록 | 출력: 없음 // [begin_master_timeline_mode] 마스터 타임라인 | 출력: bool // [stop_all] 전체 정지 | 출력: 없음
