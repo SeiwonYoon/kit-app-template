@@ -70,10 +70,16 @@ template_name = "kit_base_editor"
 
 "morph.force_ko_locale" = { order = -1000 }
 # "morph.measure_control_1" = {}  # TBS 제어용 morph.tbs_control 사용 시 주석 처리
-# "morph.tbs_control" = {}
-# "morph.tbs_control_1" = {}  # 기능별 모듈 분리 버전 (tbs_control과 동일 동작)
-"morph.lam_control" = {}  # LAM 멀티 USD 독립 타임라인 + LAM 시퀀스 편집기 (REQ-002~006, tbs_control_1 와 코드 분리)
-"morph.lam_web_bridge" = {}  # LAM HTTP 원격 UI (8720) — lam_control 세션 필요
+
+# "morph.tbs_control_2" = {}  # 기능별 모듈 분리 버전 (tbs_control과 동일 동작)
+# "omni.kit.livestream.messaging" = {}
+# "morph.hyview_messaging" = {}  # HyView T2V/V2T livestream ↔ tbs_control_2
+# "morph.lam_control" = {}  # LAM 멀티 USD 독립 타임라인 + LAM 시퀀스 편집기 (REQ-002~006, tbs_control_1 와 코드 분리)
+"morph.lam_control_1" = {}  # LAM 멀티 USD 독립 타임라인 + LAM 시퀀스 편집기 (REQ-002~006, tbs_control_1 와 코드 분리)
+# HyView T2V → LAM Federation 시뮬 (streaming Kit 에서 아래 두 줄 주석 해제)
+"omni.kit.livestream.messaging" = {}
+"sk.hyview_messaging" = {}
+# "morph.lam_web_bridge" = {}  # LAM HTTP 원격 UI (8720) — lam_control 세션 필요
 "omni.kit.language.core" = {}
 "omni.kit.language.korean" = {}
 
@@ -119,6 +125,11 @@ folders.'++' = [  # Search paths for extensions.
 	"${app}/../exts",
 	"${app}/../extscache/"
 ]
+# 로컬 source/extensions 우선 + 확장 리로드 디버그 로그 (저장 시 hot reload 확인용)
+preferLocalVersions = true
+
+[settings.app.extensions]
+debugMode = true
 
 
 [settings.app.viewport.defaults]
