@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -378,6 +379,49 @@ def _process_merged_response(
             set_csv_playback_compact_log(False)
 
 
+_FEDERATION_PERIOD_KEYS = ("mt", "mt_from", "mt_to")
+_DATETIME_PERIOD_FORMATS = (
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d",
+)
+
+
+def _to_federation_period(value: Any) -> str:
+    """Federation API 기간 필드 → ``YYYYMM`` (예: ``202606``).
+
+    ISO 8601(``2026-07-07T15:00:00.000Z``), datetime 문자열, 이미 ``YYYYMM`` 인 값을
+    모두 API 요구 형식으로 맞춘다. 날짜로 해석할 수 없는 값은 그대로 둔다.
+    """
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    if re.fullmatch(r"\d{6}", s):
+        month = int(s[4:6])
+        if 1 <= month <= 12:
+            return s
+    iso_candidate = s[:-1] + "+00:00" if s.endswith("Z") else s
+    try:
+        return datetime.fromisoformat(iso_candidate).strftime("%Y%m")
+    except ValueError:
+        pass
+    for fmt in _DATETIME_PERIOD_FORMATS:
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y%m")
+        except ValueError:
+            continue
+    return s
+
+
+def _normalize_federation_body_periods(body: Dict[str, Any]) -> Dict[str, Any]:
+    """``mt`` / ``mt_from`` / ``mt_to`` 를 Federation API ``YYYYMM`` 형식으로 정규화."""
+    out = dict(body or {})
+    for key in _FEDERATION_PERIOD_KEYS:
+        if key in out:
+            out[key] = _to_federation_period(out[key])
+    return out
+
+
 def _read_federation_defaults() -> Dict[str, Any]:
     try:
         from . import lam_sim_control_defaults as d
@@ -433,14 +477,15 @@ def _process_one_screen(
 ) -> ScreenPipelineResult:
     meta: Dict[str, Any] = {"screen": screen}
     try:
-        eqp_id = str(body.get("eqp_id") or "").strip()
+        api_body = _normalize_federation_body_periods(body)
+        eqp_id = str(api_body.get("eqp_id") or "").strip()
         if not eqp_id:
             return ScreenPipelineResult(
                 screen, False, "eqp_id missing in config body", meta
             )
         merged, fetch_meta = fetch_federation_pages(
             url=url,
-            body=body,
+            body=api_body,
             limit=limit,
             screen=screen,
             bearer_token=bearer_token,
@@ -456,7 +501,7 @@ def _process_one_screen(
             ext,
             lam_window,
             screen,
-            body,
+            api_body,
             merged,
             auto_play=auto_play,
             speed_scale=speed_scale,
