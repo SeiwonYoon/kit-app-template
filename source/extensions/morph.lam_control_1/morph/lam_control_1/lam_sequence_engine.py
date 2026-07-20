@@ -687,8 +687,14 @@ class LamSequenceRunner:
             self._sleep(anchor_delay_sec + 0.05, allow_stop=True)
             self._wait_for(anchor_finish_at_holder["t"])
             join_timeout = motion_extra_timeout + 5.0
+            deadline = time.monotonic() + join_timeout
             for ft in follower_threads:
-                ft.join(timeout=join_timeout)
+                while ft.is_alive():
+                    if self._stop_flag.is_set():
+                        return
+                    if time.monotonic() >= deadline:
+                        break
+                    ft.join(timeout=0.1)
 
         self._wait_for_motion_complete(
             motion_tx,

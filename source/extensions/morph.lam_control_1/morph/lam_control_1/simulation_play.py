@@ -3283,6 +3283,67 @@ def request_stop_csv_playback(
                 print(f"{_PRINT_PREFIX} CSV Play 중지 scheduler 경고: {exc}", flush=True)
 
 
+class _CsvPlayStopRequested(Exception):
+    """재생 중지 요청 — 프리런 등 협조적 취소."""
+
+
+_CSV_PLAY_WORKER_JOIN_SLICE_SEC = 0.1
+
+
+def _join_csv_play_workers(
+    workers: List[threading.Thread],
+    *,
+    screen: Optional[int] = None,
+) -> None:
+    """블록/레인 worker join — stop 시 장시간 대기 없이 play worker 가 빠져나오게."""
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
+    for t in workers:
+        if csv_playback_stop_requested(screen=si):
+            return
+        while t.is_alive():
+            if csv_playback_stop_requested(screen=si):
+                return
+            try:
+                t.join(timeout=_CSV_PLAY_WORKER_JOIN_SLICE_SEC)
+            except Exception:
+                return
+
+
+def stop_and_reap_csv_play_worker(
+    csv_win: Any,
+    *,
+    screen: int,
+    registry: Any = None,
+    scheduler: Any = None,
+    kit_ext: Any = None,
+    timeout: float = 60.0,
+) -> bool:
+    """기존 CSV 재생 worker 중지 요청 후 join. idle 이면 즉시 True."""
+    si = max(1, int(screen))
+    if csv_win is None:
+        return True
+    try:
+        alive_fn = getattr(csv_win, "_csv_play_thread_alive", None)
+        if callable(alive_fn) and not alive_fn():
+            return True
+    except Exception:
+        pass
+    t = getattr(csv_win, "_csv_play_thread", None)
+    if t is None or not t.is_alive():
+        return True
+    reg = registry if registry is not None else getattr(csv_win, "_registry", None)
+    sch = scheduler if scheduler is not None else getattr(csv_win, "_scheduler", None)
+    request_stop_csv_playback(reg, sch, screen=si, kit_ext=kit_ext)
+    reap_fn = getattr(csv_win, "_reap_csv_play_thread", None)
+    if callable(reap_fn):
+        return bool(reap_fn(timeout=float(timeout)))
+    try:
+        t.join(timeout=max(0.05, float(timeout)))
+    except Exception:
+        pass
+    return not t.is_alive()
+
+
 def _sleep_csv_playback(sec: float, *, screen: Optional[int] = None) -> bool:
     """최대 ``sec`` 초 대기. ``False`` = 중지 요청으로 조기 종료."""
     if csv_playback_stop_requested(screen=screen):
@@ -3866,13 +3927,9 @@ def _run_csv_timed_playback_process_only(
             if csv_playback_stop_requested(screen=si):
                 stopped = True
             t.start()
-        for t in workers:
-            if csv_playback_stop_requested(screen=si):
-                stopped = True
-            try:
-                t.join()
-            except Exception:
-                pass
+        _join_csv_play_workers(workers, screen=si)
+        if csv_playback_stop_requested(screen=si):
+            stopped = True
         _csv_play_progress_mark_json_done(n_json_all)
         _notify_csv_play_progress_ui()
     finally:
@@ -4575,13 +4632,9 @@ def run_csv_timed_playback(
             workers.append(t)
             t.start()
 
-        for t in workers:
-            if csv_playback_stop_requested(screen=si):
-                stopped = True
-            try:
-                t.join()
-            except Exception:
-                pass
+        _join_csv_play_workers(workers, screen=si)
+        if csv_playback_stop_requested(screen=si):
+            stopped = True
     finally:
         sess.progress_stop.set()
         csv_play_screen_session(si).material_test_stop.set()
@@ -7178,10 +7231,11 @@ class LamSimulationCsvPlayWindow:
         )
 
         def _worker() -> None:
+            reset_done = False
             with csv_play_screen_binding(self._screen):
                 try:
                     # 기존 재생이 완전히 끝난 뒤 초기화한다. 재생 write와 reset 경합 방지.
-                    if not self._reap_csv_play_thread(timeout=45.0):
+                    if not self._reap_csv_play_thread(timeout=60.0):
                         raise RuntimeError("기존 CSV 재생 worker 종료 시간 초과")
                     kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
                     cn = None
@@ -7250,12 +7304,14 @@ class LamSimulationCsvPlayWindow:
                     self._log(
                         "정지(초기화) 완료 — 위치(TBS)·visibility 복원 (콘솔 [LAM/Sim] 확인)"
                     )
+                    reset_done = True
                 except Exception as exc:
                     err = f"정지(초기화) 오류: {exc}"
                     print(f"{_PRINT_PREFIX} {err}", flush=True)
                     self._log(err)
                 finally:
-                    clear_csv_playback_stop(screen=self._screen)
+                    if reset_done:
+                        clear_csv_playback_stop(screen=self._screen)
                     if callable(on_complete):
                         try:
                             _post_kit_main_thread(on_complete)
@@ -7423,12 +7479,16 @@ class LamSimulationCsvPlayWindow:
                         ticker = self._build_ui_ticker
 
                         def _on_tick(done: int, total: int) -> None:
+                            if csv_playback_stop_requested(screen=self._screen):
+                                raise _CsvPlayStopRequested()
                             if ticker is not None:
                                 ticker.set_done(done)
 
                         set_csv_playback_compact_log(True)
                         t_build0 = time.perf_counter()
                         try:
+                            if csv_playback_stop_requested(screen=self._screen):
+                                return
                             dwells = load_csv_dwell_timeline(path)
                             total_est = _estimate_csv_build_units(dwells)
                             if ticker is not None:
@@ -7453,6 +7513,8 @@ class LamSimulationCsvPlayWindow:
                                 flush=True,
                             )
                             self._post_apply_cached_timeline_ui(prepared, wait=True)
+                        except _CsvPlayStopRequested:
+                            return
                         finally:
                             if ticker is not None:
                                 ticker.stop()
@@ -7720,6 +7782,7 @@ __all__ = [
     "CsvPlayPauseCheckpoint",
     "request_stop_csv_playback",
     "request_pause_csv_playback",
+    "stop_and_reap_csv_play_worker",
     "clear_csv_play_pause_checkpoint",
     "get_csv_play_pause_checkpoint",
     "csv_play_pause_armed",

@@ -26,7 +26,11 @@ from .lam_csv_prerun_playback import (
 )
 from .lam_federation_client import fetch_federation_pages
 from .lam_screen_visibility import request_screen_visibility
-from .simulation_play import build_and_cache_from_dwells, run_simulation_from_csv
+from .simulation_play import (
+    build_and_cache_from_dwells,
+    run_simulation_from_csv,
+    stop_and_reap_csv_play_worker,
+)
 
 _PRINT_PREFIX = "[LAM/federation-pipe]"
 
@@ -176,6 +180,15 @@ def _start_federation_playback(
             pass
     if registry is None or scheduler is None:
         return f"registry/scheduler missing for screen {si}"
+    if not stop_and_reap_csv_play_worker(
+        csv_win,
+        screen=si,
+        registry=registry,
+        scheduler=scheduler,
+        kit_ext=ext,
+        timeout=60.0,
+    ):
+        return f"screen{si} previous play worker stop timeout"
     process_only = False
     if csv_win is not None:
         try:
@@ -602,6 +615,16 @@ def run_federation_start_simulation(
             jobs.append((2, bodies[1]))
         if not jobs:
             return _err("both configs are empty — nothing to simulate")
+
+        for screen, _body in jobs:
+            csv_win = _resolve_csv_play_window(lam_window, screen)
+            if not stop_and_reap_csv_play_worker(
+                csv_win,
+                screen=screen,
+                kit_ext=ext,
+                timeout=60.0,
+            ):
+                return _err(f"screen{screen}: existing play worker stop timeout")
 
         results: List[ScreenPipelineResult] = []
         with ThreadPoolExecutor(max_workers=min(2, len(jobs))) as pool:
