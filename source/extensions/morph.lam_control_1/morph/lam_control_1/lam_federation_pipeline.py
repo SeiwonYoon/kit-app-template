@@ -145,8 +145,11 @@ def _start_federation_playback(
     """타임라인 반영 후 CSV Play 와 같은 preflight → 재생 경로."""
     from .lam_csv_play_screen import csv_play_screen_binding
     from .simulation_play import (
+        clear_csv_play_pause_checkpoint,
         clear_csv_play_timeline_highlight,
         clear_csv_playback_stop,
+        csv_play_pause_armed,
+        csv_playback_stop_requested,
         get_csv_play_live_speed_scale,
         set_csv_play_live_speed_ui_reader,
         set_csv_play_progress_ui_callback,
@@ -216,10 +219,34 @@ def _start_federation_playback(
         keys = frozenset(active_keys)
         schedule_on_main_thread(lambda k=keys: hl(k))
 
+    def _resolve_play_registry_scheduler() -> Tuple[Any, Any]:
+        """worker 진입 시점 registry — CSV Play [재생] 과 동일하게 csv_win 기준."""
+        play_reg, play_sch = registry, scheduler
+        if csv_win is not None:
+            try:
+                csv_win._refresh_play_runtime()
+            except Exception:
+                pass
+            if getattr(csv_win, "_registry", None) is not None:
+                play_reg = csv_win._registry
+            if getattr(csv_win, "_scheduler", None) is not None:
+                play_sch = csv_win._scheduler
+        return play_reg, play_sch
+
     def _play() -> None:
         with csv_play_screen_binding(si):
             try:
+                # Kit Play worker 와 동일 — 이전 pause/stop 잔여 상태 제거
+                clear_csv_play_pause_checkpoint(screen=si)
                 clear_csv_playback_stop(screen=si)
+                play_reg, play_sch = _resolve_play_registry_scheduler()
+                if play_reg is None or play_sch is None:
+                    print(
+                        f"{_PRINT_PREFIX} screen{si} play aborted — "
+                        "registry/scheduler missing",
+                        flush=True,
+                    )
+                    return
                 if csv_win is not None:
                     set_csv_play_live_speed_ui_reader(
                         lambda: get_csv_play_live_speed_scale(screen=si),
@@ -242,8 +269,8 @@ def _start_federation_playback(
                 except Exception:
                     pass
                 run_simulation_from_csv(
-                    registry,
-                    scheduler,
+                    play_reg,
+                    play_sch,
                     prepared=cached,
                     speed_scale=play_speed,
                     process_only=process_only,
@@ -266,10 +293,16 @@ def _start_federation_playback(
                 set_csv_play_progress_ui_callback(None, screen=si)
                 set_csv_play_timeline_highlight_callback(None, screen=si)
                 clear_csv_play_timeline_highlight(screen=si)
+                # 일시정지·공정만보기 전환: switch worker 가 join 후 해제 (Kit Play 와 동일)
                 if csv_win is not None and getattr(
                     csv_win, "_csv_play_thread", None
                 ) is threading.current_thread():
-                    csv_win._csv_play_thread = None
+                    if csv_playback_stop_requested(screen=si) and csv_play_pause_armed(
+                        screen=si
+                    ):
+                        pass
+                    else:
+                        csv_win._csv_play_thread = None
 
     play_thread = threading.Thread(
         target=_play,

@@ -6547,13 +6547,25 @@ class LamSimulationCsvPlayWindow:
             self._log("공정만보기 실시간 전환 실패 — 현재 재생 캐시 없음")
             return
 
+        # 일시정지와 동일 — 전환 직전 runtime 재조회 (Federation/API 재생 포함)
+        try:
+            self._refresh_play_runtime()
+        except Exception:
+            pass
+
         # 메인 스레드에서 UI/참조만 스냅샷 — 워커에서 omni.ui 모델 읽지 않음
         si = int(self._screen)
         path = str(cached.path)
         speed_now = float(self._read_speed_scale())
         registry = self._registry
         scheduler = self._scheduler
+        if registry is None or scheduler is None:
+            self._log(
+                f"공정만보기 실시간 전환 실패 — 화면{si} registry/scheduler 없음"
+            )
+            return
         kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
+        play_thread_ref = self._csv_play_thread
         self._process_only_switch_pending = True
         self._log(
             f"공정만보기 {'ON' if desired else 'OFF'} 실시간 전환 중…"
@@ -6562,6 +6574,12 @@ class LamSimulationCsvPlayWindow:
         def _switch_worker() -> None:
             try:
                 with csv_play_screen_binding(si):
+                    try:
+                        self._refresh_play_runtime()
+                    except Exception:
+                        pass
+                    pause_reg = self._registry or registry
+                    pause_sch = self._scheduler or scheduler
                     target0 = bool(self._process_only_switch_target)
                     sp = 1.0 if target0 else speed_now
                     ck = save_csv_play_pause_checkpoint(
@@ -6571,8 +6589,8 @@ class LamSimulationCsvPlayWindow:
                         screen=si,
                     )
                     request_pause_csv_playback(
-                        registry,
-                        scheduler,
+                        pause_reg,
+                        pause_sch,
                         screen=si,
                         kit_ext=kit_ext,
                     )
@@ -6581,7 +6599,17 @@ class LamSimulationCsvPlayWindow:
                         f"CSV t≈{ck.resume_csv_sec:.1f}s"
                     )
                     _post_kit_main_thread(lambda m=msg: self._log(m))
-                    if not self._reap_csv_play_thread(timeout=45.0):
+                    reaped = self._reap_csv_play_thread(timeout=45.0)
+                    if not reaped and play_thread_ref is not None:
+                        try:
+                            play_thread_ref.join(timeout=45.0)
+                        except Exception:
+                            pass
+                        if not play_thread_ref.is_alive():
+                            if self._csv_play_thread is play_thread_ref:
+                                self._csv_play_thread = None
+                            reaped = True
+                    if not reaped:
                         raise RuntimeError("기존 재생 worker 종료 시간 초과")
                     target = bool(self._process_only_switch_target)
                     resume_ck = CsvPlayPauseCheckpoint(
@@ -6617,6 +6645,11 @@ class LamSimulationCsvPlayWindow:
             self._refresh_play_runtime()
         except Exception:
             pass
+        if self._registry is None or self._scheduler is None:
+            self._log(
+                f"공정만보기 전환 재개 실패 — 화면{si} registry/scheduler 없음"
+            )
+            return
         self._prepared_playback = cached
         kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
         clear_csv_playback_stop(screen=si)
