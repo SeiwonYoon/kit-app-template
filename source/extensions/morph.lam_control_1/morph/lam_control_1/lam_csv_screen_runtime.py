@@ -445,35 +445,53 @@ def apply_prim_hide_for_screen(
 
 
 def restore_play_stop_perspective_for_screen(runtime: CsvScreenRuntime) -> None:
-    """시뮬 정지 후 Perspective·줌 복귀 — 화면1·2 동일 규칙, 타일만 분리."""
-    if runtime.screen <= 1:
-        from .lam_play_camera_fly import restore_perspective_after_play_camera_mode
+    """시뮬 정지 후 Perspective·줌 복귀 — 화면 번호와 무관하게 동일 경로.
 
-        restore_perspective_after_play_camera_mode()
-        return
+    차이는 ``viewport_api`` / ``context_name`` 뿐.
+    """
+    si = int(runtime.screen)
     vp_api = runtime.viewport_api
     ctx = str(runtime.context_name or "").strip()
-    if vp_api is None:
-        return
-    from .lam_play_camera_fly import (
-        clear_pre_top_view_hold_for_viewport,
-        restore_perspective_after_play_stop_for_viewport,
-    )
+    if vp_api is None and si <= 1:
+        try:
+            from .lam_play_camera_fly import _get_active_viewport_api
 
-    clear_pre_top_view_hold_for_viewport(vp_api, ctx)
+            vp_api = _get_active_viewport_api()
+        except Exception:
+            vp_api = None
+    # 탑뷰를 실제로 켠 화면만 OFF (전역 force 금지)
+    if si > 1 and _applied_top_view_by_screen.get(si):
+        try:
+            apply_top_view_for_screen(runtime, enabled=False, force=True)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} screen{si} top view OFF on stop: {exc}",
+                flush=True,
+            )
+    elif vp_api is not None:
+        from .lam_play_camera_fly import clear_pre_top_view_hold_for_viewport
+
+        clear_pre_top_view_hold_for_viewport(vp_api, ctx)
+    from .lam_play_camera_fly import restore_perspective_after_play_stop_for_viewport
+
     restore_perspective_after_play_stop_for_viewport(vp_api, ctx)
 
 
 def schedule_play_stop_perspective_restore_for_screen(runtime: CsvScreenRuntime) -> None:
-    """정지 클릭 직후 race 대비 — 화면별 Perspective 복귀 예약."""
-    if runtime.screen <= 1:
+    """정지 클릭 직후 race 대비 — 화면 공통 schedule (viewport/context 만 다름)."""
+    vp_api = runtime.viewport_api
+    ctx = str(runtime.context_name or "").strip()
+    if vp_api is None and int(runtime.screen) <= 1:
+        try:
+            from .lam_play_camera_fly import _get_active_viewport_api
+
+            vp_api = _get_active_viewport_api()
+        except Exception:
+            vp_api = None
+    if vp_api is None:
         from .lam_play_camera_fly import schedule_restore_perspective_after_play_stop
 
         schedule_restore_perspective_after_play_stop(delay_frames=0)
-        return
-    vp_api = runtime.viewport_api
-    ctx = str(runtime.context_name or "").strip()
-    if vp_api is None:
         return
     from .lam_play_camera_fly import (
         schedule_restore_perspective_after_play_stop_for_viewport,
@@ -579,28 +597,24 @@ def apply_top_view_for_screen(
                 flush=True,
             )
         return ok
-    # OFF — 탑뷰 ON 직전(재생 중) 시점 복귀. 저장 없으면 화면1 과 동일 폴백.
-    if prev:
-        from .lam_play_camera_fly import (
-            restore_view_after_top_view_for_viewport,
-            top_view_use_preset_coords,
-        )
-        from .lam_play_camera_fly import (
-            ensure_session_perspective_camera as _ensure_session_persp,
-        )
-        from .lam_play_camera_fly import (
-            restore_kit_default_perspective as _restore_kit_persp,
-        )
+    # OFF — 탑뷰 ON 직전(재생 중) 시점 복귀. 저장 없으면 해당 타일 Persp 만 복귀.
+    # PLAY/TOP 공용 /Camera 잔상 제거: 항상 Persp 로 이탈.
+    from .lam_play_camera_fly import (
+        restore_perspective_on_viewport,
+        restore_view_after_top_view_for_viewport,
+    )
 
+    if prev:
         restored = restore_view_after_top_view_for_viewport(vp_api, ctx)
         if not restored:
-            if not top_view_use_preset_coords():
-                _restore_kit_persp(log_label="top_view_off_screen2")
-            else:
-                _ensure_session_persp(
-                    log_label="top_view_off_screen2",
-                    restore_navigation=False,
-                )
+            restore_perspective_on_viewport(vp_api, ctx)
+            print(
+                f"{_PRINT_PREFIX} screen{runtime.screen} top view OFF "
+                f"— hold 없음, 타일 Persp 복귀 ctx={ctx!r}",
+                flush=True,
+            )
+    else:
+        restore_perspective_on_viewport(vp_api, ctx)
     set_viewport_top_view_navigation_locked(vp_api, False)
     _applied_top_view_by_screen[si] = False
     try:
@@ -864,12 +878,10 @@ def sync_csv_screen_overlays(lam_window: Any, screen: int) -> None:
 
 
 def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
-    """Play worker — 화면2+ preflight (화면1 과 동일 타임라인·화면별 context)."""
+    """Play worker preflight — 화면1·2 공통 (viewport/context/settings 만 다름)."""
     from .simulation_play import csv_playback_stop_requested
 
-    si = runtime.screen
-    if si <= 1:
-        return True
+    si = max(1, int(runtime.screen))
     if csv_playback_stop_requested(screen=si):
         return False
     settings = capture_csv_overlay_settings(runtime.csv_window)
@@ -884,17 +896,19 @@ def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
         except Exception:
             pass
         return True
-    if runtime.context_name is None or runtime.stage is None:
+    # 화면2+ 는 ctx/stage 필수. 화면1 은 default context 허용.
+    if si > 1 and (runtime.context_name is None or runtime.stage is None):
         print(
             f"{_PRINT_PREFIX} screen{si} preflight skip — "
-            f"ctx/stage 미준비 ctx={runtime.context_name!r} stage={runtime.stage is not None}",
+            f"ctx/stage 미준비 ctx={runtime.context_name!r} "
+            f"stage={runtime.stage is not None}",
             flush=True,
         )
         return False
     try:
-        from .lam_play_start_sequence import run_aux_screen_play_start_preflight
+        from .lam_play_start_sequence import run_screen_play_start_preflight
 
-        ok = run_aux_screen_play_start_preflight(runtime, settings)
+        ok = run_screen_play_start_preflight(runtime, settings)
     except Exception as exc:
         print(f"{_PRINT_PREFIX} screen{si} play preflight: {exc}", flush=True)
         return False

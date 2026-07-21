@@ -346,6 +346,7 @@ class LamCsvViewportControlsHud:
                                                         model=po_m,
                                                         width=20,
                                                         height=_CHECKBOX_ROW_HEIGHT,
+                                                        clicked_fn=lambda: self._csv._on_process_only_checkbox_clicked(),
                                                         tooltip=(
                                                             "재생 중에도 즉시 전환: CSV 시각 유지, "
                                                             "JSON 없는 빈 대기만 생략(배속 1x). "

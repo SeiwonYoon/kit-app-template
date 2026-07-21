@@ -375,7 +375,10 @@ def _on_update(e) -> None:
             frame_dt = dt
             if get_csv_play_anim_dt_scale is not None:
                 frame_dt = dt * float(
-                    get_csv_play_anim_dt_scale(float(state.get("speed_ref", 1.0) or 1.0))
+                    get_csv_play_anim_dt_scale(
+                        float(state.get("speed_ref", 1.0) or 1.0),
+                        usd_context_name=ctx_nm,
+                    )
                 )
             segments = state["segments"]
             idx = state["segment_index"]

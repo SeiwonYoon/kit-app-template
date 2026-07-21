@@ -180,46 +180,10 @@ def _run_play_start_preflight_timeline(
     return True
 
 
-def run_play_start_preflight(*, resume_from_pause: bool) -> bool:
-    """Play worker — CSV 재생 직전까지 타임라인 대기 (일시정지 이어서는 생략).
-
-    ``False`` = 일시정지·정지로 preflight 중단(CSV 재생 생략).
-    """
-    if resume_from_pause:
-        return True
-
-    from .lam_play_camera_fly import (  # type: ignore
-        kickoff_play_camera_fly,
-        planned_camera_fly_duration_sec,
-    )
-    from .lam_play_prim_hide import (  # type: ignore
-        kickoff_play_prim_hide_play_start,
-        planned_play_prim_hide_duration_sec,
-    )
-    from .lam_csv_screen_runtime import sync_play_prim_hide_checkbox_after_play_start
-
-    def _kickoff_prim_hide(done: threading.Event) -> bool:
-        return kickoff_play_prim_hide_play_start(
-            done,
-            on_hide_complete=lambda: sync_play_prim_hide_checkbox_after_play_start(
-                screen=1,
-            ),
-        )
-
-    return _run_play_start_preflight_timeline(
-        stop_requested=_playback_stop_requested,
-        kickoff_camera=kickoff_play_camera_fly,
-        planned_camera_sec=planned_camera_fly_duration_sec,
-        kickoff_prim_hide=_kickoff_prim_hide,
-        planned_prim_hide_sec=planned_play_prim_hide_duration_sec,
-    )
-
-
-def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
-    """화면2+ Play preflight — 화면1 과 동일 타임라인, context·체크박스만 화면별."""
+def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
+    """Play preflight — 화면1·2 공통 단일 경로 (viewport/context/settings 만 다름)."""
     from .lam_csv_screen_runtime import (
         apply_top_view_for_screen,
-        bind_viewport_camera_for_screen,
         sync_play_prim_hide_checkbox_after_play_start,
     )
     from .lam_play_camera_fly import (
@@ -232,10 +196,17 @@ def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
     )
     from .simulation_play import csv_playback_stop_requested
 
-    si = max(2, int(getattr(runtime, "screen", 2) or 2))
+    si = max(1, int(getattr(runtime, "screen", 1) or 1))
     ctx = str(getattr(runtime, "context_name", None) or "").strip()
-    need_cam = bool(settings.get("play_camera_fly"))
+    need_cam = bool(settings.get("play_camera_fly", True))
     vp_api = getattr(runtime, "viewport_api", None)
+    if vp_api is None and si <= 1:
+        try:
+            from .lam_play_camera_fly import _get_active_viewport_api
+
+            vp_api = _get_active_viewport_api()
+        except Exception:
+            vp_api = None
 
     def _stop() -> bool:
         return bool(csv_playback_stop_requested(screen=si))
@@ -258,10 +229,9 @@ def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
             usd_context_name=ctx,
         )
         if not started:
-            bind_ok = bind_viewport_camera_for_screen(runtime, "play_camera")
             print(
                 f"{_PRINT_PREFIX} screen{si} play camera fly kickoff 실패 "
-                f"— bind fallback ok={bind_ok}",
+                f"— bind fallback 생략 (fly 없이 snap 하지 않음)",
                 flush=True,
             )
         return bool(started)
@@ -269,7 +239,7 @@ def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
     def _kickoff_prim_hide(done: threading.Event) -> bool:
         return kickoff_play_prim_hide_play_start(
             done,
-            usd_context_name=ctx,
+            usd_context_name=ctx or None,
             on_hide_complete=lambda: sync_play_prim_hide_checkbox_after_play_start(
                 screen=si,
                 csv_window=getattr(runtime, "csv_window", None),
@@ -291,7 +261,48 @@ def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
     )
 
 
+def run_play_start_preflight(*, resume_from_pause: bool) -> bool:
+    """화면1 호환 wrapper — runtime 을 만들어 공통 경로로 위임."""
+    if resume_from_pause:
+        return True
+    settings = {
+        "play_camera_fly": True,
+        "top_view": False,
+        "play_prim_hide": True,
+    }
+    try:
+        from .lam_viewport_overlay_state import (
+            get_toggle_play_camera_fly,
+            get_toggle_top_view,
+        )
+
+        settings["play_camera_fly"] = bool(get_toggle_play_camera_fly())
+        settings["top_view"] = bool(get_toggle_top_view())
+    except Exception:
+        pass
+
+    class _Rt:
+        screen = 1
+        context_name = ""
+        viewport_api = None
+        csv_window = None
+
+    try:
+        from .lam_play_camera_fly import _get_active_viewport_api
+
+        _Rt.viewport_api = _get_active_viewport_api()
+    except Exception:
+        pass
+    return run_screen_play_start_preflight(_Rt(), settings)
+
+
+def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
+    """화면2+ 호환 alias — 공통 ``run_screen_play_start_preflight``."""
+    return run_screen_play_start_preflight(runtime, settings)
+
+
 __all__ = [
     "run_aux_screen_play_start_preflight",
     "run_play_start_preflight",
+    "run_screen_play_start_preflight",
 ]

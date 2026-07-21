@@ -191,8 +191,12 @@ def stop_csv_play_motion_for_screen(
             _ltx.stop_translate_animations_for_context(cn)
             _lrx.stop_rotate_animations_for_context(cn)
         elif si <= 1:
-            _ltx.stop_all_translate_animations()
-            _lrx.stop_all_rotate_animations()
+            # default USD context (화면1) — stop_all 금지, dual-play 시 화면2 애니 유지
+            _ltx.stop_translate_animations_for_context(None)
+            _lrx.stop_rotate_animations_for_context(None)
+        else:
+            # split context 미해결 — 다른 화면 건드리지 않음
+            pass
     except Exception as exc:
         print(f"{_PRINT_PREFIX} stop motion screen={si}: {exc}", flush=True)
     if lam_window is not None:

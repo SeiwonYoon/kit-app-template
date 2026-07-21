@@ -431,7 +431,7 @@ def _reset_tbs_offset_ops_for_paths(
 
 # --------------------------------------------------------------------- runner
 
-def _playback_speed_scale(fallback: float) -> float:
+def _playback_speed_scale(fallback: float, *, play_screen: Optional[int] = None) -> float:
     """CSV Play 중이면 UI 라이브 배속, 아니면 ``fallback``."""
     try:
         from .simulation_play import (
@@ -440,9 +440,10 @@ def _playback_speed_scale(fallback: float) -> float:
             sync_csv_play_live_speed_from_ui,
         )
 
-        if csv_play_session_active():
-            sync_csv_play_live_speed_from_ui()
-            return get_csv_play_live_speed_scale()
+        si = max(1, int(play_screen or 1))
+        if csv_play_session_active(screen=si):
+            sync_csv_play_live_speed_from_ui(screen=si)
+            return get_csv_play_live_speed_scale(screen=si)
     except Exception:
         pass
     return float(max(0.01, fallback or 1.0))
@@ -452,12 +453,13 @@ def _csv_play_nominal_sleep(runner: "LamSequenceRunner", wall_sec: float, *, all
     """CSV Play: wall 대기를 JSON 시간 기준으로 환산해 배속 변경에 따라 가변 대기."""
     if wall_sec <= 1e-9:
         return
-    sp0 = _playback_speed_scale(1.0)
+    ps = int(getattr(runner, "_play_screen", 1) or 1)
+    sp0 = _playback_speed_scale(1.0, play_screen=ps)
     nominal_remaining = float(wall_sec) * sp0
     while nominal_remaining > 1e-6:
         if allow_stop and runner._stop_flag.is_set():
             return
-        sp = _playback_speed_scale(sp0)
+        sp = _playback_speed_scale(sp0, play_screen=ps)
         wall_chunk = min(0.05, nominal_remaining / sp)
         time.sleep(wall_chunk)
         nominal_remaining -= wall_chunk * sp
@@ -1503,6 +1505,7 @@ class LamSequenceRunner:
     # ------------------------------------------------------------ wait/sleep
 
     def _wait_for(self, target_monotonic: float) -> None:
+        ps = int(getattr(self, "_play_screen", 1) or 1)
         while not self._stop_flag.is_set():
             now = time.monotonic()
             if now >= target_monotonic:
@@ -1510,7 +1513,7 @@ class LamSequenceRunner:
             try:
                 from .simulation_play import csv_play_session_active
 
-                if csv_play_session_active():
+                if csv_play_session_active(screen=ps):
                     _csv_play_nominal_sleep(
                         self,
                         target_monotonic - now,
@@ -1525,10 +1528,11 @@ class LamSequenceRunner:
     def _sleep(self, sec: float, *, allow_stop: bool = True) -> None:
         if sec <= 0:
             return
+        ps = int(getattr(self, "_play_screen", 1) or 1)
         try:
             from .simulation_play import csv_play_session_active
 
-            if csv_play_session_active():
+            if csv_play_session_active(screen=ps):
                 _csv_play_nominal_sleep(self, sec, allow_stop=allow_stop)
                 return
         except Exception:

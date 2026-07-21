@@ -20,6 +20,21 @@ def current_csv_play_screen() -> int:
     return max(1, int(_csv_play_screen_ctx.get()))
 
 
+def csv_play_screen_for_usd_context(usd_context_name: Optional[str]) -> int:
+    """애니메이션 USD context → CSV Play 화면 번호 (default/빈 context = 1)."""
+    cn = str(usd_context_name or "").strip()
+    if not cn:
+        return 1
+    prefix = "morph_lam_split_aux_"
+    if cn.startswith(prefix):
+        try:
+            tile_index = int(cn[len(prefix) :])
+            return max(2, tile_index + 1)
+        except ValueError:
+            pass
+    return 1
+
+
 @dataclass
 class CsvPlayScreenSession:
     """화면 1개분 CSV Play 런타임 상태 (stop·pause·진행·타임라인 강조)."""
@@ -65,6 +80,11 @@ class CsvPlayScreenSession:
     global_csv_end: float = 0.0
     # Play 진행률 ticker 중지 — 화면별로 분리 (전역이면 화면1 stop 이 화면2 ticker 도 끊음)
     progress_stop: threading.Event = field(default_factory=threading.Event)
+    # begin/end timekeeping 경합 방지 — 구 play finally 가 신 play session_active 를 끄지 않게
+    play_epoch: int = 0
+    # 블록/레인 JSON worker — 공정만보기 전환·정지 시 메인 스레드 외 잔존 join 용
+    child_workers_lock: threading.Lock = field(default_factory=threading.Lock)
+    child_workers: List[threading.Thread] = field(default_factory=list)
 
 
 def csv_play_screen_session(screen: Optional[int] = None) -> CsvPlayScreenSession:
@@ -283,6 +303,7 @@ __all__ = [
     "CsvPlayScreenSession",
     "csv_play_screen_binding",
     "csv_play_screen_session",
+    "csv_play_screen_for_usd_context",
     "current_csv_play_screen",
     "get_registry_scheduler_for_lam_screen",
     "get_stage_for_screen",
