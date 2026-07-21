@@ -37,7 +37,7 @@ from .lam_csv_viewport_hud import (
     LamCsvViewportControlsHud,
     viewport_csv_panel_enabled,
 )
-from .lam_viewport_status_panel import LamViewportStatusPanel
+from .lam_viewport_status_panel import LamStatusPanelWebNotifier, LamViewportStatusPanel
 from .lam_viewport_foup_status_3d import LamFoupStatus3dPanel
 from .lam_viewport_device_labels_3d import LamViewportDeviceLabels3d
 from .lam_viewport_overlay_state import (
@@ -120,6 +120,7 @@ class LamWindow:
         self._csv_viewport_hud: Optional[LamCsvViewportControlsHud] = None
         self._wafer_foup_labels: Optional[LamWaferFoupViewportLabels] = None
         self._status_panel: Optional[LamViewportStatusPanel] = None
+        self._status_panel_web_notifier: Optional[LamStatusPanelWebNotifier] = None
         self._foup_status_3d: Optional[LamFoupStatus3dPanel] = None
         self._foup_status_3d_by_screen: Dict[int, LamFoupStatus3dPanel] = {}
         self._device_labels_3d: Optional[LamViewportDeviceLabels3d] = None
@@ -639,6 +640,14 @@ class LamWindow:
                     pass
             self._status_panel = None
 
+        # STATUS 패널 UI 플래그와 무관 — 내용 변경 시 웹 V2T_notify_status_panel
+        if csv_win is not None:
+            if self._status_panel_web_notifier is None:
+                self._status_panel_web_notifier = LamStatusPanelWebNotifier(csv_win)
+            else:
+                self._status_panel_web_notifier.set_csv_window(csv_win)
+            self._status_panel_web_notifier.start()
+
         # FOUP 3D 상태 패널 (토글 ON일 때만 표시; 패널 스스로 토글을 확인)
         if self._foup_status_3d is None:
             self._foup_status_3d = LamFoupStatus3dPanel(
@@ -745,6 +754,12 @@ class LamWindow:
         except Exception:
             pass
         self._status_panel = None
+        try:
+            if self._status_panel_web_notifier is not None:
+                self._status_panel_web_notifier.destroy()
+        except Exception:
+            pass
+        self._status_panel_web_notifier = None
         try:
             if self._foup_status_3d is not None:
                 self._foup_status_3d.destroy()

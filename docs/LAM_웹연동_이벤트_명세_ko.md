@@ -1,7 +1,8 @@
 # LAM 장비시뮬레이션 가시화(lam_control_1) 웹 연동 이벤트 명세
 
 `lam_control_1` 확장은 HyView livestream 메시징(T2V/V2T)을 통해 웹과 통신한다.
-웹 → Kit 요청은 `T2V_*`, Kit → 웹 응답은 `V2T_*` 이벤트로 주고받는다.
+웹 → Kit 요청은 `T2V_*`, Kit → 웹 응답·통지는 `V2T_*` 이벤트로 주고받는다.
+요청 없이 Kit이 보내는 통지(예: STATUS 패널)도 `V2T_*`이며, envelope는 응답과 동일하게 `{code, message, data}` 형식을 쓴다.
 
 ## 구성 요소
 
@@ -144,9 +145,61 @@
 
 ---
 
+## 4. STATUS 패널 통지 (Kit → 웹, 요청 없음)
+
+재생 진행에 따라 Viewport STATUS 패널과 **동일한 해석 규칙**으로 만든 스냅샷을,
+내용이 **바뀔 때만** Kit이 웹으로 푸시한다.
+
+- T2V 요청 없음 (단방향 통지)
+- Viewport STATUS 패널 UI 표시 플래그(`SHOW_VIEWPORT_STATUS_PANEL`)와 **무관**하게 전송
+- 웹이 수신 데이터를 쓸지는 웹 측 정책
+
+### 통지 — `V2T_notify_status_panel`
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "title": "STATUS",
+    "rows": [
+      { "key": "eq_model", "name": "EQ MODEL", "value": "KIYO_FXE" },
+      { "key": "eqp_id", "name": "EQP ID", "value": "EQP01" },
+      { "key": "cassette_slot", "name": "wafer 번호", "value": "17" },
+      {
+        "key": "time",
+        "name": "Time",
+        "value": "재생 0.9% | t 15.1/1773.7s | 실경과 16s/1774s"
+      },
+      {
+        "key": "state",
+        "name": "Current State",
+        "value": "웨이퍼#17 · TASJR91 · atm_foup1_pick"
+      }
+    ]
+  }
+}
+```
+
+| `data` 키 | 의미 |
+|---|---|
+| `title` | 패널 제목 (`STATUS_PANEL_TITLE`) |
+| `rows` | `STATUS_PANEL_ROWS` 순서의 행 배열 |
+| `rows[].key` | 행 식별자 (예: `eq_model`, `time`, `state`) |
+| `rows[].name` | 표시 라벨 (예: `EQ MODEL`, `Time`) |
+| `rows[].value` | **해석된** 최종 문자열 (템플릿 `{eqp_id}` 등이 아닌 실제 값) |
+
+### 동작
+
+1. 화면1 CSV 재생 세션 기준으로 STATUS와 동일 토큰 규칙으로 스냅샷 생성
+2. 약 0.2초 주기로 내용 fingerprint 비교 → **변경 시에만** `V2T_notify_status_panel` dispatch
+3. 이벤트는 `LamHandler.get_outgoing_events`에 등록되어 livestream messaging으로 웹에 전달된다
+
+---
+
 ## 이벤트 요약
 
-| 방향 | 이벤트명 | payload 핵심 키 | 응답 data |
+| 방향 | 이벤트명 | payload 핵심 키 | 응답/data |
 |---|---|---|---|
 | T2V → | `T2V_request_start_simulation` | `configs[]` | — |
 | → V2T | `V2T_response_start_simulation` | — | `results[2]` (미확정, 빈 2칸) |
@@ -154,6 +207,7 @@
 | → V2T | `V2T_response_stop_simulation` | — | `case` |
 | T2V → | `T2V_control_simulation` | `case` + optional 7종 | — |
 | → V2T | `V2T_response_control_simulation` | — | 전달 payload echo |
+| → V2T | `V2T_notify_status_panel` | — (요청 없음) | `title` + `rows[]` (변경 시만) |
 
 ## 참고 — 구조 정합성 (TBS 대비)
 

@@ -12,6 +12,7 @@ LamHandler — HyView livestream 메시징 ↔ LAM Federation 시뮬 API 진입�
   - 실시간 제어 요청 키: ``case`` + optional(proc_only·show_top_view·foup_info_show·
     eqp_info_show·wafer_number_show·prim_hide·speed) — 있는 항목만 적용
   - 실시간 제어 응답 키: ``data`` = 전달 payload echo
+  - STATUS 패널 통지(요청 없음): ``V2T_notify_status_panel`` — ``data.title`` + ``data.rows[]``
   - 실패 code: ``1`` (성공 ``0``)
 
 ================================================================================
@@ -39,6 +40,7 @@ from ..hyview_event_contract import (
     T2V_CONTROL_SIMULATION,
     T2V_REQUEST_START_SIMULATION,
     T2V_REQUEST_STOP_SIMULATION,
+    V2T_NOTIFY_STATUS_PANEL,
     V2T_RESPONSE_CONTROL_SIMULATION,
     V2T_RESPONSE_START_SIMULATION,
     V2T_RESPONSE_STOP_SIMULATION,
@@ -60,6 +62,7 @@ class LamHandler(BaseHandler):
             V2T_RESPONSE_START_SIMULATION,
             V2T_RESPONSE_STOP_SIMULATION,
             V2T_RESPONSE_CONTROL_SIMULATION,
+            V2T_NOTIFY_STATUS_PANEL,
         ]
 
     def get_event_handlers(self) -> Dict[str, Callable]:

@@ -14,6 +14,9 @@ V2T_RESPONSE_STOP_SIMULATION = "V2T_response_stop_simulation"
 T2V_CONTROL_SIMULATION = "T2V_control_simulation"
 V2T_RESPONSE_CONTROL_SIMULATION = "V2T_response_control_simulation"
 
+# Kit → 웹 단방향 통지 — Viewport STATUS 패널과 동일 스냅샷 (T2V 요청 없음)
+V2T_NOTIFY_STATUS_PANEL = "V2T_notify_status_panel"
+
 PAYLOAD_CONFIGS = "configs"
 # case 0 → 화면1, case 1 → 화면2
 PAYLOAD_CASE = "case"
@@ -31,6 +34,7 @@ ALL_V2T_EVENT_TYPES: Tuple[str, ...] = (
     V2T_RESPONSE_START_SIMULATION,
     V2T_RESPONSE_STOP_SIMULATION,
     V2T_RESPONSE_CONTROL_SIMULATION,
+    V2T_NOTIFY_STATUS_PANEL,
 )
 
 __all__ = [
@@ -47,6 +51,7 @@ __all__ = [
     "T2V_CONTROL_SIMULATION",
     "T2V_REQUEST_START_SIMULATION",
     "T2V_REQUEST_STOP_SIMULATION",
+    "V2T_NOTIFY_STATUS_PANEL",
     "V2T_RESPONSE_CONTROL_SIMULATION",
     "V2T_RESPONSE_START_SIMULATION",
     "V2T_RESPONSE_STOP_SIMULATION",

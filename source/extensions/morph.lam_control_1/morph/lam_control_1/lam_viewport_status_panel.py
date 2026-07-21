@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from .lam_viewport_overlay_config import (
     STATUS_PANEL_BG_COLOR_HEX,
@@ -124,6 +124,240 @@ def _play_context_idle(ps: dict) -> bool:
     except Exception:
         pass
     return True
+
+
+def _current_dwell_for_csv_t(csv_window: Any, csv_t: float) -> Any:
+    """선택 CSV 캐시에서 현재 시각(또는 최초) dwell."""
+    try:
+        from .simulation_play import get_cached_csv_playback  # type: ignore
+
+        sel_fn = getattr(csv_window, "_selected_csv_path", None)
+        path = sel_fn() if callable(sel_fn) else None
+        cached = getattr(csv_window, "_prepared_playback", None)
+        if cached is None and path is not None:
+            cached = get_cached_csv_playback(path)
+        dwells = list(getattr(cached, "dwells", []) or []) if cached is not None else []
+        if not dwells:
+            return None
+        t = float(csv_t or 0.0)
+        if t <= 1e-6:
+            return min(dwells, key=lambda d: float(getattr(d, "start_sec", 0.0) or 0.0))
+        for d in dwells:
+            s = float(getattr(d, "start_sec", 0.0) or 0.0)
+            e = float(getattr(d, "end_sec", 0.0) or 0.0)
+            if s <= t < e:
+                return d
+        return min(
+            dwells,
+            key=lambda d: abs(float(getattr(d, "start_sec", 0.0) or 0.0) - t),
+        )
+    except Exception:
+        return None
+
+
+def build_status_panel_snapshot(csv_window: Any) -> Dict[str, Any]:
+    """STATUS 패널과 동일 규칙의 해석된 스냅샷 ``{title, rows:[{key,name,value}]}``.
+
+    Viewport 패널 표시 플래그와 무관 — 웹 V2T 통지·HUD 공통 소스.
+    """
+    try:
+        from .simulation_play import (
+            get_csv_play_progress_snap,
+            get_csv_play_timeline_active_keys_snap,
+        )
+
+        ps = get_csv_play_progress_snap()
+        update_progress_snap(ps)
+        update_active_schedule_keys(get_csv_play_timeline_active_keys_snap())
+    except Exception:
+        ps = {}
+
+    csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
+    time_s = _format_status_time_line(ps)
+    if _play_context_idle(ps):
+        set_last_state_title("")
+
+    active_state = ""
+    try:
+        from .simulation_play import (  # type: ignore
+            _schedule_entry_match_key,
+            get_csv_play_timeline_active_keys_snap,
+        )
+
+        active = get_csv_play_timeline_active_keys_snap()
+        ent = None
+        for e in getattr(csv_window, "_schedule_row_entries", []) or []:
+            if _schedule_entry_match_key(e) in active:
+                ent = e
+                break
+        if ent is not None:
+            active_state = _format_current_state_line(ent)
+            if active_state:
+                set_last_state_title(active_state)
+    except Exception:
+        pass
+    display_state = active_state or get_last_state_title()
+
+    cur_dwell = _current_dwell_for_csv_t(csv_window, csv_t)
+    eqp_id_val = ""
+    if cur_dwell is not None:
+        try:
+            eqp_id_val = str(getattr(cur_dwell, "eqp_id", "") or "").strip()
+        except Exception:
+            eqp_id_val = ""
+
+    def _token_value(tok_raw: str) -> str:
+        tok = (tok_raw or "").strip()
+        key = tok.lower()
+        if key in ("time",):
+            return str(time_s)
+        if key in ("state",):
+            return str(display_state or "").strip()
+        if key in ("eq_model", "eqmodel", "eq-model"):
+            return str(STATUS_PANEL_EQ_MODEL_VALUE or "").strip()
+        if key in ("eqp_id", "eqpid", "eqp-id"):
+            return str(eqp_id_val or "").strip()
+        if cur_dwell is not None:
+            if hasattr(cur_dwell, key):
+                try:
+                    v = getattr(cur_dwell, key)
+                    return str(v if v is not None else "").strip()
+                except Exception:
+                    return ""
+            if key == "slot" and hasattr(cur_dwell, "cassette_slot"):
+                try:
+                    return str(getattr(cur_dwell, "cassette_slot") or "").strip()
+                except Exception:
+                    return ""
+        return ""
+
+    def _resolve_value(raw: str) -> str:
+        s = str(raw or "")
+        if "{" not in s:
+            return s
+
+        def _sub(m: re.Match) -> str:
+            return _token_value(m.group(1))
+
+        return _TOKEN_RE.sub(_sub, s)
+
+    rows: list[dict[str, str]] = []
+    for spec in list(STATUS_PANEL_ROWS or []):
+        k = str(getattr(spec, "key", "") or "")
+        if not k:
+            continue
+        rows.append(
+            {
+                "key": k,
+                "name": str(getattr(spec, "name", "") or ""),
+                "value": _resolve_value(str(getattr(spec, "value", "") or "")),
+            }
+        )
+    return {
+        "title": str(STATUS_PANEL_TITLE or "STATUS"),
+        "rows": rows,
+    }
+
+
+def _status_snapshot_fingerprint(data: Dict[str, Any]) -> str:
+    """내용 변경 감지용 — rows 의 key/value 만."""
+    parts: list[str] = [str(data.get("title") or "")]
+    for row in list(data.get("rows") or []):
+        if not isinstance(row, dict):
+            continue
+        parts.append(f"{row.get('key', '')}={row.get('value', '')}")
+    return "\n".join(parts)
+
+
+def dispatch_v2t_notify_status_panel(data: Dict[str, Any]) -> bool:
+    """Kit → 웹 ``V2T_notify_status_panel`` (T2V 요청 없음)."""
+    try:
+        from sk.hyview_messaging.hyview_event_contract import (  # type: ignore
+            V2T_NOTIFY_STATUS_PANEL,
+        )
+    except Exception:
+        V2T_NOTIFY_STATUS_PANEL = "V2T_notify_status_panel"
+    try:
+        from carb.eventdispatcher import get_eventdispatcher  # type: ignore
+
+        get_eventdispatcher().dispatch_event(
+            V2T_NOTIFY_STATUS_PANEL,
+            payload={
+                "code": 0,
+                "message": "success",
+                "data": dict(data or {}),
+            },
+        )
+        return True
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} V2T_notify_status_panel dispatch: {exc}", flush=True)
+        return False
+
+
+class LamStatusPanelWebNotifier:
+    """STATUS 패널 내용 변경 시 웹으로 V2T 통지.
+
+    ``SHOW_VIEWPORT_STATUS_PANEL`` 과 무관하게 동작한다.
+    """
+
+    def __init__(self, csv_window: "LamSimulationCsvPlayWindow") -> None:
+        self._csv = csv_window
+        self._post_update_sub: Any = None
+        self._last_tick = 0.0
+        self._last_fp = ""
+
+    def start(self) -> None:
+        if self._post_update_sub is not None:
+            return
+        try:
+            import omni.kit.app as kapp  # type: ignore
+
+            stream = kapp.get_app().get_post_update_event_stream()
+        except Exception:
+            return
+
+        def _on(_e) -> None:
+            now = time.time()
+            if now - self._last_tick < 0.2:
+                return
+            self._last_tick = now
+            self._tick()
+
+        self._post_update_sub = stream.create_subscription_to_pop(
+            _on,
+            name="morph.lam_control_1:status_panel_web_notify",
+        )
+        # 기동 직후 1회 스냅샷 전송 시도
+        self._tick(force=True)
+
+    def set_csv_window(self, csv_window: "LamSimulationCsvPlayWindow") -> None:
+        self._csv = csv_window
+
+    def stop(self) -> None:
+        if self._post_update_sub is not None:
+            try:
+                self._post_update_sub.unsubscribe()
+            except Exception:
+                pass
+            self._post_update_sub = None
+        self._last_fp = ""
+
+    def destroy(self) -> None:
+        self.stop()
+
+    def _tick(self, *, force: bool = False) -> None:
+        if self._csv is None:
+            return
+        try:
+            data = build_status_panel_snapshot(self._csv)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} status snapshot: {exc}", flush=True)
+            return
+        fp = _status_snapshot_fingerprint(data)
+        if not force and fp == self._last_fp:
+            return
+        if dispatch_v2t_notify_status_panel(data):
+            self._last_fp = fp
 
 
 def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]:
@@ -377,169 +611,41 @@ class LamViewportStatusPanel:
     def _tick_update(self) -> None:
         if not self._mounted:
             return
-
-        # progress snap
         try:
-            from .simulation_play import get_csv_play_progress_snap, get_csv_play_timeline_active_keys_snap
-
-            ps = get_csv_play_progress_snap()
-            update_progress_snap(ps)
-            keys = get_csv_play_timeline_active_keys_snap()
-            update_active_schedule_keys(keys)
+            data = build_status_panel_snapshot(self._csv)
         except Exception:
-            ps = {}
-
-        csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
-
-        time_s = _format_status_time_line(ps)
-        try:
-            self._models["time"].set_value(time_s)
-        except Exception:
-            pass
-
-        if _play_context_idle(ps):
-            set_last_state_title("")
-
-        # Current State: 웨이퍼# · lot · JSON명 — dwell/일시정지 시 마지막 값 유지
-        active_state = ""
-        eqp_id_val = ""
-        try:
-            from .simulation_play import (
-                _schedule_entry_match_key,  # type: ignore
-                get_csv_play_timeline_active_keys_snap,
-            )
-
-            active = get_csv_play_timeline_active_keys_snap()
-            ent = None
-            for e in getattr(self._csv, "_schedule_row_entries", []) or []:
-                if _schedule_entry_match_key(e) in active:
-                    ent = e
-                    break
-            if ent is not None:
-                active_state = _format_current_state_line(ent)
-                if active_state:
-                    set_last_state_title(active_state)
-        except Exception:
-            pass
-
-        display_state = active_state or get_last_state_title()
-        try:
-            self._models["state"].set_value(display_state)
-        except Exception:
-            pass
-
-        # EQP ID: 선택된 CSV의 dwell(현재 시각 또는 최초 행)에서 읽기
-        try:
-            from .simulation_play import get_cached_csv_playback  # type: ignore
-
-            sel_fn = getattr(self._csv, "_selected_csv_path", None)
-            path = sel_fn() if callable(sel_fn) else None
-            cached = getattr(self._csv, "_prepared_playback", None)
-            if cached is None and path is not None:
-                cached = get_cached_csv_playback(path)
-            dwells = list(getattr(cached, "dwells", []) or []) if cached is not None else []
-            if dwells:
-                t = float(csv_t or 0.0)
-                best = None
-                if t <= 1e-6:
-                    best = min(dwells, key=lambda d: float(getattr(d, "start_sec", 0.0) or 0.0))
-                else:
-                    for d in dwells:
-                        s = float(getattr(d, "start_sec", 0.0) or 0.0)
-                        e = float(getattr(d, "end_sec", 0.0) or 0.0)
-                        if s <= t < e:
-                            best = d
-                            break
-                    if best is None:
-                        best = min(
-                            dwells,
-                            key=lambda d: abs(float(getattr(d, "start_sec", 0.0) or 0.0) - t),
-                        )
-                eqp_id_val = str(getattr(best, "eqp_id", "") or "").strip() if best is not None else ""
-        except Exception:
-            eqp_id_val = ""
-
-        # CSV 현재행(또는 최초행)로부터 다른 컬럼도 참조할 수 있게 row를 보관
-        cur_dwell = None
-        try:
-            from .simulation_play import get_cached_csv_playback  # type: ignore
-
-            sel_fn = getattr(self._csv, "_selected_csv_path", None)
-            path = sel_fn() if callable(sel_fn) else None
-            cached = getattr(self._csv, "_prepared_playback", None)
-            if cached is None and path is not None:
-                cached = get_cached_csv_playback(path)
-            dwells = list(getattr(cached, "dwells", []) or []) if cached is not None else []
-            if dwells:
-                t = float(csv_t or 0.0)
-                if t <= 1e-6:
-                    cur_dwell = min(dwells, key=lambda d: float(getattr(d, "start_sec", 0.0) or 0.0))
-                else:
-                    for d in dwells:
-                        s = float(getattr(d, "start_sec", 0.0) or 0.0)
-                        e = float(getattr(d, "end_sec", 0.0) or 0.0)
-                        if s <= t < e:
-                            cur_dwell = d
-                            break
-                    if cur_dwell is None:
-                        cur_dwell = min(
-                            dwells,
-                            key=lambda d: abs(float(getattr(d, "start_sec", 0.0) or 0.0) - t),
-                        )
-        except Exception:
-            cur_dwell = None
-
-        # 행 spec 기반 텍스트 갱신(값은 config의 value 템플릿/고정값)
-        def _resolve_value(raw: str) -> str:
-            s = str(raw or "")
-            if "{" not in s:
-                return s
-
-            def _token_value(tok_raw: str) -> str:
-                tok = (tok_raw or "").strip()
-                key = tok.lower()
-                # 예약 토큰
-                if key in ("time",):
-                    return str(time_s)
-                if key in ("state",):
-                    return str(display_state or "").strip()
-                if key in ("eq_model", "eqmodel", "eq-model"):
-                    return str(STATUS_PANEL_EQ_MODEL_VALUE or "").strip()
-                if key in ("eqp_id", "eqpid", "eqp-id"):
-                    return str(eqp_id_val or "").strip()
-                # CSV 컬럼: 현재 dwell 에서 속성으로 제공되는 값만 지원(v1)
-                if cur_dwell is not None:
-                    if hasattr(cur_dwell, key):
-                        try:
-                            v = getattr(cur_dwell, key)
-                            return str(v if v is not None else "").strip()
-                        except Exception:
-                            return ""
-                    # 몇몇 컬럼은 이름이 다를 수 있어 alias 처리
-                    if key == "slot" and hasattr(cur_dwell, "cassette_slot"):
-                        try:
-                            return str(getattr(cur_dwell, "cassette_slot") or "").strip()
-                        except Exception:
-                            return ""
-                return ""
-
-            def _sub(m: re.Match) -> str:
-                return _token_value(m.group(1))
-
-            return _TOKEN_RE.sub(_sub, s)
-
-        for spec in list(STATUS_PANEL_ROWS or []):
-            k = str(getattr(spec, "key", "") or "")
+            return
+        for row in list(data.get("rows") or []):
+            if not isinstance(row, dict):
+                continue
+            k = str(row.get("key") or "")
             if not k:
                 continue
             try:
                 lbl = self._labels.get(k)
                 if lbl is None:
                     continue
-                lbl.text = _resolve_value(str(getattr(spec, "value", "") or ""))
+                lbl.text = str(row.get("value") or "")
+            except Exception:
+                pass
+        # legacy models (있으면 동기화)
+        by_key = {
+            str(r.get("key")): str(r.get("value") or "")
+            for r in list(data.get("rows") or [])
+            if isinstance(r, dict)
+        }
+        for mk in ("time", "state", "eq_model", "eqp_id"):
+            if mk not in self._models:
+                continue
+            try:
+                self._models[mk].set_value(by_key.get(mk, ""))
             except Exception:
                 pass
 
 
-__all__ = ["LamViewportStatusPanel"]
-
+__all__ = [
+    "LamStatusPanelWebNotifier",
+    "LamViewportStatusPanel",
+    "build_status_panel_snapshot",
+    "dispatch_v2t_notify_status_panel",
+]
