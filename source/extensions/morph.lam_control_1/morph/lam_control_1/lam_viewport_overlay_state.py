@@ -628,14 +628,24 @@ def get_toggle_pick_whitelist() -> bool:
         return bool(_toggle_pick_whitelist)
 
 
-def set_toggle_play_prim_hide(enabled: bool, *, from_ui_model: bool = False) -> None:
-    """「prim숨김」 체크 ON=숨김, OFF=보임."""
+def set_toggle_play_prim_hide(
+    enabled: bool,
+    *,
+    from_ui_model: bool = False,
+    apply_side_effect: bool = True,
+) -> None:
+    """「prim숨김」 체크 ON=숨김, OFF=보임.
+
+    ``apply_side_effect=False`` — Play 시작 자동 숨김 후 체크박스만 UI 동기화.
+    """
     prev = get_toggle_play_prim_hide()
     with _lock:
         global _toggle_play_prim_hide
         _toggle_play_prim_hide = bool(enabled)
     if not from_ui_model:
         _sync_ui_model_play_prim_hide()
+    if not apply_side_effect:
+        return
     if bool(enabled) == bool(prev):
         return
     _stop_play_prim_hide_retry_subscription()

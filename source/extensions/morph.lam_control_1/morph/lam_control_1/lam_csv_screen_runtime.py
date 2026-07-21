@@ -411,10 +411,11 @@ def bind_viewport_camera_for_screen(
 
 
 def apply_prim_hide_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> None:
+    phase = "ui_hide" if enabled else "ui_show"
     if runtime.screen <= 1:
         from .lam_play_prim_hide import apply_play_prim_hide_ui_instant
 
-        apply_play_prim_hide_ui_instant("ui_hide" if enabled else "ui_show")
+        apply_play_prim_hide_ui_instant(phase)
         return
     cn = runtime.context_name
     if not cn:
@@ -423,8 +424,74 @@ def apply_prim_hide_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> N
 
     apply_play_prim_hide_ui_instant_for_context(
         cn,
-        "ui_hide" if enabled else "ui_show",
+        phase,
+        prim_hide_checked=bool(enabled),
     )
+
+
+def restore_play_stop_perspective_for_screen(runtime: CsvScreenRuntime) -> None:
+    """시뮬 정지 후 Perspective·줌 복귀 — 화면1·2 동일 규칙, 타일만 분리."""
+    if runtime.screen <= 1:
+        from .lam_play_camera_fly import restore_perspective_after_play_camera_mode
+
+        restore_perspective_after_play_camera_mode()
+        return
+    vp_api = runtime.viewport_api
+    ctx = str(runtime.context_name or "").strip()
+    if vp_api is None:
+        return
+    from .lam_play_camera_fly import restore_perspective_after_play_stop_for_viewport
+
+    restore_perspective_after_play_stop_for_viewport(vp_api, ctx)
+
+
+def schedule_play_stop_perspective_restore_for_screen(runtime: CsvScreenRuntime) -> None:
+    """정지 클릭 직후 race 대비 — 화면별 Perspective 복귀 예약."""
+    if runtime.screen <= 1:
+        from .lam_play_camera_fly import schedule_restore_perspective_after_play_stop
+
+        schedule_restore_perspective_after_play_stop(delay_frames=0)
+        return
+    vp_api = runtime.viewport_api
+    ctx = str(runtime.context_name or "").strip()
+    if vp_api is None:
+        return
+    from .lam_play_camera_fly import (
+        schedule_restore_perspective_after_play_stop_for_viewport,
+    )
+
+    schedule_restore_perspective_after_play_stop_for_viewport(
+        vp_api,
+        ctx,
+        delay_frames=0,
+    )
+
+
+def sync_play_prim_hide_checkbox_after_play_start(
+    *,
+    screen: int,
+    csv_window: Any = None,
+) -> None:
+    """Play 시작 자동 숨김 완료 후 「prim숨김」 체크만 ON (visibility 재적용 없음)."""
+    si = max(1, int(screen))
+    if si <= 1:
+        from .lam_viewport_overlay_state import set_toggle_play_prim_hide
+
+        set_toggle_play_prim_hide(True, apply_side_effect=False)
+        return
+    if csv_window is None:
+        return
+    sync_fn = getattr(csv_window, "sync_play_prim_hide_checkbox_ui", None)
+    if callable(sync_fn):
+        sync_fn(True)
+        return
+    m = getattr(csv_window, "_play_prim_hide_model", None)
+    if m is None:
+        return
+    try:
+        m.set_value(True)
+    except Exception:
+        pass
 
 
 def apply_top_view_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> bool:
@@ -688,10 +755,7 @@ def sync_csv_screen_overlays(lam_window: Any, screen: int) -> None:
 
 
 def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
-    """Play worker — 화면 N 전용 카메라·prim 숨김 (화면1 전역 preflight 와 분리)."""
-    import threading
-    import time
-
+    """Play worker — 화면2+ preflight (화면1 과 동일 타임라인·화면별 context)."""
     from .simulation_play import csv_playback_stop_requested
 
     si = runtime.screen
@@ -700,17 +764,17 @@ def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
     if csv_playback_stop_requested(screen=si):
         return False
     settings = capture_csv_overlay_settings(runtime.csv_window)
-    need_cam = bool(settings.get("play_camera_fly"))
-    need_hide = bool(settings.get("play_prim_hide"))
-    if not need_cam and not need_hide:
-        # 탑뷰만 켜진 경우에도 동기화
-        if settings.get("top_view"):
-            try:
-                apply_top_view_for_screen(runtime, enabled=True)
-            except Exception:
-                pass
+    # 탑뷰만 켜진 경우 — 카메라·prim hide 없이 탑뷰만 동기화
+    if (
+        not settings.get("play_camera_fly")
+        and not _play_prim_hide_specs_configured()
+        and settings.get("top_view")
+    ):
+        try:
+            apply_top_view_for_screen(runtime, enabled=True)
+        except Exception:
+            pass
         return True
-    # USD context 만 필수. viewport_api 없으면 camera fly 만 스킵하고 play 는 진행.
     if runtime.context_name is None or runtime.stage is None:
         print(
             f"{_PRINT_PREFIX} screen{si} preflight skip — "
@@ -718,70 +782,32 @@ def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
             flush=True,
         )
         return False
-    if need_cam and runtime.viewport_api is None:
-        print(
-            f"{_PRINT_PREFIX} screen{si} camera fly skip — viewport_api 미준비 "
-            "(play·prim hide 는 계속)",
-            flush=True,
-        )
-        need_cam = False
-    if need_cam:
-        try:
-            from .lam_play_camera_fly import (
-                kickoff_play_camera_fly_for_screen,
-                play_camera_fly_duration_sec,
-            )
+    try:
+        from .lam_play_start_sequence import run_aux_screen_play_start_preflight
 
-            # 화면1 과 동일: fly 전에 target bind 하지 않는다.
-            # (사전 bind 하면 current≈target 로 fly 가 즉시 스킵됨)
-            done = threading.Event()
-            started = kickoff_play_camera_fly_for_screen(
-                done,
-                viewport_api=runtime.viewport_api,
-                usd_context_name=str(runtime.context_name or ""),
-            )
-            if started:
-                deadline = time.monotonic() + max(
-                    0.5, float(play_camera_fly_duration_sec()) + 1.0
-                )
-                while not done.is_set():
-                    if csv_playback_stop_requested(screen=si):
-                        break
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.05)
-            else:
-                # fly 시작 실패 시에만 즉시 bind (시점만이라도 맞춤)
-                bind_ok = bind_viewport_camera_for_screen(runtime, "play_camera")
-                print(
-                    f"{_PRINT_PREFIX} screen{si} play camera fly kickoff 실패 "
-                    f"— bind fallback ok={bind_ok}",
-                    flush=True,
-                )
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} screen{si} play camera: {exc}", flush=True)
-    if settings.get("top_view") and not settings.get("play_camera_fly"):
-        try:
-            apply_top_view_for_screen(runtime, enabled=True)
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} screen{si} top view preflight: {exc}", flush=True)
-    if settings.get("play_prim_hide"):
-        try:
-            from .lam_play_prim_hide import apply_play_prim_hide_phase_for_context
+        ok = run_aux_screen_play_start_preflight(runtime, settings)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} play preflight: {exc}", flush=True)
+        return False
+    return bool(ok) and not csv_playback_stop_requested(screen=si)
 
-            apply_play_prim_hide_phase_for_context(
-                str(runtime.context_name),
-                "play_start",
-            )
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} screen{si} play prim hide: {exc}", flush=True)
-    return not csv_playback_stop_requested(screen=si)
+
+def _play_prim_hide_specs_configured() -> bool:
+    try:
+        from .lam_play_prim_hide import play_prim_hide_specs_configured
+
+        return bool(play_prim_hide_specs_configured())
+    except Exception:
+        return False
 
 
 __all__ = [
     "CsvScreenRuntime",
     "apply_csv_screen_viewport_effects",
     "apply_prim_hide_for_screen",
+    "restore_play_stop_perspective_for_screen",
+    "schedule_play_stop_perspective_restore_for_screen",
+    "sync_play_prim_hide_checkbox_after_play_start",
     "apply_top_view_for_screen",
     "bind_viewport_camera_for_screen",
     "capture_csv_overlay_settings",

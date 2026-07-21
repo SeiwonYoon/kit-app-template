@@ -8,6 +8,7 @@ Play 시작 fade: 이미 숨겨진 prim 은 다시 보이지 않음 — **현재
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from contextlib import contextmanager
@@ -22,11 +23,19 @@ _PRINT_PREFIX = "[LAM/PlayPrimHide]"
 PlayHidePhase = Literal["play_start", "play_stop_reset", "ui_hide", "ui_show"]
 
 _lock = threading.Lock()
-_visibility_snapshot: Dict[str, str] = {}
+# context_key("") = 화면1 기본 USD context / 그 외 = aux context 이름
+_visibility_snapshot_by_ctx: Dict[str, Dict[str, str]] = {}
 
 _UI_PHASES = frozenset({"ui_hide", "ui_show"})
-_ui_phase_epoch: int = 0
-_stage_context_override: Optional[str] = None
+_ui_phase_epoch_by_ctx: Dict[str, int] = {}
+_usd_context_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "lam_prim_hide_usd_ctx",
+    default="",
+)
+_hide_checked_var: contextvars.ContextVar[Optional[bool]] = contextvars.ContextVar(
+    "lam_prim_hide_checked",
+    default=None,
+)
 
 
 _OPACITY_INPUT_CANDIDATES: Tuple[str, ...] = (
@@ -73,10 +82,18 @@ def apply_play_prim_hide_phase(phase: PlayHidePhase) -> bool:
         return False
 
 
-def _bump_ui_phase_epoch() -> int:
-    global _ui_phase_epoch
-    _ui_phase_epoch += 1
-    return _ui_phase_epoch
+def _bump_ui_phase_epoch(ctx: Optional[str] = None) -> int:
+    key = str(ctx if ctx is not None else _current_context_key() or "").strip()
+    with _lock:
+        n = int(_ui_phase_epoch_by_ctx.get(key, 0)) + 1
+        _ui_phase_epoch_by_ctx[key] = n
+        return n
+
+
+def _ui_phase_epoch_for(ctx: Optional[str] = None) -> int:
+    key = str(ctx if ctx is not None else _current_context_key() or "").strip()
+    with _lock:
+        return int(_ui_phase_epoch_by_ctx.get(key, 0))
 
 
 def apply_play_prim_hide_ui_instant(phase: PlayHidePhase) -> bool:
@@ -85,7 +102,7 @@ def apply_play_prim_hide_ui_instant(phase: PlayHidePhase) -> bool:
     if phase_s not in _UI_PHASES:
         return apply_play_prim_hide_phase(phase)
     try:
-        _bump_ui_phase_epoch()
+        _bump_ui_phase_epoch(_current_context_key())
         _apply_phase_instant(phase_s)
         return True
     except Exception as exc:
@@ -96,29 +113,60 @@ def apply_play_prim_hide_ui_instant(phase: PlayHidePhase) -> bool:
 @contextmanager
 def play_prim_hide_stage_context(context_name: Optional[str]):
     """지정 USD context Stage 에 prim 숨김 적용 (화면2 분할 stage)."""
-    global _stage_context_override
-    prev = _stage_context_override
-    _stage_context_override = str(context_name) if context_name else None
+    key = str(context_name or "").strip()
+    token = _usd_context_var.set(key)
     try:
         yield
     finally:
-        _stage_context_override = prev
+        _usd_context_var.reset(token)
+
+
+def _current_context_key() -> str:
+    return str(_usd_context_var.get() or "").strip()
+
+
+def _snap_store() -> Dict[str, str]:
+    key = _current_context_key()
+    with _lock:
+        store = _visibility_snapshot_by_ctx.get(key)
+        if store is None:
+            store = {}
+            _visibility_snapshot_by_ctx[key] = store
+        return store
 
 
 def apply_play_prim_hide_ui_instant_for_context(
     context_name: str,
     phase: PlayHidePhase,
+    *,
+    prim_hide_checked: Optional[bool] = None,
 ) -> bool:
-    with play_prim_hide_stage_context(context_name):
-        return apply_play_prim_hide_ui_instant(phase)
+    checked_token = None
+    if prim_hide_checked is not None:
+        checked_token = _hide_checked_var.set(bool(prim_hide_checked))
+    try:
+        with play_prim_hide_stage_context(context_name):
+            return apply_play_prim_hide_ui_instant(phase)
+    finally:
+        if checked_token is not None:
+            _hide_checked_var.reset(checked_token)
 
 
 def apply_play_prim_hide_phase_for_context(
     context_name: str,
     phase: PlayHidePhase,
+    *,
+    prim_hide_checked: Optional[bool] = None,
 ) -> bool:
-    with play_prim_hide_stage_context(context_name):
-        return apply_play_prim_hide_phase(phase)
+    checked_token = None
+    if prim_hide_checked is not None:
+        checked_token = _hide_checked_var.set(bool(prim_hide_checked))
+    try:
+        with play_prim_hide_stage_context(context_name):
+            return apply_play_prim_hide_phase(phase)
+    finally:
+        if checked_token is not None:
+            _hide_checked_var.reset(checked_token)
 
 
 def _smoothstep01(t: float) -> float:
@@ -127,12 +175,22 @@ def _smoothstep01(t: float) -> float:
 
 
 def _schedule_instant_on_main(phase: str) -> None:
-    epoch = _ui_phase_epoch
+    ctx = _current_context_key()
+    epoch = _ui_phase_epoch_for(ctx)
+    checked = _hide_checked_var.get()
 
     def _run() -> None:
-        if epoch != _ui_phase_epoch:
+        if epoch != _ui_phase_epoch_for(ctx):
             return
-        _apply_phase_instant(phase)
+        checked_token = None
+        if checked is not None:
+            checked_token = _hide_checked_var.set(bool(checked))
+        try:
+            with play_prim_hide_stage_context(ctx or None):
+                _apply_phase_instant(phase)
+        finally:
+            if checked_token is not None:
+                _hide_checked_var.reset(checked_token)
 
     try:
         from .lam_sequence_engine import _dispatch_main
@@ -144,20 +202,30 @@ def _schedule_instant_on_main(phase: str) -> None:
 
 def _run_instant_on_main_wait(phase: str) -> bool:
     err: List[Optional[BaseException]] = [None]
+    ctx = _current_context_key()
+    checked = _hide_checked_var.get()
 
     def _run() -> None:
+        checked_token = None
+        if checked is not None:
+            checked_token = _hide_checked_var.set(bool(checked))
         try:
-            _apply_phase_instant(phase)
+            with play_prim_hide_stage_context(ctx or None):
+                _apply_phase_instant(phase)
         except BaseException as e:
             err[0] = e
             raise
+        finally:
+            if checked_token is not None:
+                _hide_checked_var.reset(checked_token)
 
     try:
         from .lam_sequence_engine import _dispatch_main_wait
 
         ok = _dispatch_main_wait(_run, timeout=8.0)
     except Exception:
-        _apply_phase_instant(phase)
+        with play_prim_hide_stage_context(ctx or None):
+            _apply_phase_instant(phase)
         ok = True
     if err[0] is not None:
         print(f"{_PRINT_PREFIX} phase={phase} failed: {err[0]}", flush=True)
@@ -178,7 +246,17 @@ def planned_play_prim_hide_duration_sec() -> float:
     return 0.0
 
 
-def kickoff_play_prim_hide_play_start(done: threading.Event) -> bool:
+def play_prim_hide_specs_configured() -> bool:
+    """PLAY_HIDE / PLAY_SHOW spec 이 하나라도 설정됐는지."""
+    return bool(_load_specs() or _load_show_specs())
+
+
+def kickoff_play_prim_hide_play_start(
+    done: threading.Event,
+    *,
+    usd_context_name: str = "",
+    on_hide_complete: Optional[Callable[[], None]] = None,
+) -> bool:
     """play_start 숨김 — main 에 시작만 걸고 worker 는 ``done`` 으로 완료 대기."""
     specs = _load_specs()
     show_specs = _load_show_specs()
@@ -186,15 +264,32 @@ def kickoff_play_prim_hide_play_start(done: threading.Event) -> bool:
         done.set()
         return False
 
+    ctx = str(usd_context_name or "").strip()
     err: List[Optional[BaseException]] = [None]
+    sync_checkbox = bool(specs)
+
+    def _finish_hide() -> None:
+        if sync_checkbox and callable(on_hide_complete):
+            try:
+                on_hide_complete()
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} play_start checkbox sync failed: {exc}",
+                    flush=True,
+                )
+        done.set()
 
     def _kickoff() -> None:
         try:
-            if specs and _any_spec_fade_for_hide():
-                _start_play_hide_fade_chain(lambda: done.set())
-            else:
-                _apply_phase_instant("play_start")
-                done.set()
+            with play_prim_hide_stage_context(ctx or None):
+                if specs and _any_spec_fade_for_hide():
+                    _start_play_hide_fade_chain(
+                        _finish_hide,
+                        usd_context_name=ctx,
+                    )
+                else:
+                    _apply_phase_instant("play_start")
+                    _finish_hide()
         except BaseException as e:
             err[0] = e
             done.set()
@@ -220,6 +315,7 @@ def kickoff_play_prim_hide_play_start(done: threading.Event) -> bool:
 
 def _apply_play_start_fade_async() -> bool:
     """fade: main 에서 update 구독 시작 → 호출 스레드는 완료까지 wait (렌더는 계속)."""
+    ctx = _current_context_key()
     total = sum(
         _resolve_fade_duration(s)
         for s in _load_specs()
@@ -230,7 +326,8 @@ def _apply_play_start_fade_async() -> bool:
 
     def _kickoff() -> None:
         try:
-            _start_play_hide_fade_chain(lambda: done.set())
+            with play_prim_hide_stage_context(ctx or None):
+                _start_play_hide_fade_chain(lambda: done.set(), usd_context_name=ctx)
         except BaseException as e:
             err[0] = e
             done.set()
@@ -243,7 +340,8 @@ def _apply_play_start_fade_async() -> bool:
             return False
     except Exception as exc:
         print(f"{_PRINT_PREFIX} play_start fade kickoff failed: {exc}", flush=True)
-        _start_play_hide_fade_chain(lambda: done.set())
+        with play_prim_hide_stage_context(ctx or None):
+            _start_play_hide_fade_chain(lambda: done.set(), usd_context_name=ctx)
 
     ok = done.wait(timeout=max(15.0, total + 8.0))
     if err[0] is not None:
@@ -321,15 +419,18 @@ def _any_spec_fade_for_hide() -> bool:
 
 
 def _get_stage():
-    cn = _stage_context_override
+    cn = _current_context_key()
     if cn:
         try:
             ctx = ou.get_context(str(cn))
             return ctx.get_stage() if ctx else None
         except Exception:
             return None
-    ctx = ou.get_context()
-    return ctx.get_stage() if ctx else None
+    try:
+        ctx = ou.get_context()
+        return ctx.get_stage() if ctx else None
+    except Exception:
+        return None
 
 
 def _session_edit(stage):
@@ -467,7 +568,8 @@ def _preload_mdl_shader_inputs(slots: List[_ShaderOpacitySlot]) -> None:
     if not slots:
         return
     try:
-        ctx = ou.get_context()
+        cn = _current_context_key()
+        ctx = ou.get_context(str(cn)) if cn else ou.get_context()
         if ctx is None:
             return
         load_fn = getattr(ctx, "load_mdl_parameters_for_prim", None)
@@ -550,16 +652,17 @@ def _read_mdl_opacity(targets: _FadeTargets) -> float:
 
 
 def _capture_snapshot(path: str) -> None:
+    store = _snap_store()
     with _lock:
-        if path in _visibility_snapshot:
+        if path in store:
             return
     _, img = _get_imageable(path)
     if img is None:
         return
     tok = _visibility_token(img)
     with _lock:
-        if path not in _visibility_snapshot:
-            _visibility_snapshot[path] = tok
+        if path not in store:
+            store[path] = tok
 
 
 def _apply_visibility_token(path: str, token: str) -> None:
@@ -737,76 +840,10 @@ def _run_fade_on_update(
     targets: _FadeTargets,
     on_done: Callable[[], None],
     from_current_visibility: bool = False,
+    usd_context_name: str = "",
 ) -> None:
     """main 스레드 — Kit update 마다 fade (mdl opacity 또는 progressive visibility)."""
-    stage = _get_stage()
-    path = targets.root_path
-    if stage is None or (
-        not targets.gprim_paths and targets.fade_mode != "mdl"
-    ):
-        if to_visible:
-            _set_visible_immediate(path, True)
-        else:
-            _capture_snapshot(path)
-            _set_visible_immediate(path, False)
-        on_done()
-        return
-
-    use_mdl = targets.fade_mode == "mdl" and bool(targets.shader_slots)
-    mode_label = "mdl" if use_mdl else "progressive"
-
-    if to_visible:
-        _set_visible_immediate(path, True)
-        if use_mdl:
-            _apply_mdl_fade_opacity(targets, 0.0)
-        else:
-            for p in targets.sorted_gprim_paths:
-                _set_visible_immediate(p, False)
-    else:
-        _capture_snapshot(path)
-        if from_current_visibility:
-            if _play_start_nothing_visible_to_fade(path, targets):
-                _set_visible_immediate(path, False)
-                on_done()
-                return
-            if use_mdl:
-                start_op = _read_mdl_opacity(targets)
-                _apply_mdl_fade_opacity(targets, start_op)
-            else:
-                if not _prim_is_draw_visible(path):
-                    _set_visible_immediate(path, False)
-                    on_done()
-                    return
-        else:
-            _set_visible_immediate(path, True)
-            if use_mdl:
-                _apply_mdl_fade_opacity(targets, 1.0)
-            else:
-                _show_all_gprims_under(targets)
-
-    print(
-        f"{_PRINT_PREFIX} fade {'show' if to_visible else 'hide'} ({mode_label}): "
-        f"{len(targets.gprim_paths)} Gprim, {len(targets.shader_slots)} shader, "
-        f"{duration_sec:.2f}s @ {path!r}"
-        + (" from-current" if from_current_visibility and not to_visible else ""),
-        flush=True,
-    )
-
-    t0 = time.monotonic()
-    box: Dict[str, object] = {
-        "sub": None,
-        "warmup": 0,
-        "mdl_start_op": _read_mdl_opacity(targets) if (from_current_visibility and not to_visible and use_mdl) else 1.0,
-    }
-
-    def _unsub() -> None:
-        sub = box.get("sub")
-        if sub is not None:
-            try:
-                sub.unsubscribe()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        box["sub"] = None
+    ctx = str(usd_context_name or "").strip() or _current_context_key()
 
     def _finish_hide() -> None:
         if use_mdl:
@@ -829,72 +866,149 @@ def _run_fade_on_update(
         on_done()
 
     def _tick(_e=None) -> None:
-        if use_mdl and int(box.get("warmup", 0)) < 3:
-            box["warmup"] = int(box.get("warmup", 0)) + 1
-            _preload_mdl_shader_inputs(targets.shader_slots)
-            return
-        elapsed = time.monotonic() - t0
-        if elapsed >= duration_sec:
-            if to_visible:
-                _finish_show()
+        with play_prim_hide_stage_context(ctx or None):
+            if use_mdl and int(box.get("warmup", 0)) < 3:
+                box["warmup"] = int(box.get("warmup", 0)) + 1
+                _preload_mdl_shader_inputs(targets.shader_slots)
+                return
+            elapsed = time.monotonic() - t0
+            if elapsed >= duration_sec:
+                if to_visible:
+                    _finish_show()
+                else:
+                    _finish_hide()
+                return
+            u = elapsed / max(0.001, duration_sec)
+            if use_mdl:
+                if to_visible:
+                    op = _smoothstep01(u)
+                elif from_current_visibility:
+                    start_op = float(box.get("mdl_start_op", 1.0) or 1.0)
+                    op = start_op * (1.0 - _smoothstep01(u))
+                else:
+                    op = 1.0 - _smoothstep01(u)
+                _apply_mdl_fade_opacity(targets, op)
             else:
-                _finish_hide()
-            return
-        u = elapsed / max(0.001, duration_sec)
-        if use_mdl:
-            if to_visible:
-                op = _smoothstep01(u)
-            elif from_current_visibility:
-                start_op = float(box.get("mdl_start_op", 1.0) or 1.0)
-                op = start_op * (1.0 - _smoothstep01(u))
-            else:
-                op = 1.0 - _smoothstep01(u)
-            _apply_mdl_fade_opacity(targets, op)
-        else:
-            if to_visible:
-                _apply_progressive_show(targets, u)
-            else:
-                _apply_progressive_hide(targets, u)
+                if to_visible:
+                    _apply_progressive_show(targets, u)
+                else:
+                    _apply_progressive_hide(targets, u)
 
-    try:
-        import omni.kit.app as _kapp  # type: ignore
+    with play_prim_hide_stage_context(ctx or None):
+        stage = _get_stage()
+        path = targets.root_path
+        if stage is None or (
+            not targets.gprim_paths and targets.fade_mode != "mdl"
+        ):
+            if to_visible:
+                _set_visible_immediate(path, True)
+            else:
+                _capture_snapshot(path)
+                _set_visible_immediate(path, False)
+            on_done()
+            return
 
-        box["sub"] = _kapp.get_app().get_update_event_stream().create_subscription_to_pop(
-            _tick,
-            name="morph.lam_control_1.play_prim_hide.fade",
-        )
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} fade update sub failed: {exc}", flush=True)
+        use_mdl = targets.fade_mode == "mdl" and bool(targets.shader_slots)
+        mode_label = "mdl" if use_mdl else "progressive"
+
         if to_visible:
             _set_visible_immediate(path, True)
-            _show_all_gprims_under(targets)
-            _clear_mdl_fade_opacity(targets)
+            if use_mdl:
+                _apply_mdl_fade_opacity(targets, 0.0)
+            else:
+                for p in targets.sorted_gprim_paths:
+                    _set_visible_immediate(p, False)
         else:
             _capture_snapshot(path)
-            _set_visible_immediate(path, False)
-            _clear_mdl_fade_opacity(targets)
-        on_done()
+            if from_current_visibility:
+                if _play_start_nothing_visible_to_fade(path, targets):
+                    _set_visible_immediate(path, False)
+                    on_done()
+                    return
+                if use_mdl:
+                    start_op = _read_mdl_opacity(targets)
+                    _apply_mdl_fade_opacity(targets, start_op)
+                else:
+                    if not _prim_is_draw_visible(path):
+                        _set_visible_immediate(path, False)
+                        on_done()
+                        return
+            else:
+                _set_visible_immediate(path, True)
+                if use_mdl:
+                    _apply_mdl_fade_opacity(targets, 1.0)
+                else:
+                    _show_all_gprims_under(targets)
+
+        print(
+            f"{_PRINT_PREFIX} fade {'show' if to_visible else 'hide'} ({mode_label}): "
+            f"{len(targets.gprim_paths)} Gprim, {len(targets.shader_slots)} shader, "
+            f"{duration_sec:.2f}s @ {path!r} ctx={ctx!r}"
+            + (" from-current" if from_current_visibility and not to_visible else ""),
+            flush=True,
+        )
+
+        t0 = time.monotonic()
+        box: Dict[str, object] = {
+            "sub": None,
+            "warmup": 0,
+            "mdl_start_op": _read_mdl_opacity(targets) if (from_current_visibility and not to_visible and use_mdl) else 1.0,
+        }
+
+        def _unsub() -> None:
+            sub = box.get("sub")
+            if sub is not None:
+                try:
+                    sub.unsubscribe()  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            box["sub"] = None
+
+        try:
+            import omni.kit.app as _kapp  # type: ignore
+
+            box["sub"] = _kapp.get_app().get_update_event_stream().create_subscription_to_pop(
+                _tick,
+                name="morph.lam_control_1.play_prim_hide.fade",
+            )
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} fade update sub failed: {exc}", flush=True)
+            if to_visible:
+                _set_visible_immediate(path, True)
+                _show_all_gprims_under(targets)
+                _clear_mdl_fade_opacity(targets)
+            else:
+                _capture_snapshot(path)
+                _set_visible_immediate(path, False)
+                _clear_mdl_fade_opacity(targets)
+            on_done()
 
 
-def _start_play_hide_fade_chain(on_all_done: Callable[[], None]) -> None:
+def _start_play_hide_fade_chain(
+    on_all_done: Callable[[], None],
+    *,
+    usd_context_name: str = "",
+) -> None:
     """play_start — fade 항목을 순차 실행 (main)."""
+    ctx = str(usd_context_name or "").strip() or _current_context_key()
     queue: List[tuple[str, float]] = []
-    for spec in _load_specs():
-        path = str(getattr(spec, "prim_path", "") or "").strip()
-        if not path:
-            continue
-        if _resolve_fade_enabled(spec) and _resolve_fade_hide_in(spec):
-            queue.append((path, _resolve_fade_duration(spec)))
-        else:
-            _capture_snapshot(path)
-            _set_visible_immediate(path, False)
+    with play_prim_hide_stage_context(ctx or None):
+        for spec in _load_specs():
+            path = str(getattr(spec, "prim_path", "") or "").strip()
+            if not path:
+                continue
+            if _resolve_fade_enabled(spec) and _resolve_fade_hide_in(spec):
+                queue.append((path, _resolve_fade_duration(spec)))
+            else:
+                _capture_snapshot(path)
+                _set_visible_immediate(path, False)
 
     if not queue:
 
         def _done_empty() -> None:
-            print(f"{_PRINT_PREFIX} play_start: no fade queue", flush=True)
-            # hide 적용이 없어도 show 목록은 항상 보이게 유지
-            _force_show_all_show_specs()
+            with play_prim_hide_stage_context(ctx or None):
+                print(f"{_PRINT_PREFIX} play_start: no fade queue", flush=True)
+                _force_show_all_show_specs()
             on_all_done()
 
         _done_empty()
@@ -903,30 +1017,32 @@ def _start_play_hide_fade_chain(on_all_done: Callable[[], None]) -> None:
     state = {"i": 0}
 
     def _run_next() -> None:
-        i = state["i"]
-        if i >= len(queue):
-            print(
-                f"{_PRINT_PREFIX} play_start: fade done ({len(queue)} prim)",
-                flush=True,
+        with play_prim_hide_stage_context(ctx or None):
+            i = state["i"]
+            if i >= len(queue):
+                print(
+                    f"{_PRINT_PREFIX} play_start: fade done ({len(queue)} prim)",
+                    flush=True,
+                )
+                _force_show_all_show_specs()
+                on_all_done()
+                return
+            path, dur = queue[i]
+            state["i"] = i + 1
+            targets = _build_fade_targets(path, visible_gprims_only=True)
+            if _play_start_nothing_visible_to_fade(path, targets):
+                _capture_snapshot(path)
+                _set_visible_immediate(path, False)
+                _run_next()
+                return
+            _run_fade_on_update(
+                duration_sec=dur,
+                to_visible=False,
+                targets=targets,
+                on_done=_run_next,
+                from_current_visibility=True,
+                usd_context_name=ctx,
             )
-            _force_show_all_show_specs()
-            on_all_done()
-            return
-        path, dur = queue[i]
-        state["i"] = i + 1
-        targets = _build_fade_targets(path, visible_gprims_only=True)
-        if _play_start_nothing_visible_to_fade(path, targets):
-            _capture_snapshot(path)
-            _set_visible_immediate(path, False)
-            _run_next()
-            return
-        _run_fade_on_update(
-            duration_sec=dur,
-            to_visible=False,
-            targets=targets,
-            on_done=_run_next,
-            from_current_visibility=True,
-        )
 
     _run_next()
 
@@ -935,8 +1051,9 @@ def _restore_all_specs() -> None:
     specs = _load_specs()
     paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
     paths = [p for p in paths if p]
+    store = _snap_store()
     with _lock:
-        snap = {p: _visibility_snapshot.pop(p, None) for p in paths}
+        snap = {p: store.pop(p, None) for p in paths}
     for path in paths:
         targets = _build_fade_targets(path)
         _clear_mdl_fade_opacity(targets)
@@ -954,8 +1071,7 @@ def _hide_all_instant(*, snapshot_restore: Optional[str] = None) -> None:
         if not path:
             continue
         if snapshot_restore is not None:
-            with _lock:
-                _visibility_snapshot[path] = str(snapshot_restore)
+            _snap_store()[path] = str(snapshot_restore)
         else:
             _capture_snapshot(path)
         targets = _build_fade_targets(path)
@@ -968,9 +1084,9 @@ def _force_show_all_specs() -> None:
     specs = _load_specs()
     paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
     paths = [p for p in paths if p]
-    with _lock:
-        for p in paths:
-            _visibility_snapshot.pop(p, None)
+    store = _snap_store()
+    for p in paths:
+        store.pop(p, None)
     for path in paths:
         targets = _build_fade_targets(path)
         _set_visible_immediate(path, True)
@@ -1001,8 +1117,7 @@ def _hide_all_show_specs_instant(*, snapshot_restore: Optional[str] = None) -> N
         if not path:
             continue
         if snapshot_restore is not None:
-            with _lock:
-                _visibility_snapshot[path] = str(snapshot_restore)
+            _snap_store()[path] = str(snapshot_restore)
         else:
             _capture_snapshot(path)
         targets = _build_fade_targets(path)
@@ -1015,8 +1130,9 @@ def _restore_all_show_specs() -> None:
     specs = _load_show_specs()
     paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
     paths = [p for p in paths if p]
+    store = _snap_store()
     with _lock:
-        snap = {p: _visibility_snapshot.pop(p, None) for p in paths}
+        snap = {p: store.pop(p, None) for p in paths}
     for path in paths:
         targets = _build_fade_targets(path)
         _clear_mdl_fade_opacity(targets)
@@ -1036,8 +1152,7 @@ def _show_all_instant() -> None:
         targets = _build_fade_targets(path)
         _clear_mdl_fade_opacity(targets)
         _show_all_gprims_under(targets)
-        with _lock:
-            tok = _visibility_snapshot.get(path)
+        tok = _snap_store().get(path)
         if tok is not None:
             _apply_visibility_token(path, tok)
         else:
@@ -1073,13 +1188,16 @@ def _apply_phase_instant(phase: str) -> None:
             restore_cfg = bool(PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET)
         except Exception:
             restore_cfg = True
-        hide_checked = False
-        try:
-            from .lam_viewport_overlay_state import get_toggle_play_prim_hide
+        hide_checked_override = _hide_checked_var.get()
+        if hide_checked_override is not None:
+            hide_checked = bool(hide_checked_override)
+        else:
+            try:
+                from .lam_viewport_overlay_state import get_toggle_play_prim_hide
 
-            hide_checked = bool(get_toggle_play_prim_hide())
-        except Exception:
-            pass
+                hide_checked = bool(get_toggle_play_prim_hide())
+            except Exception:
+                hide_checked = False
         restore = bool(restore_cfg) and not hide_checked
         if restore:
             _restore_all_specs()
@@ -1140,6 +1258,7 @@ __all__ = [
     "apply_play_prim_hide_ui_instant_for_context",
     "kickoff_play_prim_hide_play_start",
     "planned_play_prim_hide_duration_sec",
+    "play_prim_hide_specs_configured",
     "play_prim_hide_stage_context",
     "prim_hide_specs_stage_status",
 ]

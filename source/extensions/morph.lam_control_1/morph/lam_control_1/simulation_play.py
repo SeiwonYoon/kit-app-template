@@ -4799,9 +4799,13 @@ def run_simulation_from_csv(
 
         if not skip_play_prim_hide and si <= 1:
             try:
+                from .lam_csv_screen_runtime import (
+                    sync_play_prim_hide_checkbox_after_play_start,
+                )
                 from .lam_play_prim_hide import apply_play_prim_hide_phase
 
-                apply_play_prim_hide_phase("play_start")
+                if apply_play_prim_hide_phase("play_start"):
+                    sync_play_prim_hide_checkbox_after_play_start(screen=1)
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} play prim hide (play_start): {exc}", flush=True)
 
@@ -5060,6 +5064,8 @@ class LamSimulationCsvPlayWindow:
 
     def _request_screen_overlay_sync(self) -> None:
         """화면2+ 체크박스 변경 → 해당 화면 viewport 오버레이/효과 동기화."""
+        if self._overlay_checkbox_syncing:
+            return
         if self._screen <= 1:
             return
         lam = self._lam_window_ref
@@ -5078,6 +5084,20 @@ class LamSimulationCsvPlayWindow:
                 lam.sync_csv_viewport_overlays_for_screen(self._screen)
             except Exception:
                 pass
+
+    def sync_play_prim_hide_checkbox_ui(self, enabled: bool) -> None:
+        """Play 시작 자동 숨김 등 — 체크박스만 갱신 (visibility 재적용 없음)."""
+        self.ensure_playback_models()
+        m = self._play_prim_hide_model
+        if m is None:
+            return
+        self._overlay_checkbox_syncing = True
+        try:
+            m.set_value(bool(enabled))
+        except Exception:
+            pass
+        finally:
+            self._overlay_checkbox_syncing = False
 
     def _install_screen_local_overlay_hooks(self) -> None:
         if self._uses_global_overlay_models() or self._screen_local_overlay_hooks_installed:
@@ -7204,9 +7224,19 @@ class LamSimulationCsvPlayWindow:
         clear_csv_play_pause_checkpoint(screen=self._screen)
         self._reset_timeline_playback_highlight_ui()
         try:
-            from .lam_play_camera_fly import schedule_restore_perspective_after_play_stop
+            from .lam_csv_screen_runtime import (
+                resolve_csv_screen_runtime,
+                schedule_play_stop_perspective_restore_for_screen,
+            )
 
-            schedule_restore_perspective_after_play_stop(delay_frames=0)
+            rt = resolve_csv_screen_runtime(
+                self._lam_window_ref,
+                self._screen,
+                csv_window=self,
+                require_aux=False,
+            )
+            if rt is not None:
+                schedule_play_stop_perspective_restore_for_screen(rt)
         except Exception:
             pass
         try:
@@ -7264,11 +7294,19 @@ class LamSimulationCsvPlayWindow:
                     # 현재 체크 상태를 읽어 숨김 유지/복원을 알아서 분기한다.)
                     try:
                         if cn:
+                            from .lam_csv_screen_runtime import capture_csv_overlay_settings
                             from .lam_play_prim_hide import (
                                 apply_play_prim_hide_phase_for_context,
                             )
 
-                            apply_play_prim_hide_phase_for_context(cn, "play_stop_reset")
+                            hide_checked = bool(
+                                capture_csv_overlay_settings(self).get("play_prim_hide")
+                            )
+                            apply_play_prim_hide_phase_for_context(
+                                cn,
+                                "play_stop_reset",
+                                prim_hide_checked=hide_checked,
+                            )
                         else:
                             from .lam_play_prim_hide import apply_play_prim_hide_phase
 
@@ -7279,35 +7317,19 @@ class LamSimulationCsvPlayWindow:
                             flush=True,
                         )
                     try:
-                        if self._screen > 1:
-                            from .lam_csv_screen_runtime import (
-                                resolve_csv_screen_runtime,
-                            )
-                            from .lam_play_camera_fly import (
-                                restore_perspective_on_viewport,
-                                schedule_restore_perspective_after_play_stop,
-                            )
+                        from .lam_csv_screen_runtime import (
+                            resolve_csv_screen_runtime,
+                            restore_play_stop_perspective_for_screen,
+                        )
 
-                            rt = resolve_csv_screen_runtime(
-                                self._lam_window_ref,
-                                self._screen,
-                                csv_window=self,
-                                require_aux=False,
-                            )
-                            if rt is not None and rt.viewport_api is not None:
-                                restore_perspective_on_viewport(
-                                    rt.viewport_api,
-                                    str(rt.context_name or ""),
-                                )
-                            schedule_restore_perspective_after_play_stop(
-                                delay_frames=12,
-                            )
-                        else:
-                            from .lam_play_camera_fly import (
-                                restore_perspective_after_play_camera_mode,
-                            )
-
-                            restore_perspective_after_play_camera_mode()
+                        rt = resolve_csv_screen_runtime(
+                            self._lam_window_ref,
+                            self._screen,
+                            csv_window=self,
+                            require_aux=False,
+                        )
+                        if rt is not None:
+                            restore_play_stop_perspective_for_screen(rt)
                     except Exception as exc:
                         print(
                             f"{_PRINT_PREFIX} perspective restore (stop_reset): {exc}",
