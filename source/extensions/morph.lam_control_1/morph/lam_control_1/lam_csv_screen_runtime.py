@@ -13,6 +13,10 @@ _PRINT_PREFIX = "[LAM/CsvScreenRT]"
 
 CameraBindMode = Literal["top_view", "play_camera"]
 
+# 화면2+ — 마지막으로 viewport 에 적용한 탑뷰/prim숨김 (전환 시에만 카메라·visibility 재적용).
+_applied_top_view_by_screen: Dict[int, Optional[bool]] = {}
+_applied_prim_hide_by_screen: Dict[int, Optional[bool]] = {}
+
 
 @dataclass
 class CsvScreenRuntime:
@@ -410,12 +414,22 @@ def bind_viewport_camera_for_screen(
     return ok
 
 
-def apply_prim_hide_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> None:
-    phase = "ui_hide" if enabled else "ui_show"
+def apply_prim_hide_for_screen(
+    runtime: CsvScreenRuntime,
+    *,
+    enabled: bool,
+    force: bool = False,
+) -> None:
+    """prim숨김 — 화면1 은 전역 토글, 화면2+ 는 context별 (상태 전환 시에만 side effect)."""
+    want = bool(enabled)
     if runtime.screen <= 1:
-        from .lam_play_prim_hide import apply_play_prim_hide_ui_instant
+        from .lam_viewport_overlay_state import set_toggle_play_prim_hide
 
-        apply_play_prim_hide_ui_instant(phase)
+        set_toggle_play_prim_hide(want, from_ui_model=False)
+        return
+    si = int(runtime.screen)
+    prev = _applied_prim_hide_by_screen.get(si)
+    if not force and prev is not None and prev == want:
         return
     cn = runtime.context_name
     if not cn:
@@ -424,9 +438,10 @@ def apply_prim_hide_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> N
 
     apply_play_prim_hide_ui_instant_for_context(
         cn,
-        phase,
-        prim_hide_checked=bool(enabled),
+        "ui_hide" if want else "ui_show",
+        prim_hide_checked=want,
     )
+    _applied_prim_hide_by_screen[si] = want
 
 
 def restore_play_stop_perspective_for_screen(runtime: CsvScreenRuntime) -> None:
@@ -440,8 +455,12 @@ def restore_play_stop_perspective_for_screen(runtime: CsvScreenRuntime) -> None:
     ctx = str(runtime.context_name or "").strip()
     if vp_api is None:
         return
-    from .lam_play_camera_fly import restore_perspective_after_play_stop_for_viewport
+    from .lam_play_camera_fly import (
+        clear_pre_top_view_hold_for_viewport,
+        restore_perspective_after_play_stop_for_viewport,
+    )
 
+    clear_pre_top_view_hold_for_viewport(vp_api, ctx)
     restore_perspective_after_play_stop_for_viewport(vp_api, ctx)
 
 
@@ -484,6 +503,7 @@ def sync_play_prim_hide_checkbox_after_play_start(
     sync_fn = getattr(csv_window, "sync_play_prim_hide_checkbox_ui", None)
     if callable(sync_fn):
         sync_fn(True)
+        _applied_prim_hide_by_screen[si] = True
         return
     m = getattr(csv_window, "_play_prim_hide_model", None)
     if m is None:
@@ -492,13 +512,25 @@ def sync_play_prim_hide_checkbox_after_play_start(
         m.set_value(True)
     except Exception:
         pass
+    _applied_prim_hide_by_screen[si] = True
 
 
-def apply_top_view_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> bool:
+def apply_top_view_for_screen(
+    runtime: CsvScreenRuntime,
+    *,
+    enabled: bool,
+    force: bool = False,
+) -> bool:
+    """탑뷰 — 화면1 은 전역 토글(전환 시만 카메라), 화면2+ 는 타일 viewport."""
+    want = bool(enabled)
     if runtime.screen <= 1:
         from .lam_viewport_overlay_state import set_toggle_top_view
 
-        set_toggle_top_view(bool(enabled), from_ui_model=False)
+        set_toggle_top_view(want, from_ui_model=False)
+        return True
+    si = int(runtime.screen)
+    prev = _applied_top_view_by_screen.get(si)
+    if not force and prev is not None and prev == want:
         return True
     vp_api = runtime.viewport_api
     if vp_api is None and runtime.lam_window is not None:
@@ -526,26 +558,59 @@ def apply_top_view_for_screen(runtime: CsvScreenRuntime, *, enabled: bool) -> bo
     ctx = str(runtime.context_name or "").strip()
     from .lam_viewport_top_view import set_viewport_top_view_navigation_locked
 
-    if enabled:
+    if want:
+        from .lam_play_camera_fly import remember_view_before_top_view_for_viewport
+
+        remember_view_before_top_view_for_viewport(vp_api, ctx)
         ok = bind_viewport_camera_for_screen(runtime, "top_view")
         if ok:
             set_viewport_top_view_navigation_locked(vp_api, True)
+            _applied_top_view_by_screen[si] = True
             print(
                 f"{_PRINT_PREFIX} screen{runtime.screen} top view ON + nav lock",
                 flush=True,
             )
         else:
+            from .lam_play_camera_fly import clear_pre_top_view_hold_for_viewport
+
+            clear_pre_top_view_hold_for_viewport(vp_api, ctx)
             print(
                 f"{_PRINT_PREFIX} screen{runtime.screen} top view bind 실패",
                 flush=True,
             )
         return ok
-    from .lam_play_camera_fly import restore_perspective_on_viewport
+    # OFF — 탑뷰 ON 직전(재생 중) 시점 복귀. 저장 없으면 화면1 과 동일 폴백.
+    if prev:
+        from .lam_play_camera_fly import (
+            restore_view_after_top_view_for_viewport,
+            top_view_use_preset_coords,
+        )
+        from .lam_play_camera_fly import (
+            ensure_session_perspective_camera as _ensure_session_persp,
+        )
+        from .lam_play_camera_fly import (
+            restore_kit_default_perspective as _restore_kit_persp,
+        )
 
-    restore_perspective_on_viewport(vp_api, ctx)
+        restored = restore_view_after_top_view_for_viewport(vp_api, ctx)
+        if not restored:
+            if not top_view_use_preset_coords():
+                _restore_kit_persp(log_label="top_view_off_screen2")
+            else:
+                _ensure_session_persp(
+                    log_label="top_view_off_screen2",
+                    restore_navigation=False,
+                )
     set_viewport_top_view_navigation_locked(vp_api, False)
+    _applied_top_view_by_screen[si] = False
+    try:
+        from .lam_viewport_top_view import schedule_restore_viewport_navigation
+
+        schedule_restore_viewport_navigation(delay_frames=12)
+    except Exception:
+        pass
     print(
-        f"{_PRINT_PREFIX} screen{runtime.screen} top view OFF + Perspective",
+        f"{_PRINT_PREFIX} screen{runtime.screen} top view OFF — 재생 중 시점 복귀",
         flush=True,
     )
     return True
@@ -659,19 +724,107 @@ def sync_csv_screen_3d_overlays(runtime: CsvScreenRuntime) -> None:
         print(f"{_PRINT_PREFIX} screen{si} wafer labels sync: {exc}", flush=True)
 
 
-def apply_csv_screen_viewport_effects(runtime: CsvScreenRuntime) -> None:
+def apply_csv_screen_viewport_effects(
+    runtime: CsvScreenRuntime,
+    *,
+    force: bool = False,
+) -> None:
     """체크박스 스냅샷 → 해당 화면 prim 숨김·탑뷰만 적용 (3D 라벨은 별도 sync).
 
-    탑뷰는 fly 체크 여부와 무관하게 항상 반영한다 (재생 중 토글 포함).
-    Play 시작 시 fly 와의 순서는 표시 전환 ``on_complete`` → preflight 가 보장한다.
+    FOUP/웨이퍼/기기 등 표시 토글과 분리 — 탑뷰·prim숨김 **전환 시에만** 카메라/visibility.
     """
     settings = capture_csv_overlay_settings(runtime.csv_window)
-    apply_prim_hide_for_screen(runtime, enabled=bool(settings.get("play_prim_hide")))
-    apply_top_view_for_screen(runtime, enabled=bool(settings.get("top_view")))
+    apply_prim_hide_for_screen(
+        runtime,
+        enabled=bool(settings.get("play_prim_hide")),
+        force=force,
+    )
+    apply_top_view_for_screen(
+        runtime,
+        enabled=bool(settings.get("top_view")),
+        force=force,
+    )
+
+
+def _resolve_csv_screen_runtime_for_overlay(
+    lam_window: Any,
+    screen: int,
+    *,
+    csv_window: Any = None,
+) -> Optional[CsvScreenRuntime]:
+    """overlay/viewport sync 공통 — runtime + 타일 재조회."""
+    si = max(1, int(screen))
+    csv_win = csv_window
+    if csv_win is None:
+        csv_win = getattr(lam_window, "_csv_sim_windows", {}).get(si)
+        if csv_win is None and hasattr(lam_window, "_ensure_csv_sim_play_window"):
+            try:
+                csv_win = lam_window._ensure_csv_sim_play_window(si)
+            except Exception:
+                return None
+    if csv_win is not None:
+        try:
+            csv_win.ensure_playback_models()
+        except Exception:
+            pass
+    runtime = resolve_csv_screen_runtime(
+        lam_window,
+        si,
+        csv_window=csv_win,
+        require_aux=False,
+    )
+    if runtime is None:
+        return None
+    if runtime.screen > 1 and (
+        not runtime.context_name
+        or runtime.viewport_api is None
+        or runtime.stage is None
+    ):
+        runtime = (
+            resolve_csv_screen_runtime(
+                lam_window,
+                si,
+                csv_window=csv_win,
+                require_aux=False,
+            )
+            or runtime
+        )
+    return runtime
+
+
+def sync_csv_screen_viewport_effects(
+    lam_window: Any,
+    screen: int,
+    *,
+    force: bool = False,
+) -> None:
+    """화면2+ 탑뷰·prim숨김만 — FOUP/웨이퍼/기기 표시 sync 와 분리."""
+    si = max(1, int(screen))
+    if si <= 1:
+        return
+    runtime = _resolve_csv_screen_runtime_for_overlay(lam_window, si)
+    if runtime is None:
+        print(f"{_PRINT_PREFIX} screen{si} viewport effects — runtime 없음", flush=True)
+        return
+    missing = []
+    if not runtime.context_name:
+        missing.append("context")
+    if runtime.viewport_api is None:
+        missing.append("viewport_api")
+    if runtime.stage is None:
+        missing.append("stage")
+    if missing:
+        print(
+            f"{_PRINT_PREFIX} screen{si} viewport effects skip — "
+            f"미준비: {', '.join(missing)}",
+            flush=True,
+        )
+        return
+    apply_csv_screen_viewport_effects(runtime, force=force)
 
 
 def sync_csv_screen_overlays(lam_window: Any, screen: int) -> None:
-    """화면별 CSV 창 설정 → 해당 화면 viewport/USD 만 동기화 (진입점)."""
+    """화면별 CSV 창 설정 → 3D 표시 오버레이만 동기화 (카메라/탑뷰/prim 제외)."""
     si = max(1, int(screen))
     if si <= 1:
         # 화면1: HUD(foup/device/status) + 웨이퍼 번호(별도 SceneView).
@@ -687,71 +840,27 @@ def sync_csv_screen_overlays(lam_window: Any, screen: int) -> None:
                     flush=True,
                 )
         return
-    csv_win = getattr(lam_window, "_csv_sim_windows", {}).get(si)
-    if csv_win is None and hasattr(lam_window, "_ensure_csv_sim_play_window"):
-        try:
-            csv_win = lam_window._ensure_csv_sim_play_window(si)
-        except Exception:
-            return
-    if csv_win is not None:
-        try:
-            csv_win.ensure_playback_models()
-        except Exception:
-            pass
-    runtime = resolve_csv_screen_runtime(
-        lam_window,
-        si,
-        csv_window=csv_win,
-        require_aux=False,
-    )
+    runtime = _resolve_csv_screen_runtime_for_overlay(lam_window, si)
     if runtime is None:
         print(f"{_PRINT_PREFIX} screen{si} overlay sync — runtime 없음", flush=True)
         return
-    if csv_win is not None:
-        sync_csv_screen_3d_overlays(runtime)
-        if runtime.viewport_window is None:
-            print(
-                f"{_PRINT_PREFIX} screen{si} 3D overlay — viewport_window/hud_mount 없음 "
-                "(분할 타일 deferred 생성 후 다시 체크하세요)",
-                flush=True,
-            )
-        else:
-            print(
-                f"{_PRINT_PREFIX} screen{si} overlay sync "
-                f"foup={capture_csv_overlay_settings(csv_win).get('foup_status')} "
-                f"device={capture_csv_overlay_settings(csv_win).get('device_labels')} "
-                f"top={capture_csv_overlay_settings(csv_win).get('top_view')} "
-                f"vp={runtime.viewport_api is not None}",
-                flush=True,
-            )
-    if runtime.screen > 1 and (
-        not runtime.context_name
-        or runtime.viewport_api is None
-        or runtime.stage is None
-    ):
-        # 한 번 더 타일 resolve (Dock LAM_SimSplit / Widget 준비 지연)
-        runtime = resolve_csv_screen_runtime(
-            lam_window,
-            si,
-            csv_window=csv_win,
-            require_aux=False,
-        ) or runtime
-    missing = []
-    if runtime.screen > 1:
-        if not runtime.context_name:
-            missing.append("context")
-        if runtime.viewport_api is None:
-            missing.append("viewport_api")
-        if runtime.stage is None:
-            missing.append("stage")
-        if missing:
-            print(
-                f"{_PRINT_PREFIX} screen{si} viewport 효과 skip — "
-                f"미준비: {', '.join(missing)} (3D 라벨만 동기화)",
-                flush=True,
-            )
-            return
-    apply_csv_screen_viewport_effects(runtime)
+    csv_win = runtime.csv_window
+    sync_csv_screen_3d_overlays(runtime)
+    if runtime.viewport_window is None:
+        print(
+            f"{_PRINT_PREFIX} screen{si} 3D overlay — viewport_window/hud_mount 없음 "
+            "(분할 타일 deferred 생성 후 다시 체크하세요)",
+            flush=True,
+        )
+    elif csv_win is not None:
+        print(
+            f"{_PRINT_PREFIX} screen{si} overlay sync "
+            f"foup={capture_csv_overlay_settings(csv_win).get('foup_status')} "
+            f"device={capture_csv_overlay_settings(csv_win).get('device_labels')} "
+            f"top={capture_csv_overlay_settings(csv_win).get('top_view')} "
+            f"vp={runtime.viewport_api is not None}",
+            flush=True,
+        )
 
 
 def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
@@ -771,7 +880,7 @@ def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
         and settings.get("top_view")
     ):
         try:
-            apply_top_view_for_screen(runtime, enabled=True)
+            apply_top_view_for_screen(runtime, enabled=True, force=True)
         except Exception:
             pass
         return True
@@ -815,4 +924,5 @@ __all__ = [
     "run_csv_screen_play_preflight",
     "sync_csv_screen_3d_overlays",
     "sync_csv_screen_overlays",
+    "sync_csv_screen_viewport_effects",
 ]

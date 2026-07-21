@@ -50,6 +50,8 @@ _camera_prim_baselines: Dict[str, CameraPrimBaseline] = {}
 _play_stop_persp_restore_sub: Any = None
 _play_stop_persp_restore_subs: Dict[str, Any] = {}
 _pre_play_view_by_key: Dict[str, CameraViewSnapshot] = {}
+# 탑뷰 ON 직전 시점 — OFF 시 재생 중 줌 복귀 (정지용 pre_play 와 별도).
+_pre_top_view_hold_by_key: Dict[str, Tuple[Optional[CameraViewSnapshot], str]] = {}
 
 
 def _viewport_view_key(viewport_api: Any, usd_context_name: str) -> str:
@@ -75,6 +77,79 @@ def _take_pre_play_view_for_viewport(
     usd_context_name: str,
 ) -> Optional[CameraViewSnapshot]:
     return _pre_play_view_by_key.pop(
+        _viewport_view_key(viewport_api, usd_context_name),
+        None,
+    )
+
+
+def remember_view_before_top_view_for_viewport(
+    viewport_api: Any,
+    usd_context_name: str = "",
+) -> None:
+    """탑뷰 ON 직전 뷰·camera path — OFF 시 재생 중 시점 복귀."""
+    snap = capture_view_for_viewport(viewport_api, usd_context_name)
+    path = _camera_path_on_viewport(viewport_api)
+    if snap is None and not str(path or "").strip():
+        return
+    _pre_top_view_hold_by_key[_viewport_view_key(viewport_api, usd_context_name)] = (
+        snap,
+        str(path or ""),
+    )
+
+
+def restore_view_after_top_view_for_viewport(
+    viewport_api: Any,
+    usd_context_name: str = "",
+) -> bool:
+    """탑뷰 OFF — ON 직전에 저장한 재생 중 시점으로 복귀 (없으면 False)."""
+    key = _viewport_view_key(viewport_api, usd_context_name)
+    held = _pre_top_view_hold_by_key.pop(key, None)
+    if held is None:
+        return False
+    snap, path = held
+    if snap is None:
+        ctx = str(usd_context_name or "").strip()
+        restore_path = str(path or "").strip()
+        if restore_path and _is_user_camera_prim_path(restore_path):
+            return set_viewport_camera_prim_path_on_api(
+                viewport_api,
+                restore_path,
+                usd_context_name=ctx,
+            )
+        return restore_perspective_on_viewport(viewport_api, ctx)
+    ctx = str(usd_context_name or "").strip()
+    restore_path = str(path or "").strip()
+    up = get_session_fly_up_xyz(play=True)
+    with camera_fly_usd_context(ctx or None):
+        if restore_path and _is_user_camera_prim_path(restore_path):
+            set_viewport_camera_prim_path_on_api(
+                viewport_api,
+                restore_path,
+                usd_context_name=ctx,
+            )
+            return bool(
+                _apply_fly_frame_view(
+                    snap,
+                    up_xyz=up,
+                    fly_camera_path=restore_path,
+                )
+            )
+        restore_perspective_on_viewport(viewport_api, ctx)
+        return bool(
+            _apply_fly_frame_view(
+                snap,
+                up_xyz=up,
+                fly_camera_path=_PERSP_CAMERA_PATH,
+            )
+        )
+
+
+def clear_pre_top_view_hold_for_viewport(
+    viewport_api: Any,
+    usd_context_name: str = "",
+) -> None:
+    """Play 정지 등 — 저장만 제거 (복원 없음)."""
+    _pre_top_view_hold_by_key.pop(
         _viewport_view_key(viewport_api, usd_context_name),
         None,
     )
@@ -2483,6 +2558,9 @@ __all__ = [
     "restore_perspective_after_play_stop_for_viewport",
     "restore_perspective_on_viewport",
     "remember_pre_play_view_for_viewport",
+    "remember_view_before_top_view_for_viewport",
+    "restore_view_after_top_view_for_viewport",
+    "clear_pre_top_view_hold_for_viewport",
     "schedule_restore_perspective_after_play_stop",
     "schedule_restore_perspective_after_play_stop_for_viewport",
     "run_play_camera_fly_before_start",

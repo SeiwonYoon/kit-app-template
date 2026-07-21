@@ -5062,8 +5062,8 @@ class LamSimulationCsvPlayWindow:
         except Exception:
             return False
 
-    def _request_screen_overlay_sync(self) -> None:
-        """화면2+ 체크박스 변경 → 해당 화면 viewport 오버레이/효과 동기화."""
+    def _request_screen_3d_overlay_sync(self) -> None:
+        """화면2+ 표시 체크(FOUP·기기·웨이퍼) — 3D 오버레이만, 카메라/줌 유지."""
         if self._overlay_checkbox_syncing:
             return
         if self._screen <= 1:
@@ -5077,13 +5077,33 @@ class LamSimulationCsvPlayWindow:
             sync_csv_screen_overlays(lam, self._screen)
         except Exception as exc:
             print(
-                f"{_PRINT_PREFIX} screen{self._screen} overlay sync: {exc}",
+                f"{_PRINT_PREFIX} screen{self._screen} 3d overlay sync: {exc}",
                 flush=True,
             )
-            try:
-                lam.sync_csv_viewport_overlays_for_screen(self._screen)
-            except Exception:
-                pass
+
+    def _request_screen_viewport_effects_sync(self) -> None:
+        """화면2+ 탑뷰·prim숨김 — 상태 전환 시에만 카메라/visibility."""
+        if self._overlay_checkbox_syncing:
+            return
+        if self._screen <= 1:
+            return
+        lam = self._lam_window_ref
+        if lam is None:
+            return
+        try:
+            from .lam_csv_screen_runtime import sync_csv_screen_viewport_effects
+
+            sync_csv_screen_viewport_effects(lam, self._screen)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} screen{self._screen} viewport effects sync: {exc}",
+                flush=True,
+            )
+
+    def _request_screen_overlay_sync(self) -> None:
+        """화면2+ 기동/레거시 — 3D 표시 + viewport 효과 (각각 분리 sync)."""
+        self._request_screen_3d_overlay_sync()
+        self._request_screen_viewport_effects_sync()
 
     def sync_play_prim_hide_checkbox_ui(self, enabled: bool) -> None:
         """Play 시작 자동 숨김 등 — 체크박스만 갱신 (visibility 재적용 없음)."""
@@ -5102,28 +5122,44 @@ class LamSimulationCsvPlayWindow:
     def _install_screen_local_overlay_hooks(self) -> None:
         if self._uses_global_overlay_models() or self._screen_local_overlay_hooks_installed:
             return
-        models = (
+
+        def _on_display_changed(*_a: Any) -> None:
+            self._request_screen_3d_overlay_sync()
+
+        def _on_viewport_effect_changed(*_a: Any) -> None:
+            self._request_screen_viewport_effects_sync()
+
+        display_models = (
             self._foup_status_show_model,
             self._device_labels_show_model,
-            self._pick_whitelist_model,
-            self._play_prim_hide_model,
-            self._play_camera_fly_model,
-            self._top_view_model,
             self._wafer_label_show_model,
         )
-
-        def _on_changed(*_a: Any) -> None:
-            self._request_screen_overlay_sync()
+        viewport_models = (
+            self._play_prim_hide_model,
+            self._top_view_model,
+        )
 
         hooked = 0
-        for m in models:
+        for m in display_models:
             if m is None:
                 continue
             for hook in ("add_value_changed_fn", "add_item_changed_fn"):
                 try:
                     fn = getattr(m, hook, None)
                     if callable(fn):
-                        fn(_on_changed)
+                        fn(_on_display_changed)
+                        hooked += 1
+                        break
+                except Exception:
+                    pass
+        for m in viewport_models:
+            if m is None:
+                continue
+            for hook in ("add_value_changed_fn", "add_item_changed_fn"):
+                try:
+                    fn = getattr(m, hook, None)
+                    if callable(fn):
+                        fn(_on_viewport_effect_changed)
                         hooked += 1
                         break
                 except Exception:
@@ -5133,16 +5169,28 @@ class LamSimulationCsvPlayWindow:
             f"{_PRINT_PREFIX} screen{self._screen} local overlay hooks={hooked}",
             flush=True,
         )
-        # 기동 시 기본 체크 ON 상태도 즉시 반영
+        # 기동 시 기본 체크 ON 상태도 즉시 반영 (표시 + 탑뷰/prim)
         self._request_screen_overlay_sync()
 
-    def _aux_checkbox_changed_fn(self) -> Any:
-        """화면2+ CheckBox 용 — 모델 훅이 안 먹어도 UI 클릭으로 sync."""
+    def _aux_display_checkbox_changed_fn(self) -> Any:
+        """화면2+ FOUP·기기 CheckBox — 3D 표시만."""
 
         def _fn(*_a: Any) -> None:
-            self._request_screen_overlay_sync()
+            self._request_screen_3d_overlay_sync()
 
         return _fn
+
+    def _aux_viewport_effect_checkbox_changed_fn(self) -> Any:
+        """화면2+ 탑뷰·prim숨김 CheckBox — 카메라/visibility 전환 시에만."""
+
+        def _fn(*_a: Any) -> None:
+            self._request_screen_viewport_effects_sync()
+
+        return _fn
+
+    def _aux_checkbox_changed_fn(self) -> Any:
+        """레거시 alias — 3D 표시 sync."""
+        return self._aux_display_checkbox_changed_fn()
 
     def _run_aux_screen_play_preflight(self, kit_ext: Any) -> bool:
         """화면2+ Play 직전 — ``lam_csv_screen_runtime`` (화면1 전역 API 미사용)."""
@@ -5406,7 +5454,7 @@ class LamSimulationCsvPlayWindow:
         def _on_changed(*_a: Any) -> None:
             self.apply_wafer_label_visibility_from_ui(lam_window=lam)
             if not self._uses_global_overlay_models():
-                self._request_screen_overlay_sync()
+                self._request_screen_3d_overlay_sync()
 
         def _build() -> None:
             ui.Label("웨이퍼번호보기", width=int(label_width), height=int(row_height))
@@ -5467,51 +5515,46 @@ class LamSimulationCsvPlayWindow:
         # (필요 시 overlay_state가 set_toggle_*에서 모델을 동기화한다.)
         self._overlay_checkbox_initialized = True
 
-        aux_fn = None if self._uses_global_overlay_models() else self._aux_checkbox_changed_fn()
+        aux_display_fn = (
+            None
+            if self._uses_global_overlay_models()
+            else self._aux_display_checkbox_changed_fn()
+        )
 
         with ui.HStack(spacing=int(spacing), height=int(row_height)):
             ui.Label("FOUP상태보기", width=int(label_width), height=int(row_height))
-            if aux_fn is not None:
+            if aux_display_fn is not None:
                 ui.CheckBox(
                     model=f_m,
                     width=20,
                     height=int(row_height),
-                    changed_fn=aux_fn,
+                    changed_fn=aux_display_fn,
                 )
             else:
                 # 화면1: 토글 SSOT 는 lam_viewport_overlay_state 전역 모델 훅
                 ui.CheckBox(model=f_m, width=20, height=int(row_height))
             ui.Label("기기정보보기", width=int(label_width), height=int(row_height))
-            if aux_fn is not None:
+            if aux_display_fn is not None:
                 ui.CheckBox(
                     model=d_m,
                     width=20,
                     height=int(row_height),
-                    changed_fn=aux_fn,
+                    changed_fn=aux_display_fn,
                 )
             else:
                 ui.CheckBox(model=d_m, width=20, height=int(row_height))
             ui.Label("선택제한", width=int(label_width), height=int(row_height))
-            if aux_fn is not None:
-                ui.CheckBox(
-                    model=p_m,
-                    width=20,
-                    height=int(row_height),
-                    changed_fn=aux_fn,
-                    tooltip="Viewport 클릭 선택을 whitelist 루트로 제한",
-                )
-            else:
-                ui.CheckBox(
-                    model=p_m,
-                    width=20,
-                    height=int(row_height),
-                    tooltip="Viewport 클릭 선택을 whitelist 루트로 제한",
-                )
+            ui.CheckBox(
+                model=p_m,
+                width=20,
+                height=int(row_height),
+                tooltip="Viewport 클릭 선택을 whitelist 루트로 제한",
+            )
             ui.Spacer()
 
-        if aux_fn is not None:
+        if aux_display_fn is not None:
             self._install_screen_local_overlay_hooks()
-            self._request_screen_overlay_sync()
+            self._request_screen_3d_overlay_sync()
 
     def mount_play_camera_fly_checkbox_ui(
         self,
@@ -5553,7 +5596,11 @@ class LamSimulationCsvPlayWindow:
         m = self._top_view_model
         if m is None:
             return
-        aux_fn = None if self._uses_global_overlay_models() else self._aux_checkbox_changed_fn()
+        aux_vp_fn = (
+            None
+            if self._uses_global_overlay_models()
+            else self._aux_viewport_effect_checkbox_changed_fn()
+        )
         with ui.HStack(spacing=int(spacing), height=int(row_height)):
             ui.Label("탑뷰 보기", width=int(label_width), height=int(row_height))
             cb_kw: Dict[str, Any] = {
@@ -5567,8 +5614,8 @@ class LamSimulationCsvPlayWindow:
                     "체크 OFF(camera 모드): Perspective 복귀"
                 ),
             }
-            if aux_fn is not None:
-                cb_kw["changed_fn"] = aux_fn
+            if aux_vp_fn is not None:
+                cb_kw["changed_fn"] = aux_vp_fn
             ui.CheckBox(**cb_kw)
             ui.Spacer()
 
@@ -5611,7 +5658,11 @@ class LamSimulationCsvPlayWindow:
         m = self._play_prim_hide_model
         if m is None:
             return
-        aux_fn = None if self._uses_global_overlay_models() else self._aux_checkbox_changed_fn()
+        aux_vp_fn = (
+            None
+            if self._uses_global_overlay_models()
+            else self._aux_viewport_effect_checkbox_changed_fn()
+        )
         with ui.HStack(spacing=int(spacing), height=int(row_height)):
             ui.Label("prim숨김", width=int(label_width), height=int(row_height))
             cb_kw: Dict[str, Any] = {
@@ -5620,8 +5671,8 @@ class LamSimulationCsvPlayWindow:
                 "height": int(row_height),
                 "tooltip": "체크 시 PLAY_HIDE_PRIM_SPECS 경로 prim 숨김 (설정: lam_viewport_overlay_config)",
             }
-            if aux_fn is not None:
-                cb_kw["changed_fn"] = aux_fn
+            if aux_vp_fn is not None:
+                cb_kw["changed_fn"] = aux_vp_fn
             ui.CheckBox(**cb_kw)
             ui.Spacer()
 
@@ -5733,9 +5784,8 @@ class LamSimulationCsvPlayWindow:
     ) -> Dict[str, Any]:
         """웹 T2V_control_simulation — 전달된 항목만 이 화면에 실시간 반영.
 
-        각 omni.ui 모델 ``set_value`` 가 화면별 overlay/카메라 동기화를 자동 유발한다
-        (화면2+ 로컬 훅 / 화면1 전역 훅). 반드시 Kit main(UI) thread 에서 호출.
-        ``None`` 인 항목은 현재 상태를 유지한다. 적용된 항목 dict 를 돌려준다.
+        각 omni.ui 모델 ``set_value`` 가 화면별 훅을 유발한다
+        (화면2+ 표시=3D overlay / 탑뷰·prim=viewport effects). ``None`` 은 유지.
         """
         self.ensure_playback_models()
         applied: Dict[str, Any] = {}

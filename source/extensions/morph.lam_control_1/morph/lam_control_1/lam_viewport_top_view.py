@@ -870,6 +870,10 @@ def enable_top_view_mode() -> bool:
         print(f"{_PRINT_PREFIX} active viewport 없음", flush=True)
         return False
 
+    from .lam_play_camera_fly import remember_view_before_top_view_for_viewport
+
+    remember_view_before_top_view_for_viewport(viewport_api, "")
+
     if not top_view_use_preset_coords():
         from .lam_play_camera_fly import ensure_session_perspective_camera
 
@@ -882,6 +886,10 @@ def enable_top_view_mode() -> bool:
     if apply_top_view_target():
         _finish_enable_top_view(viewport_api)
         return True
+
+    from .lam_play_camera_fly import clear_pre_top_view_hold_for_viewport
+
+    clear_pre_top_view_hold_for_viewport(viewport_api, "")
 
     if top_view_use_preset_coords():
         print(f"{_PRINT_PREFIX} 탑뷰 카메라 적용 실패", flush=True)
@@ -897,6 +905,8 @@ def enable_top_view_mode() -> bool:
 
 def release_top_view_camera_hold_for_play_stop() -> None:
     """Play 정지 시 탑뷰 hold 가 USD Camera 를 다시 bind 하지 않도록 잠금만 해제 (UI 토글 유지)."""
+    from .lam_play_camera_fly import clear_pre_top_view_hold_for_viewport
+
     _cancel_top_view_fly()
     timer = _state.pop("fly_timeout_timer", None)
     if timer is not None:
@@ -911,12 +921,17 @@ def release_top_view_camera_hold_for_play_stop() -> None:
     _state["active"] = False
     _stop_hold_subscription()
     _release_input_lock(viewport_api)
+    if viewport_api is not None:
+        clear_pre_top_view_hold_for_viewport(viewport_api, "")
 
 
 def disable_top_view_mode() -> None:
-    """카메라 조작 잠금 해제. camera 모드면 Perspective 복귀."""
+    """카메라 조작 잠금 해제. 탑뷰 OFF 시 ON 직전(재생 중) 시점 복귀."""
     from .lam_play_camera_fly import (
+        clear_pre_top_view_hold_for_viewport,
         ensure_session_perspective_camera,
+        restore_kit_default_perspective,
+        restore_view_after_top_view_for_viewport,
         top_view_use_preset_coords,
     )
 
@@ -933,26 +948,37 @@ def disable_top_view_mode() -> None:
     _state["active"] = False
     _stop_hold_subscription()
     _release_input_lock(viewport_api)
-    if not top_view_use_preset_coords():
-        from .lam_play_camera_fly import restore_kit_default_perspective
-
-        restore_kit_default_perspective(log_label="top_view_off")
-    elif was_active or fly_was_pending:
-        ensure_session_perspective_camera(
-            log_label="top_view_off",
-            restore_navigation=False,
-        )
+    if was_active or fly_was_pending:
+        if viewport_api is not None:
+            restored = restore_view_after_top_view_for_viewport(viewport_api, "")
+            if not restored:
+                if not top_view_use_preset_coords():
+                    restore_kit_default_perspective(log_label="top_view_off")
+                else:
+                    ensure_session_perspective_camera(
+                        log_label="top_view_off",
+                        restore_navigation=False,
+                    )
+        elif not top_view_use_preset_coords():
+            restore_kit_default_perspective(log_label="top_view_off")
+        elif was_active or fly_was_pending:
+            ensure_session_perspective_camera(
+                log_label="top_view_off",
+                restore_navigation=False,
+            )
     if not was_active and _state.get("hold_sub") is None and not fly_was_pending:
+        if viewport_api is not None:
+            clear_pre_top_view_hold_for_viewport(viewport_api, "")
         if not top_view_use_preset_coords():
             schedule_restore_viewport_navigation(delay_frames=12)
         return
     if not top_view_use_preset_coords():
         print(
-            f"{_PRINT_PREFIX} 탑뷰 고정 OFF — Perspective 복귀 + 카메라 조작 해제",
+            f"{_PRINT_PREFIX} 탑뷰 고정 OFF — 재생 중 시점 복귀 + 카메라 조작 해제",
             flush=True,
         )
     else:
-        print(f"{_PRINT_PREFIX} 탑뷰 고정 OFF — 카메라 조작 해제", flush=True)
+        print(f"{_PRINT_PREFIX} 탑뷰 고정 OFF — 재생 중 시점 복귀 + 조작 해제", flush=True)
     schedule_restore_viewport_navigation(delay_frames=12)
 
 

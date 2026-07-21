@@ -278,7 +278,7 @@ def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
 
     def _before_prim_hide() -> None:
         if settings.get("top_view") and not settings.get("play_camera_fly"):
-            apply_top_view_for_screen(runtime, enabled=True)
+            apply_top_view_for_screen(runtime, enabled=True, force=True)
 
     return _run_play_start_preflight_timeline(
         stop_requested=_stop,
