@@ -1,0 +1,21 @@
+테스트케이스명	테스트 절차	사전조건	테스트데이터	예상결과	테스트결과	비고
+LAM 웹 UI 기동 및 Kit 연결	웹 LAM UI를 열고 Kit 앱(lam_control_1)이 실행 중인지 확인한다. 연결 상태 표시(또는 HyView livestream)가 정상인지 확인한다.	Kit 앱 실행; lam_control_1 확장 활성; 웹 UI 배포·접속 가능	없음	웹 UI가 오류 없이 표시되고 Kit와 메시징 연결이 정상임을 확인할 수 있다.		실무 검증용. 기존 기능별 TSV와 별도 문서.
+LAM 조회 — SEARCH 정상 조회	웹 UI에서 FAB, EQP ID, 조회시간(시작~종료)을 입력하고 SEARCH 버튼을 클릭한다. 목록 영역에 서버 조회 결과 행이 표시되는지 확인한다.	Kit·웹 연결; Federation(또는 LAM 조회) 서버 접근 가능; 해당 조건에 맞는 데이터 존재	FAB=유효 FAB ID; EQP ID=유효 장비 ID; 조회시간=데이터가 포함된 기간	SEARCH 클릭 후 로딩 표시(있는 경우)를 거쳐 조회 목록에 eqp_id·lot_id 등 예상 컬럼의 행이 1건 이상 표시된다.		서버로 조회 요청이 발생하는 화면 동작 검증.
+LAM 조회 — 조건 불일치 시 빈 목록	존재하지 않는 EQP ID 또는 데이터가 없는 조회시간으로 SEARCH를 실행한다.	Kit·웹 연결; 서버 접근 가능	FAB=유효; EQP ID=미등록 또는 빈 결과 기간; 조회시간=해당 기간	목록이 비어 있거나 「조회 결과 없음」 등 안내가 표시되며 웹 UI가 멈추거나 오류 팝업 없이 다음 조작이 가능하다.		
+LAM 조회 — 필수 입력 미입력	 FAB, EQP ID, 조회시간 중 하나 이상을 비운 채 SEARCH를 클릭한다.	웹 UI 표시	각 필드별 1회씩 미입력 조합	SEARCH가 차단되거나 입력 안내가 표시되고 잘못된 요청이 서버로 나가지 않는다.		
+LAM ADD — 1건 선택 후 caseA 배치	조회 목록에서 1건만 체크하고 ADD 버튼을 클릭한다. 하단 좌측 caseA 영역에 선택 행의 결과(요약) 목록이 표시되는지, 우측 caseB는 비어 있는지, 우측 하단 RUN 버튼이 활성화되는지 확인한다.	SEARCH로 목록 표시 완료	목록 1건 체크 후 ADD	caseA(좌)에만 선택 데이터가 표시되고 caseB(우)는 비어 있다. RUN 버튼이 활성화된다.		웹 UI caseA=화면1, caseB=화면2 대응.
+LAM ADD — 2건 선택 시 caseA·caseB 순서 배치	조회 목록에서 서로 다른 2건을 체크 순서 A→B로 선택하고 ADD를 클릭한다. 하단 좌 caseA에 첫 번째, 우 caseB에 두 번째 선택 건의 결과 목록이 표시되는지 확인한다. RUN 버튼 활성화를 확인한다.	SEARCH로 2건 이상 표시	1번째 체크=장비A 데이터; 2번째 체크=장비B 데이터	caseA에 1번째 체크 건, caseB에 2번째 체크 건이 각각 표시되고 RUN이 활성화된다.		체크 순서=caseA→caseB 배치 순서.
+LAM ADD — 최대 2건 체크 제한	목록에서 3건 이상 체크를 시도한다.	SEARCH로 3건 이상 표시	3건 연속 체크 시도	3번째 체크가 되지 않거나 안내 후 2건만 유지된다. ADD 후에도 caseA·caseB 두 영역만 사용된다.		
+LAM ADD — Federation 결과 데이터 표시	ADD 클릭 후 caseA·caseB 영역에 표시된 목록 항목(장비 ID, lot, 공정 요약 등)이 SEARCH에서 선택한 행과 일치하는지 눈으로 대조한다.	유효 Federation 응답 데이터	2건 선택 ADD	각 영역 목록의 식별 정보가 선택한 조회 행과 일치한다.		Federation fetch 결과가 웹에 반영되는지 확인.
+LAM ADD — 체크 해제 후 재선택	1건 ADD 후 체크를 해제하고 다른 행을 선택해 ADD를 다시 실행한다.	caseA에 1건 배치된 상태	다른 행으로 재선택 ADD	caseA(또는 해당 영역) 목록이 새 선택 건으로 갱신되고 RUN은 계속 활성화된다.		
+LAM RUN — RESULT 버튼 활성화	caseA(또는 caseA·caseB)에 데이터가 ADD된 상태에서 RUN 버튼을 클릭한다. RESULT 버튼이 활성화되는지 확인한다.	ADD 완료; RUN 활성	 caseA 1건 또는 caseA+caseB 2건	RUN 클릭 후 RESULT 버튼이 활성화된다. (프리런·데이터 준비 중 로딩 표시가 있으면 완료 후 활성화)		RUN=Kit 쪽 fetch·프리런 등 준비 단계.
+LAM RUN — caseA만 RUN	 caseA에만 1건 ADD 후 RUN을 클릭한다. caseB는 비어 있는 상태에서 RUN·RESULT 동작을 확인한다.	caseA만 배치	caseA 1건; caseB 비움	RUN 후 RESULT 활성화. RESULT 실행 시 화면1( caseA )만 시뮬 대상이 된다.		
+LAM RUN — caseA·caseB 동시 RUN	 caseA·caseB 각각 다른 건 ADD 후 RUN을 클릭한다.	2건 ADD 완료	서로 다른 eqp_id/lot_id 2건	RUN 완료 후 RESULT 활성화. 이후 RESULT에서 두 화면 모두 재생 준비가 된다.		
+LAM RESULT — caseA(화면1) 시뮬레이션 동작	 caseA만 설정된 상태에서 RUN 후 RESULT를 클릭한다. Kit 화면1 Viewport에서 3D 장비·FOUP·웨이퍼 애니메이션이 재생되는지, 타임라인(또는 재생 UI)이 진행되는지 확인한다.	RUN 완료; RESULT 활성; 화면1 USD 로드	caseA 1건 RESULT	화면1에서 선택한 조회 데이터에 맞는 시뮬레이션이 시작되고 prim 이동·공정 진행이 눈에 보인다.		코드 로그가 아닌 화면·3D 동작 검증.
+LAM RESULT — caseB(화면2) 시뮬레이션 동작	 caseB만 설정(또는 caseA 비우고 caseB만) RUN 후 RESULT를 클릭한다. Kit 화면2 Viewport 재생을 확인한다.	화면2 USD·런타임 준비	caseB 1건 RESULT	화면2에서만 시뮬이 재생되고 화면1은 재생하지 않는다.		
+LAM RESULT — caseA·caseB 동시 시뮬레이션	 caseA·caseB에 서로 다른 2건 ADD → RUN → RESULT 순으로 실행한다. Kit 화면1·화면2 Viewport를 동시에 관찰한다.	듀얼 화면 표시; 2건 ADD	서로 다른 2건 RESULT	두 Viewport에서 각각 독립적으로 재생이 진행되며 한쪽 설정·재생이 다른 쪽에 섞이지 않는다.		
+LAM RESULT — 재생 중 공정·시간 정보 표시	RESULT로 재생을 시작한 뒤 웹 UI 또는 Kit 재생창의 타임라인·공정 시간·현재 lot 정보가 진행에 맞게 갱신되는지 확인한다.	RESULT 재생 중	 caseA 또는 양쪽 재생	재생 시점에 맞춰 공정 구간·시간 표시가 갱신되고 멈춤 없이 이어진다.		
+LAM RESULT — 재생 중 정지(초기화)	재생 중 웹 UI의 정지(또는 stop) 기능을 caseA, caseB 각각 실행한다. 해당 Viewport prim·재생 상태가 초기화되는지 확인한다.	양쪽 동시 재생 중	 caseA 정지; caseB 정지(별도)	선택한 화면만 재생이 멈추고 3D 상태가 초기화되며 다른 화면 재생은 유지된다(한쪽만 정지 시).		
+LAM RESULT — 재생 중 화면별 제어(공정만보기·탑뷰 등)	재생 중 웹 UI에서 caseA·caseB 각각 공정만보기, 탑뷰, FOUP/기기정보/웨이퍼 표시 등을 켜고 끈다.	재생 중; 웹 제어 UI 제공	case=0/1 별 토글	선택한 화면 Viewport·오버레이만 변경되고 다른 화면 설정은 유지된다.		웹 UI에 해당 컨트롤이 있을 때 수행.
+LAM ADD→RUN→RESULT 전체 흐름(1화면)	SEARCH → 1건 체크 → ADD → RUN → RESULT를 처음부터 끝까지 1회 수행한다.	서버·Kit·웹 정상	유효 조회 1건	전 단계 버튼 활성/표시가 순서대로 진행되고 최종적으로 화면1 시뮬이 정상 재생된다.		실무 시나리오 end-to-end.
+LAM ADD→RUN→RESULT 전체 흐름(2화면)	SEARCH → 2건 체크(순서 확인) → ADD → RUN → RESULT를 수행한다.	듀얼 화면	서로 다른 2건	 caseA·caseB 배치 → RUN → RESULT 후 두 화면이 각각 독립 재생된다.		실무 시나리오 end-to-end.
