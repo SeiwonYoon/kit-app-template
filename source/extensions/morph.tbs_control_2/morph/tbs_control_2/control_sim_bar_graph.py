@@ -1182,6 +1182,65 @@ def compute_bar_graph_empty_pct(bar: EpBarPrecomputed, row_order: List[str]) -> 
     return out
 
 
+def compute_bar_graph_lot_counts(
+    result: Any,
+    bar: EpBarPrecomputed,
+    *,
+    sim_snapshot: Optional[Dict[str, Any]] = None,
+    configured_lot_count: Optional[int] = None,
+) -> Dict[str, int]:
+    """막대별 lot 처리 수 — ``bar_graph.lot_counts``.
+
+    - ``all_ep``: 설정 LOT 수 (``lot_count``)
+    - ``ep1``/``ep2``/``ep3``: 해당 EP 에서 ``FOUP_PROCESS_START`` 로 처리된 고유 lot 수
+    """
+    snap = dict(sim_snapshot or {})
+    if configured_lot_count is not None:
+        try:
+            all_n = max(0, int(configured_lot_count))
+        except Exception:
+            all_n = 0
+    else:
+        try:
+            all_n = max(0, int(snap.get("lot_count", 0) or 0))
+        except Exception:
+            all_n = 0
+
+    per_ep: Dict[str, set] = {}
+    for it in getattr(result, "items", None) or ():
+        try:
+            if str(getattr(it, "kind", "") or "").strip().lower() != "event":
+                continue
+            p = getattr(it, "payload", None)
+            if not isinstance(p, dict):
+                continue
+            seq = str(p.get("seq") or p.get("event") or "").strip().upper()
+            if seq != "FOUP_PROCESS_START":
+                continue
+            port = str(p.get("port_id") or p.get("event_port_id") or "").strip().upper()
+            lot = str(p.get("lot_id") or "").strip()
+            if not port.startswith("EP") or not lot:
+                continue
+            per_ep.setdefault(port, set()).add(lot)
+        except Exception:
+            continue
+
+    out: Dict[str, int] = {"all_ep": int(all_n)}
+    ep_rows: List[str] = []
+    for p in tuple(getattr(bar, "ep_ports", None) or ()):
+        ps = str(p or "").strip().upper()
+        if ps.startswith("EP"):
+            ep_rows.append(ps)
+    if not ep_rows:
+        for rn in tuple(getattr(bar, "row_order", None) or ()):
+            rs = str(rn or "").strip().upper()
+            if rs.startswith("EP"):
+                ep_rows.append(rs)
+    for ep in ep_rows:
+        out[ep.lower()] = len(per_ep.get(ep, set()))
+    return out
+
+
 def compute_cumulative_empty_pct(segs: List[Dict[str, Any]], t: float) -> float:
     """막대 세그먼트를 ``t`` 초까지 잘라, 진행 시간 대비 empty 누적 비율(%).
 
@@ -1308,6 +1367,9 @@ def build_prerun_export_document(
             "duration_sec_by_row": dict(bar.duration_sec_by_row or {}),
             "duration_sec_totals": duration_sec_totals,
             "empty_pct": compute_bar_graph_empty_pct(bar, row_order),
+            "lot_counts": compute_bar_graph_lot_counts(
+                result, bar, sim_snapshot=snap
+            ),
         },
     }
 
@@ -1418,6 +1480,7 @@ __all__ = [
     "build_prerun_export_document",
     "build_prerun_export_document_web_slim",
     "compute_bar_graph_empty_pct",
+    "compute_bar_graph_lot_counts",
     "compute_cumulative_empty_pct",
     "compute_duration_sec_by_row",
     "format_row_state_duration_summary",

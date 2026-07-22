@@ -93,28 +93,24 @@ from typing import Any, Callable, Dict, List
 
 
 from ..tbs_sim_bridge import (
-
     handle_control_simulation,
-
     handle_ebs_enable,
-
     handle_eqp_change,
-
+    handle_restart_simulation,
     handle_seek_simulation,
-
     handle_start_simulation,
-
     handle_time_sync,
-
 )
 
 from ..hyview_event_contract import (
     PAYLOAD_CASE,
     PAYLOAD_T,
     PAYLOAD_TIME,
+    T2V_REQUEST_RESTART_SIMULATION,
     T2V_REQUEST_SEEK_SIMULATION,
     T2V_REQUEST_TIME_SYNC,
     T2V_REQUEST_TIME_TABLE,
+    V2T_RESPONSE_RESTART_SIMULATION,
     V2T_RESPONSE_SEEK_SIMULATION,
     V2T_RESPONSE_TIME_SYNC,
     V2T_RESPONSE_TIME_TABLE,
@@ -223,6 +219,8 @@ class EBSHandler(BaseHandler):
 
             "V2T_response_start_simulation",
 
+            V2T_RESPONSE_RESTART_SIMULATION,
+
             "V2T_response_control_simulation",
 
             V2T_RESPONSE_SEEK_SIMULATION,
@@ -246,6 +244,8 @@ class EBSHandler(BaseHandler):
             "T2V_request_ebs_enable": self._on_req_ebs_enable,
 
             "T2V_request_start_simulation": self._on_req_start_simulation,
+
+            T2V_REQUEST_RESTART_SIMULATION: self._on_req_restart_simulation,
 
             "T2V_request_control_simulation": self._on_req_control_simulation,
 
@@ -512,6 +512,44 @@ class EBSHandler(BaseHandler):
         )
 
         # V2T 는 프리런 완료 후 _dispatch_start_simulation_response 에서 전송 (즉시 return)
+
+
+
+    def _on_req_restart_simulation(self, event: carb.events.IEvent) -> None:
+
+        """
+
+        T2V_request_restart_simulation — 직전 프리런으로 재생 재시작.
+
+
+
+        요청 payload 는 비어도 된다 (보관된 프리런 사용).
+
+        응답 data 는 비움 — 웹이 start 시 받은 데이터를 그대로 사용.
+
+        """
+
+        print(f"[EBSHandler] _on_req_restart_simulation - {event.payload}")
+
+
+
+        def _on_bridge_done(event_name: str, bridge_body: Dict[str, Any]) -> None:
+
+            code = int(bridge_body.get("code", 0))
+
+            message = str(bridge_body.get("message", "success"))
+
+            if code != 0:
+
+                self._dispatch_v2t_err(event_name, message, {})
+
+                return
+
+            self._dispatch_v2t_ok(event_name, {})
+
+
+
+        handle_restart_simulation(event.payload, dispatch=_on_bridge_done)
 
 
 

@@ -456,6 +456,52 @@ def handle_start_simulation(
     )
 
 
+def handle_restart_simulation(
+    payload: Any,
+    *,
+    dispatch: Callable[[str, Dict[str, Any]], None],
+) -> None:
+    """T2V_request_restart_simulation — 직전 프리런으로 재생만 재시작.
+
+    웹은 이미 start 응답 데이터를 보유하므로 V2T ``data`` 는 비운다.
+    """
+    _ = _event_payload_to_dict(payload)
+    req_id = bridge_queued("restart_simulation")
+
+    def _work() -> None:
+        t0 = bridge_work_start(req_id, "restart_simulation")
+        try:
+            from morph.tbs_control_2.control_window import on_sim_restart_clicked
+
+            ext = require_tbs_extension_instance()
+            bundle = getattr(ext, "_sim_restart_prerun_bundle", None)
+            if not isinstance(bundle, dict) or not bundle.get("results"):
+                bridge_work_done(req_id, "restart_simulation", t0)
+                dispatch(
+                    "V2T_response_restart_simulation",
+                    _err("no cached prerun — start simulation first", data={}),
+                )
+                return
+            on_sim_restart_clicked(ext)
+            bridge_work_done(req_id, "restart_simulation", t0)
+            # 웹이 기존 start 데이터를 보관 — data 재전송 없음
+            dispatch("V2T_response_restart_simulation", _ok({}))
+        except Exception as exc:
+            bridge_work_done(req_id, "restart_simulation", t0)
+            dispatch(
+                "V2T_response_restart_simulation",
+                _err(str(exc), data={}),
+            )
+
+    schedule_on_main_thread(
+        _work,
+        on_error=lambda exc: dispatch(
+            "V2T_response_restart_simulation",
+            _err(str(exc), data={}),
+        ),
+    )
+
+
 def handle_control_simulation(
     payload: Any,
     *,

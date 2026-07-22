@@ -416,6 +416,7 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False, case_id:
         _sync_sim_split_checkboxes_from_ext_count,
         on_sim_ep_count_changed,
         on_sim_reset_clicked,
+        on_sim_restart_clicked,
         on_sim_start_clicked,
         on_sim_stop_clicked,
     )
@@ -428,6 +429,7 @@ def build_ebs_control_panel_content(ext: Any, *, compact: bool = False, case_id:
             on_sim_start_clicked=on_sim_start_clicked,
             on_sim_stop_clicked=on_sim_stop_clicked,
             on_sim_reset_clicked=on_sim_reset_clicked,
+            on_sim_restart_clicked=on_sim_restart_clicked,
             _sync_ep3_port_cell_visibility=_sync_ep3_port_cell_visibility,
             _on_sim_split_choice_changed=_on_sim_split_choice_changed,
             _sync_sim_split_checkboxes_from_ext_count=_sync_sim_split_checkboxes_from_ext_count,
@@ -463,6 +465,7 @@ def _build_ebs_control_panel_compact(
     on_sim_start_clicked: Any,
     on_sim_stop_clicked: Any,
     on_sim_reset_clicked: Any,
+    on_sim_restart_clicked: Any,
     _sync_ep3_port_cell_visibility: Any,
     _on_sim_split_choice_changed: Any,
     _sync_sim_split_checkboxes_from_ext_count: Any,
@@ -639,6 +642,7 @@ def _build_ebs_control_panel_compact(
             ext._sim_start_buttons.append(
                 ui.Button("시작", width=60, clicked_fn=lambda: on_sim_start_clicked(ext))
             )
+            ui.Button("재시작", width=60, clicked_fn=lambda: on_sim_restart_clicked(ext))
             ui.Button("정지", width=60, clicked_fn=lambda: on_sim_stop_clicked(ext))
             ui.Button("리셋", width=60, clicked_fn=lambda: on_sim_reset_clicked(ext))
             ui.Label(

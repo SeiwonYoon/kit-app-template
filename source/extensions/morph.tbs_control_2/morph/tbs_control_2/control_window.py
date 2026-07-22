@@ -8934,6 +8934,84 @@ def _finalize_prerun_ui_assets(
     except Exception:
         pass
     _scroll_sim_monitor_to_timetable(ext)
+    # 재시작용 프리런 번들 보관 (정지해도 유지, 리셋/신규 시작 finalize 시 갱신)
+    try:
+        full_res = getattr(ext, "_sim_prerun_results_by_screen", None)
+        if isinstance(full_res, dict) and full_res:
+            _stash_prerun_restart_bundle(ext, full_res)
+        else:
+            _stash_prerun_restart_bundle(ext, results)
+    except Exception as exc:
+        print(f"[SIM] prerun restart stash failed: {exc}", flush=True)
+
+
+_RESTART_BUNDLE_ATTRS = (
+    "_sim_ep_bar_prerun_by_screen",
+    "_sim_timetable_row_metas_by_screen",
+    "_sim_seek_snapshots_by_screen",
+    "_sim_prerun_export_json_by_screen",
+    "_sim_playback_schedule_by_screen",
+    "_sim_playback_plan_by_screen",
+    "_sim_playback_plan_initial_occ_by_screen",
+)
+
+
+def _stash_prerun_restart_bundle(ext: Any, results: Dict[int, Any]) -> None:
+    """직전 성공 프리런을 재시작용으로 보관."""
+    if not isinstance(results, dict) or not results:
+        return
+    res_copy: Dict[int, Any] = {}
+    for k, v in results.items():
+        try:
+            res_copy[int(k)] = v
+        except Exception:
+            continue
+    if not res_copy:
+        return
+    extras: Dict[str, Any] = {}
+    for attr in _RESTART_BUNDLE_ATTRS:
+        raw = getattr(ext, attr, None)
+        if isinstance(raw, dict):
+            extras[attr] = dict(raw)
+        else:
+            extras[attr] = {}
+    ext._sim_restart_prerun_bundle = {
+        "results": res_copy,
+        "extras": extras,
+    }
+
+
+def _clear_prerun_restart_bundle(ext: Any) -> None:
+    try:
+        ext._sim_restart_prerun_bundle = None
+    except Exception:
+        pass
+
+
+def _restore_prerun_restart_bundle(ext: Any) -> Optional[Dict[int, Any]]:
+    """번들에서 프리런/재생 자산을 복원하고 results 를 반환."""
+    bundle = getattr(ext, "_sim_restart_prerun_bundle", None)
+    if not isinstance(bundle, dict):
+        return None
+    results = bundle.get("results")
+    if not isinstance(results, dict) or not results:
+        return None
+    out: Dict[int, Any] = {}
+    for k, v in results.items():
+        try:
+            out[int(k)] = v
+        except Exception:
+            continue
+    if not out:
+        return None
+    extras = bundle.get("extras")
+    if isinstance(extras, dict):
+        for attr in _RESTART_BUNDLE_ATTRS:
+            raw = extras.get(attr)
+            if isinstance(raw, dict):
+                setattr(ext, attr, dict(raw))
+    ext._sim_prerun_results_by_screen = dict(out)
+    return out
 
 
 def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
@@ -13020,7 +13098,12 @@ def _restore_sim_prim_motion_to_initial(
         print(f"[TBS/SIM] restore motion failed: {exc}", flush=True)
 
 
-def on_sim_stop_clicked(ext: Any, *, freeze_ep_timeline: bool = True) -> None:
+def on_sim_stop_clicked(
+    ext: Any,
+    *,
+    freeze_ep_timeline: bool = True,
+    clear_prerun_cache: bool = True,
+) -> None:
     """
     시뮬레이션 중지(Stop).
 
@@ -13179,14 +13262,15 @@ def on_sim_stop_clicked(ext: Any, *, freeze_ep_timeline: bool = True) -> None:
         ev = getattr(ext, "_sim_prerun_done_evt", None)
         if ev is not None and hasattr(ev, "clear"):
             ev.clear()
-        ext._sim_prerun_results_by_screen = None
-        ext._sim_playback_schedule_by_screen = None
-        try:
-            from .control_sim_playback_plan import clear_playback_plan_runtime_state
+        if clear_prerun_cache:
+            ext._sim_prerun_results_by_screen = None
+            ext._sim_playback_schedule_by_screen = None
+            try:
+                from .control_sim_playback_plan import clear_playback_plan_runtime_state
 
-            clear_playback_plan_runtime_state(ext)
-        except Exception:
-            pass
+                clear_playback_plan_runtime_state(ext)
+            except Exception:
+                pass
     except Exception:
         pass
     for eng in list(getattr(ext, "_sim_engines", None) or []):
@@ -13381,6 +13465,179 @@ def on_sim_stop_clicked(ext: Any, *, freeze_ep_timeline: bool = True) -> None:
         pass
 
 
+def on_sim_restart_clicked(ext: Any) -> None:
+    """이전 프리런 결과로 재생만 다시 시작 (재프리런/설정 변경 없음)."""
+    print("[SIM] restart clicked", flush=True)
+    bundle = getattr(ext, "_sim_restart_prerun_bundle", None)
+    if not isinstance(bundle, dict) or not isinstance(bundle.get("results"), dict):
+        try:
+            _append_sim_log(ext, "[SIM] 재시작 실패 — 보관된 프리런 결과가 없습니다. 먼저 시작하세요.")
+        except Exception:
+            pass
+        print("[SIM] restart skipped — no prerun bundle", flush=True)
+        return
+
+    # 정지 후에도 잔여 애니/구독이 있을 수 있어 항상 정리 후 번들 복원
+    try:
+        on_sim_stop_clicked(
+            ext, freeze_ep_timeline=False, clear_prerun_cache=True
+        )
+    except Exception as exc:
+        print(f"[SIM] restart pre-stop: {exc}", flush=True)
+
+    results = _restore_prerun_restart_bundle(ext)
+    if not isinstance(results, dict) or not results:
+        try:
+            _append_sim_log(ext, "[SIM] 재시작 실패 — 프리런 번들 복원 실패")
+        except Exception:
+            pass
+        print("[SIM] restart restore failed", flush=True)
+        return
+
+    try:
+        # 화면별 stop 마크가 남아있으면 재생이 스킵될 수 있음
+        ext._sim_stopped_screens = set()
+    except Exception:
+        pass
+
+    try:
+        _append_sim_log(ext, "[SIM] 재시작 — 이전 프리런으로 재생 재개")
+    except Exception:
+        pass
+    print(
+        f"[SIM] restart screens={sorted(int(s) for s in results.keys())}",
+        flush=True,
+    )
+
+    try:
+        set_sim_playback_active(ext, True)
+        ext._sim_anim_pending = []
+        ext._sim_anim_pending_by_screen = {}
+        ext._sim_playback_done = False
+        ext._sim_prerun_timetable_printed = True
+    except Exception:
+        pass
+
+    try:
+        by = getattr(ext, "_sim_last_total_est_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_last_total_est_by_screen = by
+        for scr, res in results.items():
+            try:
+                by[str(int(scr))] = float(res.final_sim_time)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    playback_engs: List[Any] = []
+    try:
+        max_scr = max(int(s) for s in results.keys())
+    except Exception:
+        max_scr = 1
+    for i in range(1, max_scr + 1):
+        rr = results.get(int(i))
+        if rr is None:
+            continue
+        playback_engs.append(PlaybackEngine(final_sim_time=float(rr.final_sim_time)))
+    try:
+        ext._sim_engines = playback_engs
+        ext._sim_engine = playback_engs[0] if playback_engs else None
+    except Exception:
+        pass
+
+    def _speed() -> float:
+        try:
+            m = getattr(ext, "_sim_speed_model", None)
+            return float(m.get_value_as_float()) if m is not None else 1.0
+        except Exception:
+            return 1.0
+
+    def _timeline_event_gate(scr: int) -> bool:
+        return can_emit_timeline_event(ext, int(scr))
+
+    try:
+        _prepare_playback_emit_environment(ext, results)
+    except Exception as exc:
+        print(f"[SIM] restart prepare emit: {exc}", flush=True)
+
+    try:
+        bootstrap_playback_after_prerun(
+            ext,
+            results,
+            _make_playback_emit_fn(ext, results),
+            _speed,
+            gate_fn=_timeline_event_gate,
+        )
+    except Exception as exc:
+        print(f"[SIM] restart bootstrap failed: {exc}", flush=True)
+        try:
+            _append_sim_log(ext, f"[SIM] 재시작 실패: {exc}")
+        except Exception:
+            pass
+        return
+
+    # 첫 이벤트 전에도 진행현황이 움직이도록 초기 payload
+    try:
+        for scr, rr in results.items():
+            try:
+                scr_i = int(scr)
+            except Exception:
+                scr_i = 1
+            p0 = {
+                "tbs_sim_screen": str(scr_i),
+                "sim_time": "0.00",
+                "sim_total_est_sec": f"{float(rr.final_sim_time):.2f}",
+                "label": "대기",
+                "detail": "",
+                "status": "RUNNING",
+                "elapsed": "0.0",
+                "total": "0.0",
+                "percent": "0",
+            }
+            _update_sim_progress(ext, p0)
+    except Exception:
+        pass
+
+    # 시작(프리런 완료)과 동일 — UI update 구독이 있어야 재생 tick 이 돈다
+    try:
+        import omni.kit.app as app  # type: ignore
+
+        sub = getattr(ext, "_sim_playback_ui_sub", None)
+        if sub is not None:
+            try:
+                sub.unsubscribe()
+            except Exception:
+                pass
+        ext._sim_playback_ui_sub = (
+            app.get_app()
+            .get_update_event_stream()
+            .create_subscription_to_pop(
+                lambda _e: _tick_playback_timeline(ext),
+                name="morph.tbs_control_2:sim_playback_tick",
+            )
+        )
+        print("[SIM] restart playback tick subscribed", flush=True)
+    except Exception as exc:
+        print(f"[SIM] restart tick subscribe failed: {exc}", flush=True)
+
+    try:
+        ev = getattr(ext, "_sim_prerun_done_evt", None)
+        if ev is None:
+            ext._sim_prerun_done_evt = threading.Event()
+            ev = ext._sim_prerun_done_evt
+        if hasattr(ev, "set"):
+            ev.set()
+    except Exception:
+        pass
+
+    try:
+        _append_sim_log(ext, "[SIM] 재시작 완료: 보관된 타임라인을 재생합니다.")
+    except Exception:
+        pass
+    print("[SIM] restart playback started", flush=True)
+
 def on_sim_reset_clicked(ext: Any) -> None:
     """
     시뮬레이션 리셋(Reset).
@@ -13400,6 +13657,10 @@ def on_sim_reset_clicked(ext: Any) -> None:
     try:
         unlock_timetable_rows(ext)
         _clear_sim_timetable_storage(ext)
+    except Exception:
+        pass
+    try:
+        _clear_prerun_restart_bundle(ext)
     except Exception:
         pass
     on_sim_stop_clicked(ext, freeze_ep_timeline=False)
