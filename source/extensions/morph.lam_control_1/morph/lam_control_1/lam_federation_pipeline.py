@@ -24,6 +24,7 @@ from .lam_csv_prerun_playback import (
     maybe_export_csv_prerun_json,
 )
 from .lam_federation_client import fetch_federation_pages
+from .lam_federation_load_hud import set_federation_load_status
 from .lam_screen_visibility import request_screen_visibility
 from .simulation_play import (
     build_and_cache_from_dwells,
@@ -579,6 +580,26 @@ def _federation_verbose_parse_log() -> bool:
         return False
 
 
+def _fed_load_hud(
+    screen: int,
+    phase: str,
+    *,
+    detail: str = "",
+    ext: Any = None,
+    lam_window: Any = None,
+) -> None:
+    try:
+        set_federation_load_status(
+            screen,
+            phase,
+            detail=detail,
+            ext=ext,
+            lam_window=lam_window,
+        )
+    except Exception:
+        pass
+
+
 def _process_merged_response(
     ext: Any,
     lam_window: Any,
@@ -591,7 +612,7 @@ def _process_merged_response(
     save_response_json: bool = False,
     export_default_prerun: bool = False,
 ) -> ScreenPipelineResult:
-    """이미 수집됐거나 사용자가 붙여넣은 응답만 파싱·프리런·재생한다."""
+    """이미 수집됐거나 사용자가 붙여넣은 응답만 파싱·프리런·(옵션)재생한다."""
     from .simulation_play import set_csv_playback_compact_log
 
     meta: Dict[str, Any] = {"screen": screen}
@@ -602,9 +623,19 @@ def _process_merged_response(
         eqp_id = str(body.get("eqp_id") or "").strip()
         if not eqp_id:
             _fed_diag("S09_parse_fail", "eqp_id missing", screen=screen)
+            _fed_load_hud(
+                screen,
+                "failed",
+                detail="eqp_id missing",
+                ext=ext,
+                lam_window=lam_window,
+            )
             return ScreenPipelineResult(
                 screen, False, "eqp_id missing in config body", meta
             )
+        _fed_load_hud(
+            screen, "parsing", ext=ext, lam_window=lam_window
+        )
         dwells, parse_stats = merged_response_to_dwells(
             merged, eqp_id=eqp_id, quiet=quiet
         )
@@ -615,6 +646,13 @@ def _process_merged_response(
                 "no dwell records after parse",
                 screen=screen,
                 eqp_id=eqp_id,
+            )
+            _fed_load_hud(
+                screen,
+                "failed",
+                detail="파싱 결과 없음",
+                ext=ext,
+                lam_window=lam_window,
             )
             return ScreenPipelineResult(screen, False, "no dwell records after parse", meta)
         _fed_diag(
@@ -671,6 +709,9 @@ def _process_merged_response(
             auto_play=bool(auto_play),
         )
         _apply_federation_timeline_ui(csv_win, cached)
+        _fed_load_hud(
+            screen, "ready", ext=ext, lam_window=lam_window
+        )
         if auto_play:
             _fed_diag("S11_auto_play", "start playback", screen=screen)
             err = _start_federation_playback(
@@ -687,14 +728,31 @@ def _process_merged_response(
                     err,
                     screen=screen,
                 )
+                _fed_load_hud(
+                    screen,
+                    "failed",
+                    detail=err,
+                    ext=ext,
+                    lam_window=lam_window,
+                )
                 return ScreenPipelineResult(screen, False, err, meta)
+            _fed_load_hud(
+                screen, "playing", ext=ext, lam_window=lam_window
+            )
         else:
-            _fed_diag("S11_auto_play_skip", "auto_play=False", screen=screen)
+            _fed_diag("S11_auto_play_skip", "auto_play=False (barrier)", screen=screen)
         return ScreenPipelineResult(
             screen, True, "ok", meta, prerun=prerun, cached=cached
         )
     except Exception as exc:
         _fed_diag("S09_exception", str(exc), screen=screen)
+        _fed_load_hud(
+            screen,
+            "failed",
+            detail=str(exc),
+            ext=ext,
+            lam_window=lam_window,
+        )
         return ScreenPipelineResult(screen, False, str(exc), meta)
     finally:
         if quiet:
@@ -803,9 +861,19 @@ def _process_one_screen(
         api_body = _normalize_federation_body_periods(body)
         eqp_id = str(api_body.get("eqp_id") or "").strip()
         if not eqp_id:
+            _fed_load_hud(
+                screen,
+                "failed",
+                detail="eqp_id missing",
+                ext=ext,
+                lam_window=lam_window,
+            )
             return ScreenPipelineResult(
                 screen, False, "eqp_id missing in config body", meta
             )
+        _fed_load_hud(
+            screen, "requesting", ext=ext, lam_window=lam_window
+        )
         merged, fetch_meta = fetch_federation_pages(
             url=url,
             body=api_body,
@@ -829,6 +897,9 @@ def _process_one_screen(
             elapsed=fetch_meta.get("elapsed_sec"),
             status=fetch_meta.get("http_status"),
         )
+        _fed_load_hud(
+            screen, "received", ext=ext, lam_window=lam_window
+        )
         result = _process_merged_response(
             ext,
             lam_window,
@@ -842,7 +913,65 @@ def _process_one_screen(
         result.meta["fetch"] = fetch_meta
         return result
     except Exception as exc:
+        _fed_load_hud(
+            screen,
+            "failed",
+            detail=str(exc),
+            ext=ext,
+            lam_window=lam_window,
+        )
         return ScreenPipelineResult(screen, False, str(exc), meta)
+
+
+def _start_ready_screens_together(
+    ext: Any,
+    lam_window: Any,
+    results: List[ScreenPipelineResult],
+    *,
+    speed_scale: float,
+) -> List[ScreenPipelineResult]:
+    """준비완료(ok+cached) 화면만 거의 동시에 play 시작. 실패 화면은 그대로 둔다."""
+    ready = [r for r in results if r.ok and r.cached is not None]
+    failed = [r for r in results if not r.ok]
+    _fed_diag(
+        "S11_barrier",
+        "start ready screens together",
+        ready=[r.screen for r in ready],
+        failed=[r.screen for r in failed],
+    )
+    out: List[ScreenPipelineResult] = []
+    # 실패분은 유지, 성공분은 play 결과로 갱신
+    by_screen = {r.screen: r for r in results}
+    for r in ready:
+        csv_win = _resolve_csv_play_window(lam_window, r.screen)
+        _fed_diag("S11_auto_play", "barrier start playback", screen=r.screen)
+        err = _start_federation_playback(
+            ext,
+            lam_window,
+            csv_win,
+            r.screen,
+            r.cached,
+            speed_scale=speed_scale,
+        )
+        if err:
+            _fed_diag("S11_auto_play_fail", err, screen=r.screen)
+            _fed_load_hud(
+                r.screen,
+                "failed",
+                detail=err,
+                ext=ext,
+                lam_window=lam_window,
+            )
+            by_screen[r.screen] = ScreenPipelineResult(
+                r.screen, False, err, dict(r.meta or {}), prerun=r.prerun, cached=r.cached
+            )
+        else:
+            _fed_load_hud(
+                r.screen, "playing", ext=ext, lam_window=lam_window
+            )
+    for si in sorted(by_screen.keys()):
+        out.append(by_screen[si])
+    return out
 
 
 def run_federation_start_simulation(
@@ -858,7 +987,11 @@ def run_federation_start_simulation(
     bearer_token_override: Optional[str] = None,
     extra_headers_override: Optional[Dict[str, str]] = None,
 ) -> None:
-    """T2V ``configs`` payload → 화면 표시 + fetch + prerun + (옵션) 재생."""
+    """T2V ``configs`` payload → 화면 표시 + fetch + prerun + (옵션) 재생.
+
+    듀얼 화면: 각 화면 fetch·파싱이 끝난 뒤 **성공 화면만** 동시에 재생 시작.
+    실패 화면은 HUD에 실패를 남기고 play 하지 않는다.
+    """
     defaults = _read_federation_defaults()
     url = str(url_override or defaults["url"] or "").strip()
     if not url:
@@ -902,7 +1035,7 @@ def run_federation_start_simulation(
     )
 
     def _work_after_visibility() -> Dict[str, Any]:
-        _fed_diag("S06_work_begin", "after visibility — fetch/play")
+        _fed_diag("S06_work_begin", "after visibility — fetch/parse then barrier play")
         lam_window = getattr(ext, "_lam_window", None) or getattr(ext, "_window", None)
         if lam_window is None:
             _fed_diag("S06_fail", "LAM window is not ready")
@@ -928,10 +1061,9 @@ def run_federation_start_simulation(
             )
 
         results: List[ScreenPipelineResult] = []
-        # 배포: 듀얼 화면 동시 ThreadPool + main-thread 경합으로 play 미기동 방지
-        # → 화면 순차 처리 (결과는 동일, fetch/play 시작 시점만 직렬). CSV Play UI 무관.
+        # Phase A: fetch+parse+prerun 만 (play 보류). 순차 처리로 main-thread 경합 회피.
         for screen, body in jobs:
-            _fed_diag("S08_screen_begin", "process screen", screen=screen)
+            _fed_diag("S08_screen_begin", "prepare screen (no play yet)", screen=screen)
             results.append(
                 _process_one_screen(
                     ext,
@@ -946,7 +1078,7 @@ def run_federation_start_simulation(
                     extra_headers=extra_headers,
                     log_row_sample=log_row_sample,
                     log_full_response=log_full_response,
-                    auto_play=auto_play,
+                    auto_play=False,
                     speed_scale=speed_scale,
                     export_default_prerun=False,
                 )
@@ -959,19 +1091,48 @@ def run_federation_start_simulation(
                 ok=r.ok,
             )
         results.sort(key=lambda r: r.screen)
-        failed = [r for r in results if not r.ok]
-        if failed:
-            return _err(
-                "; ".join(f"screen{r.screen}: {r.message}" for r in failed),
-                data={"screens": [_result_dict(r) for r in results]},
+
+        # Phase B: 성공 화면만 동시 시작
+        if auto_play:
+            results = _start_ready_screens_together(
+                ext,
+                lam_window,
+                results,
+                speed_scale=speed_scale,
             )
-        return _ok(
-            {
-                "screens": [_result_dict(r) for r in results],
-                "show_1": show_1,
-                "show_2": show_2,
-            }
-        )
+        else:
+            for r in results:
+                if r.ok:
+                    _fed_diag(
+                        "S11_auto_play_skip",
+                        "auto_play=False after prepare",
+                        screen=r.screen,
+                    )
+
+        results.sort(key=lambda r: r.screen)
+        ok_list = [r for r in results if r.ok]
+        failed = [r for r in results if not r.ok]
+        payload_data = {
+            "screens": [_result_dict(r) for r in results],
+            "show_1": show_1,
+            "show_2": show_2,
+            "started_screens": [r.screen for r in ok_list],
+            "failed_screens": [r.screen for r in failed],
+        }
+        if not ok_list:
+            return _err(
+                "; ".join(f"screen{r.screen}: {r.message}" for r in failed)
+                or "all screens failed",
+                data=payload_data,
+            )
+        if failed:
+            # 일부 실패·일부 성공 → 성공분만 재생한 상태로 ok 반환
+            print(
+                f"{_PRINT_PREFIX} partial ok — started={payload_data['started_screens']} "
+                f"failed={payload_data['failed_screens']}",
+                flush=True,
+            )
+        return _ok(payload_data)
 
     def _apply_visibility_then_run() -> None:
         def _run_fetch() -> None:

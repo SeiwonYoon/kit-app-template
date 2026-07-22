@@ -66,6 +66,9 @@ SHOW_VIEWPORT_STATUS_PANEL: bool = False
 # Viewport 우상단 CSV 시뮬 재생 HUD. False → 미표시.
 SHOW_VIEWPORT_CSV_PANEL: bool = False
 
+# Viewport 좌상단 Federation API 로딩 HUD (요청중/실패/수신/파싱/준비완료). False → 미표시.
+SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = True
+
 # CSV 시뮬 재생 ui.Window — 타임라인 ScrollingFrame 아래(이벤트 함수·매크로·로그) 숨김.
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
@@ -151,6 +154,7 @@ __all__ = [
     "UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT",
     "SHOW_VIEWPORT_STATUS_PANEL",
     "SHOW_VIEWPORT_CSV_PANEL",
+    "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
     "FEDERATION_QUERY_URL",
     "FEDERATION_FETCH_LIMIT",
