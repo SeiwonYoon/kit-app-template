@@ -172,16 +172,17 @@ class LamHandler(BaseHandler):
 
     def _on_req_stop_simulation(self, event: carb.events.IEvent) -> None:
         """
-        T2V_request_stop_simulation — 화면별 시뮬레이션 중지.
+        T2V_request_stop_simulation — 시뮬레이션 중지.
 
         요청: ``{"case": 0}``  (0=화면1, 1=화면2)
-        성공 응답 data: ``{"case": case_index}``
+              ``case`` 없음 / null / 빈 값 → 화면1·2 동시 정지
+        성공 응답 data: ``{"case": 0|1}`` 또는 양쪽 정지 시 ``{"case": null}``
         """
         # [1] T2V 수신 로그 — 이 줄이 즉시 찍히면 livestream 메시징 수신 OK
         print(f"[LamHandler] _on_req_stop_simulation - {event.payload}")
 
         payload = dict(getattr(event, "payload", None) or {})
-        case_index = payload.get(PAYLOAD_CASE, 0)
+        case_echo_default = payload.get(PAYLOAD_CASE) if PAYLOAD_CASE in payload else None
 
         # [2] bridge 완료 콜백 — 화면 중지·초기화 끝난 뒤 V2T 전송
         def _on_bridge_done(event_name: str, bridge_body: Dict[str, Any]) -> None:
@@ -190,13 +191,13 @@ class LamHandler(BaseHandler):
             data = bridge_body.get("data")
             if not isinstance(data, dict):
                 data = {}
-            case_echo = data.get(PAYLOAD_CASE, case_index)
+            case_echo = data.get(PAYLOAD_CASE, case_echo_default)
             if code != 0:
                 self._dispatch_v2t_err(event_name, message, {PAYLOAD_CASE: case_echo})
                 return
             self._dispatch_v2t_ok(event_name, {PAYLOAD_CASE: case_echo})
 
-        # [3] Kit 시뮬 중지 위임 — 해당 화면만 정지(초기화), 다른 화면 무영향 (비동기)
+        # [3] Kit 시뮬 중지 위임 (비동기)
         handle_stop_simulation(payload, dispatch=_on_bridge_done)
 
     # ------------------------------------------------------------------

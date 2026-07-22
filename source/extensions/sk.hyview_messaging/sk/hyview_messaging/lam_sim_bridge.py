@@ -17,6 +17,7 @@ LAM HyView 메시징 ↔ Kit Federation 시뮬 브리지 (TBS ``tbs_sim_bridge``
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from morph.lam_control_1.kit_main_dispatch import schedule_on_main_thread
@@ -113,24 +114,112 @@ def handle_start_simulation(
     schedule_on_main_thread(_run)
 
 
+def _stop_case_means_all_screens(payload: Dict[str, Any]) -> bool:
+    """``case`` 키 없음 / None / 빈 문자열 → 화면 1·2 동시 정지."""
+    if PAYLOAD_CASE not in payload:
+        return True
+    raw = payload.get(PAYLOAD_CASE)
+    if raw is None:
+        return True
+    if isinstance(raw, str) and not str(raw).strip():
+        return True
+    return False
+
+
+def _stop_one_screen_reset(
+    lam_win: Any,
+    screen: int,
+    *,
+    on_complete: Callable[[], None],
+) -> None:
+    csv_win = (
+        lam_win._ensure_csv_sim_play_window(screen)
+        if lam_win is not None
+        else None
+    )
+    if csv_win is None:
+        raise RuntimeError(f"screen{screen} CSV play window unavailable")
+    csv_win._on_csv_stop_reset_clicked(on_complete=on_complete)
+
+
 def handle_stop_simulation(
     payload: Dict[str, Any],
     *,
     dispatch: Callable[[str, Dict[str, Any]], None],
     event_name: str = V2T_RESPONSE_STOP_SIMULATION,
 ) -> None:
-    """T2V_request_stop_simulation — ``case`` 화면만 중지 (0=화면1, 1=화면2).
+    """T2V_request_stop_simulation — 화면 중지.
 
-    UI 「정지(초기화)」와 동일한 화면별 경로를 사용해 다른 화면 재생에 영향을
-    주지 않는다. 중지·초기화 완료 콜백에서 ``dispatch(event_name, {code, message,
-    data:{case}})`` 를 호출한다.
+    - ``case`` 0 → 화면1, 1 → 화면2
+    - ``case`` 없음 / ``None`` / 빈 값 → 화면1·2 **동시** 정지(초기화)
+    - 그 외 값 → invalid
+
+    UI 「정지(초기화)」와 동일한 경로. 완료 후
+    ``dispatch(event_name, {code, message, data:{case}})``
+    (양쪽 정지 시 ``case`` 는 ``None``).
     """
     pl = dict(payload or {})
-    raw_case = pl.get(PAYLOAD_CASE, 0)
+    stop_all = _stop_case_means_all_screens(pl)
+    raw_case = pl.get(PAYLOAD_CASE) if PAYLOAD_CASE in pl else None
 
     def _run() -> None:
         try:
-            case_index = int(raw_case)
+            ext = require_lam_extension_instance()
+            lam_win = getattr(ext, "_lam_window", None)
+        except Exception as exc:
+            dispatch(
+                event_name,
+                _err(
+                    str(exc),
+                    data={PAYLOAD_CASE: None if stop_all else raw_case},
+                ),
+            )
+            return
+
+        if stop_all:
+            pending = {1, 2}
+            errors: List[str] = []
+            lock = threading.Lock()
+
+            def _finish_if_done() -> None:
+                with lock:
+                    if pending:
+                        return
+                    err_copy = list(errors)
+                if err_copy:
+                    dispatch(
+                        event_name,
+                        _err(
+                            "; ".join(err_copy),
+                            data={PAYLOAD_CASE: None},
+                        ),
+                    )
+                else:
+                    dispatch(event_name, _ok({PAYLOAD_CASE: None}))
+
+            def _on_screen_done(screen: int) -> Callable[[], None]:
+                def _cb() -> None:
+                    with lock:
+                        pending.discard(int(screen))
+                    _finish_if_done()
+
+                return _cb
+
+            # 두 화면 정지 요청을 연달아 기동 → 백그라운드에서 동시 진행
+            for screen in (1, 2):
+                try:
+                    _stop_one_screen_reset(
+                        lam_win, screen, on_complete=_on_screen_done(screen)
+                    )
+                except Exception as exc:
+                    with lock:
+                        errors.append(f"screen{screen}: {exc}")
+                        pending.discard(screen)
+            _finish_if_done()
+            return
+
+        try:
+            case_index = int(raw_case)  # type: ignore[arg-type]
         except Exception:
             case_index = -1
         if case_index not in (0, 1):
@@ -141,20 +230,10 @@ def handle_stop_simulation(
             return
         screen = case_index + 1
         try:
-            ext = require_lam_extension_instance()
-            lam_win = getattr(ext, "_lam_window", None)
-            csv_win = (
-                lam_win._ensure_csv_sim_play_window(screen)
-                if lam_win is not None
-                else None
-            )
-            if csv_win is None:
-                raise RuntimeError(f"screen{screen} CSV play window unavailable")
-
             def _on_stop_done() -> None:
                 dispatch(event_name, _ok({PAYLOAD_CASE: case_index}))
 
-            csv_win._on_csv_stop_reset_clicked(on_complete=_on_stop_done)
+            _stop_one_screen_reset(lam_win, screen, on_complete=_on_stop_done)
         except Exception as exc:
             dispatch(event_name, _err(str(exc), data={PAYLOAD_CASE: case_index}))
 
