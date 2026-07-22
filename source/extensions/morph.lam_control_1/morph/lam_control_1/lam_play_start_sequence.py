@@ -208,6 +208,27 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
         except Exception:
             vp_api = None
 
+    # lot→FOUP 개수별 추가 숨김 (CSV/Federation 공통 Play 진입)
+    try:
+        from .lam_foup_usage_hide import apply_foup_usage_extra_hide_for_playback
+
+        csv_win = getattr(runtime, "csv_window", None)
+        cached = (
+            getattr(csv_win, "_prepared_playback", None) if csv_win is not None else None
+        )
+        dwells = getattr(cached, "dwells", None) if cached is not None else None
+        apply_foup_usage_extra_hide_for_playback(
+            dwells=dwells,
+            usd_context_name=ctx or None,
+            screen=si,
+            wait=True,
+        )
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} screen{si} foup usage hide: {exc}",
+            flush=True,
+        )
+
     def _stop() -> bool:
         return bool(csv_playback_stop_requested(screen=si))
 

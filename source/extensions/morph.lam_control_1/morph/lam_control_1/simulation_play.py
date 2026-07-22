@@ -4520,6 +4520,15 @@ def reset_csv_play_stop_initial_state(
             _snap_csv_play_robot_z_home(st)
             _snap_csv_play_scaffold_motion_prims_home(st)
             apply_csv_play_initial_wafer_visibility_on_stage(st, screen=si)
+            try:
+                from .lam_foup_usage_hide import restore_foup_usage_extra_hide_on_stage
+
+                restore_foup_usage_extra_hide_on_stage(st, screen=si)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX}   foup usage hide restore: {exc}",
+                    flush=True,
+                )
         finally:
             pop_usd_context_name(prev)
 

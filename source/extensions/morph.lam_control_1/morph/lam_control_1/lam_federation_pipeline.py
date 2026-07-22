@@ -809,6 +809,42 @@ def _process_merged_response(
             auto_play=bool(auto_play),
         )
         _apply_federation_timeline_ui(csv_win, cached)
+        try:
+            from .lam_foup_usage_hide import (
+                apply_foup_usage_extra_hide_for_playback,
+                count_used_foups_from_dwells,
+            )
+
+            used_n = count_used_foups_from_dwells(dwells)
+            meta["used_foup_count"] = used_n
+            ctx_name = ""
+            if int(screen) > 1:
+                try:
+                    from .lam_csv_play_screen import usd_context_name_for_screen
+
+                    ctx_name = str(
+                        usd_context_name_for_screen(ext, int(screen)) or ""
+                    ).strip()
+                except Exception:
+                    ctx_name = ""
+            apply_foup_usage_extra_hide_for_playback(
+                dwells=dwells,
+                foup_count=used_n,
+                usd_context_name=ctx_name or None,
+                screen=int(screen),
+                wait=True,
+            )
+            _fed_diag(
+                "S10_foup_usage_hide",
+                "extra hide by foup count",
+                screen=screen,
+                used_foup_count=used_n,
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} screen{screen} foup usage hide: {exc}",
+                flush=True,
+            )
         _fed_load_hud(
             screen, "ready", ext=ext, lam_window=lam_window
         )

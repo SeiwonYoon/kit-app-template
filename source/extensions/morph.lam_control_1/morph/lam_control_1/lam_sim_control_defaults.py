@@ -73,6 +73,24 @@ SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = True
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 # ---------------------------------------------------------------------------
+# FOUP 사용 개수별 추가 숨김 prim
+# ---------------------------------------------------------------------------
+# 파싱/프리런 후 lot_id→foup_index 고유 개수(1/2/3)를 판별하고,
+# 해당 목록의 prim 을 시뮬레이션 시작(및 Federation 준비완료) 시 자동 숨김.
+# 목록이 비어 있으면 해당 개수에서는 추가 숨김 없음.
+# 예: 1개만 쓸 때 FOUP2·3 body 숨김 경로를 FOUP_USAGE_EXTRA_HIDE_PRIMS_1 에 넣는다.
+FOUP_USAGE_EXTRA_HIDE_PRIMS_1: list = [
+    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_02/Foup_02_Body",
+    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_03/Foup_03_Body",
+]
+FOUP_USAGE_EXTRA_HIDE_PRIMS_2: list = [
+    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_03/Foup_03_Body",
+]
+FOUP_USAGE_EXTRA_HIDE_PRIMS_3: list = [
+    # 3개 모두 사용 시에도 추가로 숨길 prim (없으면 비움)
+]
+
+# ---------------------------------------------------------------------------
 # Federation API (HyView / 웹 T2V → Kit fetch)
 # ---------------------------------------------------------------------------
 # POST 대상 — 실무 내부망. 로컬·테스트 창에서도 편집 가능.
@@ -156,6 +174,9 @@ __all__ = [
     "SHOW_VIEWPORT_CSV_PANEL",
     "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
+    "FOUP_USAGE_EXTRA_HIDE_PRIMS_1",
+    "FOUP_USAGE_EXTRA_HIDE_PRIMS_2",
+    "FOUP_USAGE_EXTRA_HIDE_PRIMS_3",
     "FEDERATION_QUERY_URL",
     "FEDERATION_FETCH_LIMIT",
     "FEDERATION_FETCH_TIMEOUT_SEC",
