@@ -171,7 +171,11 @@ def stop_csv_play_motion_for_screen(
     kit_ext: Any = None,
     lam_window: Any = None,
 ) -> None:
-    """지정 화면의 MOVE/ROTATE 만 중지 (다른 화면 재생 유지)."""
+    """지정 화면의 MOVE/ROTATE 만 중지 (다른 화면 재생 유지).
+
+    애니 딕셔너리·update 구독은 Kit 메인 update 와 경쟁하므로,
+    백그라운드(모드 전환 worker) 에서는 메인 스레드로 마샬링한다.
+    """
     si = max(1, int(screen))
     cn: Optional[str] = None
     if kit_ext is not None:
@@ -183,22 +187,40 @@ def stop_csv_play_motion_for_screen(
                 cn = None
         except Exception:
             cn = None
-    try:
-        from . import lam_rotate_animation as _lrx
-        from . import lam_translate_animation as _ltx
 
-        if cn:
-            _ltx.stop_translate_animations_for_context(cn)
-            _lrx.stop_rotate_animations_for_context(cn)
-        elif si <= 1:
-            # default USD context (화면1) — stop_all 금지, dual-play 시 화면2 애니 유지
-            _ltx.stop_translate_animations_for_context(None)
-            _lrx.stop_rotate_animations_for_context(None)
+    def _stop_anims() -> None:
+        try:
+            from . import lam_rotate_animation as _lrx
+            from . import lam_translate_animation as _ltx
+
+            if cn:
+                _ltx.stop_translate_animations_for_context(cn)
+                _lrx.stop_rotate_animations_for_context(cn)
+            elif si <= 1:
+                # default USD context (화면1) — stop_all 금지, dual-play 시 화면2 애니 유지
+                _ltx.stop_translate_animations_for_context(None)
+                _lrx.stop_rotate_animations_for_context(None)
+            else:
+                # split context 미해결 — 다른 화면 건드리지 않음
+                pass
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} stop motion screen={si}: {exc}", flush=True)
+
+    try:
+        import threading as _threading
+
+        from .lam_sequence_engine import _dispatch_main
+
+        # 메인에서 unsubscribe/애니 정리. wait 금지 — 전환 worker↔메인 데드락 방지.
+        if _threading.current_thread() is _threading.main_thread():
+            _stop_anims()
         else:
-            # split context 미해결 — 다른 화면 건드리지 않음
-            pass
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} stop motion screen={si}: {exc}", flush=True)
+            _dispatch_main(_stop_anims)
+            # dict 는 즉시 비워 runner 가 더 이상 애니를 붙잡지 않게 함
+            _stop_anims()
+    except Exception:
+        _stop_anims()
+
     if lam_window is not None:
         runners = getattr(lam_window, "_csv_sequence_runners_by_screen", None)
         if isinstance(runners, dict):

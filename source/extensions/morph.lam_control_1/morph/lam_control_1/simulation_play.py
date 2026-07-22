@@ -3417,10 +3417,38 @@ def join_csv_play_child_workers(
 
 
 def recover_csv_play_after_failed_mode_switch(*, screen: int) -> None:
-    """공정만보기 전환 실패 후 해당 화면만 재생 가능 상태로 (pause_checkpoint 유지)."""
+    """전환 실패 복구.
+
+    살아 있는 자식 worker 가 있으면 **stop 을 해제하지 않는다**.
+    (해제 시 좀비 worker 가 재개되어 토글 반복 시 Kit 메인 데드락으로 이어짐.)
+    """
     si = max(1, int(screen))
+    alive = _alive_csv_play_child_workers(screen=si)
+    if alive:
+        sess = csv_play_screen_session(si)
+        sess.stop_event.set()
+        sess.material_test_stop.set()
+        print(
+            f"{_PRINT_PREFIX} 공정만보기 전환 실패 화면{si} — "
+            f"잔존 worker {len(alive)}개, stop 유지 (Play/Stop 으로 복구)",
+            flush=True,
+        )
+        return
     clear_csv_playback_stop(screen=si)
     disarm_csv_play_pause_for_resume(screen=si)
+
+
+def abandon_csv_play_after_failed_mode_switch(*, screen: int) -> None:
+    """전환 실패 — stop 유지·pause 해제. 좀비 재개 금지."""
+    si = max(1, int(screen))
+    sess = csv_play_screen_session(si)
+    sess.stop_event.set()
+    sess.material_test_stop.set()
+    sess.pause_armed = False
+    print(
+        f"{_PRINT_PREFIX} 공정만보기 전환 abandon 화면{si} — stop 유지",
+        flush=True,
+    )
 
 
 def reap_csv_play_workers_for_screen(
@@ -3449,14 +3477,15 @@ def _join_csv_play_workers(
     *,
     screen: Optional[int] = None,
 ) -> None:
-    """블록/레인 worker join — stop 시 장시간 대기 없이 play worker 가 빠져나오게."""
-    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
+    """블록/레인 worker join.
+
+    stop 요청 후에도 **조기 return 하지 않는다** — play 스레드가 빠져나가며
+    자식을 고아로 남기면 모드 전환 reap/토글 반복 시 데드락 위험이 커진다.
+    worker 는 stop 플래그를 보고 스스로 종료하고, 여기서는 종료만 기다린다.
+    """
+    _ = screen
     for t in workers:
-        if csv_playback_stop_requested(screen=si):
-            return
         while t.is_alive():
-            if csv_playback_stop_requested(screen=si):
-                return
             try:
                 t.join(timeout=_CSV_PLAY_WORKER_JOIN_SLICE_SEC)
             except Exception:
@@ -4643,7 +4672,7 @@ def run_csv_timed_playback(
 ) -> None:
     """CSV ``eqp_start_tm`` 스케줄 재생 (``speed_scale`` 배속).
 
-    - **일반**: 각 블록 스레드가 CSV 시각까지 대기 후 실행.
+    - **일반**: JSON 블록만 스레드(레인 병렬). dwell 은 단일 로그 스레드.
     - **공정만보기** (``process_only``): dwell 생략·배속 1x·빈 구간 압축·레인 간 JSON 실행 중 병렬(일반 재생 경로 무관).
     - **ATM** / **VTM** 은 CSV 시각에 맞춰 교차 시작 가능(동시 0초 시작 아님).
     - **동일 레인** 은 ``max(이전 JSON 종료, 다음 CSV t)`` 에 시작(직렬).
@@ -4777,16 +4806,49 @@ def run_csv_timed_playback(
     )
     ticker.start()
     workers: List[threading.Thread] = []
+    # JSON 블록만 스레드 — dwell 은 단일 로거 스레드(블록당 스레드 폭주·토글 프리즈 방지)
+    json_items = [(i, b) for i, b in enumerate(ordered, 1) if b.steps]
+    dwell_items = [(i, b) for i, b in enumerate(ordered, 1) if not b.steps]
+    print(
+        f"{_PRINT_PREFIX} 화면{si} 일반재생 worker | JSON {len(json_items)} · "
+        f"dwell로그스레드 1 (dwell {len(dwell_items)}건)",
+        flush=True,
+    )
+
+    def _dwell_log_worker() -> None:
+        for index, block in dwell_items:
+            if csv_playback_stop_requested(screen=si):
+                return
+            if not _wait_until_csv_play_time(float(block.time_sec), screen=si):
+                return
+            if csv_playback_stop_requested(screen=si):
+                return
+            sched = block.schedule
+            if sched is None:
+                continue
+            wall_elapsed = get_csv_play_csv_time_now(screen=si)
+            _print_csv_compact_line(
+                index, sched, wall_elapsed_sec=wall_elapsed, executed=False
+            )
+
     try:
-        for i, block in enumerate(ordered, 1):
+        if dwell_items:
+            dt = _spawn_csv_play_bound_thread(
+                si,
+                name=f"lam-csv-play-dwell-log-s{si}",
+                target=_dwell_log_worker,
+            )
+            workers.append(dt)
+            dt.start()
+        for index, block in json_items:
             if csv_playback_stop_requested(screen=si):
                 stopped = True
                 break
             t = _spawn_csv_play_bound_thread(
                 si,
-                name=f"lam-csv-play-blk{i:03d}-s{si}",
+                name=f"lam-csv-play-blk{index:03d}-s{si}",
                 target=_csv_playback_block_worker,
-                args=(block, i, registry, scheduler),
+                args=(block, index, registry, scheduler),
                 kwargs={
                     "lane_coordinator": lane_coordinator,
                     "usd_context_name": usd_ctx,
@@ -5099,6 +5161,8 @@ class LamSimulationCsvPlayWindow:
         self._process_only_model_syncing: bool = False
         self._process_only_switch_pending: bool = False
         self._process_only_switch_target: bool = False
+        self._process_only_switch_lock = threading.Lock()
+        self._process_only_switch_gen: int = 0
         self._process_only_deferred_for_start: Optional[bool] = None
         self._csv_prerun_export_model: Any = None
         self._wafer_label_show_model: Any = None
@@ -6844,16 +6908,25 @@ class LamSimulationCsvPlayWindow:
     def _schedule_live_process_only_changed(
         self, *, desired: Optional[bool] = None
     ) -> None:
-        """모델/체크 변경 → live 전환. 목표값은 **토글 후 모델값** (invert 하지 않음)."""
+        """모델/체크 변경 → live 전환. 목표값은 **토글 후 모델값** (invert 하지 않음).
+
+        연타 debounce: 최신 desired 만 짧은 지연 후 1회 적용 (전환 worker 폭주 방지).
+        """
         captured = desired
         si = int(self._screen)
+        self._process_only_switch_gen = int(
+            getattr(self, "_process_only_switch_gen", 0)
+        ) + 1
+        token = int(self._process_only_switch_gen)
         print(
             f"{_PRINT_PREFIX} 공정만보기 schedule 화면{si} "
-            f"desired={captured if captured is not None else '(read)'}",
+            f"desired={captured if captured is not None else '(read)'} gen={token}",
             flush=True,
         )
 
         def _run() -> None:
+            if token != int(getattr(self, "_process_only_switch_gen", 0)):
+                return
             if captured is not None:
                 self._on_live_process_only_changed(desired_override=bool(captured))
             else:
@@ -6861,16 +6934,17 @@ class LamSimulationCsvPlayWindow:
                     desired_override=self._read_process_only()
                 )
 
-        try:
-            import omni.kit.app  # type: ignore
-
-            app = omni.kit.app.get_app()
-            if app is not None and hasattr(app, "post_update"):
-                app.post_update(_run)
+        def _debounce() -> None:
+            time.sleep(0.12)
+            if token != int(getattr(self, "_process_only_switch_gen", 0)):
                 return
-        except Exception:
-            pass
-        _post_kit_main_thread(_run)
+            _post_kit_main_thread(_run)
+
+        threading.Thread(
+            target=_debounce,
+            daemon=True,
+            name=f"lam-process-only-debounce-s{si}",
+        ).start()
 
     def _on_process_only_checkbox_clicked(self) -> None:
         """CheckBox clicked_fn — value_changed 가 있으면 그쪽이 SSOT."""
@@ -6897,7 +6971,7 @@ class LamSimulationCsvPlayWindow:
                 f"before={before} after={after} desired={desired}",
                 flush=True,
             )
-            self._on_live_process_only_changed(desired_override=bool(desired))
+            self._schedule_live_process_only_changed(desired=bool(desired))
 
         try:
             import omni.kit.app  # type: ignore
@@ -6986,71 +7060,78 @@ class LamSimulationCsvPlayWindow:
             self._fan_out_process_only_to_aux_screens(desired)
 
     def _try_start_live_process_only_switch(self, desired: bool) -> None:
-        """해당 화면 재생 중이면 pause → 공정만보기/일반 모드로 이어서 재생."""
-        si = int(self._screen)
-        if self._process_only_switch_pending:
-            print(
-                f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — 전환 worker 진행 중",
-                flush=True,
-            )
-            return
-        if not self._csv_play_is_active():
-            print(
-                f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — 재생 세션 없음",
-                flush=True,
-            )
-            return
-        # Play thread 는 살아 있으나 CSV 시계 세션 전(preflight/prerun) —
-        # pause/reap 하면 화면1 처럼 전환 worker 가 잠기고 mid-check 가 무시된다.
-        # 화면2 와 동일하게: 세션 시작 직전에 모드만 반영.
-        if not csv_play_session_active(screen=si):
-            self._process_only_deferred_for_start = bool(desired)
-            self._process_only_switch_target = bool(desired)
-            print(
-                f"{_PRINT_PREFIX} 공정만보기 deferred 화면{si} desired={desired} "
-                f"(preflight/prerun — Play 진입 시 적용)",
-                flush=True,
-            )
-            self._log(
-                f"공정만보기 {'ON' if desired else 'OFF'} — "
-                f"재생 시작 시 적용 (화면{si} preflight 중)"
-            )
-            return
-        snap = get_csv_play_progress_snap(screen=si)
-        if bool(snap.get("process_only")) == bool(desired):
-            print(
-                f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — "
-                f"이미 {'ON' if desired else 'OFF'}",
-                flush=True,
-            )
-            return
-        cached = self._resolve_prepared_playback_for_live_switch()
-        if cached is None:
-            self._log(
-                f"공정만보기 실시간 전환 실패 — 화면{self._screen} 재생 캐시 없음 "
-                "(Play 완료 후 타임라인 갱신 또는 재생 중 다시 시도)"
-            )
-            return
+        """해당 화면 재생 중이면 pause → 공정만보기/일반 모드로 이어서 재생.
 
-        # 일시정지와 동일 — 전환 직전 runtime 재조회 (Federation/API 재생 포함)
-        try:
-            self._refresh_play_runtime()
-        except Exception:
-            pass
-
-        # 메인 스레드에서 UI/참조만 스냅샷 — 워커에서 omni.ui 모델 읽지 않음
+        진행 중이면 목표만 갱신(latest-wins). 전환 완료 후 목표가 다르면 재전환.
+        """
         si = int(self._screen)
-        path = str(cached.path)
-        speed_now = float(self._read_speed_scale())
-        registry = self._registry
-        scheduler = self._scheduler
-        if registry is None or scheduler is None:
-            self._log(
-                f"공정만보기 실시간 전환 실패 — 화면{si} registry/scheduler 없음"
-            )
-            return
-        kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
-        self._process_only_switch_pending = True
+        self._process_only_switch_target = bool(desired)
+        switch_lock = getattr(self, "_process_only_switch_lock", None)
+        if switch_lock is None:
+            self._process_only_switch_lock = threading.Lock()
+            switch_lock = self._process_only_switch_lock
+
+        with switch_lock:
+            if self._process_only_switch_pending:
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 전환 queue 화면{si} — "
+                    f"진행 중, 목표만 desired={desired}",
+                    flush=True,
+                )
+                return
+            if not self._csv_play_is_active():
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — 재생 세션 없음",
+                    flush=True,
+                )
+                return
+            # Play thread 는 살아 있으나 CSV 시계 세션 전(preflight/prerun) —
+            # pause/reap 하면 전환 worker 가 잠기고 mid-check 가 무시된다.
+            if not csv_play_session_active(screen=si):
+                self._process_only_deferred_for_start = bool(desired)
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 deferred 화면{si} desired={desired} "
+                    f"(preflight/prerun — Play 진입 시 적용)",
+                    flush=True,
+                )
+                self._log(
+                    f"공정만보기 {'ON' if desired else 'OFF'} — "
+                    f"재생 시작 시 적용 (화면{si} preflight 중)"
+                )
+                return
+            snap = get_csv_play_progress_snap(screen=si)
+            if bool(snap.get("process_only")) == bool(desired):
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — "
+                    f"이미 {'ON' if desired else 'OFF'}",
+                    flush=True,
+                )
+                return
+            cached = self._resolve_prepared_playback_for_live_switch()
+            if cached is None:
+                self._log(
+                    f"공정만보기 실시간 전환 실패 — 화면{self._screen} 재생 캐시 없음 "
+                    "(Play 완료 후 타임라인 갱신 또는 재생 중 다시 시도)"
+                )
+                return
+
+            try:
+                self._refresh_play_runtime()
+            except Exception:
+                pass
+
+            path = str(cached.path)
+            speed_now = float(self._read_speed_scale())
+            registry = self._registry
+            scheduler = self._scheduler
+            if registry is None or scheduler is None:
+                self._log(
+                    f"공정만보기 실시간 전환 실패 — 화면{si} registry/scheduler 없음"
+                )
+                return
+            kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
+            self._process_only_switch_pending = True
+
         self._log(
             f"공정만보기 {'ON' if desired else 'OFF'} 실시간 전환 중… (화면{si})"
         )
@@ -7061,9 +7142,9 @@ class LamSimulationCsvPlayWindow:
         )
 
         def _switch_worker() -> None:
+            resumed_ok = False
             try:
                 with csv_play_screen_binding(si):
-                    # preflight 레이스 — 세션이 아직 없으면 defer 로 전환
                     if not csv_play_session_active(screen=si):
                         self._process_only_deferred_for_start = bool(
                             self._process_only_switch_target
@@ -7098,18 +7179,32 @@ class LamSimulationCsvPlayWindow:
                         f"CSV t≈{ck.resume_csv_sec:.1f}s"
                     )
                     _post_kit_main_thread(lambda m=msg: self._log(m))
-                    reaped = reap_csv_play_workers_for_screen(
-                        self,
-                        screen=si,
-                        registry=pause_reg,
-                        scheduler=pause_sch,
-                        kit_ext=kit_ext,
-                        timeout=45.0,
-                    )
+                    # 짧게 여러 번 재시도 — 한 번에 45s 블로킹보다 안전
+                    reaped = False
+                    for _attempt in range(3):
+                        reaped = reap_csv_play_workers_for_screen(
+                            self,
+                            screen=si,
+                            registry=pause_reg,
+                            scheduler=pause_sch,
+                            kit_ext=kit_ext,
+                            timeout=12.0,
+                        )
+                        if reaped:
+                            break
+                        request_pause_csv_playback(
+                            pause_reg,
+                            pause_sch,
+                            screen=si,
+                            kit_ext=kit_ext,
+                        )
                     if not reaped:
                         raise RuntimeError(
                             "기존 재생 worker(메인·자식) 종료 시간 초과"
                         )
+                    # 잔존 자식이 있으면 resume 금지 (stop 해제 시 좀비 재개)
+                    if _alive_csv_play_child_workers(screen=si):
+                        raise RuntimeError("잔존 자식 worker 존재 — resume 중단")
                     target = bool(self._process_only_switch_target)
                     resume_ck = CsvPlayPauseCheckpoint(
                         csv_path=ck.csv_path,
@@ -7121,12 +7216,38 @@ class LamSimulationCsvPlayWindow:
                         paused_in_json=ck.paused_in_json,
                     )
                     self._launch_live_process_only_resume(cached, resume_ck)
+                    resumed_ok = True
             except Exception as exc:
                 err = f"공정만보기 실시간 전환 실패: {exc}"
                 _post_kit_main_thread(lambda m=err: self._log(m))
-                recover_csv_play_after_failed_mode_switch(screen=si)
+                abandon_csv_play_after_failed_mode_switch(screen=si)
             finally:
-                self._process_only_switch_pending = False
+                with switch_lock:
+                    self._process_only_switch_pending = False
+                    follow = bool(self._process_only_switch_target)
+                # 성공 resume 후에만 follow-up (abandon 후 재시도 루프 방지)
+                if not resumed_ok:
+                    return
+
+                def _follow_up(f: bool = follow) -> None:
+                    try:
+                        if csv_playback_stop_requested(screen=si):
+                            return
+                        if self._csv_play_is_active() and csv_play_session_active(
+                            screen=si
+                        ):
+                            snap_now = get_csv_play_progress_snap(screen=si)
+                            if bool(snap_now.get("process_only")) != f:
+                                print(
+                                    f"{_PRINT_PREFIX} 공정만보기 전환 follow-up 화면{si} "
+                                    f"→ {f}",
+                                    flush=True,
+                                )
+                                self._try_start_live_process_only_switch(f)
+                    except Exception:
+                        pass
+
+                _post_kit_main_thread(_follow_up)
 
         threading.Thread(
             target=_switch_worker,
@@ -7149,8 +7270,17 @@ class LamSimulationCsvPlayWindow:
             self._log(
                 f"공정만보기 전환 재개 실패 — 화면{si} registry/scheduler 없음"
             )
-            recover_csv_play_after_failed_mode_switch(screen=si)
+            abandon_csv_play_after_failed_mode_switch(screen=si)
             return
+        # 잔존 worker 있으면 stop 해제 금지
+        if _alive_csv_play_child_workers(screen=si) or self._csv_play_thread_alive():
+            join_csv_play_child_workers(screen=si, timeout=2.0)
+            if _alive_csv_play_child_workers(screen=si) or self._csv_play_thread_alive():
+                self._log(
+                    f"공정만보기 전환 재개 중단 — 화면{si} 이전 worker 미종료"
+                )
+                abandon_csv_play_after_failed_mode_switch(screen=si)
+                return
         self._prepared_playback = cached
         kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
         # 자식 worker join 완료 후에만 stop 해제 — 잔존 worker 재개 방지
@@ -7210,7 +7340,7 @@ class LamSimulationCsvPlayWindow:
                         f"{_PRINT_PREFIX} 화면{si} 공정만보기 전환 재생 오류: {exc}",
                         flush=True,
                     )
-                    recover_csv_play_after_failed_mode_switch(screen=si)
+                    abandon_csv_play_after_failed_mode_switch(screen=si)
                 finally:
                     set_csv_play_live_speed_ui_reader(None, screen=si)
                     set_csv_play_progress_ui_callback(None, screen=si)
