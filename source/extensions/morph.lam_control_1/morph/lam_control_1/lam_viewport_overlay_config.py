@@ -100,7 +100,7 @@ TOP_VIEW_PRESET: PlayCameraPresetSpec = PlayCameraPresetSpec(
 TOP_VIEW_CAMERA_PRIM_VIEW: Optional[PlayCameraPresetSpec] = None
 # 예) 캡처 후 붙여넣기:
 TOP_VIEW_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(
-    eye_xyz=(0.000000, 0.000000, 3473.719917),
+    eye_xyz=(0.000000, 0.000000, 4918.361498),
     target_xyz=(0.000000, 0.000000, 1343.485827),
     up_xyz=(0.000000, 1.000000, 0.000000),
 )
@@ -153,7 +153,12 @@ class PlayHidePrimSpec:
 # 사용자가 여기 리스트에 경로 추가/삭제 (DeviceLabelSpec 과 동일 패턴)
 PLAY_HIDE_PRIM_SPECS: List[PlayHidePrimSpec] = [
     PlayHidePrimSpec(
-        prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1001_000___________1262",
+        prim_path="/World/aaa_1/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r07__________B_1114",
+        fade_enabled=True,
+        fade_duration_sec=2,
+    ),
+    PlayHidePrimSpec(
+        prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r07__________B_1114",
         fade_enabled=True,
         fade_duration_sec=2,
     ),

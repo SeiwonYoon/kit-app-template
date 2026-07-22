@@ -67,9 +67,17 @@ def handle_start_simulation(
     """
 
     def _run() -> None:
+        print(
+            "[LAM/FED-DIAG] S02_bridge_main | handle_start_simulation on main",
+            flush=True,
+        )
         try:
             ext = require_lam_extension_instance()
         except Exception as exc:
+            print(
+                f"[LAM/FED-DIAG] S02_bridge_fail | ext missing: {exc}",
+                flush=True,
+            )
             dispatch(event_name, _err(str(exc), data=_empty_results_data()))
             return
 
@@ -96,6 +104,10 @@ def handle_start_simulation(
                 limit_override=int(FEDERATION_FETCH_LIMIT),
             )
         except Exception as exc:
+            print(
+                f"[LAM/FED-DIAG] S02_bridge_fail | pipeline raise: {exc}",
+                flush=True,
+            )
             dispatch(event_name, _err(str(exc), data=_empty_results_data()))
 
     schedule_on_main_thread(_run)

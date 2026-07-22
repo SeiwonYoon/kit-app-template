@@ -5320,6 +5320,8 @@ class LamSimulationCsvPlayWindow:
         """화면2+ 탑뷰·prim숨김 — 상태 전환 시에만 카메라/visibility."""
         if self._overlay_checkbox_syncing:
             return
+        if bool(getattr(self, "_play_stop_reset_in_progress", False)):
+            return
         if self._screen <= 1:
             return
         lam = self._lam_window_ref
@@ -7810,6 +7812,7 @@ class LamSimulationCsvPlayWindow:
         """
         clear_csv_play_pause_checkpoint(screen=self._screen)
         self._reset_timeline_playback_highlight_ui()
+        self._play_stop_reset_in_progress = True
         try:
             from .lam_csv_screen_runtime import (
                 resolve_csv_screen_runtime,
@@ -7931,6 +7934,7 @@ class LamSimulationCsvPlayWindow:
                     print(f"{_PRINT_PREFIX} {err}", flush=True)
                     self._log(err)
                 finally:
+                    self._play_stop_reset_in_progress = False
                     if reset_done:
                         clear_csv_playback_stop(screen=self._screen)
                     if callable(on_complete):

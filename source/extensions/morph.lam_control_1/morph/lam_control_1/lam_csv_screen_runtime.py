@@ -445,9 +445,10 @@ def apply_prim_hide_for_screen(
 
 
 def restore_play_stop_perspective_for_screen(runtime: CsvScreenRuntime) -> None:
-    """시뮬 정지 후 Perspective·줌 복귀 — 화면 번호와 무관하게 동일 경로.
+    """시뮬 정지 후 Perspective·줌 복귀 — 화면1과 동일 규칙.
 
-    차이는 ``viewport_api`` / ``context_name`` 뿐.
+    PLAY/TOP 가 ``/Camera`` 를 공유하므로, 정지 시 USD Camera look-through
+    에 남으면 탑뷰처럼 보인다. 탑뷰 ON 여부와 무관하게 Persp + pre-play 복귀.
     """
     si = int(runtime.screen)
     vp_api = runtime.viewport_api
@@ -459,16 +460,23 @@ def restore_play_stop_perspective_for_screen(runtime: CsvScreenRuntime) -> None:
             vp_api = _get_active_viewport_api()
         except Exception:
             vp_api = None
-    # 탑뷰를 실제로 켠 화면만 OFF (전역 force 금지)
+    # 탑뷰 적용 플래그만 해제 — enabled=False 경로의 hold 복원이
+    # /Camera 잔상과 섞이지 않게 Persp 복귀는 아래에서 단일로 수행
     if si > 1 and _applied_top_view_by_screen.get(si):
+        _applied_top_view_by_screen[si] = False
         try:
-            apply_top_view_for_screen(runtime, enabled=False, force=True)
-        except Exception as exc:
-            print(
-                f"{_PRINT_PREFIX} screen{si} top view OFF on stop: {exc}",
-                flush=True,
-            )
-    elif vp_api is not None:
+            from .lam_viewport_top_view import set_viewport_top_view_navigation_locked
+
+            if vp_api is not None:
+                set_viewport_top_view_navigation_locked(vp_api, False)
+        except Exception:
+            pass
+        print(
+            f"{_PRINT_PREFIX} screen{si} top-view flag clear on stop "
+            f"(Persp restore follows)",
+            flush=True,
+        )
+    if vp_api is not None:
         from .lam_play_camera_fly import clear_pre_top_view_hold_for_viewport
 
         clear_pre_top_view_hold_for_viewport(vp_api, ctx)

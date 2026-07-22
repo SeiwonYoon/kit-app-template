@@ -163,13 +163,34 @@ def maybe_export_csv_prerun_json(
     *,
     export_enabled: bool,
 ) -> Optional[Path]:
+    """프리런 JSON dump (옵션).
+
+    - 재생 SSOT 가 아님 — **저장된 파일을 읽어 재생하지 않는다.**
+    - 배포 등에서 ``data/csv_prerun`` 쓰기 권한이 없으면 로그만 남기고 ``None``
+      (PermissionError 등으로 Play/Federation 파이프라인을 중단하지 않음).
+    """
     if not export_enabled:
         return None
     out_dir = csv_prerun_export_dir()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = out_dir / f"prerun_screen{int(result.screen)}_{stamp}.json"
     doc = build_csv_prerun_export_document(result)
-    write_csv_prerun_export_json(out_path, doc)
+    try:
+        write_csv_prerun_export_json(out_path, doc)
+    except OSError as exc:
+        # Errno 13 등 — 확장 설치 경로가 읽기 전용인 배포 환경
+        print(
+            f"{_PRINT_PREFIX} export JSON skip (화면{result.screen}) — "
+            f"쓰기 불가, 재생은 계속: {exc}",
+            flush=True,
+        )
+        return None
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} export JSON skip (화면{result.screen}) — {exc}",
+            flush=True,
+        )
+        return None
     try:
         print(f"{_PRINT_PREFIX} export JSON (화면{result.screen}): {out_path}", flush=True)
     except Exception:

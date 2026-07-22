@@ -109,11 +109,19 @@ class LamHandler(BaseHandler):
         """
         # [1] T2V 수신 로그 — 이 줄이 즉시 찍히면 livestream 메시징 수신 OK
         print(f"[LamHandler] _on_req_start_simulation - {event.payload}")
+        print(
+            "[LAM/FED-DIAG] S01_t2v_received | T2V_request_start_simulation",
+            flush=True,
+        )
 
         payload = dict(getattr(event, "payload", None) or {})
         configs = payload.get(PAYLOAD_CONFIGS, [])
         if not isinstance(configs, list):
             configs = []
+        print(
+            f"[LAM/FED-DIAG] S01_configs | count={len(configs)}",
+            flush=True,
+        )
 
         # [2] 시뮬레이션 작업 — bridge 가 메인 스레드에서 Federation 파이프라인 실행
         handle_start_simulation(
@@ -144,9 +152,17 @@ class LamHandler(BaseHandler):
 
         # 실패 — 빈 results 2칸
         if code != 0:
+            print(
+                f"[LAM/FED-DIAG] S17_v2t_dispatch_err | code={code} msg={message!r}",
+                flush=True,
+            )
             self._dispatch_v2t_err(event_name, message, {"results": results})
             return
 
+        print(
+            f"[LAM/FED-DIAG] S17_v2t_dispatch_ok | code=0 msg={message!r}",
+            flush=True,
+        )
         # 성공 — 응답 형식 미정: 빈 results 2칸 + success
         self._dispatch_v2t_ok(event_name, {"results": results})
 

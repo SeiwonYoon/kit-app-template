@@ -1227,10 +1227,12 @@ def _read_coi_local(cam_prim: Usd.Prim) -> Gf.Vec3d:
     return Gf.Vec3d(0.0, 0.0, -500.0)
 
 
-def _snapshot_from_camera_prim() -> Optional[CameraViewSnapshot]:
-    """Kit session 카메라 prim + COI — apply 와 동일 규칙."""
+def _snapshot_from_camera_prim(
+    camera_path: str = "",
+) -> Optional[CameraViewSnapshot]:
+    """Kit session/USD 카메라 prim + COI — ``camera_path`` 없으면 활성 카메라."""
     stage = _get_stage()
-    path = _active_camera_path_str()
+    path = str(camera_path or "").strip() or str(_active_camera_path_str() or "")
     if not stage or not path:
         return None
     prim = stage.GetPrimAtPath(path)
@@ -1272,8 +1274,10 @@ def _snapshot_from_viewport_state(
                 st = ViewportCameraState(viewport_api)
             except Exception:
                 st = None
-        if st is None:
+        if st is None and viewport_api is None:
             st = ViewportCameraState()
+        if st is None:
+            return None
         eye = getattr(st, "position_world", None)
         if eye is None:
             return None
@@ -1301,31 +1305,47 @@ def _capture_view_preferring_live_state(
     viewport_api: Any = None,
     camera_path_hint: str = "",
 ) -> Optional[CameraViewSnapshot]:
-    """뷰 캡처 — USD Camera bind 시 viewport 실제 시점(줌 포함) 우선."""
+    """뷰 캡처 — 해당 viewport 가 보이는 시점만 사용 (화면1 활성 카메라 혼입 금지).
+
+    화면2 aux 에서 ViewportCameraState 실패 시 활성(화면1) 카메라로 폴백하면
+    줌이 튀고 fly/정지 복귀가 깨진다. 반드시 이 viewport 의 camera_path +
+    현재 USD context stage 만 읽는다.
+    """
     path = str(camera_path_hint or "").strip()
     if not path and viewport_api is not None:
-        try:
-            cp = getattr(viewport_api, "camera_path", None)
-            if cp is not None:
-                path = str(cp).strip()
-        except Exception:
-            path = ""
-    if not path:
+        path = _camera_path_on_viewport(viewport_api)
+    if not path and viewport_api is None:
         path = str(_active_camera_path_str() or "").strip()
 
+    if viewport_api is not None:
+        live = _snapshot_from_viewport_state(viewport_api)
+        if live is not None:
+            return live
+        # live 실패 → 이 타일이 look-through 중인 prim 만 (절대 화면1 활성 카메라 금지)
+        if path:
+            if _is_user_camera_prim_path(path):
+                snap = snapshot_from_prim_path(path)
+                if snap is not None:
+                    return snap
+            snap = _snapshot_from_camera_prim(path)
+            if snap is not None:
+                return snap
+            if path != _PERSP_CAMERA_PATH:
+                snap = _snapshot_from_camera_prim(_PERSP_CAMERA_PATH)
+                if snap is not None:
+                    return snap
+        return None
+
     if _is_user_camera_prim_path(path):
-        snap = _snapshot_from_viewport_state(viewport_api)
-        if snap is not None:
-            return snap
         snap = snapshot_from_prim_path(path)
         if snap is not None:
             return snap
         return None
 
-    snap = _snapshot_from_camera_prim()
+    snap = _snapshot_from_camera_prim(path)
     if snap is not None:
         return snap
-    return _snapshot_from_viewport_state(viewport_api)
+    return _snapshot_from_viewport_state(None)
 
 
 def capture_current_view() -> Optional[CameraViewSnapshot]:
@@ -2045,8 +2065,18 @@ def _apply_play_stop_perspective_restore(
     ok = False
     applied = False
     with camera_fly_usd_context(ctx or None):
+        # PLAY/TOP 공용 /Camera look-through 강제 이탈 (잔상=탑뷰처럼 보임)
         if vp is not None:
-            ok = restore_perspective_on_viewport(vp, ctx)
+            for attempt in range(3):
+                ok = restore_perspective_on_viewport(vp, ctx) or ok
+                if _is_session_camera_path(_camera_path_on_viewport(vp)):
+                    break
+                print(
+                    f"{_PRINT_PREFIX} play stop Persp 재시도 ({log_label}) "
+                    f"ctx={ctx!r} still={_camera_path_on_viewport(vp)!r} "
+                    f"attempt={attempt}",
+                    flush=True,
+                )
         else:
             ok = restore_kit_default_perspective(log_label=log_label)
         if snap is not None:
@@ -2068,14 +2098,7 @@ def _apply_play_stop_perspective_restore(
                                 camera_path=cam,
                             )
                         )
-                    elif cam and _is_user_camera_prim_path(cam):
-                        applied = bool(
-                            apply_view_to_camera_prim(
-                                cam,
-                                snap,
-                                up_xyz=get_session_fly_up_xyz(play=True),
-                            )
-                        )
+                    # USD Camera 에 pre-play 를 쓰지 않음 — /Camera 는 PLAY/TOP 공용
                 ok = applied or ok
                 if applied:
                     _clear_pre_play_view_for_viewport(vp, ctx)
@@ -2102,12 +2125,22 @@ def _apply_play_stop_perspective_restore(
         active = _camera_path_on_viewport(vp)
         if not _is_session_camera_path(active):
             with camera_fly_usd_context(ctx or None):
-                ok = restore_perspective_on_viewport(vp, ctx) or ok
-            active = _camera_path_on_viewport(vp)
+                for _ in range(2):
+                    ok = restore_perspective_on_viewport(vp, ctx) or ok
+                    active = _camera_path_on_viewport(vp)
+                    if _is_session_camera_path(active):
+                        break
         if not _is_session_camera_path(active):
             print(
-                f"{_PRINT_PREFIX} Perspective 복귀 재시도 필요 — "
-                f"ctx={ctx!r} camera={active!r}",
+                f"{_PRINT_PREFIX} Perspective 복귀 실패 ({log_label}) "
+                f"ctx={ctx!r} still_cam={active!r} "
+                f"— /Camera 잔상(탑뷰로 보일 수 있음)",
+                flush=True,
+            )
+        else:
+            print(
+                f"{_PRINT_PREFIX} play stop Persp OK ({log_label}) "
+                f"ctx={ctx!r} cam={active!r} snap_applied={applied}",
                 flush=True,
             )
     try:
@@ -2169,8 +2202,7 @@ def schedule_restore_perspective_after_play_stop_for_viewport(
             viewport_api,
             ctx,
         )
-        if _is_session_camera_path(_camera_path_on_viewport(viewport_api)):
-            return
+        # Persp 여부와 무관하게 재적용 — pre-play 줌 snap 포함
         _apply_play_stop_perspective_restore_for_viewport(
             viewport_api,
             ctx,
@@ -2412,8 +2444,8 @@ def kickoff_play_camera_fly_for_screen(
             # → 반드시 **같은 context 의 /Camera 에 시작점을 쓴 뒤** look-through
             #   한 채 fly (쓰기 실패 시 look-through 하지 않음).
             #
-            # 탑뷰 오염 뷰는 **pre-play 저장만** 거부한다 (remember_* 내부).
-            # current 자체를 버리면 fly 가 스킵되어 화면2에서 카메라 이동이 사라진다.
+            # 중요: Persp 전환을 캡처 **전에** 하면 화면2 에서 기본/이전 줌으로
+            # 점프한 뒤 fly 가 시작된다. 화면1처럼 **현재 보이는 시점 먼저 캡처**.
             purged = purge_top_like_camera_prim_baselines()
             if purged:
                 print(
@@ -2422,21 +2454,27 @@ def kickoff_play_camera_fly_for_screen(
                     flush=True,
                 )
             with camera_fly_usd_context(ctx or None):
-                restore_view_after_top_view_for_viewport(viewport_api, ctx)
-                restore_perspective_on_viewport(viewport_api, ctx)
+                # 1) look-through 바꾸기 전에 현재 화면 시점 캡처
                 current = capture_view_for_viewport(viewport_api, ctx)
-                # 가능하면 Persp 의 비-탑뷰를 fly 시작점으로 우선 사용
+                active_cam = _camera_path_on_viewport(viewport_api)
+                print(
+                    f"{_PRINT_PREFIX} screen fly capture-before-switch "
+                    f"ctx={ctx!r} cam={active_cam!r} "
+                    f"has_current={current is not None} "
+                    f"top_like={is_top_view_like_snapshot(current)}",
+                    flush=True,
+                )
+
+                # 2) 탑뷰일 때만 hold 복원·Persp 재캡처. 일반 줌은 건드리지 않음.
                 if current is not None and is_top_view_like_snapshot(current):
                     print(
-                        f"{_PRINT_PREFIX} screen 현재 뷰가 탑뷰 — Persp 재캡처 "
+                        f"{_PRINT_PREFIX} screen 현재 뷰가 탑뷰 — hold/Persp 복원 "
                         f"ctx={ctx!r}",
                         flush=True,
                     )
+                    restore_view_after_top_view_for_viewport(viewport_api, ctx)
                     restore_perspective_on_viewport(viewport_api, ctx)
-                    alt = _capture_view_preferring_live_state(
-                        viewport_api=viewport_api,
-                        camera_path_hint=_PERSP_CAMERA_PATH,
-                    )
+                    alt = capture_view_for_viewport(viewport_api, ctx)
                     if alt is not None and not is_top_view_like_snapshot(alt):
                         current = alt
                     else:
@@ -2445,6 +2483,10 @@ def kickoff_play_camera_fly_for_screen(
                             f"애니메이션은 유지 (pre-play 저장만 생략) ctx={ctx!r}",
                             flush=True,
                         )
+                else:
+                    # 탑뷰 hold 만 폐기 (Persp 강제 전환으로 줌 점프 금지)
+                    clear_pre_top_view_hold_for_viewport(viewport_api, ctx)
+
                 if current is not None:
                     # 탑뷰이면 remember 내부에서 거부 — fly 용 current 는 유지
                     remember_pre_play_view_for_viewport(viewport_api, ctx, current)
@@ -2454,10 +2496,7 @@ def kickoff_play_camera_fly_for_screen(
                         flush=True,
                     )
                     restore_perspective_on_viewport(viewport_api, ctx)
-                    current = _capture_view_preferring_live_state(
-                        viewport_api=viewport_api,
-                        camera_path_hint=_PERSP_CAMERA_PATH,
-                    )
+                    current = capture_view_for_viewport(viewport_api, ctx)
                     if current is not None:
                         remember_pre_play_view_for_viewport(
                             viewport_api, ctx, current
@@ -2512,12 +2551,12 @@ def kickoff_play_camera_fly_for_screen(
                             f"path={prim_path!r} ctx={ctx!r} — Persp fly 폴백",
                             flush=True,
                         )
-                        restore_perspective_on_viewport(viewport_api, ctx)
                         apply_camera_view(
                             current,
                             up_xyz=up,
                             camera_path=_PERSP_CAMERA_PATH,
                         )
+                        restore_perspective_on_viewport(viewport_api, ctx)
                         fly_path = _PERSP_CAMERA_PATH
                     else:
                         if not set_viewport_camera_prim_path_on_api(
@@ -2537,7 +2576,8 @@ def kickoff_play_camera_fly_for_screen(
                             flush=True,
                         )
                 else:
-                    restore_perspective_on_viewport(viewport_api, ctx)
+                    # 현재 줌을 Persp 에 **먼저** 쓴 뒤 look-through
+                    # (전환→쓰기 순서면 한 프레임 이상한 줌이 보임)
                     if not apply_camera_view(
                         current,
                         up_xyz=up,
@@ -2548,12 +2588,15 @@ def kickoff_play_camera_fly_for_screen(
                             f"ctx={ctx!r}",
                             flush=True,
                         )
+                    restore_perspective_on_viewport(viewport_api, ctx)
                     fly_path = _PERSP_CAMERA_PATH
 
                 print(
                     f"{_PRINT_PREFIX} screen fly 시작 "
                     f"ctx={ctx!r} ({play_camera_fly_duration_sec():.2f}s) "
-                    f"via={fly_path!r}",
+                    f"via={fly_path!r} "
+                    f"eye=({current.eye_xyz[0]:.3f},{current.eye_xyz[1]:.3f},"
+                    f"{current.eye_xyz[2]:.3f})",
                     flush=True,
                 )
                 fly_started = True

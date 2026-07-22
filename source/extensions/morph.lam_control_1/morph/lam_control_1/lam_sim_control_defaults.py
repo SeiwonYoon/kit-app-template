@@ -73,8 +73,12 @@ CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 # Federation API (HyView / 웹 T2V → Kit fetch)
 # ---------------------------------------------------------------------------
 # POST 대상 — 실무 내부망. 로컬·테스트 창에서도 편집 가능.
+# FEDERATION_QUERY_URL: str = (
+#     "http://federation.digitaltwin.internal/queries/mcc-target-prev-lot-history/run"
+# )
+
 FEDERATION_QUERY_URL: str = (
-    "http://federation.digitaltwin.internal/queries/mcc-target-prev-lot-history/run"
+    "http://10.61.59.208/queries/mcc-target-prev-lot-history/run"
 )
 # 페이지당 row 수 — sk.hyview_messaging.lam_handler_config 에서 override 가능.
 FEDERATION_FETCH_LIMIT: int = 50
@@ -84,6 +88,7 @@ FEDERATION_FETCH_TIMEOUT_SEC: float = 300.0
 FEDERATION_USE_FIXTURE: bool = False
 # True → 앱 시작 시 「LAM Federation API Test」 테스트 창을 자동으로 연다.
 # False여도 LAM 메인 창의 「Federation API 테스트」 버튼으로 수동 실행 가능.
+# 기동 중 동기 open_stage 직전 창 도킹 경합을 피하려면 False 권장.
 FEDERATION_TEST_WINDOW_AUTO_SHOW: bool = True
 # 응답 로그에 rows 앞 N개만 출력 (0 = metadata만).
 # ``FEDERATION_VERBOSE_PARSE_LOG=False`` 이면 이 값은 무시되고 샘플을 출력하지 않는다.
@@ -101,7 +106,7 @@ FEDERATION_VERBOSE_PARSE_LOG: bool = False
 # Bearer 예: FEDERATION_BEARER_TOKEN = "eyJ..."
 FEDERATION_BEARER_TOKEN: str = ""
 # 추가 헤더 예: {"X-API-Key": "..."}
-FEDERATION_EXTRA_HEADERS: dict = {}
+FEDERATION_EXTRA_HEADERS: dict = { "Host": "federation.digitaltwin.internal" }
 
 
 def default_viewport_split_count() -> int:

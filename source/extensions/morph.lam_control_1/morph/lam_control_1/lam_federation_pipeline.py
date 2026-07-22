@@ -6,7 +6,6 @@ import json
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +32,200 @@ from .simulation_play import (
 )
 
 _PRINT_PREFIX = "[LAM/federation-pipe]"
+# 실무 배포 진단용 — 콘솔에서 ``[LAM/FED-DIAG]`` 로 grep.
+# 단계 번호·이름은 docs/LAM_Federation_Deploy_Diagnose_ko.md 와 동일.
+_FED_DIAG_PREFIX = "[LAM/FED-DIAG]"
+
+
+def _fed_diag(step: str, message: str, **fields: Any) -> None:
+    """배포 진단 한 줄 로그. ``step`` 예: ``S01_t2v`` / ``S10_play_start``."""
+    extra = ""
+    if fields:
+        parts = []
+        for k, v in fields.items():
+            try:
+                parts.append(f"{k}={v!r}")
+            except Exception:
+                parts.append(f"{k}=?")
+        extra = " | " + " ".join(parts)
+    try:
+        print(f"{_FED_DIAG_PREFIX} {step} | {message}{extra}", flush=True)
+    except Exception:
+        pass
+
+
+# Federation 웹/배포 전용 — CSV Play UI 경로에는 영향 없음.
+_FED_VISIBILITY_WATCHDOG_SEC = 20.0
+_FED_REAP_TIMEOUT_SEC = 12.0
+_FED_REGISTRY_RETRY = 5
+_FED_REGISTRY_RETRY_SLEEP_SEC = 0.35
+
+
+def _federation_ensure_main_dispatch() -> None:
+    try:
+        from .kit_main_dispatch import ensure_kit_main_dispatch
+
+        ensure_kit_main_dispatch()
+    except Exception:
+        pass
+
+
+def _federation_run_after_visibility(
+    ext: Any,
+    show_1: bool,
+    show_2: bool,
+    *,
+    work: Callable[[], None],
+    thread_name: str,
+) -> None:
+    """화면 표시 전환 후 ``work`` 1회 실행.
+
+    - ``on_complete`` 유실(generation race)·레이아웃 지연 시 watchdog 로 진행
+    - 동일 요청에 대해 work 중복 기동 방지
+    - Federation 진입부에만 사용 (일반 CSV Play 무관)
+    """
+    _federation_ensure_main_dispatch()
+    started = {"v": False}
+    lock = threading.Lock()
+
+    def _kick_once(*, reason: str) -> None:
+        with lock:
+            if started["v"]:
+                return
+            started["v"] = True
+        print(
+            f"{_PRINT_PREFIX} visibility gate → work ({reason})",
+            flush=True,
+        )
+        _fed_diag("S05_visibility_gate", "work kick", reason=reason)
+        threading.Thread(target=work, name=thread_name, daemon=True).start()
+
+    def _after_visibility() -> None:
+        _kick_once(reason="on_complete")
+
+    def _watchdog() -> None:
+        time.sleep(float(_FED_VISIBILITY_WATCHDOG_SEC))
+        with lock:
+            if started["v"]:
+                return
+        print(
+            f"{_PRINT_PREFIX} visibility watchdog "
+            f"{_FED_VISIBILITY_WATCHDOG_SEC:.0f}s — proceed without layout done",
+            flush=True,
+        )
+        _fed_diag(
+            "S05_visibility_watchdog",
+            "layout on_complete missing — force proceed",
+            timeout_sec=_FED_VISIBILITY_WATCHDOG_SEC,
+        )
+        _kick_once(reason="watchdog")
+
+    try:
+        request_screen_visibility(
+            ext, show_1, show_2, on_complete=_after_visibility
+        )
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen visibility failed: {exc}", flush=True)
+        _kick_once(reason="visibility-exception")
+        return
+    threading.Thread(
+        target=_watchdog,
+        name=f"{thread_name}-wd",
+        daemon=True,
+    ).start()
+
+
+def _federation_reap_best_effort(
+    csv_win: Any,
+    *,
+    screen: int,
+    kit_ext: Any = None,
+    registry: Any = None,
+    scheduler: Any = None,
+) -> None:
+    """이전 재생 정리. 타임아웃이어도 Federation 파이프라인은 계속(배포 좀비 대비)."""
+    si = max(1, int(screen))
+    ok = stop_and_reap_csv_play_worker(
+        csv_win,
+        screen=si,
+        registry=registry,
+        scheduler=scheduler,
+        kit_ext=kit_ext,
+        timeout=float(_FED_REAP_TIMEOUT_SEC),
+    )
+    if ok:
+        _fed_diag("S07_reap_ok", "previous play cleared", screen=si)
+        return
+    print(
+        f"{_PRINT_PREFIX} screen{si} reap timeout "
+        f"({_FED_REAP_TIMEOUT_SEC:.0f}s) — detach and continue",
+        flush=True,
+    )
+    _fed_diag(
+        "S07_reap_timeout",
+        "detach zombies and continue",
+        screen=si,
+        timeout_sec=_FED_REAP_TIMEOUT_SEC,
+    )
+    try:
+        from .simulation_play import (
+            clear_csv_playback_stop,
+            csv_play_screen_session,
+            request_stop_csv_playback,
+        )
+
+        request_stop_csv_playback(
+            registry, scheduler, screen=si, kit_ext=kit_ext
+        )
+        sess = csv_play_screen_session(si)
+        with sess.child_workers_lock:
+            sess.child_workers = [
+                t for t in sess.child_workers if t is not None and t.is_alive()
+            ]
+            # 추적만 끊음 — stop 플래그는 새 play 진입 시 clear
+            sess.child_workers.clear()
+        if csv_win is not None:
+            try:
+                csv_win._csv_play_thread = None
+            except Exception:
+                pass
+        # 새 Federation play 가 바로 들어갈 수 있게 stop 만 해제
+        clear_csv_playback_stop(screen=si)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} reap detach: {exc}", flush=True)
+
+
+def _federation_resolve_registry_scheduler(
+    lam_window: Any,
+    csv_win: Any,
+    screen: int,
+) -> Tuple[Any, Any]:
+    """배포에서 레이아웃 직후 registry 가 늦을 수 있어 짧게 재시도."""
+    si = max(1, int(screen))
+    registry: Any = None
+    scheduler: Any = None
+    for attempt in range(1, int(_FED_REGISTRY_RETRY) + 1):
+        registry, scheduler = get_registry_scheduler_for_lam_screen(
+            lam_window, si, allow_fallback=(si <= 1)
+        )
+        if csv_win is not None:
+            try:
+                csv_win._refresh_play_runtime()
+            except Exception:
+                pass
+            if getattr(csv_win, "_registry", None) is not None:
+                registry = csv_win._registry
+            if getattr(csv_win, "_scheduler", None) is not None:
+                scheduler = csv_win._scheduler
+        if registry is not None and scheduler is not None:
+            if attempt > 1:
+                print(
+                    f"{_PRINT_PREFIX} screen{si} registry ready after retry {attempt}",
+                    flush=True,
+                )
+            return registry, scheduler
+        time.sleep(float(_FED_REGISTRY_RETRY_SLEEP_SEC))
+    return registry, scheduler
 
 
 @dataclass
@@ -61,10 +254,12 @@ def _write_federation_parse_export(
     parse_stats: Dict[str, Any],
     dwells: List[Any],
     prerun: Any,
-) -> Path:
-    """테스트 창 JSON 저장 — 전체 원본 응답과 CSV 동형 프리런 결과를 한 파일에 보존."""
+) -> Optional[Path]:
+    """테스트 창 JSON 저장 — 전체 원본 응답과 CSV 동형 프리런 결과를 한 파일에 보존.
+
+    배포에서 확장 경로 쓰기 실패 시 ``None`` (파이프라인/재생은 계속).
+    """
     out_dir = Path(__file__).resolve().parents[2] / "data" / "api_queries"
-    out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = out_dir / f"federation_screen{int(screen)}_{stamp}.json"
     doc = {
@@ -77,8 +272,16 @@ def _write_federation_parse_export(
             "prerun": build_csv_prerun_export_document(prerun),
         },
     }
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(doc, f, ensure_ascii=False, indent=2)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        print(
+            f"{_PRINT_PREFIX} federation parse export skip screen={screen}: {exc}",
+            flush=True,
+        )
+        return None
     return path
 
 
@@ -102,12 +305,16 @@ def _resolve_csv_play_window(lam_window: Any, screen: int) -> Any:
 
 
 def _apply_federation_timeline_ui(csv_win: Any, cached: Any) -> None:
-    """CSV Play 와 동일하게 화면별 타임라인 UI 를 새 schedule 로 교체."""
+    """CSV Play 와 동일하게 화면별 타임라인 UI 를 새 schedule 로 교체.
+
+    Federation worker 는 백그라운드 스레드이므로 ``wait=True``(``_dispatch_main_wait``)
+    를 쓰지 않는다 — 메인 정체 시 파이프라인 전체가 멈추는 것을 막는다.
+    """
     if csv_win is None or cached is None:
         return
     apply = getattr(csv_win, "_post_apply_cached_timeline_ui", None)
     if callable(apply):
-        apply(cached, wait=True)
+        apply(cached, wait=False)
         return
     apply2 = getattr(csv_win, "_apply_cached_timeline_ui", None)
     if callable(apply2):
@@ -161,34 +368,29 @@ def _start_federation_playback(
     )
 
     si = max(1, int(screen))
-    registry, scheduler = get_registry_scheduler_for_lam_screen(
-        lam_window, si, allow_fallback=(si <= 1)
+    registry, scheduler = _federation_resolve_registry_scheduler(
+        lam_window, csv_win, si
     )
     if csv_win is not None:
-        try:
-            csv_win._refresh_play_runtime()
-        except Exception:
-            pass
-        if getattr(csv_win, "_registry", None) is not None:
-            registry = csv_win._registry
-        if getattr(csv_win, "_scheduler", None) is not None:
-            scheduler = csv_win._scheduler
         # 공정만보기 실시간 전환·일시정지 이어서 재생이 같은 캐시를 쓰도록 고정
         try:
             csv_win._prepared_playback = cached
         except Exception:
             pass
     if registry is None or scheduler is None:
+        _fed_diag(
+            "S11_registry_missing",
+            "cannot start play",
+            screen=si,
+        )
         return f"registry/scheduler missing for screen {si}"
-    if not stop_and_reap_csv_play_worker(
+    _federation_reap_best_effort(
         csv_win,
         screen=si,
         registry=registry,
         scheduler=scheduler,
         kit_ext=ext,
-        timeout=60.0,
-    ):
-        return f"screen{si} previous play worker stop timeout"
+    )
     process_only = False
     if csv_win is not None:
         try:
@@ -259,6 +461,11 @@ def _start_federation_playback(
                         "registry/scheduler missing",
                         flush=True,
                     )
+                    _fed_diag(
+                        "S12_play_abort_registry",
+                        "play worker exit",
+                        screen=si,
+                    )
                     return
                 if csv_win is not None:
                     set_csv_play_live_speed_ui_reader(
@@ -269,18 +476,34 @@ def _start_federation_playback(
                 set_csv_play_timeline_highlight_callback(
                     _on_timeline_highlight, screen=si
                 )
+                _fed_diag("S13_preflight_begin", "camera/prim hide", screen=si)
                 if not _run_federation_play_preflight(csv_win, si, ext):
                     print(
-                        f"{_PRINT_PREFIX} screen{si} preflight 중단 — 재생 생략",
+                        f"{_PRINT_PREFIX} screen{si} preflight 실패 — "
+                        "카메라/prim hide 생략하고 CSV 재생 계속",
                         flush=True,
                     )
-                    return
+                    _fed_diag(
+                        "S13_preflight_fail_continue",
+                        "skip camera/hide, continue CSV",
+                        screen=si,
+                    )
+                else:
+                    _fed_diag("S13_preflight_ok", "preflight done", screen=si)
                 try:
                     from .lam_traffic_light_emissive import on_csv_playback_started
 
                     on_csv_playback_started()
                 except Exception:
                     pass
+                _fed_diag(
+                    "S14_run_simulation",
+                    "run_simulation_from_csv enter",
+                    screen=si,
+                    process_only=process_only,
+                    speed=play_speed,
+                    blocks=len(getattr(cached, "blocks", None) or []),
+                )
                 run_simulation_from_csv(
                     play_reg,
                     play_sch,
@@ -291,8 +514,14 @@ def _start_federation_playback(
                     kit_ext=ext,
                     skip_play_prim_hide=True,
                 )
+                _fed_diag(
+                    "S15_run_simulation_exit",
+                    "play worker finished",
+                    screen=si,
+                )
             except Exception as exc:
                 print(f"{_PRINT_PREFIX} screen{si} play failed: {exc}", flush=True)
+                _fed_diag("S15_play_failed", str(exc), screen=si)
             finally:
                 try:
                     from .lam_traffic_light_emissive import (
@@ -330,6 +559,13 @@ def _start_federation_playback(
         except Exception:
             pass
     play_thread.start()
+    _fed_diag(
+        "S12_play_thread_started",
+        "background play thread running",
+        screen=si,
+        thread=play_thread.name,
+        auto_play=True,
+    )
     return None
 
 
@@ -353,7 +589,7 @@ def _process_merged_response(
     auto_play: bool,
     speed_scale: float,
     save_response_json: bool = False,
-    export_default_prerun: bool = True,
+    export_default_prerun: bool = False,
 ) -> ScreenPipelineResult:
     """이미 수집됐거나 사용자가 붙여넣은 응답만 파싱·프리런·재생한다."""
     from .simulation_play import set_csv_playback_compact_log
@@ -365,6 +601,7 @@ def _process_merged_response(
     try:
         eqp_id = str(body.get("eqp_id") or "").strip()
         if not eqp_id:
+            _fed_diag("S09_parse_fail", "eqp_id missing", screen=screen)
             return ScreenPipelineResult(
                 screen, False, "eqp_id missing in config body", meta
             )
@@ -373,10 +610,31 @@ def _process_merged_response(
         )
         meta["parse"] = parse_stats
         if not dwells:
+            _fed_diag(
+                "S09_parse_fail",
+                "no dwell records after parse",
+                screen=screen,
+                eqp_id=eqp_id,
+            )
             return ScreenPipelineResult(screen, False, "no dwell records after parse", meta)
+        _fed_diag(
+            "S09_parse_ok",
+            "dwells built",
+            screen=screen,
+            eqp_id=eqp_id,
+            dwells=len(dwells),
+        )
         vpath = federation_virtual_path(screen, body)
         cached = build_and_cache_from_dwells(vpath, dwells)
         prerun = build_prerun_result_from_cached(cached, screen=screen)
+        _fed_diag(
+            "S10_prerun_ok",
+            "cached playback ready",
+            screen=screen,
+            items=len(prerun.items),
+            csv_t=round(float(prerun.final_csv_time_sec), 1),
+            blocks=len(getattr(cached, "blocks", None) or []),
+        )
         if save_response_json:
             saved = _write_federation_parse_export(
                 screen=screen,
@@ -385,8 +643,10 @@ def _process_merged_response(
                 dwells=dwells,
                 prerun=prerun,
             )
-            meta["saved_json"] = str(saved)
+            if saved is not None:
+                meta["saved_json"] = str(saved)
         elif export_default_prerun:
+            # dump 실패해도 재생 계속 (maybe_export 내부에서 OSError swallow)
             maybe_export_csv_prerun_json(
                 prerun,
                 export_enabled=_default_prerun_export_enabled(),
@@ -403,8 +663,16 @@ def _process_merged_response(
         )
         csv_win = _resolve_csv_play_window(lam_window, screen)
         # Play 여부와 무관하게 화면별 타임라인은 API 결과로 교체
+        _fed_diag(
+            "S11_timeline_ui",
+            "apply schedule UI (async)",
+            screen=screen,
+            csv_win=csv_win is not None,
+            auto_play=bool(auto_play),
+        )
         _apply_federation_timeline_ui(csv_win, cached)
         if auto_play:
+            _fed_diag("S11_auto_play", "start playback", screen=screen)
             err = _start_federation_playback(
                 ext,
                 lam_window,
@@ -414,11 +682,19 @@ def _process_merged_response(
                 speed_scale=speed_scale,
             )
             if err:
+                _fed_diag(
+                    "S11_auto_play_fail",
+                    err,
+                    screen=screen,
+                )
                 return ScreenPipelineResult(screen, False, err, meta)
+        else:
+            _fed_diag("S11_auto_play_skip", "auto_play=False", screen=screen)
         return ScreenPipelineResult(
             screen, True, "ok", meta, prerun=prerun, cached=cached
         )
     except Exception as exc:
+        _fed_diag("S09_exception", str(exc), screen=screen)
         return ScreenPipelineResult(screen, False, str(exc), meta)
     finally:
         if quiet:
@@ -520,6 +796,7 @@ def _process_one_screen(
     log_full_response: bool,
     auto_play: bool,
     speed_scale: float,
+    export_default_prerun: bool = False,
 ) -> ScreenPipelineResult:
     meta: Dict[str, Any] = {"screen": screen}
     try:
@@ -543,6 +820,15 @@ def _process_one_screen(
             quiet=not _federation_verbose_parse_log(),
         )
         meta["fetch"] = fetch_meta
+        _fed_diag(
+            "S08_fetch_done",
+            "HTTP pages finished",
+            screen=screen,
+            pages=fetch_meta.get("pages"),
+            rows=fetch_meta.get("total_rows"),
+            elapsed=fetch_meta.get("elapsed_sec"),
+            status=fetch_meta.get("http_status"),
+        )
         result = _process_merged_response(
             ext,
             lam_window,
@@ -551,6 +837,7 @@ def _process_one_screen(
             merged,
             auto_play=auto_play,
             speed_scale=speed_scale,
+            export_default_prerun=export_default_prerun,
         )
         result.meta["fetch"] = fetch_meta
         return result
@@ -575,6 +862,7 @@ def run_federation_start_simulation(
     defaults = _read_federation_defaults()
     url = str(url_override or defaults["url"] or "").strip()
     if not url:
+        _fed_diag("S03_fail", "FEDERATION_QUERY_URL is empty")
         _finish(on_complete, _err("FEDERATION_QUERY_URL is empty"))
         return
     limit = int(limit_override if limit_override is not None else defaults["limit"])
@@ -603,10 +891,21 @@ def run_federation_start_simulation(
         f"{_PRINT_PREFIX} start configs show_1={show_1} show_2={show_2}",
         flush=True,
     )
+    _fed_diag(
+        "S03_pipeline_enter",
+        "run_federation_start_simulation",
+        show_1=show_1,
+        show_2=show_2,
+        auto_play=auto_play,
+        url=url[:80],
+        limit=limit,
+    )
 
     def _work_after_visibility() -> Dict[str, Any]:
+        _fed_diag("S06_work_begin", "after visibility — fetch/play")
         lam_window = getattr(ext, "_lam_window", None) or getattr(ext, "_window", None)
         if lam_window is None:
+            _fed_diag("S06_fail", "LAM window is not ready")
             return _err("LAM window is not ready")
         jobs: List[Tuple[int, Dict[str, Any]]] = []
         if show_1:
@@ -614,23 +913,27 @@ def run_federation_start_simulation(
         if show_2:
             jobs.append((2, bodies[1]))
         if not jobs:
+            _fed_diag("S06_fail", "both configs empty")
             return _err("both configs are empty — nothing to simulate")
 
+        _fed_diag(
+            "S06_jobs",
+            "screens to process",
+            screens=[s for s, _ in jobs],
+        )
         for screen, _body in jobs:
             csv_win = _resolve_csv_play_window(lam_window, screen)
-            if not stop_and_reap_csv_play_worker(
-                csv_win,
-                screen=screen,
-                kit_ext=ext,
-                timeout=60.0,
-            ):
-                return _err(f"screen{screen}: existing play worker stop timeout")
+            _federation_reap_best_effort(
+                csv_win, screen=screen, kit_ext=ext
+            )
 
         results: List[ScreenPipelineResult] = []
-        with ThreadPoolExecutor(max_workers=min(2, len(jobs))) as pool:
-            futs = {
-                pool.submit(
-                    _process_one_screen,
+        # 배포: 듀얼 화면 동시 ThreadPool + main-thread 경합으로 play 미기동 방지
+        # → 화면 순차 처리 (결과는 동일, fetch/play 시작 시점만 직렬). CSV Play UI 무관.
+        for screen, body in jobs:
+            _fed_diag("S08_screen_begin", "process screen", screen=screen)
+            results.append(
+                _process_one_screen(
                     ext,
                     lam_window,
                     screen,
@@ -645,11 +948,16 @@ def run_federation_start_simulation(
                     log_full_response=log_full_response,
                     auto_play=auto_play,
                     speed_scale=speed_scale,
-                ): screen
-                for screen, body in jobs
-            }
-            for fut in as_completed(futs):
-                results.append(fut.result())
+                    export_default_prerun=False,
+                )
+            )
+            r = results[-1]
+            _fed_diag(
+                "S08_screen_end",
+                r.message,
+                screen=screen,
+                ok=r.ok,
+            )
         results.sort(key=lambda r: r.screen)
         failed = [r for r in results if not r.ok]
         if failed:
@@ -672,17 +980,20 @@ def run_federation_start_simulation(
             result.setdefault("data", {})["elapsed_sec"] = time.perf_counter() - t0
             _finish(on_complete, result)
 
-        def _after_visibility() -> None:
-            threading.Thread(
-                target=_run_fetch, name="lam-federation-start", daemon=True
-            ).start()
-
-        try:
-            request_screen_visibility(
-                ext, show_1, show_2, on_complete=_after_visibility
-            )
-        except Exception as exc:
-            _finish(on_complete, _err(f"screen visibility failed: {exc}"))
+        _federation_run_after_visibility(
+            ext,
+            show_1,
+            show_2,
+            work=_run_fetch,
+            thread_name="lam-federation-start",
+        )
+        _fed_diag(
+            "S04_visibility_requested",
+            "waiting on_complete or watchdog",
+            show_1=show_1,
+            show_2=show_2,
+            watchdog_sec=_FED_VISIBILITY_WATCHDOG_SEC,
+        )
 
     schedule_on_main_thread(_apply_visibility_then_run)
 
@@ -732,19 +1043,13 @@ def run_federation_response_simulation(
                     ),
                 )
 
-        def _after_visibility() -> None:
-            threading.Thread(
-                target=_work,
-                name=f"lam-federation-response-s{si}",
-                daemon=True,
-            ).start()
-
-        try:
-            request_screen_visibility(
-                ext, si == 1, si == 2, on_complete=_after_visibility
-            )
-        except Exception as exc:
-            _finish(on_complete, _err(f"screen visibility failed: {exc}"))
+        _federation_run_after_visibility(
+            ext,
+            si == 1,
+            si == 2,
+            work=_work,
+            thread_name=f"lam-federation-response-s{si}",
+        )
 
     schedule_on_main_thread(_apply_visibility_then_run)
 
@@ -767,19 +1072,28 @@ def _result_dict(r: ScreenPipelineResult) -> Dict[str, Any]:
 
 
 def _finish(cb: Optional[Callable[[Dict[str, Any]], None]], result: Dict[str, Any]) -> None:
+    code = int(result.get("code", 0))
+    _fed_diag(
+        "S16_pipeline_done",
+        str(result.get("message", "")),
+        code=code,
+    )
     if cb is None:
-        code = int(result.get("code", 0))
         print(
             f"{_PRINT_PREFIX} done code={code} msg={result.get('message')}",
             flush=True,
         )
         return
 
+    _federation_ensure_main_dispatch()
+
     def _dispatch() -> None:
         try:
+            _fed_diag("S17_v2t_callback", "on_complete → V2T", code=code)
             cb(result)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} on_complete failed: {exc}", flush=True)
+            _fed_diag("S17_v2t_callback_fail", str(exc))
 
     schedule_on_main_thread(_dispatch)
 
