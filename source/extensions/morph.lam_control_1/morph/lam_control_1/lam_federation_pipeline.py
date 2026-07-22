@@ -196,6 +196,106 @@ def _federation_reap_best_effort(
         print(f"{_PRINT_PREFIX} screen{si} reap detach: {exc}", flush=True)
 
 
+_FED_FORCE_STOP_TIMEOUT_SEC = 70.0
+
+
+def _federation_force_stop_reset_for_start(
+    ext: Any,
+    lam_window: Any,
+    screen: int,
+) -> None:
+    """웹 시작 요청용 — 해당 화면을 UI「정지(초기화)」와 동일하게 강제 종료·초기화.
+
+    재생 중이든 아니든 요청 화면만 case별로 처리한다. 완료 후 새 재생이
+    막히지 않도록 stop 플래그를 해제한다.
+    """
+    from .simulation_play import clear_csv_playback_stop
+
+    si = max(1, int(screen))
+    _fed_diag(
+        "S07_force_stop_begin",
+        "stop+reset before federation start",
+        screen=si,
+    )
+    csv_win = _resolve_csv_play_window(lam_window, si)
+    if csv_win is None:
+        _federation_reap_best_effort(None, screen=si, kit_ext=ext)
+        clear_csv_playback_stop(screen=si)
+        _fed_diag(
+            "S07_force_stop_skip",
+            "csv window missing — reap only",
+            screen=si,
+        )
+        return
+
+    done = threading.Event()
+
+    def _kick_stop_reset() -> None:
+        try:
+            fn = getattr(csv_win, "_on_csv_stop_reset_clicked", None)
+            if not callable(fn):
+                _federation_reap_best_effort(
+                    csv_win, screen=si, kit_ext=ext
+                )
+                done.set()
+                return
+
+            def _on_done() -> None:
+                done.set()
+
+            fn(on_complete=_on_done)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} screen{si} force stop-reset kick: {exc}",
+                flush=True,
+            )
+            try:
+                _federation_reap_best_effort(
+                    csv_win, screen=si, kit_ext=ext
+                )
+            except Exception:
+                pass
+            done.set()
+
+    # UI 정지(초기화)와 동일하게 메인에서 기동
+    schedule_on_main_thread(_kick_stop_reset)
+    if not done.wait(timeout=float(_FED_FORCE_STOP_TIMEOUT_SEC)):
+        print(
+            f"{_PRINT_PREFIX} screen{si} force stop-reset timeout "
+            f"({_FED_FORCE_STOP_TIMEOUT_SEC:.0f}s) — reap fallback",
+            flush=True,
+        )
+        _fed_diag(
+            "S07_force_stop_timeout",
+            "fallback reap",
+            screen=si,
+            timeout_sec=_FED_FORCE_STOP_TIMEOUT_SEC,
+        )
+        _federation_reap_best_effort(csv_win, screen=si, kit_ext=ext)
+
+    # 성공/실패와 무관 — 이어질 fetch·play 가 stop 플래그에 막히지 않게
+    try:
+        clear_csv_playback_stop(screen=si)
+    except Exception:
+        pass
+    _fed_diag("S07_force_stop_done", "ready for new start", screen=si)
+
+
+def _federation_force_stop_requested_screens(
+    ext: Any,
+    lam_window: Any,
+    screens: List[int],
+) -> None:
+    """요청에 포함된 화면만 순차 강제 종료(다른 화면 재생은 유지)."""
+    seen = set()
+    for raw in screens:
+        si = max(1, int(raw))
+        if si in seen:
+            continue
+        seen.add(si)
+        _federation_force_stop_reset_for_start(ext, lam_window, si)
+
+
 def _federation_resolve_registry_scheduler(
     lam_window: Any,
     csv_win: Any,
@@ -989,7 +1089,8 @@ def run_federation_start_simulation(
 ) -> None:
     """T2V ``configs`` payload → 화면 표시 + fetch + prerun + (옵션) 재생.
 
-    듀얼 화면: 각 화면 fetch·파싱이 끝난 뒤 **성공 화면만** 동시에 재생 시작.
+    요청에 포함된 화면(case)은 시작 전에 UI「정지(초기화)」와 동일하게
+    강제 종료한 뒤 fetch·준비하며, 듀얼이면 성공 화면만 동시에 재생한다.
     실패 화면은 HUD에 실패를 남기고 play 하지 않는다.
     """
     defaults = _read_federation_defaults()
@@ -1054,11 +1155,10 @@ def run_federation_start_simulation(
             "screens to process",
             screens=[s for s, _ in jobs],
         )
-        for screen, _body in jobs:
-            csv_win = _resolve_csv_play_window(lam_window, screen)
-            _federation_reap_best_effort(
-                csv_win, screen=screen, kit_ext=ext
-            )
+        # 웹 시작 = 해당 case 강제 종료(정지초기화) + 이후 fetch/준비/재생 (한 요청)
+        _federation_force_stop_requested_screens(
+            ext, lam_window, [s for s, _ in jobs]
+        )
 
         results: List[ScreenPipelineResult] = []
         # Phase A: fetch+parse+prerun 만 (play 보류). 순차 처리로 main-thread 경합 회피.
@@ -1179,6 +1279,8 @@ def run_federation_response_simulation(
             if lam_window is None:
                 _finish(on_complete, _err("LAM window is not ready"))
                 return
+            # 시작 전 해당 화면 강제 종료+초기화 (웹 시작과 동일)
+            _federation_force_stop_reset_for_start(ext, lam_window, si)
             result = _process_merged_response(
                 ext,
                 lam_window,
