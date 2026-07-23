@@ -57,7 +57,7 @@ class CsvPlayScreenSession:
     timeline_highlight_cb: Optional[Callable[[frozenset], None]] = None
     timeline_active_keys_lock: threading.Lock = field(default_factory=threading.Lock)
     timeline_active_keys: set = field(default_factory=set)
-    progress_snap_lock: threading.Lock = field(default_factory=threading.Lock)
+    progress_snap_lock: threading.RLock = field(default_factory=threading.RLock)
     progress_snap: Dict[str, Any] = field(
         default_factory=lambda: {
             "process_only": False,
@@ -85,6 +85,12 @@ class CsvPlayScreenSession:
     # 블록/레인 JSON worker — 공정만보기 전환·정지 시 메인 스레드 외 잔존 join 용
     child_workers_lock: threading.Lock = field(default_factory=threading.Lock)
     child_workers: List[threading.Thread] = field(default_factory=list)
+    # 공정만보기 모드 전환 — 진행 중 JSON 이 끝날 때까지 신규 JSON 시작 보류
+    mode_switch_drain: bool = False
+    # 마지막으로 정상 완료한 JSON 의 CSV t — 모드 전환 resume 기준(다음 단계 스킵 방지)
+    last_json_completed_csv_sec: float = 0.0
+    # 완료한 JSON schedule match key — 동일 CSV t 병렬 블록 재실행/스킵 판별
+    completed_json_keys: set = field(default_factory=set)
 
 
 def csv_play_screen_session(screen: Optional[int] = None) -> CsvPlayScreenSession:

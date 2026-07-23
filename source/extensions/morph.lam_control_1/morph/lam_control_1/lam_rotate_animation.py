@@ -304,8 +304,15 @@ def stop_all_rotate_animations() -> None:
         _update_sub = None
 
 
-def stop_rotate_animations_for_context(usd_context_name: Optional[str]) -> None:
-    """지정 USD 컨텍스트의 rotate 애니만 중지."""
+def stop_rotate_animations_for_context(
+    usd_context_name: Optional[str],
+    *,
+    release_sub: bool = True,
+) -> None:
+    """지정 USD 컨텍스트의 rotate 애니만 중지.
+
+    ``release_sub=False`` — update 구독 유지(구독 해제로 Kit freeze 유발 가능).
+    """
     global _rot_animations, _update_sub
     target = str(usd_context_name or "").strip()
     for k, state in list(_rot_animations.items()):
@@ -315,7 +322,8 @@ def stop_rotate_animations_for_context(usd_context_name: Optional[str]) -> None:
                 _rot_animations.pop(k, None)
             except Exception:
                 pass
-    _maybe_release_update_sub()
+    if release_sub:
+        _maybe_release_update_sub()
 
 
 # ----------------------------------------------------------------- internal
@@ -356,6 +364,23 @@ def _on_update(e) -> None:
         get_csv_play_anim_dt_scale = None  # type: ignore
     if not _rot_animations:
         return
+
+    try:
+        from .lam_csv_play_screen import csv_play_screen_for_usd_context
+        from .simulation_play import csv_playback_stop_requested
+
+        stop_keys: List[str] = []
+        for anim_key, state in list(_rot_animations.items()):
+            ctx_nm = state.get("usd_context_name")
+            si = csv_play_screen_for_usd_context(ctx_nm)
+            if csv_playback_stop_requested(screen=si):
+                stop_keys.append(anim_key)
+        for k in stop_keys:
+            _rot_animations.pop(k, None)
+        if not _rot_animations:
+            return
+    except Exception:
+        pass
 
     to_remove: List[str] = []
     for anim_key, state in list(_rot_animations.items()):

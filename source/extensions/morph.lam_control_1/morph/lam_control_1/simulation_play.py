@@ -2659,14 +2659,20 @@ def _seed_process_only_started_before_resume(
     resume: float,
     paused_in_json: bool = False,
     screen: Optional[int] = None,
+    completed_keys: Optional[set] = None,
 ) -> None:
-    """이어서 공정만보기 시, resume 이전 JSON 을 started 로 표기.
+    """이어서 공정만보기 시, resume 이전·이미 완료 JSON 을 started 로 표기.
 
     비우면 ``_process_only_next_unstarted_block`` 이 스케줄 맨 앞(t≈0)을
     다음 이벤트로 보고 idle 점프/진행이 막혀 재생이 멈춘다.
+
+    모드 전환 후: 방금 완료한 resume 시각 블록을 started 에 넣지 않으면
+    next_unstarted 가 그 블록에 고정되고 idle 점프가 영구히 안 되어
+    이후 JSON 이 전부 대기만 한다.
     """
     resume_t = float(resume or 0.0)
-    if resume_t <= 1e-9:
+    done = set(completed_keys or ())
+    if resume_t <= 1e-9 and not done:
         return
     eps = 1e-6
     sess = csv_play_screen_session(screen)
@@ -2675,11 +2681,14 @@ def _seed_process_only_started_before_resume(
             if not b.steps or b.schedule is None:
                 continue
             t = float(b.time_sec)
-            if t < resume_t - eps:
-                sess.process_only_started_keys.add(_schedule_entry_match_key(b.schedule))
-            elif (not paused_in_json) and t <= resume_t + eps:
-                # 필터에서 빠진 동일 시각 블록 — next_unstarted 가 뒤로 못 가게
-                sess.process_only_started_keys.add(_schedule_entry_match_key(b.schedule))
+            key = _schedule_entry_match_key(b.schedule)
+            if key in done:
+                sess.process_only_started_keys.add(key)
+            elif resume_t > 1e-9 and t < resume_t - eps:
+                sess.process_only_started_keys.add(key)
+            elif paused_in_json and resume_t > 1e-9 and t <= resume_t + eps:
+                # 일시정지 재개: 진행 중 블록은 필터가 다시 넣음 — started 로 두지 않음
+                pass
 
 
 def _process_only_json_active(*, screen: Optional[int] = None) -> bool:
@@ -2749,6 +2758,10 @@ def _process_only_try_idle_compress_to_next(
     screen: Optional[int] = None,
 ) -> None:
     """전 레인 JSON 미실행(idle)일 때만 다음 예정 이벤트 CSV t 로 점프."""
+    if csv_play_mode_switch_drain_active(screen=screen):
+        # drain 중 점프하면 playhead 가 다음 단계(B)로 가고,
+        # resume 필터(t>resume) 가 B 를 건너뛰어 C 부터 재생된다.
+        return
     if _process_only_json_active(screen=screen):
         return
     nxt = _process_only_next_unstarted_block(all_blocks, screen=screen)
@@ -2831,8 +2844,10 @@ def _sleep_until_process_only_start(
                 return False
             continue
         if not _process_only_json_active(screen=si):
-            if _process_only_block_is_next_unstarted(block, all_blocks, screen=si):
-                _process_only_try_idle_compress_to_next(all_blocks, screen=si)
+            # 아무 lane 이든 idle 이면 전역 next 로 점프.
+            # (next_unstarted 전용 worker 만 점프하면, 완료 블록이 started 누락일 때
+            #  그 블록은 필터에 없어 점프가 영구히 안 됨)
+            _process_only_try_idle_compress_to_next(all_blocks, screen=si)
         csv_now = _process_only_playhead_csv_now(screen=si)
         if csv_now + 1e-6 >= target_csv:
             _process_only_mark_block_started(block, screen=si)
@@ -3016,6 +3031,9 @@ def begin_csv_play_timekeeping(
     sess.time_base_wall = time.monotonic()
     sess.csv_time_offset = max(0.0, float(csv_offset or 0.0))
     sess.wall_elapsed_offset = max(0.0, float(wall_elapsed_offset or 0.0))
+    # resume 이어서면 이미 지난 JSON 은 완료로 간주 (필터는 begin 전에 exclude keys 사용)
+    sess.last_json_completed_csv_sec = max(0.0, float(csv_offset or 0.0))
+    sess.completed_json_keys.clear()
     set_csv_play_live_speed_scale(speed_scale, screen=screen)
     return epoch
 
@@ -3043,6 +3061,65 @@ def _csv_play_json_executing(*, screen: Optional[int] = None) -> bool:
     sess = csv_play_screen_session(screen)
     with sess.timeline_active_keys_lock:
         return bool(sess.timeline_active_keys)
+
+
+def set_csv_play_mode_switch_drain(
+    enabled: bool, *, screen: Optional[int] = None
+) -> None:
+    """모드 전환 drain — True 면 신규 JSON 시작을 막고 진행 중 JSON 완료를 기다린다."""
+    csv_play_screen_session(screen).mode_switch_drain = bool(enabled)
+
+
+def csv_play_mode_switch_drain_active(*, screen: Optional[int] = None) -> bool:
+    return bool(csv_play_screen_session(screen).mode_switch_drain)
+
+
+def _wait_csv_play_hold_before_new_json(
+    *,
+    screen: Optional[int] = None,
+    play_epoch: Optional[int] = None,
+) -> bool:
+    """모드 전환 drain 중이면 신규 JSON 시작을 보류. False = stop/epoch 로 중단."""
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
+    while csv_play_mode_switch_drain_active(screen=si):
+        if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
+            return False
+        if not _sleep_csv_playback(0.05, screen=si, play_epoch=play_epoch):
+            return False
+    return not csv_play_worker_should_exit(screen=si, play_epoch=play_epoch)
+
+
+def _wait_csv_play_in_flight_json_finish(
+    *,
+    screen: Optional[int] = None,
+    timeout_sec: float = 180.0,
+) -> bool:
+    """진행 중 JSON(타임라인 active) 이 모두 끝날 때까지 대기.
+
+    True = idle. False = timeout(fail-open — 호출측이 전환 진행).
+    """
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
+    deadline = time.monotonic() + max(1.0, float(timeout_sec))
+    if not _csv_play_json_executing(screen=si):
+        return True
+    print(
+        f"{_PRINT_PREFIX} 공정만보기 전환 — 진행 중 JSON 완료 대기 화면{si}…",
+        flush=True,
+    )
+    while _csv_play_json_executing(screen=si):
+        if time.monotonic() >= deadline:
+            print(
+                f"{_PRINT_PREFIX} 공정만보기 전환 — JSON 완료 대기 timeout "
+                f"화면{si} ({timeout_sec:.0f}s) → 강제 전환",
+                flush=True,
+            )
+            return False
+        time.sleep(0.05)
+    print(
+        f"{_PRINT_PREFIX} 공정만보기 전환 — 진행 중 JSON 완료 화면{si}",
+        flush=True,
+    )
+    return True
 
 
 def get_csv_play_csv_time_now(*, screen: Optional[int] = None) -> float:
@@ -3139,43 +3216,58 @@ def save_csv_play_pause_checkpoint(
     speed_scale: float,
     process_only: bool,
     screen: Optional[int] = None,
+    for_mode_switch: bool = False,
 ) -> CsvPlayPauseCheckpoint:
     si = max(1, int(screen if screen is not None else current_csv_play_screen()))
     with csv_play_screen_binding(si):
-        sync_csv_play_live_speed_from_ui(screen=si)
+        # omni.ui reader 는 메인 전용 — 백그라운드(모드 전환)에서는 세션 배속만 사용
+        if threading.current_thread() is threading.main_thread():
+            sync_csv_play_live_speed_from_ui(screen=si)
         _flush_csv_play_time_segment_to_offset(screen=si)
         in_json = _csv_play_json_executing(screen=si)
         snap = get_csv_play_progress_snap(screen=si)
+        sess = csv_play_screen_session(si)
         if not in_json:
-            if snap.get("process_only"):
+            if for_mode_switch and float(sess.last_json_completed_csv_sec or 0) > 0:
+                # 모드 전환: 완료한 JSON 시각 기준 → 다음 단계(B) 포함.
+                # playhead/idle압축이 이미 B 로 가 있으면 display 기준 resume 이 B 를 스킵함.
+                csv_t = max(0.0, float(sess.last_json_completed_csv_sec))
+            elif snap.get("process_only"):
                 csv_t = max(0.0, _process_only_playhead_csv_now(screen=si))
             else:
                 csv_t = max(0.0, get_csv_play_csv_time_now(screen=si))
             csv_total = float(snap.get("csv_total", 0) or 0)
             if csv_total > 0:
                 csv_t = min(csv_total, csv_t)
-            sess = csv_play_screen_session(si)
+            # wall 은 락 밖에서 계산 — 락 안에서 get_csv_play_progress_snap 재진입 시
+            # (과거 Lock) 자기교착으로 Kit 전체가 멈췄다.
+            wall_el_now = float(
+                _compute_pause_wall_elapsed_from_snap(snap, screen=si)
+            )
             with sess.progress_snap_lock:
                 sess.progress_snap["csv_t_display"] = float(csv_t)
-                sess.progress_snap["wall_elapsed_display"] = float(
-                    _compute_pause_wall_elapsed_from_snap(
-                        get_csv_play_progress_snap(screen=si),
-                        screen=si,
-                    )
-                )
-        snap = get_csv_play_progress_snap(screen=si)
+                sess.progress_snap["wall_elapsed_display"] = wall_el_now
+            snap = get_csv_play_progress_snap(screen=si)
+        else:
+            snap = get_csv_play_progress_snap(screen=si)
         resume_t, in_json = _compute_pause_csv_time_from_snap(snap, screen=si)
+        if for_mode_switch and not in_json:
+            last = float(sess.last_json_completed_csv_sec or 0)
+            if last > 0:
+                resume_t = last
+                csv_total = float(snap.get("csv_total", 0) or 0)
+                if csv_total > 0:
+                    resume_t = min(csv_total, resume_t)
         wall_el = _compute_pause_wall_elapsed_from_snap(snap, screen=si)
         ck = CsvPlayPauseCheckpoint(
-            csv_path=str(Path(csv_path).resolve()),
+            csv_path=str(csv_path),
             speed_scale=float(speed_scale),
             process_only=bool(process_only),
             resume_csv_sec=float(resume_t),
             json_done=int(snap.get("json_done", 0) or 0),
             wall_elapsed_sec=float(wall_el),
-            paused_in_json=bool(in_json),
+            paused_in_json=bool(in_json) if not for_mode_switch else False,
         )
-        sess = csv_play_screen_session(si)
         sess.pause_checkpoint = ck
         sess.pause_armed = True
         return ck
@@ -3202,45 +3294,25 @@ def match_csv_play_pause_checkpoint(
     return ck
 
 
-def _filter_blocks_from_csv_time(
-    blocks: List[CsvTimedPlaybackBlock],
-    resume_csv_sec: float,
-    *,
-    paused_in_json: bool = False,
-) -> List[CsvTimedPlaybackBlock]:
-    """``resume_csv_sec`` 이후 블록만 (해당 시각 JSON 은 처음부터 재실행).
-
-    JSON 실행 중 일시정지면 진행 중이던 블록(``time_sec <= resume``)도 포함한다.
-    """
-    resume = float(resume_csv_sec or 0.0)
-    if resume <= 1e-9:
-        return list(blocks)
-    ordered = sorted(blocks, key=lambda b: (b.time_sec, b.sort_order))
-    eps = 1e-6
-    out = [b for b in ordered if float(b.time_sec) >= resume - eps]
-    if paused_in_json:
-        in_progress = [
-            b for b in ordered if b.steps and float(b.time_sec) <= resume + eps
-        ]
-        if in_progress:
-            blk = max(in_progress, key=lambda b: (b.time_sec, b.sort_order))
-            if blk not in out:
-                out = sorted(out + [blk], key=lambda b: (b.time_sec, b.sort_order))
-    return out
-
-
 def _filter_process_only_lane_items(
     items: List[Tuple[int, CsvTimedPlaybackBlock]],
     resume_csv_sec: float,
     *,
     paused_in_json: bool = False,
+    exclude_schedule_keys: Optional[set] = None,
 ) -> List[Tuple[int, CsvTimedPlaybackBlock]]:
+    """resume 이후 JSON 만. 모드 전환(``paused_in_json=False``) 시 과거 재실행 금지.
+
+    ``paused_in_json=True``(일시정지 재개) 일 때만 진행 중이던 최신 블록을 포함.
+    모드 전환: ``t > resume`` + 동일 시각이지만 아직 완료되지 않은 블록 포함.
+    """
     resume = float(resume_csv_sec or 0.0)
     if resume <= 1e-9:
         return list(items)
     eps = 1e-6
-    out = [(i, b) for i, b in items if float(b.time_sec) >= resume - eps]
+    excl = exclude_schedule_keys or set()
     if paused_in_json:
+        out = [(i, b) for i, b in items if float(b.time_sec) >= resume - eps]
         in_progress = [
             (i, b)
             for i, b in items
@@ -3252,6 +3324,57 @@ def _filter_process_only_lane_items(
                 out = sorted(
                     out + [pair], key=lambda x: (x[1].time_sec, x[1].sort_order)
                 )
+        return out
+    out: List[Tuple[int, CsvTimedPlaybackBlock]] = []
+    for i, b in items:
+        t = float(b.time_sec)
+        if t > resume + eps:
+            out.append((i, b))
+            continue
+        if abs(t - resume) <= eps and b.steps and b.schedule is not None:
+            key = _schedule_entry_match_key(b.schedule)
+            if key not in excl:
+                out.append((i, b))
+    return out
+
+
+def _filter_blocks_from_csv_time(
+    blocks: List[CsvTimedPlaybackBlock],
+    resume_csv_sec: float,
+    *,
+    paused_in_json: bool = False,
+    exclude_schedule_keys: Optional[set] = None,
+) -> List[CsvTimedPlaybackBlock]:
+    """``resume_csv_sec`` 이후 블록만.
+
+    일시정지(``paused_in_json``): 진행 중이던 JSON 블록 포함(처음부터 재실행).
+    모드 전환 등 ``paused_in_json=False``: resume 초과 + 동일시각 미완료 블록.
+    """
+    resume = float(resume_csv_sec or 0.0)
+    if resume <= 1e-9:
+        return list(blocks)
+    ordered = sorted(blocks, key=lambda b: (b.time_sec, b.sort_order))
+    eps = 1e-6
+    excl = exclude_schedule_keys or set()
+    if not paused_in_json:
+        out: List[CsvTimedPlaybackBlock] = []
+        for b in ordered:
+            t = float(b.time_sec)
+            if t > resume + eps:
+                out.append(b)
+            elif abs(t - resume) <= eps and b.steps and b.schedule is not None:
+                key = _schedule_entry_match_key(b.schedule)
+                if key not in excl:
+                    out.append(b)
+        return out
+    out = [b for b in ordered if float(b.time_sec) >= resume - eps]
+    in_progress = [
+        b for b in ordered if b.steps and float(b.time_sec) <= resume + eps
+    ]
+    if in_progress:
+        blk = max(in_progress, key=lambda b: (b.time_sec, b.sort_order))
+        if blk not in out:
+            out = sorted(out + [blk], key=lambda b: (b.time_sec, b.sort_order))
     return out
 
 
@@ -3341,7 +3464,13 @@ def request_stop_csv_playback(
     screen: Optional[int] = None,
     kit_ext: Any = None,
     stop_scheduler: bool = True,
+    stop_motion: bool = True,
 ) -> None:
+    """CSV 재생 중지 요청.
+
+    ``stop_motion=False`` / ``stop_scheduler=False`` — 공정만보기 실시간 전환용.
+    (애니 dict·scheduler stop_all 이 메인 USD update 와 겹치면 Kit 가 멈출 수 있음)
+    """
     _ = registry
     si = max(1, int(screen if screen is not None else current_csv_play_screen()))
     sess = csv_play_screen_session(si)
@@ -3357,17 +3486,31 @@ def request_stop_csv_playback(
         except Exception as exc:
             if not is_csv_playback_compact_log():
                 print(f"{_PRINT_PREFIX} CSV Play 중지 Runner 경고: {exc}", flush=True)
-    try:
-        from .lam_csv_play_execution import stop_csv_play_motion_for_screen
+    if stop_motion:
+        try:
+            from .lam_csv_play_execution import stop_csv_play_motion_for_screen
 
-        lam_window = None
-        if kit_ext is not None:
-            lam_window = getattr(kit_ext, "_lam_window", None) or getattr(
-                kit_ext, "_window", None
-            )
-        stop_csv_play_motion_for_screen(si, kit_ext=kit_ext, lam_window=lam_window)
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} CSV Play 중지 애니 경고: {exc}", flush=True)
+            lam_window = None
+            if kit_ext is not None:
+                lam_window = getattr(kit_ext, "_lam_window", None) or getattr(
+                    kit_ext, "_window", None
+                )
+            stop_csv_play_motion_for_screen(si, kit_ext=kit_ext, lam_window=lam_window)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} CSV Play 중지 애니 경고: {exc}", flush=True)
+    else:
+        # runner 캐시만 무효 — 다음 resume 이 새 runner 를 받도록
+        try:
+            from .lam_csv_play_execution import invalidate_csv_sequence_runner_for_screen
+
+            lam_window = None
+            if kit_ext is not None:
+                lam_window = getattr(kit_ext, "_lam_window", None) or getattr(
+                    kit_ext, "_window", None
+                )
+            invalidate_csv_sequence_runner_for_screen(lam_window, si)
+        except Exception:
+            pass
     if stop_scheduler and scheduler is not None:
         try:
             stop_fn = getattr(scheduler, "stop_all", None)
@@ -3687,13 +3830,21 @@ def _run_lam_sim_steps_cancellable(
     usd_context_name: Optional[str] = None,
     lam_window: Any = None,
     play_screen: Optional[int] = None,
+    play_epoch: Optional[int] = None,
 ) -> None:
-    """``run_lam_sim_steps`` 와 동일하나 CSV 중지 시 Runner 를 끊을 수 있게 등록."""
-    if not steps or csv_playback_stop_requested(screen=play_screen):
+    """``run_lam_sim_steps`` 와 동일하나 CSV 중지 시 Runner 를 끊을 수 있게 등록.
+
+    **중요:** 화면당 캐시 runner 를 쓰지 않는다. ATM/VTM 레인 병렬 시 동일
+    ``LamSequenceRunner.run()`` 이 ``_stop_flag.clear()`` 로 서로를 깨우고
+    Kit 교착·과거 JSON 재실행을 유발한다.
+    """
+    if not steps or csv_play_worker_should_exit(
+        screen=play_screen, play_epoch=play_epoch
+    ):
         return
     try:
         from .lam_sequence_engine import LamSequenceRunner
-        from .lam_csv_play_execution import get_csv_sequence_runner, resolve_csv_play_execution
+        from .lam_csv_play_execution import resolve_csv_play_execution
     except Exception as exc:
         print(f"{_PRINT_PREFIX} LamSequenceRunner import 실패: {exc}", flush=True)
         return
@@ -3703,7 +3854,11 @@ def _run_lam_sim_steps_cancellable(
     ctx = str(usd_context_name).strip() if usd_context_name and str(usd_context_name).strip() else None
 
     def _execute() -> None:
-        runner: Any
+        if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
+            return
+        reg = registry
+        sch = scheduler
+        ctx_run = ctx
         if lam_window is not None:
             binding = resolve_csv_play_execution(
                 lam_window,
@@ -3716,15 +3871,17 @@ def _run_lam_sim_steps_cancellable(
                     flush=True,
                 )
                 return
-            runner = get_csv_sequence_runner(lam_window, binding)
+            reg = binding.registry
+            sch = binding.scheduler
             ctx_run = binding.usd_context_name
-        else:
-            runner = LamSequenceRunner(
-                registry, scheduler, usd_context_name=ctx, play_screen=si
-            )
-            ctx_run = ctx
+        # JSON 블록마다 새 runner — 레인 병렬·모드 전환 안전
+        runner = LamSequenceRunner(
+            reg, sch, usd_context_name=ctx_run, play_screen=si
+        )
         _csv_play_register_runner(runner, screen=si)
         try:
+            if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
+                return
             runner.run(
                 list(steps),
                 reset_each_start=False,
@@ -3753,10 +3910,13 @@ def _csv_playback_execute_json_block(
     usd_context_name: Optional[str] = None,
     lam_window: Any = None,
     play_screen: Optional[int] = None,
+    play_epoch: Optional[int] = None,
 ) -> None:
     """한 JSON 블록 실행 (로그·타임라인 강조·진행 스냅샷)."""
     sp = float(max(0.01, speed_scale or 1.0))
     si = max(1, int(play_screen if play_screen is not None else current_csv_play_screen()))
+    if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
+        return
     sched = block.schedule
     if sched is None or not block.steps:
         return
@@ -3776,12 +3936,26 @@ def _csv_playback_execute_json_block(
             usd_context_name=usd_context_name,
             lam_window=lam_window,
             play_screen=play_screen,
+            play_epoch=play_epoch,
         )
     finally:
         _csv_play_timeline_row_end_entry(sched)
+    # detach/epoch 무효 후엔 로그·시계 갱신 금지 (과거 t 재출력·널뛰기 방지)
+    if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
+        return
     if not csv_playback_stop_requested(screen=si):
         _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=True)
     _csv_play_progress_mark_json_done(json_done_before + 1)
+    # 모드 전환 resume 기준 — 완료한 JSON CSV t (다음 단계 스킵 방지)
+    try:
+        sess = csv_play_screen_session(si)
+        t_done = float(block.time_sec)
+        if t_done >= float(sess.last_json_completed_csv_sec or 0):
+            sess.last_json_completed_csv_sec = t_done
+        if sched is not None:
+            sess.completed_json_keys.add(_schedule_entry_match_key(sched))
+    except Exception:
+        pass
     _notify_csv_play_progress_ui(screen=si)
     if get_csv_play_progress_snap(screen=si).get("process_only"):
         _process_only_advance_playhead_after_block(block, screen=si)
@@ -3851,6 +4025,8 @@ def _csv_playback_block_worker(
         return
     if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
         return
+    if not _wait_csv_play_hold_before_new_json(screen=si, play_epoch=play_epoch):
+        return
 
     wall_elapsed = get_csv_play_csv_time_now(screen=si)
     sp = get_csv_play_live_speed_scale(screen=si)
@@ -3874,6 +4050,7 @@ def _csv_playback_block_worker(
         usd_context_name=usd_context_name,
         lam_window=lam_window,
         play_screen=si,
+        play_epoch=play_epoch,
     )
 
 
@@ -4015,6 +4192,10 @@ def _csv_play_normal_lane_worker(
             return
         if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
             return
+        if not _wait_csv_play_hold_before_new_json(
+            screen=si, play_epoch=play_epoch
+        ):
+            return
         sp = get_csv_play_live_speed_scale(screen=si)
         _csv_playback_execute_json_block(
             block,
@@ -4028,6 +4209,7 @@ def _csv_play_normal_lane_worker(
             usd_context_name=usd_context_name,
             lam_window=lam_window,
             play_screen=si,
+            play_epoch=play_epoch,
         )
 
 
@@ -4068,6 +4250,10 @@ def _csv_play_process_only_lane_worker(
             return
         if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
             return
+        if not _wait_csv_play_hold_before_new_json(
+            screen=si, play_epoch=play_epoch
+        ):
+            return
         with json_done_lock:
             json_done_before = int(json_done_counter[0])
         _csv_playback_execute_json_block(
@@ -4082,6 +4268,7 @@ def _csv_play_process_only_lane_worker(
             usd_context_name=usd_context_name,
             lam_window=lam_window,
             play_screen=play_screen,
+            play_epoch=play_epoch,
         )
         with json_done_lock:
             json_done_counter[0] = max(
@@ -4149,14 +4336,25 @@ def _run_csv_timed_playback_process_only(
     resume = max(0.0, float(resume_from_csv_sec or 0.0))
     all_json_blocks = [b for b in ordered if b.steps]
     atm_items, vtm_items, other_items = _partition_json_blocks_by_lane(blocks)
+    # begin 전에 스냅 — begin 이 completed_json_keys 를 clear 함
+    excl_keys = set(csv_play_screen_session(si).completed_json_keys)
     atm_items = _filter_process_only_lane_items(
-        atm_items, resume, paused_in_json=paused_in_json
+        atm_items,
+        resume,
+        paused_in_json=paused_in_json,
+        exclude_schedule_keys=excl_keys,
     )
     vtm_items = _filter_process_only_lane_items(
-        vtm_items, resume, paused_in_json=paused_in_json
+        vtm_items,
+        resume,
+        paused_in_json=paused_in_json,
+        exclude_schedule_keys=excl_keys,
     )
     other_items = _filter_process_only_lane_items(
-        other_items, resume, paused_in_json=paused_in_json
+        other_items,
+        resume,
+        paused_in_json=paused_in_json,
+        exclude_schedule_keys=excl_keys,
     )
     n_json_remaining = len(atm_items) + len(vtm_items) + len(other_items)
     n_json_all = sum(1 for b in ordered if b.steps)
@@ -4192,9 +4390,27 @@ def _run_csv_timed_playback_process_only(
         resume=resume,
         paused_in_json=paused_in_json,
         screen=si,
+        completed_keys=excl_keys,
     )
     # idle 구간 재개·시작 직후 다음 JSON CSV t 로 즉시 점프
     _process_only_try_idle_compress_to_next(all_json_blocks, screen=si)
+    try:
+        nxt = _process_only_next_unstarted_block(all_json_blocks, screen=si)
+        if nxt is not None:
+            print(
+                f"{_PRINT_PREFIX} 공정만보기 resume playhead→"
+                f"{_process_only_playhead_csv_now(screen=si):.1f}s "
+                f"next_json t={float(nxt.time_sec):.1f}s",
+                flush=True,
+            )
+        else:
+            print(
+                f"{_PRINT_PREFIX} 공정만보기 resume — next_json 없음 "
+                f"(started={len(csv_play_screen_session(si).process_only_started_keys)})",
+                flush=True,
+            )
+    except Exception:
+        pass
     lane_coordinator = _CsvPlaybackLaneCoordinator(play_screen=si)
     json_done_counter: List[int] = [max(0, int(initial_json_done))]
     json_done_lock = threading.Lock()
@@ -4889,8 +5105,12 @@ def run_csv_timed_playback(
         return
 
     resume = max(0.0, float(resume_from_csv_sec or 0.0))
+    excl_keys = set(csv_play_screen_session(si).completed_json_keys)
     ordered = _filter_blocks_from_csv_time(
-        all_ordered, resume, paused_in_json=paused_in_json
+        all_ordered,
+        resume,
+        paused_in_json=paused_in_json,
+        exclude_schedule_keys=excl_keys,
     )
     if not ordered:
         print(f"{_PRINT_PREFIX} CSV Play: 이어서 재생할 블록 없음", flush=True)
@@ -5351,6 +5571,7 @@ class LamSimulationCsvPlayWindow:
         self._process_only_switch_target: bool = False
         self._process_only_switch_lock = threading.Lock()
         self._process_only_switch_gen: int = 0
+        self._process_only_last_applied: Optional[bool] = None
         self._process_only_deferred_for_start: Optional[bool] = None
         self._csv_prerun_export_model: Any = None
         self._wafer_label_show_model: Any = None
@@ -7101,6 +7322,8 @@ class LamSimulationCsvPlayWindow:
         """모델/체크 변경 → live 전환. 목표값은 **토글 후 모델값** (invert 하지 않음).
 
         연타 debounce: 최신 desired 만 짧은 지연 후 1회 적용 (전환 worker 폭주 방지).
+        **Kit main / ``_dispatch_main`` 에 올리지 않는다** — 애니 update·USD write
+        큐와 겹치면 앱이 멈춘다. debounce 백그라운드에서 바로 전환 worker 기동.
         """
         captured = desired
         si = int(self._screen)
@@ -7114,21 +7337,27 @@ class LamSimulationCsvPlayWindow:
             flush=True,
         )
 
-        def _run() -> None:
-            if token != int(getattr(self, "_process_only_switch_gen", 0)):
-                return
-            if captured is not None:
-                self._on_live_process_only_changed(desired_override=bool(captured))
-            else:
-                self._on_live_process_only_changed(
-                    desired_override=self._read_process_only()
-                )
-
         def _debounce() -> None:
-            time.sleep(0.12)
+            time.sleep(0.08)
             if token != int(getattr(self, "_process_only_switch_gen", 0)):
                 return
-            _post_kit_main_thread(_run)
+            try:
+                if captured is not None:
+                    self._on_live_process_only_changed(desired_override=bool(captured))
+                else:
+                    # 모델 read 는 omni.ui — 메인 권장. 실패 시 스냅 기준으로 폴백.
+                    try:
+                        d = self._read_process_only()
+                    except Exception:
+                        d = bool(
+                            get_csv_play_progress_snap(screen=si).get("process_only")
+                        )
+                    self._on_live_process_only_changed(desired_override=bool(d))
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 debounce 실패 화면{si}: {exc}",
+                    flush=True,
+                )
 
         threading.Thread(
             target=_debounce,
@@ -7186,7 +7415,10 @@ class LamSimulationCsvPlayWindow:
         return False
 
     def _fan_out_process_only_to_aux_screens(self, desired: bool) -> None:
-        """화면1 HUD·공유 체크박스 → 재생 중인 화면2+ 에도 동일 모드 전파."""
+        """화면1 HUD·공유 체크박스 → 재생 중인 화면2+ 에도 동일 모드 전파.
+
+        모델 set_value 는 Kit main 에서만 (debounce 백그라운드에서 omni.ui 금지).
+        """
         lam = self._lam_window_ref
         if lam is None:
             return
@@ -7204,13 +7436,25 @@ class LamSimulationCsvPlayWindow:
                 snap = get_csv_play_progress_snap(screen=int(si))
                 if bool(snap.get("process_only")) == bool(desired):
                     continue
-                m = win._process_only_model
-                win._process_only_model_syncing = True
+
+                def _sync_model(
+                    w=win, d=bool(desired), screen_i=int(si)
+                ) -> None:
+                    try:
+                        m = w._process_only_model
+                        w._process_only_model_syncing = True
+                        try:
+                            if m is not None and bool(w._read_process_only()) != d:
+                                m.set_value(d)
+                        finally:
+                            w._process_only_model_syncing = False
+                    except Exception:
+                        pass
+
                 try:
-                    if m is not None and bool(win._read_process_only()) != bool(desired):
-                        m.set_value(bool(desired))
-                finally:
-                    win._process_only_model_syncing = False
+                    _post_kit_main_thread(_sync_model)
+                except Exception:
+                    pass
                 win._process_only_switch_target = bool(desired)
                 win._try_start_live_process_only_switch(bool(desired))
             except Exception:
@@ -7253,6 +7497,8 @@ class LamSimulationCsvPlayWindow:
         """해당 화면 재생 중이면 pause → 공정만보기/일반 모드로 이어서 재생.
 
         진행 중이면 목표만 갱신(latest-wins). 전환 완료 후 목표가 다르면 재전환.
+        호출 스레드(메인/debounce)에서는 pending 설정·worker 기동만 한다.
+        checkpoint / stop / detach / resume 은 전부 switch worker.
         """
         si = int(self._screen)
         self._process_only_switch_target = bool(desired)
@@ -7284,139 +7530,147 @@ class LamSimulationCsvPlayWindow:
                     f"(preflight/prerun — Play 진입 시 적용)",
                     flush=True,
                 )
-                self._log(
-                    f"공정만보기 {'ON' if desired else 'OFF'} — "
-                    f"재생 시작 시 적용 (화면{si} preflight 중)"
-                )
+                try:
+                    _post_kit_main_thread(
+                        lambda d=bool(desired), s=si: self._log(
+                            f"공정만보기 {'ON' if d else 'OFF'} — "
+                            f"재생 시작 시 적용 (화면{s} preflight 중)"
+                        )
+                    )
+                except Exception:
+                    pass
                 return
             snap = get_csv_play_progress_snap(screen=si)
+            last_applied = getattr(self, "_process_only_last_applied", None)
+            if (
+                last_applied is not None
+                and bool(last_applied) == bool(desired)
+                and csv_play_session_active(screen=si)
+            ):
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — "
+                    f"이미 적용·재생 중 applied={desired}",
+                    flush=True,
+                )
+                return
             if bool(snap.get("process_only")) == bool(desired):
                 print(
                     f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — "
                     f"이미 {'ON' if desired else 'OFF'}",
                     flush=True,
                 )
+                self._process_only_last_applied = bool(desired)
                 return
             cached = self._resolve_prepared_playback_for_live_switch()
             if cached is None:
-                self._log(
-                    f"공정만보기 실시간 전환 실패 — 화면{self._screen} 재생 캐시 없음 "
-                    "(Play 완료 후 타임라인 갱신 또는 재생 중 다시 시도)"
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 실시간 전환 실패 — 화면{self._screen} "
+                    "재생 캐시 없음",
+                    flush=True,
                 )
                 return
-
-            try:
-                self._refresh_play_runtime()
-            except Exception:
-                pass
 
             path = str(cached.path)
-            speed_now = float(self._read_speed_scale())
+            try:
+                speed_now = float(self._read_speed_scale())
+            except Exception:
+                speed_now = 1.0
             registry = self._registry
             scheduler = self._scheduler
-            if registry is None or scheduler is None:
-                self._log(
-                    f"공정만보기 실시간 전환 실패 — 화면{si} registry/scheduler 없음"
-                )
-                return
             kit_ext = getattr(self._lam_window_ref, "_kit_ext", None)
             self._process_only_switch_pending = True
 
-        self._log(
-            f"공정만보기 {'ON' if desired else 'OFF'} 실시간 전환 중… (화면{si})"
-        )
+        # 메인/debounce 에서는 print + Thread.start 만 (USD·stop·join 금지)
         print(
             f"{_PRINT_PREFIX} 공정만보기 {'ON' if desired else 'OFF'} "
             f"실시간 전환 시작 — 화면{si}",
             flush=True,
         )
-        # 체크포인트는 early stop 전에 메인에서 저장 (session 조기 종료 대비).
-        target0 = bool(desired)
-        sp0 = 1.0 if target0 else speed_now
-        try:
-            ck_main = save_csv_play_pause_checkpoint(
-                csv_path=path,
-                speed_scale=sp0,
-                process_only=target0,
-                screen=si,
-            )
-        except Exception as exc:
-            print(
-                f"{_PRINT_PREFIX} 공정만보기 checkpoint 실패 화면{si}: {exc}",
-                flush=True,
-            )
-            with switch_lock:
-                self._process_only_switch_pending = False
-            return
-        # lane worker 가 wait 에서 바로 빠져나오도록 stop 선제 설정
-        try:
-            _sess_early = csv_play_screen_session(si)
-            _sess_early.stop_event.set()
-            _sess_early.material_test_stop.set()
-        except Exception:
-            pass
 
         def _switch_worker() -> None:
             resumed_ok = False
             follow = bool(desired)
+            applied_mode: Optional[bool] = None
             print(
                 f"{_PRINT_PREFIX} 공정만보기 switch worker enter 화면{si}",
                 flush=True,
             )
             try:
                 with csv_play_screen_binding(si):
+                    # 1) 신규 JSON 시작 보류 + 진행 중 JSON/애니 가 끝날 때까지 대기
+                    #    (해제·ON 모두 — 끊지 않고 현재 공정 동작 완료 후 모드 적용)
+                    set_csv_play_mode_switch_drain(True, screen=si)
+                    try:
+                        _wait_csv_play_in_flight_json_finish(
+                            screen=si, timeout_sec=180.0
+                        )
+                    except Exception as exc:
+                        print(
+                            f"{_PRINT_PREFIX} 공정만보기 JSON drain 경고 화면{si}: {exc}",
+                            flush=True,
+                        )
+                    # drain 중 목표가 바뀌었을 수 있음
+                    target0w = bool(self._process_only_switch_target)
+                    print(
+                        f"{_PRINT_PREFIX} 공정만보기 switch refresh… 화면{si}",
+                        flush=True,
+                    )
                     try:
                         self._refresh_play_runtime()
                     except Exception:
                         pass
                     pause_reg = self._registry or registry
                     pause_sch = self._scheduler or scheduler
-                    target0w = bool(self._process_only_switch_target)
-                    ck = get_csv_play_pause_checkpoint(screen=si) or ck_main
-                    if ck is None:
-                        raise RuntimeError("pause checkpoint 없음")
-                    if bool(ck.process_only) != target0w:
-                        ck = CsvPlayPauseCheckpoint(
-                            csv_path=ck.csv_path,
-                            speed_scale=1.0 if target0w else speed_now,
-                            process_only=target0w,
-                            resume_csv_sec=ck.resume_csv_sec,
-                            json_done=ck.json_done,
-                            wall_elapsed_sec=ck.wall_elapsed_sec,
-                            paused_in_json=ck.paused_in_json,
-                        )
+                    if pause_reg is None or pause_sch is None:
+                        raise RuntimeError("registry/scheduler 없음")
+                    sp0 = 1.0 if target0w else speed_now
                     print(
-                        f"{_PRINT_PREFIX} 공정만보기 switch pause/reap… 화면{si} "
-                        f"t≈{ck.resume_csv_sec:.1f}s",
+                        f"{_PRINT_PREFIX} 공정만보기 switch checkpoint… 화면{si}",
                         flush=True,
                     )
-                    request_pause_csv_playback(
+                    try:
+                        ck = save_csv_play_pause_checkpoint(
+                            csv_path=path,
+                            speed_scale=sp0,
+                            process_only=target0w,
+                            screen=si,
+                            for_mode_switch=True,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(f"checkpoint 실패: {exc}") from exc
+                    print(
+                        f"{_PRINT_PREFIX} 공정만보기 switch pause/detach… 화면{si} "
+                        f"t≈{ck.resume_csv_sec:.1f}s "
+                        f"(last_json={csv_play_screen_session(si).last_json_completed_csv_sec:.1f}s)",
+                        flush=True,
+                    )
+                    # soft stop — 이미 in-flight JSON 은 끝난 뒤. 대기 중 worker 만 끊음.
+                    request_stop_csv_playback(
                         pause_reg,
                         pause_sch,
                         screen=si,
                         kit_ext=kit_ext,
+                        stop_scheduler=False,
+                        stop_motion=False,
                     )
+                    # join 최소화 — 잔존은 detach (앱 정지 금지)
+                    try:
+                        self._reap_csv_play_thread(timeout=0.1)
+                    except Exception:
+                        pass
+                    join_csv_play_child_workers(screen=si, timeout=0.1)
+                    detach_csv_play_workers_for_screen(self, screen=si)
                     msg = (
                         f"공정만보기 {'ON' if target0w else 'OFF'} 전환 — "
                         f"CSV t≈{ck.resume_csv_sec:.1f}s"
                     )
-                    _post_kit_main_thread(lambda m=msg: self._log(m))
-                    reaped = reap_csv_play_workers_for_screen(
-                        self,
-                        screen=si,
-                        registry=pause_reg,
-                        scheduler=pause_sch,
-                        kit_ext=kit_ext,
-                        timeout=1.5,
-                    )
-                    if not reaped or _alive_csv_play_child_workers(screen=si):
-                        print(
-                            f"{_PRINT_PREFIX} 공정만보기 switch detach 화면{si} "
-                            f"(reaped={reaped})",
-                            flush=True,
-                        )
-                    detach_csv_play_workers_for_screen(self, screen=si)
+                    print(f"{_PRINT_PREFIX} {msg}", flush=True)
+                    try:
+                        _post_kit_main_thread(lambda m=msg: self._log(m))
+                    except Exception:
+                        pass
                     target = bool(self._process_only_switch_target)
+                    # 모드 전환: 진행 중 JSON 을 처음부터 다시 돌리지 않음.
                     resume_ck = CsvPlayPauseCheckpoint(
                         csv_path=ck.csv_path,
                         speed_scale=1.0 if target else speed_now,
@@ -7424,47 +7678,82 @@ class LamSimulationCsvPlayWindow:
                         resume_csv_sec=ck.resume_csv_sec,
                         json_done=ck.json_done,
                         wall_elapsed_sec=ck.wall_elapsed_sec,
-                        paused_in_json=ck.paused_in_json,
+                        paused_in_json=False,
                     )
+                    # resume 전에 drain 해제 — 새 lane worker 가 hold 에 영구 대기하지 않게
+                    set_csv_play_mode_switch_drain(False, screen=si)
+                    clear_csv_playback_stop(screen=si)
                     self._launch_live_process_only_resume(cached, resume_ck)
+                    applied_mode = bool(resume_ck.process_only)
+                    self._process_only_last_applied = applied_mode
                     resumed_ok = True
             except Exception as exc:
                 err = f"공정만보기 실시간 전환 실패: {exc}"
                 print(f"{_PRINT_PREFIX} {err}", flush=True)
-                _post_kit_main_thread(lambda m=err: self._log(m))
+                try:
+                    _post_kit_main_thread(lambda m=err: self._log(m))
+                except Exception:
+                    pass
                 abandon_csv_play_after_failed_mode_switch(screen=si)
             finally:
+                set_csv_play_mode_switch_drain(False, screen=si)
                 with switch_lock:
                     self._process_only_switch_pending = False
                     follow = bool(self._process_only_switch_target)
             if not resumed_ok:
                 return
+            # snap.process_only 는 새 Play 스레드가 올리기 전 False 일 수 있음.
+            # snap 기준 follow-up 하면 방금 재개한 세션을 즉시 stop 해 진행이 멈춘다.
+            if applied_mode is not None and bool(applied_mode) == bool(follow):
+                print(
+                    f"{_PRINT_PREFIX} 공정만보기 follow-up skip 화면{si} — "
+                    f"이미 적용됨 applied={applied_mode}",
+                    flush=True,
+                )
+                return
 
             def _follow_up(f: bool = follow) -> None:
                 try:
-                    if csv_playback_stop_requested(screen=si):
+                    if bool(getattr(self, "_process_only_last_applied", None)) == bool(
+                        f
+                    ):
                         return
                     if self._csv_play_is_active() and csv_play_session_active(
                         screen=si
                     ):
-                        snap_now = get_csv_play_progress_snap(screen=si)
-                        if bool(snap_now.get("process_only")) != f:
-                            print(
-                                f"{_PRINT_PREFIX} 공정만보기 전환 follow-up 화면{si} "
-                                f"→ {f}",
-                                flush=True,
-                            )
-                            self._try_start_live_process_only_switch(f)
+                        print(
+                            f"{_PRINT_PREFIX} 공정만보기 전환 follow-up 화면{si} "
+                            f"→ {f}",
+                            flush=True,
+                        )
+                        self._try_start_live_process_only_switch(f)
                 except Exception:
                     pass
 
-            _post_kit_main_thread(_follow_up)
+            def _follow_bg() -> None:
+                time.sleep(0.2)
+                _follow_up()
 
-        threading.Thread(
-            target=_switch_worker,
-            daemon=True,
-            name=f"lam-process-only-switch-s{si}",
-        ).start()
+            threading.Thread(
+                target=_follow_bg,
+                daemon=True,
+                name=f"lam-process-only-follow-s{si}",
+            ).start()
+
+        try:
+            threading.Thread(
+                target=_switch_worker,
+                daemon=True,
+                name=f"lam-process-only-switch-s{si}",
+            ).start()
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} 공정만보기 switch thread 기동 실패 화면{si}: {exc}",
+                flush=True,
+            )
+            with switch_lock:
+                self._process_only_switch_pending = False
+            abandon_csv_play_after_failed_mode_switch(screen=si)
 
     def _launch_live_process_only_resume(
         self,
@@ -7568,6 +7857,7 @@ class LamSimulationCsvPlayWindow:
             self._clear_stale_csv_play_thread_ref()
             self._csv_play_thread = t
         t.start()
+        self._process_only_last_applied = bool(ck.process_only)
         done_msg = (
             f"공정만보기 {'ON' if ck.process_only else 'OFF'} 적용 완료 — "
             f"CSV t≥{ck.resume_csv_sec:.1f}s부터 계속"
@@ -8188,6 +8478,7 @@ class LamSimulationCsvPlayWindow:
             self._log("CSV 경로 없음")
             return
         process_only = self._read_process_only()
+        self._process_only_last_applied = bool(process_only)
         if process_only:
             self._set_speed_preset(1.0)
         sp = self._read_speed_scale()

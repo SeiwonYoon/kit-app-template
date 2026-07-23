@@ -300,8 +300,15 @@ def stop_all_translate_animations() -> None:
         _update_sub = None
 
 
-def stop_translate_animations_for_context(usd_context_name: Optional[str]) -> None:
-    """지정 USD 컨텍스트의 translate 애니만 중지."""
+def stop_translate_animations_for_context(
+    usd_context_name: Optional[str],
+    *,
+    release_sub: bool = True,
+) -> None:
+    """지정 USD 컨텍스트의 translate 애니만 중지.
+
+    ``release_sub=False`` — update 구독 유지(구독 해제로 Kit freeze 유발 가능).
+    """
     global _animations, _update_sub
     target = str(usd_context_name or "").strip()
     for k, state in list(_animations.items()):
@@ -311,7 +318,8 @@ def stop_translate_animations_for_context(usd_context_name: Optional[str]) -> No
                 del _animations[k]
             except Exception:
                 pass
-    _maybe_release_update_sub()
+    if release_sub:
+        _maybe_release_update_sub()
 
 
 # ----------------------------------------------------------------- internal
@@ -352,6 +360,24 @@ def _on_update(e) -> None:
         get_csv_play_anim_dt_scale = None  # type: ignore
     if not _animations:
         return
+
+    # 화면별 CSV stop 중이면 해당 ctx 애니만 제거 (구독 unsubscribe 금지)
+    try:
+        from .lam_csv_play_screen import csv_play_screen_for_usd_context
+        from .simulation_play import csv_playback_stop_requested
+
+        stop_keys: List[str] = []
+        for anim_key, state in list(_animations.items()):
+            ctx_nm = state.get("usd_context_name")
+            si = csv_play_screen_for_usd_context(ctx_nm)
+            if csv_playback_stop_requested(screen=si):
+                stop_keys.append(anim_key)
+        for k in stop_keys:
+            _animations.pop(k, None)
+        if not _animations:
+            return
+    except Exception:
+        pass
 
     to_remove: List[str] = []
     for anim_key, state in list(_animations.items()):

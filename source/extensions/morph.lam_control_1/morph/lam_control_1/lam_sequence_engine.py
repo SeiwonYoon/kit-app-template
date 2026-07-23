@@ -201,7 +201,7 @@ def _stage():
 _dispatch_main_lock = threading.Lock()
 _dispatch_main_queue: List[Callable[[], None]] = []
 _dispatch_main_sub = None
-_DISPATCH_MAIN_MAX_PER_TICK = 12
+_DISPATCH_MAIN_MAX_PER_TICK = 8
 
 
 def _dispatch_main_pump(_e=None) -> None:
@@ -268,6 +268,9 @@ def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> boo
 
     **메인 스레드에서 호출하면 다음 update 를 기다리며 영구 교착**이 나므로,
     메인이면 `fn()` 을 즉시 인라인 실행한다 (시퀀스 에디터 reset 주석과 동일 원칙).
+
+    CSV Play stop/모드전환 중이면 짧은 타임아웃으로 fail-open — 메인이 바쁘면
+    워커가 풀려야 UI 가 죽지 않는다.
     """
     if threading.current_thread() is threading.main_thread():
         try:
@@ -275,6 +278,16 @@ def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> boo
             return True
         except BaseException:
             raise
+
+    wait_timeout = float(timeout)
+    try:
+        from .simulation_play import csv_playback_stop_requested
+
+        if csv_playback_stop_requested():
+            # 모드 전환·Stop 중 메인이 바쁘면 즉시 fail-open (교착 금지)
+            wait_timeout = min(wait_timeout, 0.05)
+    except Exception:
+        pass
 
     done = threading.Event()
     err: List[Optional[BaseException]] = [None]
@@ -288,9 +301,12 @@ def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> boo
             done.set()
 
     _dispatch_main(wrapped)
-    ok = done.wait(timeout=float(timeout))
+    ok = done.wait(timeout=wait_timeout)
     if not ok:
-        _seq_log(f"{_PRINT_PREFIX} _dispatch_main_wait TIMEOUT after {timeout}s", flush=True)
+        _seq_log(
+            f"{_PRINT_PREFIX} _dispatch_main_wait TIMEOUT after {wait_timeout}s",
+            flush=True,
+        )
         return False
     if err[0] is not None:
         raise err[0]
@@ -567,23 +583,23 @@ class LamSequenceRunner:
                     _lrx.stop_all_rotate_animations()
             except Exception:
                 pass
-        # hide clear 은 USD visibility write — 백그라운드에서 직접 하면
-        # 메인 애니 update 와 stage lock 교착으로 Kit 전체가 멈춘다.
-        try:
-            hide = self._hide
+            # hide clear 은 USD write — CSV pause/모드전환(cancel_all=False) 에서는
+            # 메인 애니 update 와 겹치면 Kit 가 멈출 수 있어 호출하지 않는다.
+            try:
+                hide = self._hide
 
-            def _clear_hide() -> None:
-                try:
-                    hide.clear_all()
-                except Exception:
-                    pass
+                def _clear_hide() -> None:
+                    try:
+                        hide.clear_all()
+                    except Exception:
+                        pass
 
-            if threading.current_thread() is threading.main_thread():
-                _clear_hide()
-            else:
-                _dispatch_main(_clear_hide)
-        except Exception:
-            pass
+                if threading.current_thread() is threading.main_thread():
+                    _clear_hide()
+                else:
+                    _dispatch_main(_clear_hide)
+            except Exception:
+                pass
 
     def run(
         self,
@@ -652,6 +668,18 @@ class LamSequenceRunner:
                 if self._stop_flag.is_set():
                     _seq_log(f"{_PRINT_PREFIX} stop requested at step[{a}]", flush=True)
                     break
+                try:
+                    from .simulation_play import csv_playback_stop_requested
+
+                    if csv_playback_stop_requested(screen=self._play_screen):
+                        self._stop_flag.set()
+                        _seq_log(
+                            f"{_PRINT_PREFIX} csv stop at step[{a}] screen={self._play_screen}",
+                            flush=True,
+                        )
+                        break
+                except Exception:
+                    pass
                 sp = _playback_speed_scale(sp)
                 b = _group_end_index(steps, a)
                 self._execute_group(steps, a, b, sp, reset_each_start)
@@ -664,10 +692,24 @@ class LamSequenceRunner:
                         self._sleep(delay_next)
                 a = next_idx
 
-            try:
-                self._hide.clear_all()
-            except Exception:
-                pass
+            # stop 으로 抜け도 clear_all 이 백그라운드 USD write 하면
+            # 메인 애니 update 와 교착 → Kit freeze. stop 시에는 skip.
+            if not self._stop_flag.is_set():
+                try:
+                    hide = self._hide
+
+                    def _clear_hide_end() -> None:
+                        try:
+                            hide.clear_all()
+                        except Exception:
+                            pass
+
+                    if threading.current_thread() is threading.main_thread():
+                        _clear_hide_end()
+                    else:
+                        _dispatch_main(_clear_hide_end)
+                except Exception:
+                    pass
 
             if on_complete:
                 try:

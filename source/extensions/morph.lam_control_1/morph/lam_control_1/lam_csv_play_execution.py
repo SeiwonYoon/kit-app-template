@@ -210,13 +210,14 @@ def stop_csv_play_motion_for_screen(
             from . import lam_rotate_animation as _lrx
             from . import lam_translate_animation as _ltx
 
+            # release_sub=False — update 콜백 중 unsubscribe 하면 Kit freeze
             if cn:
-                _ltx.stop_translate_animations_for_context(cn)
-                _lrx.stop_rotate_animations_for_context(cn)
+                _ltx.stop_translate_animations_for_context(cn, release_sub=False)
+                _lrx.stop_rotate_animations_for_context(cn, release_sub=False)
             elif si <= 1:
                 # default USD context (화면1) — stop_all 금지, dual-play 시 화면2 애니 유지
-                _ltx.stop_translate_animations_for_context(None)
-                _lrx.stop_rotate_animations_for_context(None)
+                _ltx.stop_translate_animations_for_context(None, release_sub=False)
+                _lrx.stop_rotate_animations_for_context(None, release_sub=False)
             else:
                 # split context 미해결 — 다른 화면 건드리지 않음
                 pass

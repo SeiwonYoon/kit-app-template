@@ -132,36 +132,57 @@ class LamHideController:
         return out
 
     def _set_visible(self, path: str, visible: bool) -> None:
+        """USD write — 비메인이면 Kit main 으로 fire-and-forget (애니 update 와 교착 방지)."""
+        import threading as _threading
+
+        def _do() -> None:
+            try:
+                from pxr import UsdGeom  # type: ignore
+
+                from .lam_usd_stage_context import (
+                    get_stage_for_context_name,
+                    get_stage_for_thread_context,
+                )
+
+                stage = None
+                if self._usd_context_name:
+                    stage = get_stage_for_context_name(self._usd_context_name)
+                if stage is None:
+                    stage = get_stage_for_thread_context()
+                if stage is None:
+                    ctx = ou.get_context()
+                    stage = ctx.get_stage() if ctx else None
+                if stage is None:
+                    return
+                prim = stage.GetPrimAtPath(path)
+                if not prim or not prim.IsValid():
+                    return
+                img = UsdGeom.Imageable(prim)
+                if not img:
+                    return
+                if visible:
+                    img.MakeVisible()
+                else:
+                    img.MakeInvisible()
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} set_visible({path},{visible}) failed: {exc}",
+                    flush=True,
+                )
+
+        if _threading.current_thread() is _threading.main_thread():
+            _do()
+            return
         try:
-            from pxr import UsdGeom  # type: ignore
+            from .lam_sequence_engine import _dispatch_main
 
-            from .lam_usd_stage_context import (
-                get_stage_for_context_name,
-                get_stage_for_thread_context,
+            _dispatch_main(_do)
+        except Exception:
+            # dispatch 불가 시 USD write 생략 — 백그라운드 직접 write 로 Kit freeze 유발 금지
+            print(
+                f"{_PRINT_PREFIX} set_visible skip (no main dispatch) path={path}",
+                flush=True,
             )
-
-            stage = None
-            if self._usd_context_name:
-                stage = get_stage_for_context_name(self._usd_context_name)
-            if stage is None:
-                stage = get_stage_for_thread_context()
-            if stage is None:
-                ctx = ou.get_context()
-                stage = ctx.get_stage() if ctx else None
-            if stage is None:
-                return
-            prim = stage.GetPrimAtPath(path)
-            if not prim or not prim.IsValid():
-                return
-            img = UsdGeom.Imageable(prim)
-            if not img:
-                return
-            if visible:
-                img.MakeVisible()
-            else:
-                img.MakeInvisible()
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} set_visible({path},{visible}) failed: {exc}", flush=True)
 
 
 __all__ = ["LamHideController"]
