@@ -194,37 +194,70 @@ def _stage():
 # `run_prim_rotate_animation`, hide vis attribute set, offset correction,
 # `_apply_start_snapshot`) 을 main thread 의 다음 update tick 으로 dispatch 한다.
 # background thread 는 dispatch 만 하고 step duration 만큼 sleep → 다음 step 진행.
-def _dispatch_main(fn: Callable[[], None]) -> None:
-    """fn 을 다음 main update tick 에서 실행(fire-and-forget). background thread 안전.
+# ---------------------------------------------------------------------------
+# Kit main-thread dispatch — 구독 1개 + 큐 (호출마다 create_subscription 금지).
+# 블록당 스레드×스텝마다 subscription 을 만들면 update stream 이 붕괴해 앱이 멈춘다.
+# ---------------------------------------------------------------------------
+_dispatch_main_lock = threading.Lock()
+_dispatch_main_queue: List[Callable[[], None]] = []
+_dispatch_main_sub = None
+_DISPATCH_MAIN_MAX_PER_TICK = 12
 
-    `create_subscription_to_pop` 자체는 thread-safe(주로 lock-free 또는 짧은 mutex 만)
-    하다고 가정. 실제 fn() 은 main thread 의 update 콜백 안에서 실행되므로 USD write 가
-    stage write lock 과 충돌하지 않는다.
-    """
-    box: Dict[str, Any] = {"sub": None}
 
-    def _do(_e=None) -> None:
+def _dispatch_main_pump(_e=None) -> None:
+    """한 update tick 에서 큐를 제한적으로 drain."""
+    global _dispatch_main_sub
+    for _ in range(int(_DISPATCH_MAIN_MAX_PER_TICK)):
+        with _dispatch_main_lock:
+            if not _dispatch_main_queue:
+                break
+            fn = _dispatch_main_queue.pop(0)
         try:
             fn()
         except Exception as exc:
             _seq_log(f"{_PRINT_PREFIX} dispatch_main fn failed: {exc}", flush=True)
-        finally:
-            try:
-                if box["sub"] is not None:
-                    box["sub"].unsubscribe()
-            except Exception:
-                pass
-            box["sub"] = None
 
+
+def _dispatch_main(fn: Callable[[], None]) -> None:
+    """fn 을 다음 main update tick 에서 실행(fire-and-forget). background thread 안전.
+
+    단일 update 구독 + 큐. 매 호출 ``create_subscription_to_pop`` 하면
+    공정만보기 토글·다수 JSON worker 상황에서 Kit 메인이 정지한다.
+    """
+    global _dispatch_main_sub
+    create_sub = False
+    with _dispatch_main_lock:
+        _dispatch_main_queue.append(fn)
+        if _dispatch_main_sub is None:
+            create_sub = True
+            # 임시 플레이스홀더 — 중복 create 방지
+            _dispatch_main_sub = False  # type: ignore[assignment]
+    if not create_sub:
+        return
     try:
-        import omni.kit.app as _kapp  # cache hit (lam_translate_animation 가 모듈 최상단에서 이미 로드).
-        box["sub"] = _kapp.get_app().get_update_event_stream().create_subscription_to_pop(
-            _do, name="morph.lam_control_1.sequence_engine.dispatch_main"
+        import omni.kit.app as _kapp  # cache hit
+
+        sub = (
+            _kapp.get_app()
+            .get_update_event_stream()
+            .create_subscription_to_pop(
+                _dispatch_main_pump,
+                name="morph.lam_control_1.sequence_engine.dispatch_main_queue",
+            )
         )
+        with _dispatch_main_lock:
+            _dispatch_main_sub = sub
     except Exception as exc:
-        # fallback — Kit 가 없는 환경/테스트. 그냥 직접 호출 (이 환경에선 deadlock 도 없을 것).
+        with _dispatch_main_lock:
+            _dispatch_main_sub = None
+            pending = list(_dispatch_main_queue)
+            _dispatch_main_queue.clear()
         _seq_log(f"{_PRINT_PREFIX} dispatch_main fallback (direct call): {exc}", flush=True)
-        _do(None)
+        for f in pending:
+            try:
+                f()
+            except Exception as e2:
+                _seq_log(f"{_PRINT_PREFIX} dispatch_main fn failed: {e2}", flush=True)
 
 
 def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> bool:
@@ -232,7 +265,17 @@ def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> boo
 
     Run(reset) 시 TBS_OFFSET 초기화처럼 background thread 에서 반드시 main-thread USD write
     완료 후 다음 로직으로 진행해야 할 때 사용한다.
+
+    **메인 스레드에서 호출하면 다음 update 를 기다리며 영구 교착**이 나므로,
+    메인이면 `fn()` 을 즉시 인라인 실행한다 (시퀀스 에디터 reset 주석과 동일 원칙).
     """
+    if threading.current_thread() is threading.main_thread():
+        try:
+            fn()
+            return True
+        except BaseException:
+            raise
+
     done = threading.Event()
     err: List[Optional[BaseException]] = [None]
 
@@ -524,8 +567,21 @@ class LamSequenceRunner:
                     _lrx.stop_all_rotate_animations()
             except Exception:
                 pass
+        # hide clear 은 USD visibility write — 백그라운드에서 직접 하면
+        # 메인 애니 update 와 stage lock 교착으로 Kit 전체가 멈춘다.
         try:
-            self._hide.clear_all()
+            hide = self._hide
+
+            def _clear_hide() -> None:
+                try:
+                    hide.clear_all()
+                except Exception:
+                    pass
+
+            if threading.current_thread() is threading.main_thread():
+                _clear_hide()
+            else:
+                _dispatch_main(_clear_hide)
         except Exception:
             pass
 

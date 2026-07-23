@@ -130,6 +130,23 @@ def get_csv_sequence_runner(lam_window: Any, binding: CsvPlayExecutionBinding) -
     return runner
 
 
+def invalidate_csv_sequence_runner_for_screen(
+    lam_window: Any,
+    screen: int,
+) -> None:
+    """모드 전환·정지 시 공유 runner 캐시 제거.
+
+    잔존 좀비 worker 가 붙잡은 runner 의 ``run()`` 이 ``_stop_flag.clear()`` 로
+    새 재생까지 깨우지 못하게, 다음 Play 는 새 runner 인스턴스를 받는다.
+    """
+    if lam_window is None:
+        return
+    runners = getattr(lam_window, "_csv_sequence_runners_by_screen", None)
+    if not isinstance(runners, dict):
+        return
+    runners.pop(str(max(1, int(screen))), None)
+
+
 def run_lam_sim_steps_for_screen(
     lam_window: Any,
     screen: int,
@@ -212,19 +229,30 @@ def stop_csv_play_motion_for_screen(
         from .lam_sequence_engine import _dispatch_main
 
         # 메인에서 unsubscribe/애니 정리. wait 금지 — 전환 worker↔메인 데드락 방지.
+        # 백그라운드에서 dict 를 즉시 clear 하면 메인 ``_on_update`` 와 경쟁해
+        # Kit freeze 가 날 수 있으므로, 비메인은 fire-and-forget 만 한다.
+        # runner 는 ``_stop_flag`` 로 motion wait 를 빠져나온다.
         if _threading.current_thread() is _threading.main_thread():
             _stop_anims()
         else:
             _dispatch_main(_stop_anims)
-            # dict 는 즉시 비워 runner 가 더 이상 애니를 붙잡지 않게 함
-            _stop_anims()
-    except Exception:
-        _stop_anims()
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} stop motion dispatch screen={si}: {exc}", flush=True)
+        try:
+            import threading as _threading
 
-    if lam_window is not None:
-        runners = getattr(lam_window, "_csv_sequence_runners_by_screen", None)
-        if isinstance(runners, dict):
-            runners.pop(str(si), None)
+            if _threading.current_thread() is _threading.main_thread():
+                _stop_anims()
+        except Exception:
+            pass
+
+    invalidate_csv_sequence_runner_for_screen(lam_window, si)
+    if lam_window is None and kit_ext is not None:
+        try:
+            lw = getattr(kit_ext, "_lam_window", None) or getattr(kit_ext, "_window", None)
+            invalidate_csv_sequence_runner_for_screen(lw, si)
+        except Exception:
+            pass
 
 
 def resolve_registry_scheduler_for_play(
@@ -248,6 +276,7 @@ def resolve_registry_scheduler_for_play(
 __all__ = [
     "CsvPlayExecutionBinding",
     "get_csv_sequence_runner",
+    "invalidate_csv_sequence_runner_for_screen",
     "resolve_csv_play_execution",
     "resolve_registry_scheduler_for_play",
     "run_lam_sim_steps_for_screen",
