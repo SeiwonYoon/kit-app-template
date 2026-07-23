@@ -524,10 +524,8 @@ def handle_control_simulation(
 
         if action == "play":
             if is_simulation_in_progress(ext):
-                return _err(
-                    "play 중 — 시뮬레이션이 이미 진행 중입니다",
-                    data={"active": "play", "speed": _read_sim_speed(ext)},
-                )
+                set_sim_speed(ext, speed_requested)
+                return ok({"active": "play", "speed": _read_sim_speed(ext)})
             _set_sim_speed(ext, speed_requested)
             on_sim_start_clicked(ext)
             return _ok({"active": "play", "speed": _read_sim_speed(ext)})
