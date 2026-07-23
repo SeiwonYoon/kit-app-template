@@ -795,9 +795,15 @@ def _process_merged_response(
             from .lam_foup_usage_hide import (
                 apply_foup_usage_extra_hide_for_playback,
                 count_used_foups_from_dwells,
+                count_used_foups_from_lot_map,
             )
 
             used_n = count_used_foups_from_dwells(dwells)
+            lot_map = (parse_stats or {}).get("lots_to_foup") or {}
+            used_from_map = count_used_foups_from_lot_map(
+                lot_map if isinstance(lot_map, dict) else {}
+            )
+            used_n = max(1, min(3, max(int(used_n), int(used_from_map))))
             meta["used_foup_count"] = used_n
             ctx_name = ""
             if int(screen) > 1:
@@ -821,6 +827,7 @@ def _process_merged_response(
                 "extra hide by foup count",
                 screen=screen,
                 used_foup_count=used_n,
+                lots_to_foup=lot_map,
             )
         except Exception as exc:
             print(

@@ -1197,7 +1197,7 @@ def _parse_csv_time_field(raw: Dict[str, str], primary: str, iso_alt: str = "") 
 
 
 def build_lot_id_to_foup_index(rows: Iterable[ParsedCsvRow]) -> Dict[str, int]:
-    """``eqp_start_tm`` 순 **lot_id 최초 등장** → foup1, foup2, foup3 (prompt1 §332-1)."""
+    """``eqp_start_tm`` 순 **lot_id 최초 등장** → foup1, foup2, foup3 (최대 3)."""
     ordered = sorted(rows, key=lambda r: (r.eqp_start_tm, r.cassette_slot, r.module_nm))
     out: Dict[str, int] = {}
     n = 0
@@ -1205,7 +1205,7 @@ def build_lot_id_to_foup_index(rows: Iterable[ParsedCsvRow]) -> Dict[str, int]:
         lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_slot}"
         if lid not in out:
             n += 1
-            out[lid] = n
+            out[lid] = min(3, n)
     return out
 
 

@@ -73,21 +73,22 @@ SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = True
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 # ---------------------------------------------------------------------------
-# FOUP 사용 개수별 추가 숨김 prim
+# FOUP 번호별 추가 숨김 prim (인덱스 = FOUP 번호)
 # ---------------------------------------------------------------------------
-# 파싱/프리런 후 lot_id→foup_index 고유 개수(1/2/3)를 판별하고,
-# 해당 목록의 prim 을 시뮬레이션 시작(및 Federation 준비완료) 시 자동 숨김.
-# 목록이 비어 있으면 해당 개수에서는 추가 숨김 없음.
-# 예: 1개만 쓸 때 FOUP2·3 body 숨김 경로를 FOUP_USAGE_EXTRA_HIDE_PRIMS_1 에 넣는다.
+# ``FOUP_USAGE_EXTRA_HIDE_PRIMS_1`` = FOUP1 관련 경로, ``_2`` = FOUP2, ``_3`` = FOUP3.
+# 파싱 후 사용 FOUP 개수 N(lot→foup 고유 개수)에 따라 시뮬레이션 시작 시:
+#   - N=1: ``_1`` 숨김, ``_2``·``_3`` 강제 표시
+#   - N=2: ``_1``+``_2`` 숨김, ``_3`` 강제 표시
+#   - N=3: ``_1``+``_2``+``_3`` 전부 숨김
+# 목록이 비어 있으면 해당 FOUP 번호는 추가 숨김 없음.
 FOUP_USAGE_EXTRA_HIDE_PRIMS_1: list = [
-    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_02/Foup_02_Body",
-    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_03/Foup_03_Body",
+    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_01/Foup_01_Body",
 ]
 FOUP_USAGE_EXTRA_HIDE_PRIMS_2: list = [
-    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_03/Foup_03_Body",
+    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_02/Foup_02_Body",
 ]
 FOUP_USAGE_EXTRA_HIDE_PRIMS_3: list = [
-    # 3개 모두 사용 시에도 추가로 숨길 prim (없으면 비움)
+    # "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_03/Foup_03_Body",
 ]
 
 # ---------------------------------------------------------------------------
