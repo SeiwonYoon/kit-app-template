@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -19,7 +18,6 @@ from .lam_api_timeline_parser import (
 )
 from .lam_csv_play_screen import get_registry_scheduler_for_lam_screen
 from .lam_csv_prerun_playback import (
-    build_csv_prerun_export_document,
     build_prerun_result_from_cached,
     maybe_export_csv_prerun_json,
 )
@@ -356,34 +354,18 @@ def _write_federation_parse_export(
     dwells: List[Any],
     prerun: Any,
 ) -> Optional[Path]:
-    """테스트 창 JSON 저장 — 전체 원본 응답과 CSV 동형 프리런 결과를 한 파일에 보존.
+    """Federation 응답 디스크 저장 — **비활성**.
 
-    배포에서 확장 경로 쓰기 실패 시 ``None`` (파이프라인/재생은 계속).
+    예전 ``data/api_queries`` mkdir/쓰기는 배포 PermissionError 의 원인이었고,
+    재생 SSOT 는 메모리 ``CachedCsvPlayback`` 이라 파일 저장이 필요 없다.
     """
-    out_dir = Path(__file__).resolve().parents[2] / "data" / "api_queries"
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = out_dir / f"federation_screen{int(screen)}_{stamp}.json"
-    doc = {
-        "version": 1,
-        "screen": int(screen),
-        "original_response": original,
-        "parsed": {
-            "stats": parse_stats,
-            "dwells": [asdict(d) for d in dwells],
-            "prerun": build_csv_prerun_export_document(prerun),
-        },
-    }
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(doc, f, ensure_ascii=False, indent=2)
-    except OSError as exc:
-        print(
-            f"{_PRINT_PREFIX} federation parse export skip screen={screen}: {exc}",
-            flush=True,
-        )
-        return None
-    return path
+    _ = (screen, original, parse_stats, dwells, prerun)
+    print(
+        f"{_PRINT_PREFIX} federation parse export disabled "
+        f"(no api_queries mkdir/write) screen={int(screen)}",
+        flush=True,
+    )
+    return None
 
 
 def _resolve_csv_play_window(lam_window: Any, screen: int) -> Any:

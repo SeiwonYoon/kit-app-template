@@ -131,14 +131,18 @@ def merged_response_to_dwells(
 
 
 def federation_virtual_path(screen: int, body: Dict[str, Any]) -> "Path":
+    """Federation 재생 캐시 키용 **가상** Path.
+
+    디스크에 ``data/api_queries`` 를 만들거나 파일을 읽지 않는다.
+    (배포에서 ext 경로 mkdir → PermissionError 로 시뮬 전체가 중단되던 원인.)
+    """
     from pathlib import Path
 
     eqp = str(body.get("eqp_id") or "eqp").strip() or "eqp"
     lot = str(body.get("lot_id") or "lot").strip() or "lot"
     safe = re.sub(r"[^\w\-.]+", "_", f"s{int(screen)}_{eqp}_{lot}")[:120]
-    base = Path(__file__).resolve().parents[2] / "data" / "api_queries"
-    base.mkdir(parents=True, exist_ok=True)
-    return base / f"{safe}.virtual"
+    # 로컬 상대 가상 경로 — resolve 만 하며 mkdir/open 하지 않음
+    return Path("lam_federation_virtual") / f"{safe}.virtual"
 
 
 __all__ = [
