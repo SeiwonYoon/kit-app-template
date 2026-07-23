@@ -1454,6 +1454,16 @@ def build_prerun_export_document_web_slim(doc: Dict[str, Any]) -> Dict[str, Any]
                     new_list.append([st, dur])
                 segs2[str(row_name)] = new_list
             bg2["segments"] = segs2
+
+        # 7.0.5 empty_pct / lot_counts: {key: value} → [value, ...] (웹 전송 전용)
+        # 삽입 순서 = row_order / all_ep→epN (build_prerun_export_document 와 동일)
+        ep = bg2.get("empty_pct")
+        if isinstance(ep, dict):
+            bg2["empty_pct"] = list(ep.values())
+        lc = bg2.get("lot_counts")
+        if isinstance(lc, dict):
+            bg2["lot_counts"] = list(lc.values())
+
         bg = bg2
         out["bar_graph"] = bg
 
