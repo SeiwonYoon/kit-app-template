@@ -407,24 +407,27 @@ def _apply_federation_timeline_ui(csv_win: Any, cached: Any) -> None:
 def _run_federation_play_preflight(csv_win: Any, screen: int, kit_ext: Any) -> bool:
     """CSV Play 직전과 동일 — 화면1 camera fly / 화면2+ aux preflight."""
     si = max(1, int(screen))
-    if si <= 1:
-        try:
-            from .lam_play_start_sequence import run_play_start_preflight
-
-            return bool(run_play_start_preflight(resume_from_pause=False))
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} screen1 play preflight: {exc}", flush=True)
-            return False
-    if csv_win is None:
-        return False
     try:
-        fn = getattr(csv_win, "_run_aux_screen_play_preflight", None)
-        if callable(fn):
-            return bool(fn(kit_ext))
+        from .lam_csv_screen_runtime import (
+            resolve_csv_screen_runtime,
+            run_csv_screen_play_preflight,
+        )
+
+        lam_window = getattr(csv_win, "_lam_window", None) if csv_win is not None else None
+        if lam_window is None:
+            lam_window = getattr(kit_ext, "_lam_window", None)
+        runtime = resolve_csv_screen_runtime(
+            lam_window,
+            si,
+            csv_window=csv_win,
+            require_aux=si > 1,
+        )
+        if runtime is None:
+            return False
+        return bool(run_csv_screen_play_preflight(runtime))
     except Exception as exc:
         print(f"{_PRINT_PREFIX} screen{si} play preflight: {exc}", flush=True)
         return False
-    return False
 
 
 def _start_federation_playback(
@@ -793,7 +796,6 @@ def _process_merged_response(
         _apply_federation_timeline_ui(csv_win, cached)
         try:
             from .lam_foup_usage_hide import (
-                apply_foup_usage_extra_hide_for_playback,
                 count_used_foups_from_dwells,
                 count_used_foups_from_lot_map,
             )
@@ -805,33 +807,27 @@ def _process_merged_response(
             )
             used_n = max(1, min(3, max(int(used_n), int(used_from_map))))
             meta["used_foup_count"] = used_n
-            ctx_name = ""
-            if int(screen) > 1:
+            # 파싱 단계에서는 visibility 를 바꾸지 않는다. Play preflight 가 이 값을
+            # fly 이후 PLAY_HIDE_PRIM_SPECS 와 함께 한 번만 적용한다.
+            try:
+                cached.used_foup_count = used_n
+            except Exception:
+                pass
+            if csv_win is not None:
                 try:
-                    from .lam_csv_play_screen import usd_context_name_for_screen
-
-                    ctx_name = str(
-                        usd_context_name_for_screen(ext, int(screen)) or ""
-                    ).strip()
+                    csv_win._lam_used_foup_count = used_n
                 except Exception:
-                    ctx_name = ""
-            apply_foup_usage_extra_hide_for_playback(
-                dwells=dwells,
-                foup_count=used_n,
-                usd_context_name=ctx_name or None,
-                screen=int(screen),
-                wait=True,
-            )
+                    pass
             _fed_diag(
-                "S10_foup_usage_hide",
-                "extra hide by foup count",
+                "S10_foup_usage_count",
+                "defer extra hide until post-fly prim phase",
                 screen=screen,
                 used_foup_count=used_n,
                 lots_to_foup=lot_map,
             )
         except Exception as exc:
             print(
-                f"{_PRINT_PREFIX} screen{screen} foup usage hide: {exc}",
+                f"{_PRINT_PREFIX} screen{screen} foup usage count: {exc}",
                 flush=True,
             )
         _fed_load_hud(

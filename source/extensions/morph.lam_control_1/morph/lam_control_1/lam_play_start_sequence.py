@@ -208,24 +208,34 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
         except Exception:
             vp_api = None
 
-    # lot→FOUP 개수별 추가 숨김 (CSV/Federation 공통 Play 진입)
+    # lot→FOUP 개수는 여기서 확정하되 visibility 는 fly 이후 prim hide 와 같이 적용.
+    # Federation 파싱 단계가 저장한 authoritative 값이 있으면 dwells 재판정보다 우선한다.
+    foup_count = 1
     try:
-        from .lam_foup_usage_hide import apply_foup_usage_extra_hide_for_playback
+        from .lam_foup_usage_hide import count_used_foups_from_dwells
 
         csv_win = getattr(runtime, "csv_window", None)
         cached = (
             getattr(csv_win, "_prepared_playback", None) if csv_win is not None else None
         )
         dwells = getattr(cached, "dwells", None) if cached is not None else None
-        apply_foup_usage_extra_hide_for_playback(
-            dwells=dwells,
-            usd_context_name=ctx or None,
-            screen=si,
-            wait=True,
+        saved_count = (
+            getattr(cached, "used_foup_count", None) if cached is not None else None
+        )
+        if saved_count is None and csv_win is not None:
+            saved_count = getattr(csv_win, "_lam_used_foup_count", None)
+        if saved_count is not None:
+            foup_count = max(1, min(3, int(saved_count)))
+        else:
+            foup_count = count_used_foups_from_dwells(dwells)
+        print(
+            f"{_PRINT_PREFIX} screen{si} FOUP count 확정={foup_count} "
+            f"source={'parsed' if saved_count is not None else 'dwells'}",
+            flush=True,
         )
     except Exception as exc:
         print(
-            f"{_PRINT_PREFIX} screen{si} foup usage hide: {exc}",
+            f"{_PRINT_PREFIX} screen{si} foup usage count: {exc}",
             flush=True,
         )
 
@@ -258,6 +268,22 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
         return bool(started)
 
     def _kickoff_prim_hide(done: threading.Event) -> bool:
+        # fly 이후 같은 phase 에서 FOUP visibility 와 PLAY_HIDE_PRIM_SPECS 적용.
+        # foup_count 를 명시해 빈/교체된 dwells 때문에 N=1로 재판정되는 것을 막는다.
+        try:
+            from .lam_foup_usage_hide import apply_foup_usage_extra_hide_for_playback
+
+            apply_foup_usage_extra_hide_for_playback(
+                foup_count=foup_count,
+                usd_context_name=ctx or None,
+                screen=si,
+                wait=True,
+            )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} screen{si} foup usage hide: {exc}",
+                flush=True,
+            )
         return kickoff_play_prim_hide_play_start(
             done,
             usd_context_name=ctx or None,

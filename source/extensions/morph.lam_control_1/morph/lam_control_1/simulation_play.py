@@ -452,6 +452,8 @@ class CachedCsvPlayback:
     schedule: List["CsvPlaybackScheduleEntry"]
     blocks: List["CsvTimedPlaybackBlock"]
     build_ms: float = 0.0
+    # Federation/파서가 확정한 FOUP 사용 개수. None 이면 dwells 에서 계산.
+    used_foup_count: Optional[int] = None
 
 
 def _csv_playback_config_tag() -> str:
