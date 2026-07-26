@@ -116,25 +116,36 @@ TOP_VIEW_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(
 # 시뮬 정지: 이전 줌 복귀 대신 이 뷰로 복귀.
 # None = 기존 동작(현재 뷰에서 fly 시작, 정지 시 이전 줌 복귀).
 PLAY_CAMERA_START_VIEW_1_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
-    eye_xyz=(1343.267028, 1624.237571, 1691.205169),
-    target_xyz=(-880.192912, 245.176765, 862.122901),
-    up_xyz=(-0.256708, -0.159218, 0.953284),
+    eye_xyz=(2077.278376, 3283.121566, 3508.283719),
+    target_xyz=(-878.949530, 326.893659, 552.055883),
+    up_xyz=(-0.408248, -0.408248, 0.816497),
 )
 PLAY_CAMERA_START_VIEW_2_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
-    eye_xyz=(30720.419012, 33432.271407, 32518.078243),
-    target_xyz=(-1503.170796, 1208.681599, 294.489204),
+    eye_xyz=(1206.543447, 2215.959543, 2548.541316),
+    target_xyz=(-783.804667, 225.611429, 558.193250),
     up_xyz=(-0.408248, -0.408248, 0.816497),
 )
 
+# [Play fly 종료 줌(aperture) — 화면 수별]
+# fly: Perspective + START_VIEW → 목표 preset (동일 Perspective 모드에서 진행).
+# aperture 값이 있으면 fly 중 Persp aperture 도 목표 Camera FOV 로 함께 보간.
+# fly 종료 후 Camera_fly 모드로 전환하며 아래 aperture 를 Camera 에 적용.
+# None = aperture 보간/변경 안 함.
+PLAY_CAMERA_APERTURE_1_SCREEN: Optional[float] = 41
+PLAY_CAMERA_APERTURE_2_SCREEN: Optional[float] = 41
+
+# (레거시) fly 후 별도 aperture 블렌드 시간. 기본은 fly 중 Persp 보간을 쓰므로 보통 미사용.
+PLAY_CAMERA_APERTURE_BLEND_SEC: float = 1.0
+
 # [Play fly 목표 뷰 — 화면 수별]  None = 위 PLAY_CAMERA_PRIM_VIEW 사용.
 PLAY_CAMERA_PRIM_VIEW_1_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
-    eye_xyz=(2170.714899, 514.167088, 1079.585060),
-    target_xyz=(620.354988, 514.167088, 1079.585060),
+    eye_xyz=(2201.376655, 456.270208, 1159.314444),
+    target_xyz=(620.354988, 456.270208, 1159.314444),
     up_xyz=(0.000000, 0.000000, 1.000000),
 )
 PLAY_CAMERA_PRIM_VIEW_2_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
-    eye_xyz=(1151.255012, 446.407007, 1188.411856),
-    target_xyz=(620.354988, 446.407007, 1188.411856),
+    eye_xyz=(1151.255012, 412.297364, 1161.408388),
+    target_xyz=(620.354988, 412.297364, 1161.408388),
     up_xyz=(0.000000, 0.000000, 1.000000),
 )
 
@@ -473,6 +484,9 @@ __all__ = [
     "PLAY_CAMERA_PRIM_VIEW_2_SCREEN",
     "PLAY_CAMERA_START_VIEW_1_SCREEN",
     "PLAY_CAMERA_START_VIEW_2_SCREEN",
+    "PLAY_CAMERA_APERTURE_1_SCREEN",
+    "PLAY_CAMERA_APERTURE_2_SCREEN",
+    "PLAY_CAMERA_APERTURE_BLEND_SEC",
     "TOP_VIEW_USE_PRESET_COORDS",
     "TOP_VIEW_CAMERA_PRIM_PATH",
     "TOP_VIEW_BIND_VIEWPORT_TO_USD_PRIM",
