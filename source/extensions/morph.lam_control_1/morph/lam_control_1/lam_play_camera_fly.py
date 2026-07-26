@@ -720,10 +720,11 @@ def _finish_fly_to_target(
     ctx = str(usd_context_name or "").strip()
     if path:
         tag = log_context or "fly_end"
+        # 탑뷰 prim 은 config up 을 그대로 사용 — (0,1,0) 강제로 90도 틀어지던 문제
         apply_view_to_camera_prim(
             path,
             target,
-            up_xyz=up_xyz,
+            up_xyz=_prim_write_up_hint(path, up_xyz),
             log_context=f"{tag}_prim",
         )
         return bind_viewport_to_camera_prim(
@@ -1375,22 +1376,88 @@ def _snapshot_from_preset_spec(spec: Any) -> Optional[CameraViewSnapshot]:
         return None
 
 
-def play_camera_prim_view_spec() -> Optional[CameraViewSnapshot]:
-    """config PLAY_CAMERA_PRIM_VIEW (None 이면 prim 현재 상태 사용)."""
+def current_visible_screen_count() -> int:
+    """현재 표시 중인 화면 수 (1 또는 2) — 화면 수별 preset 선택용."""
     try:
-        from .lam_viewport_overlay_config import PLAY_CAMERA_PRIM_VIEW  # type: ignore
+        from .lam_extension_singleton import get_lam_extension_instance
+        from .lam_screen_visibility import visible_screens
+
+        show_1, show_2 = visible_screens(get_lam_extension_instance())
+        n = int(bool(show_1)) + int(bool(show_2))
+        return n if n >= 1 else 1
+    except Exception:
+        return 1
+
+
+def _cfg_attr(name: str) -> Any:
+    try:
+        from . import lam_viewport_overlay_config as _cfg
+
+        return getattr(_cfg, name, None)
     except Exception:
         return None
-    return _snapshot_from_preset_spec(PLAY_CAMERA_PRIM_VIEW)
+
+
+def _spec_for_screen_count(base_name: str) -> Any:
+    """``{base}_1_SCREEN`` / ``{base}_2_SCREEN`` 중 현재 화면 수에 맞는 config 값."""
+    suffix = "_2_SCREEN" if current_visible_screen_count() >= 2 else "_1_SCREEN"
+    return _cfg_attr(f"{base_name}{suffix}")
+
+
+def _play_camera_prim_view_pref() -> Any:
+    """Play fly 목표 spec — 화면 수별 값 우선, 없으면 legacy PLAY_CAMERA_PRIM_VIEW."""
+    spec = _spec_for_screen_count("PLAY_CAMERA_PRIM_VIEW")
+    if spec is not None:
+        return spec
+    return _cfg_attr("PLAY_CAMERA_PRIM_VIEW")
+
+
+def _top_view_camera_prim_view_pref() -> Any:
+    """탑뷰 spec — 화면 수별 값 우선, 없으면 legacy TOP_VIEW_CAMERA_PRIM_VIEW."""
+    spec = _spec_for_screen_count("TOP_VIEW_CAMERA_PRIM_VIEW")
+    if spec is not None:
+        return spec
+    return _cfg_attr("TOP_VIEW_CAMERA_PRIM_VIEW")
+
+
+def _play_camera_start_view_pref() -> Any:
+    """시뮬 시작/정지용 Perspective 시작 뷰 spec (화면 수별). None = 기존 동작."""
+    if play_camera_use_preset_coords():
+        return None
+    return _spec_for_screen_count("PLAY_CAMERA_START_VIEW")
+
+
+def play_camera_start_view_spec() -> Optional[CameraViewSnapshot]:
+    """카메라 모드 시뮬 시작·정지 시 Perspective 를 맞출 화면 수별 시작 뷰."""
+    return _snapshot_from_preset_spec(_play_camera_start_view_pref())
+
+
+def play_camera_prim_view_spec() -> Optional[CameraViewSnapshot]:
+    """config PLAY_CAMERA_PRIM_VIEW[_N_SCREEN] (None 이면 prim 현재 상태 사용)."""
+    return _snapshot_from_preset_spec(_play_camera_prim_view_pref())
 
 
 def top_view_camera_prim_view_spec() -> Optional[CameraViewSnapshot]:
-    """config TOP_VIEW_CAMERA_PRIM_VIEW (None 이면 prim 현재 상태 사용)."""
-    try:
-        from .lam_viewport_overlay_config import TOP_VIEW_CAMERA_PRIM_VIEW  # type: ignore
-    except Exception:
-        return None
-    return _snapshot_from_preset_spec(TOP_VIEW_CAMERA_PRIM_VIEW)
+    """config TOP_VIEW_CAMERA_PRIM_VIEW[_N_SCREEN] (None 이면 prim 현재 상태 사용)."""
+    return _snapshot_from_preset_spec(_top_view_camera_prim_view_pref())
+
+
+def _prim_write_up_hint(
+    prim_path: str,
+    fallback: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    """Camera prim 최종 기록용 up.
+
+    탑뷰 prim 은 시선이 수직(-Z)이라 eye/target 만으로 roll 이 정해지지 않는데,
+    기존에는 fallback (0,0,1) 이 (0,1,0) 으로 resolve 되어 config up 을 무시하고
+    90도 틀어졌다. 탑뷰 Camera prim 에는 config spec 의 up 을 그대로 쓴다.
+    """
+    p = str(prim_path or "").strip()
+    if p and not top_view_use_preset_coords() and p == top_view_camera_prim_path():
+        spec = _top_view_camera_prim_view_pref()
+        if spec is not None:
+            return _up_from_preset_spec(spec)
+    return tuple(float(x) for x in fallback)
 
 
 def _up_from_preset_spec(spec: Any) -> Tuple[float, float, float]:
@@ -1471,40 +1538,79 @@ def apply_play_camera_prim_view_spec() -> bool:
     """Play prim 모드 — config 스펙이 있으면 prim 에 뷰·줌 강제 (없으면 no-op)."""
     if play_camera_use_preset_coords():
         return False
-    spec = play_camera_prim_view_spec()
+    pref = _play_camera_prim_view_pref()
+    spec = _snapshot_from_preset_spec(pref)
     if spec is None:
         return False
-    try:
-        from .lam_viewport_overlay_config import PLAY_CAMERA_PRIM_VIEW  # type: ignore
-
-        up = _up_from_preset_spec(PLAY_CAMERA_PRIM_VIEW)
-    except Exception:
-        up = (0.0, 0.0, 1.0)
     return apply_view_to_camera_prim(
         play_camera_prim_path(),
         spec,
-        up_xyz=up,
+        up_xyz=_up_from_preset_spec(pref),
         log_context="play_prim_view",
     )
+
+
+def _top_view_aperture_for_screen_count() -> Optional[float]:
+    """화면 수별 탑뷰 aperture config 값 (None = 변경 안 함)."""
+    value = _spec_for_screen_count("TOP_VIEW_APERTURE")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def apply_top_view_aperture(prim_path: str = "") -> bool:
+    """탑뷰 Camera prim 줌 — 화면 수별 aperture 적용.
+
+    탑뷰 카메라는 줌 시 transform 이 아니라 horizontal/vertical aperture 가
+    변하므로, 화면 수(1·2)에 맞는 config 값을 두 aperture 에 기록한다.
+    """
+    if top_view_use_preset_coords():
+        return False
+    path = str(prim_path or "").strip() or top_view_camera_prim_path()
+    value = _top_view_aperture_for_screen_count()
+    if not path or value is None:
+        return False
+    stage = _get_stage()
+    if not stage:
+        return False
+    cam_prim = stage.GetPrimAtPath(path)
+    if not cam_prim or not cam_prim.IsValid():
+        return False
+    try:
+        cam = UsdGeom.Camera(cam_prim)
+        with Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer())):
+            cam.GetHorizontalApertureAttr().Set(float(value))
+            cam.GetVerticalApertureAttr().Set(float(value))
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} 탑뷰 aperture 적용 실패 path={path!r}: {exc}",
+            flush=True,
+        )
+        return False
+    print(
+        f"{_PRINT_PREFIX} 탑뷰 aperture 적용 path={path!r} value={value:.1f} "
+        f"screens={current_visible_screen_count()}",
+        flush=True,
+    )
+    return True
 
 
 def apply_top_view_camera_prim_view_spec() -> bool:
     """탑뷰 prim 모드 — config 스펙이 있으면 prim 에 뷰·줌 강제 (없으면 no-op)."""
     if top_view_use_preset_coords():
         return False
-    spec = top_view_camera_prim_view_spec()
+    apply_top_view_aperture()
+    pref = _top_view_camera_prim_view_pref()
+    spec = _snapshot_from_preset_spec(pref)
     if spec is None:
         return False
-    try:
-        from .lam_viewport_overlay_config import TOP_VIEW_CAMERA_PRIM_VIEW  # type: ignore
-
-        up = _up_from_preset_spec(TOP_VIEW_CAMERA_PRIM_VIEW)
-    except Exception:
-        up = (0.0, 0.0, 1.0)
     return apply_view_to_camera_prim(
         top_view_camera_prim_path(),
         spec,
-        up_xyz=up,
+        up_xyz=_up_from_preset_spec(pref),
         log_context="top_view_prim_view",
     )
 
@@ -1678,11 +1784,18 @@ def format_config_snippet(
         f"{coords}"
         ")\n\n"
         "# Camera prim 모드(USE_PRESET_COORDS=False) — Play 시점 줌 고정\n"
+        "# 화면 수별로 쓰려면 PLAY_CAMERA_PRIM_VIEW_1_SCREEN / _2_SCREEN 에 붙여넣기\n"
         "PLAY_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(\n"
         f"{coords}"
         ")\n\n"
         "# Camera prim 모드 — 탑뷰 줌 고정 (TOP_VIEW_CAMERA_PRIM_VIEW 에 붙여넣기)\n"
+        "# 화면 수별로 쓰려면 TOP_VIEW_CAMERA_PRIM_VIEW_1_SCREEN / _2_SCREEN 에 붙여넣기\n"
         "TOP_VIEW_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(\n"
+        f"{coords}"
+        ")\n\n"
+        "# 시뮬 시작·정지용 Perspective 시작 뷰 (화면 수별)\n"
+        "# PLAY_CAMERA_START_VIEW_1_SCREEN / _2_SCREEN 에 붙여넣기\n"
+        "PLAY_CAMERA_START_VIEW_1_SCREEN = PlayCameraPresetSpec(\n"
         f"{coords}"
         ")\n"
     )
@@ -1815,6 +1928,7 @@ def _start_fly_animation(
     *,
     on_complete: Optional[Any] = None,
     up_xyz: Optional[Tuple[float, float, float]] = None,
+    up_end_xyz: Optional[Tuple[float, float, float]] = None,
     usd_context_name: str = "",
     fly_camera_path: str = "",
 ) -> None:
@@ -1823,8 +1937,21 @@ def _start_fly_animation(
     t0 = time.perf_counter()
     sub_box: List[Any] = [None]
     up = up_xyz if up_xyz is not None else (0.0, 0.0, 1.0)
+    up_end = tuple(float(x) for x in up_end_xyz) if up_end_xyz is not None else None
+    if up_end is not None and up_end == tuple(float(x) for x in up):
+        up_end = None
     ctx = str(usd_context_name or "").strip()
     fly_path = str(fly_camera_path or "").strip()
+
+    def _up_at(u: float) -> Tuple[float, float, float]:
+        """탑뷰 등 최종 up 이 다르면 보간 — 끝에서 90도 스냅 방지."""
+        if up_end is None:
+            return up
+        blended = _vec3(_lerp3(up, up_end, u))
+        if blended.GetLength() < 1e-9:
+            return up_end
+        blended.Normalize()
+        return (float(blended[0]), float(blended[1]), float(blended[2]))
 
     def _finish() -> None:
         try:
@@ -1848,11 +1975,15 @@ def _start_fly_animation(
             tgt = _lerp3(start.target_xyz, end.target_xyz, u)
             _apply_fly_frame_view(
                 CameraViewSnapshot(eye_xyz=eye, target_xyz=tgt),
-                up_xyz=up,
+                up_xyz=_up_at(u),
                 fly_camera_path=fly_path,
             )
             if u >= 1.0 - 1e-9:
-                _apply_fly_frame_view(end, up_xyz=up, fly_camera_path=fly_path)
+                _apply_fly_frame_view(
+                    end,
+                    up_xyz=up_end or up,
+                    fly_camera_path=fly_path,
+                )
                 _finish()
 
     try:
@@ -1960,6 +2091,7 @@ def kickoff_fly_to_target(
             done,
             on_complete=_complete,
             up_xyz=up,
+            up_end_xyz=_prim_write_up_hint(assign_path, up),
             usd_context_name=ctx,
         )
         return True
@@ -2062,6 +2194,19 @@ def _apply_play_stop_perspective_restore(
         )
         _clear_pre_play_view_for_viewport(vp, ctx)
         snap = None
+    restore_up = get_session_fly_up_xyz(play=True)
+    start_pref = _play_camera_start_view_pref()
+    start_snap = _snapshot_from_preset_spec(start_pref)
+    if start_snap is not None:
+        # 정지 시 이전 줌 복귀 대신 화면 수별 시작용 preset 으로 복귀
+        snap = start_snap
+        restore_up = _up_from_preset_spec(start_pref)
+        _clear_pre_play_view_for_viewport(vp, ctx)
+        print(
+            f"{_PRINT_PREFIX} 정지 복귀 ({log_label}) — 화면 수별 시작용 preset "
+            f"screens={current_visible_screen_count()} ctx={ctx!r}",
+            flush=True,
+        )
     ok = False
     applied = False
     with camera_fly_usd_context(ctx or None):
@@ -2084,7 +2229,7 @@ def _apply_play_stop_perspective_restore(
                 applied = bool(
                     apply_camera_view(
                         snap,
-                        up_xyz=get_session_fly_up_xyz(play=True),
+                        up_xyz=restore_up,
                         camera_path=_PERSP_CAMERA_PATH,
                     )
                 )
@@ -2094,7 +2239,7 @@ def _apply_play_stop_perspective_restore(
                         applied = bool(
                             apply_camera_view(
                                 snap,
-                                up_xyz=get_session_fly_up_xyz(play=True),
+                                up_xyz=restore_up,
                                 camera_path=cam,
                             )
                         )
@@ -2501,6 +2646,17 @@ def kickoff_play_camera_fly_for_screen(
                         remember_pre_play_view_for_viewport(
                             viewport_api, ctx, current
                         )
+                # 카메라 모드: 현재 줌과 무관하게 화면 수별 시작용 preset 에서 fly 시작
+                if use_prim:
+                    start_snap = play_camera_start_view_spec()
+                    if start_snap is not None:
+                        current = start_snap
+                        print(
+                            f"{_PRINT_PREFIX} screen fly 시작점 — 화면 수별 "
+                            f"시작용 preset 적용 (현재 줌 무시) "
+                            f"screens={current_visible_screen_count()} ctx={ctx!r}",
+                            flush=True,
+                        )
                 if current is None:
                     print(
                         f"{_PRINT_PREFIX} screen 현재 뷰 읽기 실패 — target 직접 적용",
@@ -2620,6 +2776,9 @@ def kickoff_play_camera_fly_for_screen(
                     done,
                     on_complete=_complete,
                     up_xyz=up,
+                    up_end_xyz=_prim_write_up_hint(
+                        prim_path if use_prim else "", up
+                    ),
                     usd_context_name=ctx,
                     fly_camera_path=fly_path,
                 )
@@ -2670,8 +2829,11 @@ __all__ = [
     "apply_camera_view",
     "apply_play_camera_prim_view_spec",
     "apply_session_view_to_target",
+    "apply_top_view_aperture",
     "apply_top_view_camera_prim_view_spec",
     "apply_view_to_camera_prim",
+    "current_visible_screen_count",
+    "play_camera_start_view_spec",
     "camera_prim_up_xyz",
     "bind_viewport_to_camera_prim",
     "camera_fly_usd_context",

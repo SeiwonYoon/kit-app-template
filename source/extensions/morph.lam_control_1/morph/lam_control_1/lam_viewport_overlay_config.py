@@ -30,7 +30,7 @@ STARTUP_CHECK_PLAY_CAMERA_FLY: bool = True  # Play 시 preset 뷰로 fly (일시
 # False=PLAY_CAMERA_PRIM_PATH USD Camera prim 뷰로 fly
 # ---------------------------------------------------------------------------
 PLAY_CAMERA_USE_PRESET_COORDS: bool = False
-PLAY_CAMERA_PRIM_PATH: str = "/Camera"  # stage 트리 기준 실제 경로로 수정
+PLAY_CAMERA_PRIM_PATH: str = "/Camera_fly"  # stage 트리 기준 실제 경로로 수정
 # Camera prim 모드(USE_PRESET_COORDS=False)에서는 fly 후 viewport 가 USD Camera 에 bind 됨.
 # 아래 플래그는 레거시·문서용 (동작에는 영향 없음).
 PLAY_CAMERA_BIND_VIEWPORT_TO_USD_PRIM: bool = True
@@ -102,8 +102,59 @@ TOP_VIEW_CAMERA_PRIM_VIEW: Optional[PlayCameraPresetSpec] = None
 TOP_VIEW_CAMERA_PRIM_VIEW = PlayCameraPresetSpec(
     eye_xyz=(0.000000, 0.000000, 4918.361498),
     target_xyz=(0.000000, 0.000000, 1343.485827),
+    up_xyz=(1.000000, 0.000000, 0.000000),
+)
+
+
+# ---------------------------------------------------------------------------
+# 화면 개수(1·2)별 카메라 preset — 카메라 모드(*_USE_PRESET_COORDS=False)에서만 사용.
+# 현재 표시 중인 화면 수(화면1·화면2 체크 상태, 1 또는 2)에 따라 자동 선택된다.
+# ---------------------------------------------------------------------------
+
+# [Play 시작용 Perspective 뷰 — 화면 수별]
+# 시뮬 시작: 현재 줌 상태와 무관하게 Perspective 를 이 뷰로 먼저 맞춘 뒤 fly 시작.
+# 시뮬 정지: 이전 줌 복귀 대신 이 뷰로 복귀.
+# None = 기존 동작(현재 뷰에서 fly 시작, 정지 시 이전 줌 복귀).
+PLAY_CAMERA_START_VIEW_1_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
+    eye_xyz=(1343.267028, 1624.237571, 1691.205169),
+    target_xyz=(-880.192912, 245.176765, 862.122901),
+    up_xyz=(-0.256708, -0.159218, 0.953284),
+)
+PLAY_CAMERA_START_VIEW_2_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
+    eye_xyz=(30720.419012, 33432.271407, 32518.078243),
+    target_xyz=(-1503.170796, 1208.681599, 294.489204),
+    up_xyz=(-0.408248, -0.408248, 0.816497),
+)
+
+# [Play fly 목표 뷰 — 화면 수별]  None = 위 PLAY_CAMERA_PRIM_VIEW 사용.
+PLAY_CAMERA_PRIM_VIEW_1_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
+    eye_xyz=(2170.714899, 514.167088, 1079.585060),
+    target_xyz=(620.354988, 514.167088, 1079.585060),
+    up_xyz=(0.000000, 0.000000, 1.000000),
+)
+PLAY_CAMERA_PRIM_VIEW_2_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
+    eye_xyz=(1151.255012, 446.407007, 1188.411856),
+    target_xyz=(620.354988, 446.407007, 1188.411856),
+    up_xyz=(0.000000, 0.000000, 1.000000),
+)
+
+# [탑뷰 뷰 — 화면 수별]  None = 위 TOP_VIEW_CAMERA_PRIM_VIEW 사용.
+TOP_VIEW_CAMERA_PRIM_VIEW_1_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
+    eye_xyz=(-463.828260, 557.906634, 3076.096106),
+    target_xyz=(-463.828260, 557.906634, 1343.485827),
     up_xyz=(0.000000, 1.000000, 0.000000),
 )
+TOP_VIEW_CAMERA_PRIM_VIEW_2_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPresetSpec(
+    eye_xyz=(-463.828260, 557.906634, 3076.096106),
+    target_xyz=(-463.828260, 557.906634, 1343.485827),
+    up_xyz=(0.000000, 1.000000, 0.000000),
+)
+
+# [탑뷰 줌(aperture) — 화면 수별]
+# 탑뷰 카메라는 줌 시 transform(x,y,z)이 아니라 horizontal/vertical aperture 가 변한다.
+# 탑뷰 진입 시 두 aperture 를 아래 값으로 설정. None = 변경 안 함(현재 상태 유지).
+TOP_VIEW_APERTURE_1_SCREEN: Optional[float] = 35.0
+TOP_VIEW_APERTURE_2_SCREEN: Optional[float] = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -418,12 +469,20 @@ __all__ = [
     "PlayCameraPresetSpec",
     "PLAY_CAMERA_PRESET",
     "PLAY_CAMERA_PRIM_VIEW",
+    "PLAY_CAMERA_PRIM_VIEW_1_SCREEN",
+    "PLAY_CAMERA_PRIM_VIEW_2_SCREEN",
+    "PLAY_CAMERA_START_VIEW_1_SCREEN",
+    "PLAY_CAMERA_START_VIEW_2_SCREEN",
     "TOP_VIEW_USE_PRESET_COORDS",
     "TOP_VIEW_CAMERA_PRIM_PATH",
     "TOP_VIEW_BIND_VIEWPORT_TO_USD_PRIM",
     "TOP_VIEW_PRESET_ENABLED",
     "TOP_VIEW_PRESET",
     "TOP_VIEW_CAMERA_PRIM_VIEW",
+    "TOP_VIEW_CAMERA_PRIM_VIEW_1_SCREEN",
+    "TOP_VIEW_CAMERA_PRIM_VIEW_2_SCREEN",
+    "TOP_VIEW_APERTURE_1_SCREEN",
+    "TOP_VIEW_APERTURE_2_SCREEN",
     "TRAFFIC_LIGHT_EMISSIVE_ENABLED",
     "TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MIN_SEC",
     "TRAFFIC_LIGHT_EMISSIVE_INTERVAL_MAX_SEC",
