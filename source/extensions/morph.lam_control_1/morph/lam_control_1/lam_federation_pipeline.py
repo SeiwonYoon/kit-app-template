@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .kit_main_dispatch import schedule_on_main_thread
 from .lam_api_timeline_parser import (
+    config_use_simulation_get,
     federation_virtual_path,
     merged_response_to_dwells,
     normalize_configs,
@@ -21,7 +22,7 @@ from .lam_csv_prerun_playback import (
     build_prerun_result_from_cached,
     maybe_export_csv_prerun_json,
 )
-from .lam_federation_client import fetch_federation_pages
+from .lam_federation_client import fetch_federation_pages, fetch_simulation_get_pages
 from .lam_federation_load_hud import set_federation_load_status
 from .lam_screen_visibility import request_screen_visibility
 from .simulation_play import (
@@ -696,6 +697,7 @@ def _process_merged_response(
     speed_scale: float,
     save_response_json: bool = False,
     export_default_prerun: bool = False,
+    eqp_id_from_rows: bool = False,
 ) -> ScreenPipelineResult:
     """이미 수집됐거나 사용자가 붙여넣은 응답만 파싱·프리런·(옵션)재생한다."""
     from .simulation_play import set_csv_playback_compact_log
@@ -706,7 +708,7 @@ def _process_merged_response(
         set_csv_playback_compact_log(True)
     try:
         eqp_id = str(body.get("eqp_id") or "").strip()
-        if not eqp_id:
+        if not eqp_id_from_rows and not eqp_id:
             _fed_diag("S09_parse_fail", "eqp_id missing", screen=screen)
             _fed_load_hud(
                 screen,
@@ -722,15 +724,20 @@ def _process_merged_response(
             screen, "parsing", ext=ext, lam_window=lam_window
         )
         dwells, parse_stats = merged_response_to_dwells(
-            merged, eqp_id=eqp_id, quiet=quiet
+            merged,
+            eqp_id=eqp_id,
+            eqp_id_from_rows=eqp_id_from_rows,
+            quiet=quiet,
         )
         meta["parse"] = parse_stats
+        if eqp_id_from_rows:
+            eqp_id = str((parse_stats.get("eqp_ids") or [""])[0] or "").strip()
         if not dwells:
             _fed_diag(
                 "S09_parse_fail",
                 "no dwell records after parse",
                 screen=screen,
-                eqp_id=eqp_id,
+                eqp_id=eqp_id or "(from rows)",
             )
             _fed_load_hud(
                 screen,
@@ -936,6 +943,9 @@ def _read_federation_defaults() -> Dict[str, Any]:
             log_full_response = False
         return {
             "url": str(getattr(d, "FEDERATION_QUERY_URL", "") or ""),
+            "simulation_get_base_url": str(
+                getattr(d, "FEDERATION_SIMULATION_GET_BASE_URL", "") or ""
+            ),
             "limit": int(getattr(d, "FEDERATION_FETCH_LIMIT", 1000) or 1000),
             "timeout_sec": float(getattr(d, "FEDERATION_FETCH_TIMEOUT_SEC", 300.0) or 300.0),
             "use_fixture": bool(getattr(d, "FEDERATION_USE_FIXTURE", False)),
@@ -948,6 +958,7 @@ def _read_federation_defaults() -> Dict[str, Any]:
     except Exception:
         return {
             "url": "",
+            "simulation_get_base_url": "",
             "limit": 1000,
             "timeout_sec": 300.0,
             "use_fixture": False,
@@ -959,6 +970,17 @@ def _read_federation_defaults() -> Dict[str, Any]:
         }
 
 
+def _federation_post_config_error(body: Dict[str, Any]) -> Optional[str]:
+    """POST Federation config 검증 — 실패 시 상세 메시지."""
+    api_body = _normalize_federation_body_periods(body)
+    if not str(api_body.get("eqp_id") or "").strip():
+        return (
+            "federation POST config invalid (execId empty/absent): eqp_id missing; "
+            f"received keys={sorted(str(k) for k in api_body.keys())}"
+        )
+    return None
+
+
 def _process_one_screen(
     ext: Any,
     lam_window: Any,
@@ -966,6 +988,7 @@ def _process_one_screen(
     body: Dict[str, Any],
     *,
     url: str,
+    simulation_get_base_url: str,
     limit: int,
     timeout_sec: float,
     use_fixture: bool,
@@ -978,49 +1001,78 @@ def _process_one_screen(
     export_default_prerun: bool = False,
 ) -> ScreenPipelineResult:
     meta: Dict[str, Any] = {"screen": screen}
+    use_get = config_use_simulation_get(body)
+    meta["fetch_mode"] = "simulation_get" if use_get else "federation_post"
     try:
-        api_body = _normalize_federation_body_periods(body)
-        eqp_id = str(api_body.get("eqp_id") or "").strip()
-        if not eqp_id:
-            _fed_load_hud(
-                screen,
-                "failed",
-                detail="eqp_id missing",
-                ext=ext,
-                lam_window=lam_window,
+        if use_get:
+            exec_id = str(body.get("execId") or "").strip()
+            sim_base = str(simulation_get_base_url or "").strip()
+            if not sim_base:
+                msg = (
+                    f"screen{screen}: FEDERATION_SIMULATION_GET_BASE_URL is empty "
+                    f"but execId={exec_id!r} requires simulation GET"
+                )
+                _fed_load_hud(
+                    screen, "failed", detail=msg, ext=ext, lam_window=lam_window
+                )
+                return ScreenPipelineResult(screen, False, msg, meta)
+            api_body = dict(body or {})
+            _fed_load_hud(screen, "requesting", ext=ext, lam_window=lam_window)
+            merged, fetch_meta = fetch_simulation_get_pages(
+                base_url=sim_base,
+                exec_id=exec_id,
+                limit=limit,
+                screen=screen,
+                timeout_sec=timeout_sec,
+                quiet=not _federation_verbose_parse_log(),
             )
-            return ScreenPipelineResult(
-                screen, False, "eqp_id missing in config body", meta
+        else:
+            api_body = _normalize_federation_body_periods(body)
+            post_err = _federation_post_config_error(api_body)
+            if post_err:
+                _fed_load_hud(
+                    screen,
+                    "failed",
+                    detail=post_err,
+                    ext=ext,
+                    lam_window=lam_window,
+                )
+                return ScreenPipelineResult(screen, False, post_err, meta)
+            if not str(url or "").strip():
+                msg = (
+                    f"screen{screen}: FEDERATION_QUERY_URL is empty "
+                    "but federation POST config requires POST URL"
+                )
+                _fed_load_hud(
+                    screen, "failed", detail=msg, ext=ext, lam_window=lam_window
+                )
+                return ScreenPipelineResult(screen, False, msg, meta)
+            _fed_load_hud(screen, "requesting", ext=ext, lam_window=lam_window)
+            merged, fetch_meta = fetch_federation_pages(
+                url=url,
+                body=api_body,
+                limit=limit,
+                screen=screen,
+                bearer_token=bearer_token,
+                extra_headers=extra_headers,
+                timeout_sec=timeout_sec,
+                use_fixture=use_fixture,
+                log_row_sample=log_row_sample,
+                log_full_response=log_full_response,
+                quiet=not _federation_verbose_parse_log(),
             )
-        _fed_load_hud(
-            screen, "requesting", ext=ext, lam_window=lam_window
-        )
-        merged, fetch_meta = fetch_federation_pages(
-            url=url,
-            body=api_body,
-            limit=limit,
-            screen=screen,
-            bearer_token=bearer_token,
-            extra_headers=extra_headers,
-            timeout_sec=timeout_sec,
-            use_fixture=use_fixture,
-            log_row_sample=log_row_sample,
-            log_full_response=log_full_response,
-            quiet=not _federation_verbose_parse_log(),
-        )
         meta["fetch"] = fetch_meta
         _fed_diag(
             "S08_fetch_done",
             "HTTP pages finished",
             screen=screen,
+            mode=meta.get("fetch_mode"),
             pages=fetch_meta.get("pages"),
             rows=fetch_meta.get("total_rows"),
             elapsed=fetch_meta.get("elapsed_sec"),
             status=fetch_meta.get("http_status"),
         )
-        _fed_load_hud(
-            screen, "received", ext=ext, lam_window=lam_window
-        )
+        _fed_load_hud(screen, "received", ext=ext, lam_window=lam_window)
         result = _process_merged_response(
             ext,
             lam_window,
@@ -1030,6 +1082,7 @@ def _process_one_screen(
             auto_play=auto_play,
             speed_scale=speed_scale,
             export_default_prerun=export_default_prerun,
+            eqp_id_from_rows=use_get,
         )
         result.meta["fetch"] = fetch_meta
         return result
@@ -1116,10 +1169,7 @@ def run_federation_start_simulation(
     """
     defaults = _read_federation_defaults()
     url = str(url_override or defaults["url"] or "").strip()
-    if not url:
-        _fed_diag("S03_fail", "FEDERATION_QUERY_URL is empty")
-        _finish(on_complete, _err("FEDERATION_QUERY_URL is empty"))
-        return
+    simulation_get_base_url = str(defaults.get("simulation_get_base_url") or "").strip()
     limit = int(limit_override if limit_override is not None else defaults["limit"])
     timeout_sec = float(defaults["timeout_sec"])
     use_fixture = (
@@ -1203,6 +1253,7 @@ def run_federation_start_simulation(
                     screen,
                     body,
                     url=url,
+                    simulation_get_base_url=simulation_get_base_url,
                     limit=limit,
                     timeout_sec=timeout_sec,
                     use_fixture=use_fixture,
@@ -1301,6 +1352,7 @@ def run_federation_response_simulation(
     auto_play: bool = True,
     speed_scale: float = 1.0,
     save_response_json: bool = False,
+    eqp_id_from_rows: bool = False,
 ) -> None:
     """응답/로그 편집기의 현재 rows만 파싱·시뮬한다(API 재요청·pagination 없음)."""
     si = max(1, min(2, int(screen)))
@@ -1323,6 +1375,7 @@ def run_federation_response_simulation(
                 speed_scale=speed_scale,
                 save_response_json=save_response_json,
                 export_default_prerun=False,
+                eqp_id_from_rows=eqp_id_from_rows,
             )
             if result.ok:
                 _finish(

@@ -17,6 +17,61 @@ from .simulation_play import (
 
 _PRINT_PREFIX = "[LAM/api-parser]"
 
+# camelCase 대응 시 alias 추가 — 상세: docs/lam_control_federation_get_camelcase_field_guide_ko.md
+_API_ROW_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "module_nm": ("module_nm", "moduleNm"),
+    "lot_id": ("lot_id", "lotId"),
+    "eqp_id": ("eqp_id", "eqpId"),
+    "cassette_slot": ("cassette_slot", "cassetteSlot"),
+    "eqp_start_tm": ("eqp_start_tm", "eqpStartTm"),
+    "eqp_end_tm": ("eqp_end_tm", "eqpEndTm"),
+    "process_tm": ("process_tm", "processTm"),
+}
+
+
+def config_use_simulation_get(body: Dict[str, Any]) -> bool:
+    """``configs[n]`` 에 비어 있지 않은 ``execId`` 가 있으면 Simulation GET 경로."""
+    return bool(str((body or {}).get("execId") or "").strip())
+
+
+def normalize_api_row_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    """API row dict 키를 snake_case canonical 로 정규화 (alias 지원)."""
+    if not isinstance(row, dict):
+        return {}
+    out = dict(row)
+    for canonical, aliases in _API_ROW_FIELD_ALIASES.items():
+        if str(out.get(canonical) or "").strip():
+            continue
+        for alias in aliases:
+            if alias == canonical:
+                continue
+            if alias in row and str(row.get(alias) or "").strip():
+                out[canonical] = row[alias]
+                break
+    return out
+
+
+def object_array_to_merged(objects: List[Any]) -> Dict[str, Any]:
+    """Simulation GET ``[{...}, ...]`` → POST 와 동일한 ``columns``/``rows`` 병합 형식."""
+    rows_norm = [
+        normalize_api_row_dict(o) for o in (objects or []) if isinstance(o, dict)
+    ]
+    columns: List[str] = []
+    seen_cols: set = set()
+    for row in rows_norm:
+        for key in row.keys():
+            ks = str(key)
+            if ks not in seen_cols:
+                seen_cols.add(ks)
+                columns.append(ks)
+    matrix = [[row.get(col) for col in columns] for row in rows_norm]
+    return {
+        "columns": columns,
+        "rows": matrix,
+        "row_count": len(matrix),
+        "fetch_mode": "simulation_get",
+    }
+
 
 def _is_nonempty_config(cfg: Any) -> bool:
     if not isinstance(cfg, dict):
@@ -51,6 +106,7 @@ def rows_to_parsed_csv_rows(
     rows: List[List[Any]],
     *,
     eqp_id: str,
+    eqp_id_from_rows: bool = False,
 ) -> Tuple[List[ParsedCsvRow], int, int]:
     """API merged rows → ``ParsedCsvRow`` (정규화 전)."""
     parsed: List[ParsedCsvRow] = []
@@ -62,7 +118,11 @@ def rows_to_parsed_csv_rows(
         if not isinstance(raw_row, (list, tuple)):
             skipped += 1
             continue
-        raw = api_row_to_dict(columns, list(raw_row))
+        raw = normalize_api_row_dict(api_row_to_dict(columns, list(raw_row)))
+        row_eqp = str(raw.get("eqp_id") or "").strip() if eqp_id_from_rows else eqp
+        if not row_eqp:
+            skipped += 1
+            continue
         mod = str(raw.get("module_nm") or "").strip()
         if not mod:
             skipped += 1
@@ -87,7 +147,7 @@ def rows_to_parsed_csv_rows(
             seen.add(key)
         parsed.append(
             ParsedCsvRow(
-                eqp_id=eqp,
+                eqp_id=row_eqp,
                 module_nm=mod,
                 lot_id=lot,
                 cassette_slot=cs,
@@ -103,15 +163,22 @@ def merged_response_to_dwells(
     merged: Dict[str, Any],
     *,
     eqp_id: str,
+    eqp_id_from_rows: bool = False,
     quiet: bool = False,
 ) -> Tuple[List[DwellRecord], Dict[str, Any]]:
     """병합 API 응답 → dwell 타임라인 + 파싱 통계."""
     columns = list(merged.get("columns") or [])
     rows = list(merged.get("rows") or [])
-    parsed, skipped, dup = rows_to_parsed_csv_rows(columns, rows, eqp_id=eqp_id)
+    parsed, skipped, dup = rows_to_parsed_csv_rows(
+        columns,
+        rows,
+        eqp_id=eqp_id,
+        eqp_id_from_rows=eqp_id_from_rows,
+    )
     normalized = normalize_csv_timeline(parsed)
     lot_map = build_lot_id_to_foup_index(normalized)
     dwells = sort_dwells_for_playback(rows_to_dwell_records(normalized, lot_map))
+    eqp_ids = sorted({str(r.eqp_id or "").strip() for r in parsed if str(r.eqp_id or "").strip()})
     stats = {
         "input_rows": len(rows),
         "parsed_rows": len(parsed),
@@ -120,6 +187,7 @@ def merged_response_to_dwells(
         "skipped": skipped,
         "duplicates": dup,
         "lots_to_foup": lot_map,
+        "eqp_ids": eqp_ids,
     }
     if not quiet:
         print(
@@ -138,6 +206,10 @@ def federation_virtual_path(screen: int, body: Dict[str, Any]) -> "Path":
     """
     from pathlib import Path
 
+    exec_id = str(body.get("execId") or "").strip()
+    if exec_id:
+        safe = re.sub(r"[^\w\-.]+", "_", f"s{int(screen)}_exec_{exec_id}")[:120]
+        return Path("lam_federation_virtual") / f"{safe}.virtual"
     eqp = str(body.get("eqp_id") or "eqp").strip() or "eqp"
     lot = str(body.get("lot_id") or "lot").strip() or "lot"
     safe = re.sub(r"[^\w\-.]+", "_", f"s{int(screen)}_{eqp}_{lot}")[:120]
@@ -147,8 +219,11 @@ def federation_virtual_path(screen: int, body: Dict[str, Any]) -> "Path":
 
 __all__ = [
     "api_row_to_dict",
+    "config_use_simulation_get",
     "federation_virtual_path",
     "merged_response_to_dwells",
+    "normalize_api_row_dict",
     "normalize_configs",
+    "object_array_to_merged",
     "rows_to_parsed_csv_rows",
 ]

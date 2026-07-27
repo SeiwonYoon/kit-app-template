@@ -1,4 +1,4 @@
-"""Federation API 테스트 창 — Live POST / pagination / 파싱·시뮬."""
+"""Federation API 테스트 창 — Live POST / Simulation GET / 파싱·시뮬."""
 
 from __future__ import annotations
 
@@ -11,13 +11,29 @@ from .kit_main_dispatch import schedule_on_main_thread
 _PRINT_PREFIX = "[LAM/fed-test]"
 WINDOW_TITLE = "LAM Federation API Test"
 
+# Simulation GET 테스트용 기본 execId (URL 기본값에만 사용).
+_DEFAULT_GET_EXEC_ID = "M15"
+_DEFAULT_GET_URL_TEMPLATE = (
+    "http://hytwindev.skhynix.com/svc/fab/api/v1/lam/simulations/simulations/"
+    f"{_DEFAULT_GET_EXEC_ID}?offset=0&limit={{limit}}"
+)
+
+# _DEFAULT_BODY = {
+#     "fab_id": "FAB01",
+#     "mt": "SC2HM",
+#     "eqp_id": "EQP_SAMPLE",
+#     "lot_id": "TAGUB84",
+#     "mt_from": "2026-06-01 00:00:00",
+#     "mt_to": "2026-06-02 00:00:00",
+# }
+
 _DEFAULT_BODY = {
-    "fab_id": "FAB01",
-    "mt": "SC2HM",
-    "eqp_id": "EQP_SAMPLE",
-    "lot_id": "TAGUB84",
-    "mt_from": "2026-06-01 00:00:00",
-    "mt_to": "2026-06-02 00:00:00",
+    "fab_id":"M14",
+    "mt":"202606",
+    "eqp_id":"4EKFA417",
+    "lot_id":"TAJUC44",
+    "mt_from":"202605",
+    "mt_to":"202606",
 }
 
 
@@ -35,6 +51,7 @@ class LamFederationTestWindow:
         # 이름에 model 이 있어도 실제로는 Field/CheckBox 위젯을 저장한다.
         # 값 접근은 반드시 ``_widget_model(w)`` / ``w.model`` 을 사용한다.
         self._url_field = None
+        self._get_url_field = None
         self._body_field = None
         self._limit_field = None
         self._offset_field = None
@@ -87,6 +104,10 @@ class LamFederationTestWindow:
                 "headers": {},
             }
 
+    @staticmethod
+    def _default_get_url(limit: int = 1000) -> str:
+        return _DEFAULT_GET_URL_TEMPLATE.format(limit=max(1, int(limit or 1000)))
+
     def _append_log(self, text: str) -> None:
         """로그 갱신 — 백그라운드에서 호출되어도 메인 스레드로 마샬링."""
 
@@ -129,12 +150,16 @@ class LamFederationTestWindow:
 
     @staticmethod
     def _parse_response_text(raw: str) -> Dict[str, Any]:
-        """붙여넣은 JSON 또는 로그 안의 마지막 columns/rows JSON 객체를 찾는다."""
+        """붙여넣은 JSON 또는 로그 안의 응답을 merged 형식으로 찾는다."""
+        from .lam_api_timeline_parser import object_array_to_merged
+
         text = str(raw or "").strip()
         if not text:
             raise ValueError("응답/로그에 파싱할 JSON이 없습니다")
         try:
             data = json.loads(text)
+            if isinstance(data, list):
+                return object_array_to_merged(data)
             if isinstance(data, dict) and isinstance(data.get("rows"), list):
                 return data
         except Exception:
@@ -142,12 +167,14 @@ class LamFederationTestWindow:
         decoder = json.JSONDecoder()
         found: Optional[Dict[str, Any]] = None
         for i, ch in enumerate(text):
-            if ch != "{":
+            if ch not in ("{", "["):
                 continue
             try:
                 candidate, _end = decoder.raw_decode(text[i:])
             except Exception:
                 continue
+            if isinstance(candidate, list):
+                return object_array_to_merged(candidate)
             if (
                 isinstance(candidate, dict)
                 and isinstance(candidate.get("columns"), list)
@@ -155,7 +182,9 @@ class LamFederationTestWindow:
             ):
                 found = candidate
         if found is None:
-            raise ValueError("응답/로그에서 columns/rows JSON 객체를 찾지 못했습니다")
+            raise ValueError(
+                "응답/로그에서 JSON 배열 또는 columns/rows 객체를 찾지 못했습니다"
+            )
         return found
 
     def _read_response_for_parse(self) -> Dict[str, Any]:
@@ -217,6 +246,13 @@ class LamFederationTestWindow:
             "save_json": bool(save_m.get_value_as_bool()) if save_m else False,
             "headers": self._read_headers(),
         }
+
+    def _read_get_url(self) -> str:
+        model = _widget_model(self._get_url_field)
+        raw = str(model.get_value_as_string() or "").strip() if model is not None else ""
+        if raw:
+            return raw
+        return self._default_get_url(self._defaults().get("limit", 1000))
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = bool(busy)
@@ -310,6 +346,112 @@ class LamFederationTestWindow:
 
         threading.Thread(target=_work, daemon=True).start()
 
+    def _on_get_fetch_once(self) -> None:
+        if self._busy:
+            return
+        self._set_busy(True)
+        get_url = self._read_get_url()
+
+        def _work() -> None:
+            try:
+                from .lam_federation_client import fetch_simulation_get_once
+
+                status, data, raw = fetch_simulation_get_once(url=get_url)
+                if data:
+                    self._set_response_data(data)
+                elif raw:
+                    self._response_data = None
+                    self._append_log(raw)
+                print(
+                    f"{_PRINT_PREFIX} GET once status={status} url={get_url!r}",
+                    flush=True,
+                )
+            except Exception as exc:
+                self._append_log(f"ERROR: {exc}")
+            finally:
+                self._set_busy(False)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_get_fetch_all(self) -> None:
+        if self._busy:
+            return
+        self._set_busy(True)
+        vals = self._ui_values()
+        get_url = self._read_get_url()
+
+        def _work() -> None:
+            try:
+                from .lam_federation_client import fetch_simulation_get_pages_from_url
+
+                try:
+                    from .lam_sim_control_defaults import FEDERATION_VERBOSE_PARSE_LOG
+
+                    quiet = not bool(FEDERATION_VERBOSE_PARSE_LOG)
+                except Exception:
+                    quiet = True
+                merged, meta = fetch_simulation_get_pages_from_url(
+                    url=get_url,
+                    screen=vals["screen"],
+                    quiet=quiet,
+                )
+                self._set_response_data(merged)
+                print(
+                    f"{_PRINT_PREFIX} GET fetch all pages={meta.get('pages')} "
+                    f"rows={meta.get('total_rows')} "
+                    f"elapsed={meta.get('elapsed_sec'):.2f}s",
+                    flush=True,
+                )
+            except Exception as exc:
+                self._append_log(f"ERROR: {exc}")
+            finally:
+                self._set_busy(False)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_get_parse_sim(self) -> None:
+        if self._busy:
+            return
+        self._set_busy(True)
+        vals = self._ui_values()
+        screen = vals["screen"]
+        try:
+            merged = self._read_response_for_parse()
+        except Exception as exc:
+            self._append_log(f"ERROR: {exc}")
+            self._set_busy(False)
+            return
+
+        body: Dict[str, Any] = {}
+        exec_id = str(merged.get("exec_id") or "").strip()
+        if exec_id:
+            body["execId"] = exec_id
+
+        def _done(result: Dict[str, Any]) -> None:
+            print(
+                f"{_PRINT_PREFIX} GET parse/sim result: "
+                f"{json.dumps(result, ensure_ascii=False)}",
+                flush=True,
+            )
+            self._append_log(
+                "\n--- GET 파싱·시뮬 결과 ---\n"
+                + json.dumps(result, ensure_ascii=False, indent=2)
+            )
+            self._set_busy(False)
+
+        from .lam_federation_pipeline import run_federation_response_simulation
+
+        run_federation_response_simulation(
+            self._ext,
+            merged,
+            body,
+            screen=screen,
+            on_complete=_done,
+            auto_play=True,
+            save_response_json=vals["save_json"],
+            eqp_id_from_rows=True,
+        )
+
     def _on_parse_sim(self) -> None:
         if self._busy:
             return
@@ -355,7 +497,7 @@ class LamFederationTestWindow:
         self._window = ui.Window(
             WINDOW_TITLE,
             width=720,
-            height=720,
+            height=820,
             flags=ui.WINDOW_FLAGS_NO_SCROLLBAR,
         )
         with self._window.frame:
@@ -408,5 +550,26 @@ class LamFederationTestWindow:
                     ui.Label("JSON 저장", width=70)
                     self._save_json_field = ui.CheckBox(width=20)
                     self._save_json_field.model.set_value(False)
+                ui.Separator(height=4)
+                ui.Label(
+                    "Simulation GET — URL 전체를 입력합니다 (인증·body 불필요).",
+                    word_wrap=True,
+                )
+                with ui.HStack(height=0):
+                    ui.Label("GET URL", width=80)
+                    self._get_url_field = ui.StringField()
+                    self._get_url_field.model.set_value(self._default_get_url(d["limit"]))
+                with ui.HStack(height=0):
+                    ui.Button("GET 1회", clicked_fn=self._on_get_fetch_once, width=100)
+                    ui.Button(
+                        "GET 전체 fetch",
+                        clicked_fn=self._on_get_fetch_all,
+                        width=110,
+                    )
+                    ui.Button(
+                        "GET 파싱/시뮬",
+                        clicked_fn=self._on_get_parse_sim,
+                        width=110,
+                    )
                 ui.Label("응답 / 로그")
                 self._log_field = ui.StringField(multiline=True, height=280, read_only=False)

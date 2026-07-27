@@ -115,6 +115,10 @@ FOUP_USAGE_EXTRA_HIDE_PRIMS_3: list = [
 FEDERATION_QUERY_URL: str = (
     "http://10.61.59.208/queries/mcc-target-prev-lot-history/run"
 )
+# Simulation GET base — ``{base}/api/v1/lam/simulations/simulations/{execId}``
+FEDERATION_SIMULATION_GET_BASE_URL: str = (
+    "http://hytwindev.skhynix.com/svc/fab"
+)
 # 페이지당 row 수 — sk.hyview_messaging.lam_handler_config 에서 override 가능.
 FEDERATION_FETCH_LIMIT: int = 1000
 # 화면당 전체 pagination fetch 타임아웃 [s].
@@ -194,6 +198,7 @@ __all__ = [
     "FOUP_USAGE_EXTRA_HIDE_PRIMS_2",
     "FOUP_USAGE_EXTRA_HIDE_PRIMS_3",
     "FEDERATION_QUERY_URL",
+    "FEDERATION_SIMULATION_GET_BASE_URL",
     "FEDERATION_FETCH_LIMIT",
     "FEDERATION_FETCH_TIMEOUT_SEC",
     "FEDERATION_USE_FIXTURE",

@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .lam_api_timeline_parser import object_array_to_merged
+
 _PRINT_PREFIX = "[LAM/federation]"
+
+_SIMULATION_PATH_SUFFIX = "/api/v1/lam/simulations/simulations/"
 
 
 def _fixture_dir() -> Path:
@@ -87,6 +92,185 @@ def _load_fixture_page(offset: int) -> Dict[str, Any]:
             with p.open("r", encoding="utf-8") as f:
                 return json.load(f)
     raise FileNotFoundError(f"fixture not found under {d}")
+
+
+def build_simulation_get_url(
+    base_url: str,
+    exec_id: str,
+    *,
+    offset: int,
+    limit: int,
+) -> str:
+    """Simulation GET URL — ``{base}/api/v1/lam/simulations/simulations/{execId}?offset=&limit=``."""
+    base = str(base_url or "").strip().rstrip("/")
+    eid = urllib.parse.quote(str(exec_id or "").strip(), safe="")
+    if not base or not eid:
+        raise ValueError("base_url and exec_id are required for simulation GET")
+    path = f"{base}{_SIMULATION_PATH_SUFFIX}{eid}"
+    query = urllib.parse.urlencode(
+        {"offset": max(0, int(offset or 0)), "limit": max(1, int(limit or 1))}
+    )
+    return f"{path}?{query}"
+
+
+def parse_simulation_get_url(url: str) -> Tuple[str, str, int, int]:
+    """전체 GET URL → ``(fab_base, exec_id, offset, limit)``."""
+    parsed = urllib.parse.urlparse(str(url or "").strip())
+    path = parsed.path or ""
+    idx = path.find(_SIMULATION_PATH_SUFFIX)
+    if idx < 0:
+        raise ValueError(f"URL must contain {_SIMULATION_PATH_SUFFIX!r}")
+    exec_id = path[idx + len(_SIMULATION_PATH_SUFFIX) :].strip("/")
+    if not exec_id:
+        raise ValueError("execId missing in simulation GET URL path")
+    fab_base = f"{parsed.scheme}://{parsed.netloc}{path[:idx]}".rstrip("/")
+    qs = urllib.parse.parse_qs(parsed.query or "")
+    offset = int((qs.get("offset") or ["0"])[0])
+    limit = max(1, int((qs.get("limit") or ["1000"])[0]))
+    return fab_base, exec_id, max(0, offset), limit
+
+
+def _http_get_json(
+    url: str,
+    *,
+    timeout_sec: float,
+) -> Tuple[int, Any, str]:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=float(timeout_sec)) as resp:
+            status = int(getattr(resp, "status", 200) or 200)
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code or 0)
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+        try:
+            return status, json.loads(raw), raw
+        except Exception:
+            return status, None, raw
+    except Exception as exc:
+        return 0, None, str(exc)
+    try:
+        return status, json.loads(raw), raw
+    except Exception:
+        return status, None, raw
+
+
+def _simulation_get_objects_from_payload(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    raise RuntimeError("simulation GET response must be a JSON array of objects")
+
+
+def fetch_simulation_get_once(
+    *,
+    url: str,
+    timeout_sec: float = 60.0,
+) -> Tuple[int, Dict[str, Any], str]:
+    """테스트 창용 — URL 그대로 GET 1회 → merged 형식."""
+    status, data, raw = _http_get_json(url, timeout_sec=timeout_sec)
+    if status and status >= 400:
+        return status, {}, raw
+    if data is None:
+        return status, {}, raw
+    try:
+        objects = _simulation_get_objects_from_payload(data)
+    except RuntimeError as exc:
+        return status, {}, str(exc)
+    merged = object_array_to_merged(objects)
+    merged["http_status"] = status
+    return status, merged, raw
+
+
+def fetch_simulation_get_pages(
+    *,
+    base_url: str,
+    exec_id: str,
+    limit: int,
+    initial_offset: int = 0,
+    screen: int = 1,
+    timeout_sec: float = 300.0,
+    quiet: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """``len(page) < limit`` 될 때까지 Simulation GET pagination 후 병합."""
+    t0 = time.perf_counter()
+    eid = str(exec_id or "").strip()
+    if not eid:
+        raise ValueError("exec_id is required for simulation GET")
+    print(
+        f"{_PRINT_PREFIX} simulation GET start screen={screen} execId={eid!r} "
+        f"limit={limit}",
+        flush=True,
+    )
+    all_objects: List[Dict[str, Any]] = []
+    pages = 0
+    offset = max(0, int(initial_offset or 0))
+    first_offset = offset
+    last_status = 0
+
+    while True:
+        page_url = build_simulation_get_url(
+            base_url, eid, offset=offset, limit=limit
+        )
+        status, data, raw = _http_get_json(page_url, timeout_sec=timeout_sec)
+        last_status = status
+        pages += 1
+        if status and status >= 400:
+            raise RuntimeError(f"HTTP {status}: {raw[:500]}")
+        objects = _simulation_get_objects_from_payload(data)
+        all_objects.extend(objects)
+        if not quiet:
+            print(
+                f"{_PRINT_PREFIX} simulation GET page {pages} offset={offset} "
+                f"status={status} rows={len(objects)}",
+                flush=True,
+            )
+        if len(objects) < int(limit):
+            break
+        offset += int(limit)
+        if pages > 10000:
+            raise RuntimeError("simulation GET pagination exceeded 10000 pages")
+
+    elapsed = time.perf_counter() - t0
+    merged = object_array_to_merged(all_objects)
+    merged["exec_id"] = eid
+    merged["fetch_mode"] = "simulation_get"
+    meta = {
+        "http_status": last_status,
+        "pages": pages,
+        "total_rows": len(all_objects),
+        "elapsed_sec": elapsed,
+        "screen": screen,
+        "exec_id": eid,
+        "fetch_mode": "simulation_get",
+        "offset_start": first_offset,
+        "limit": limit,
+    }
+    print(
+        f"{_PRINT_PREFIX} simulation GET done screen={screen} execId={eid!r} "
+        f"pages={pages} rows={len(all_objects)} elapsed={elapsed:.2f}s",
+        flush=True,
+    )
+    return merged, meta
+
+
+def fetch_simulation_get_pages_from_url(
+    *,
+    url: str,
+    timeout_sec: float = 300.0,
+    screen: int = 1,
+    quiet: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """테스트 창 「GET 전체 fetch」 — URL 에서 base/execId/offset/limit 파싱."""
+    fab_base, exec_id, offset, limit = parse_simulation_get_url(url)
+    return fetch_simulation_get_pages(
+        base_url=fab_base,
+        exec_id=exec_id,
+        limit=limit,
+        initial_offset=offset,
+        screen=screen,
+        timeout_sec=timeout_sec,
+        quiet=quiet,
+    )
 
 
 def _http_post_json(
@@ -260,6 +444,11 @@ def fetch_single_post(
 
 __all__ = [
     "build_request_headers",
+    "build_simulation_get_url",
     "fetch_federation_pages",
+    "fetch_simulation_get_once",
+    "fetch_simulation_get_pages",
+    "fetch_simulation_get_pages_from_url",
     "fetch_single_post",
+    "parse_simulation_get_url",
 ]
