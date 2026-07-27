@@ -745,6 +745,16 @@ def sync_csv_screen_3d_overlays(runtime: CsvScreenRuntime) -> None:
     except Exception as exc:
         print(f"{_PRINT_PREFIX} screen{si} wafer labels sync: {exc}", flush=True)
 
+    if hasattr(lam, "_sync_status_panel_for_screen"):
+        try:
+            lam._sync_status_panel_for_screen(
+                si,
+                csv_win,
+                viewport_window=tile_vw,
+            )
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} screen{si} status panel sync: {exc}", flush=True)
+
 
 def apply_csv_screen_viewport_effects(
     runtime: CsvScreenRuntime,

@@ -250,9 +250,9 @@ CSV_COL_MODULE_NM: str = "module_nm"
 # ---------------------------------------------------------------------------
 STATUS_PANEL_TITLE: str = "STATUS"
 
-# 패널 레이아웃/스타일(사용자가 여기서 조정)
-STATUS_PANEL_WIDTH_PX: int = 350
-STATUS_PANEL_LABEL_COL_WIDTH_PX: int = 120
+# 패널 레이아웃/스타일(사용자가 여기서 조정) — 가로 전체 너비는 STATUS_PANEL_WIDTH_PX
+STATUS_PANEL_WIDTH_PX: int = 250
+STATUS_PANEL_LABEL_COL_WIDTH_PX: int = 90
 STATUS_PANEL_PADDING_PX: int = 10
 STATUS_PANEL_TITLE_FONT_SIZE: int = 14
 STATUS_PANEL_ROW_FONT_SIZE: int = 16  # 행별 label/value 미지정 시 공통 기본값

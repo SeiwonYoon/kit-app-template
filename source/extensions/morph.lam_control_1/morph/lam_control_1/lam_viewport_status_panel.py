@@ -1,6 +1,7 @@
-"""Viewport 좌상단 2D 상태 패널 (기능 #1) — v1.
+"""Viewport 우상단 2D 상태 패널 (기능 #1) — v1.
 
 재생 로직을 수정하지 않고, simulation_play 스냅샷을 읽어 표시만 한다.
+화면별 CSV 재생창·progress snap 을 독립 반영한다.
 """
 
 from __future__ import annotations
@@ -39,6 +40,13 @@ if TYPE_CHECKING:
 _PRINT_PREFIX = "[LAM/StatusHUD]"
 _FRAME_SLOT = "morph.lam_control_1:status_hud"
 
+
+def _frame_slot_for_screen(screen: int) -> str:
+    si = max(1, int(screen))
+    if si <= 1:
+        return _FRAME_SLOT
+    return f"morph.lam_control_1:status_hud_s{si}"
+
 _TOKEN_RE = re.compile(r"\{([^{}]+)\}")
 _STATE_LOT_RE = re.compile(r"lot=['\"]([^'\"]+)['\"]")
 _STATE_WAFER_RE = re.compile(r"웨이퍼#(\d+)")
@@ -62,7 +70,7 @@ def _format_current_state_line(ent: Any) -> str:
     return str(STATUS_PANEL_STATE_SEP).join(parts)
 
 
-def _wall_elapsed_for_display(ps: dict) -> float:
+def _wall_elapsed_for_display(ps: dict, *, screen: Optional[int] = None) -> float:
     """실경과 [s] — 일시정지 시 체크포인트 값 고정, 재생 중엔 라이브 시계."""
     try:
         from .simulation_play import (  # type: ignore
@@ -71,21 +79,21 @@ def _wall_elapsed_for_display(ps: dict) -> float:
             get_csv_play_wall_elapsed,
         )
 
-        ck = get_csv_play_pause_checkpoint()
-        if ck is not None and not csv_play_session_active():
+        ck = get_csv_play_pause_checkpoint(screen=screen)
+        if ck is not None and not csv_play_session_active(screen=screen):
             return max(0.0, float(getattr(ck, "wall_elapsed_sec", 0) or 0))
-        if csv_play_session_active():
-            return max(0.0, get_csv_play_wall_elapsed())
+        if csv_play_session_active(screen=screen):
+            return max(0.0, get_csv_play_wall_elapsed(screen=screen))
     except Exception:
         pass
     return max(0.0, float(ps.get("wall_elapsed_display", 0.0) or 0.0))
 
 
-def _format_status_time_line(ps: dict) -> str:
+def _format_status_time_line(ps: dict, *, screen: Optional[int] = None) -> str:
     """예: 재생 0.9% | t 15.1/1773.7s | 실경과 16s/1774s"""
     csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
     csv_total = float(ps.get("csv_total", 0.0) or 0.0)
-    wall = _wall_elapsed_for_display(ps)
+    wall = _wall_elapsed_for_display(ps, screen=screen)
     sp = float(max(0.01, ps.get("speed_scale", 1.0) or 1.0))
 
     if csv_total <= 1e-6 and csv_t <= 1e-6 and wall <= 1e-6:
@@ -109,7 +117,7 @@ def _format_status_time_line(ps: dict) -> str:
     )
 
 
-def _play_context_idle(ps: dict) -> bool:
+def _play_context_idle(ps: dict, *, screen: Optional[int] = None) -> bool:
     """Play 전·정지(초기화) 후 — Time 0s, Current State 초기화."""
     csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
     csv_total = float(ps.get("csv_total", 0.0) or 0.0)
@@ -119,7 +127,7 @@ def _play_context_idle(ps: dict) -> bool:
     try:
         from .simulation_play import get_csv_play_pause_checkpoint  # type: ignore
 
-        if get_csv_play_pause_checkpoint() is not None:
+        if get_csv_play_pause_checkpoint(screen=screen) is not None:
             return False
     except Exception:
         pass
@@ -155,56 +163,77 @@ def _current_dwell_for_csv_t(csv_window: Any, csv_t: float) -> Any:
         return None
 
 
-def build_status_panel_snapshot(csv_window: Any) -> Dict[str, Any]:
+def build_status_panel_snapshot(
+    csv_window: Any,
+    *,
+    screen: Optional[int] = None,
+) -> Dict[str, Any]:
     """STATUS 패널과 동일 규칙의 해석된 스냅샷 ``{title, rows:[{key,name,value}]}``.
 
     Viewport 패널 표시 플래그와 무관 — 웹 V2T 통지·HUD 공통 소스.
     """
+    si = max(
+        1,
+        int(
+            screen
+            if screen is not None
+            else getattr(csv_window, "_screen", 1) or 1
+        ),
+    )
     try:
         from .simulation_play import (
             get_csv_play_progress_snap,
             get_csv_play_timeline_active_keys_snap,
         )
 
-        ps = get_csv_play_progress_snap()
-        update_progress_snap(ps)
-        update_active_schedule_keys(get_csv_play_timeline_active_keys_snap())
+        ps = get_csv_play_progress_snap(screen=si)
+        update_progress_snap(ps, screen=si)
+        update_active_schedule_keys(
+            get_csv_play_timeline_active_keys_snap(screen=si),
+            screen=si,
+        )
     except Exception:
         ps = {}
 
+    idle = _play_context_idle(ps, screen=si)
     csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
-    time_s = _format_status_time_line(ps)
-    if _play_context_idle(ps):
-        set_last_state_title("")
-
-    active_state = ""
-    try:
-        from .simulation_play import (  # type: ignore
-            _schedule_entry_match_key,
-            get_csv_play_timeline_active_keys_snap,
-        )
-
-        active = get_csv_play_timeline_active_keys_snap()
-        ent = None
-        for e in getattr(csv_window, "_schedule_row_entries", []) or []:
-            if _schedule_entry_match_key(e) in active:
-                ent = e
-                break
-        if ent is not None:
-            active_state = _format_current_state_line(ent)
-            if active_state:
-                set_last_state_title(active_state)
-    except Exception:
-        pass
-    display_state = active_state or get_last_state_title()
-
-    cur_dwell = _current_dwell_for_csv_t(csv_window, csv_t)
-    eqp_id_val = ""
-    if cur_dwell is not None:
+    if idle:
+        # Play 전·정지 후: 다른 화면 재생과 무관하게 해당 화면 패널은 비움
+        set_last_state_title("", screen=si)
+        time_s = "0s"
+        display_state = ""
+        eqp_id_val = ""
+        cur_dwell = None
+    else:
+        time_s = _format_status_time_line(ps, screen=si)
+        active_state = ""
         try:
-            eqp_id_val = str(getattr(cur_dwell, "eqp_id", "") or "").strip()
+            from .simulation_play import (  # type: ignore
+                _schedule_entry_match_key,
+                get_csv_play_timeline_active_keys_snap,
+            )
+
+            active = get_csv_play_timeline_active_keys_snap(screen=si)
+            ent = None
+            for e in getattr(csv_window, "_schedule_row_entries", []) or []:
+                if _schedule_entry_match_key(e) in active:
+                    ent = e
+                    break
+            if ent is not None:
+                active_state = _format_current_state_line(ent)
+                if active_state:
+                    set_last_state_title(active_state, screen=si)
         except Exception:
-            eqp_id_val = ""
+            pass
+        display_state = active_state or get_last_state_title(screen=si)
+
+        cur_dwell = _current_dwell_for_csv_t(csv_window, csv_t)
+        eqp_id_val = ""
+        if cur_dwell is not None:
+            try:
+                eqp_id_val = str(getattr(cur_dwell, "eqp_id", "") or "").strip()
+            except Exception:
+                eqp_id_val = ""
 
     def _token_value(tok_raw: str) -> str:
         tok = (tok_raw or "").strip()
@@ -349,7 +378,10 @@ class LamStatusPanelWebNotifier:
         if self._csv is None:
             return
         try:
-            data = build_status_panel_snapshot(self._csv)
+            data = build_status_panel_snapshot(
+                self._csv,
+                screen=max(1, int(getattr(self._csv, "_screen", 1) or 1)),
+            )
         except Exception as exc:
             print(f"{_PRINT_PREFIX} status snapshot: {exc}", flush=True)
             return
@@ -392,22 +424,60 @@ def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]
 
 
 class LamViewportStatusPanel:
-    """Viewport 좌상단 STATUS 패널 — ``lam_sim_control_defaults.SHOW_VIEWPORT_STATUS_PANEL``."""
+    """Viewport 우상단 STATUS 패널 — ``lam_sim_control_defaults.SHOW_VIEWPORT_STATUS_PANEL``."""
 
     def __init__(
         self,
         csv_window: "LamSimulationCsvPlayWindow",
         *,
         viewport: Optional["LamViewport"] = None,
+        screen: Optional[int] = None,
     ) -> None:
         self._csv = csv_window
+        self._screen = max(
+            1,
+            int(
+                screen
+                if screen is not None
+                else getattr(csv_window, "_screen", 1) or 1
+            ),
+        )
         self._viewport = viewport
+        self._viewport_window: Any = None
         self._root: Any = None
         self._models: dict[str, Any] = {}
         self._labels: dict[str, Any] = {}  # key -> ui.Label(value)
         self._post_update_sub: Any = None
         self._mounted = False
         self._last_tick = 0.0
+        self._frame_slot = _frame_slot_for_screen(self._screen)
+
+    def _resolve_viewport_for_panel(self) -> Optional[Any]:
+        if self._screen > 1:
+            lam = getattr(self._csv, "_lam_window_ref", None)
+            ext = getattr(lam, "_kit_ext", None) if lam is not None else None
+            if ext is not None:
+                try:
+                    from .lam_csv_play_screen import resolve_viewport_window_for_screen
+
+                    vw = resolve_viewport_window_for_screen(
+                        ext,
+                        self._screen,
+                        main_viewport=self._viewport,
+                    )
+                    if vw is not None and callable(getattr(vw, "get_frame", None)):
+                        self._viewport_window = vw
+                        return vw
+                except Exception:
+                    pass
+            cached = getattr(self, "_viewport_window", None)
+            if cached is not None and callable(getattr(cached, "get_frame", None)):
+                return cached
+            return None
+        cached = getattr(self, "_viewport_window", None)
+        if cached is not None and callable(getattr(cached, "get_frame", None)):
+            return cached
+        return _resolve_viewport_window(self._viewport)
 
     def destroy(self) -> None:
         self._stop_poll()
@@ -424,7 +494,7 @@ class LamViewportStatusPanel:
         def _try(remaining: int) -> None:
             if token_box["token"] != token:
                 return
-            vw = _resolve_viewport_window(self._viewport)
+            vw = self._resolve_viewport_for_panel()
             if vw is not None:
                 self._mount_on_viewport(vw)
                 return
@@ -444,10 +514,10 @@ class LamViewportStatusPanel:
         self._models.clear()
         self._labels.clear()
         try:
-            vw = _resolve_viewport_window(self._viewport)
+            vw = self._resolve_viewport_for_panel()
             if vw is None:
                 return
-            with vw.get_frame(_FRAME_SLOT):
+            with vw.get_frame(self._frame_slot):
                 pass
         except Exception:
             pass
@@ -471,15 +541,15 @@ class LamViewportStatusPanel:
 
         try:
             ra = getattr(ui, "Alignment", None)
-            lt = getattr(ra, "LEFT_TOP", None) if ra is not None else None
-            with vw.get_frame(_FRAME_SLOT):
-                root = ui.ZStack(alignment=lt) if lt is not None else ui.ZStack()
+            rt = getattr(ra, "RIGHT_TOP", None) if ra is not None else None
+            with vw.get_frame(self._frame_slot):
+                root = ui.ZStack(alignment=rt) if rt is not None else ui.ZStack()
                 self._root = root
                 with root:
                     with ui.VStack():
                         ui.Spacer(height=10)
                         with ui.HStack():
-                            ui.Spacer(width=10)
+                            ui.Spacer()
                             panel_w = int(STATUS_PANEL_WIDTH_PX)
                             pad = int(STATUS_PANEL_PADDING_PX)
                             label_w = int(STATUS_PANEL_LABEL_COL_WIDTH_PX)
@@ -573,8 +643,12 @@ class LamViewportStatusPanel:
                                             rows = list(STATUS_PANEL_ROWS or [])
                                             for i, spec in enumerate(rows):
                                                 _row(spec, draw_sep=(i != len(rows) - 1))
+                            ui.Spacer(width=10)
         except Exception as exc:
-            print(f"{_PRINT_PREFIX} mount failed: {exc}", flush=True)
+            print(
+                f"{_PRINT_PREFIX} screen{self._screen} mount failed: {exc}",
+                flush=True,
+            )
             self._destroy_layer()
             return
 
@@ -598,7 +672,10 @@ class LamViewportStatusPanel:
             self._last_tick = now
             self._tick_update()
 
-        self._post_update_sub = stream.create_subscription_to_pop(_on, name="morph.lam_control_1:status_hud_poll")
+        self._post_update_sub = stream.create_subscription_to_pop(
+            _on,
+            name=f"morph.lam_control_1:status_hud_poll_s{self._screen}",
+        )
 
     def _stop_poll(self) -> None:
         if self._post_update_sub is not None:
@@ -612,7 +689,7 @@ class LamViewportStatusPanel:
         if not self._mounted:
             return
         try:
-            data = build_status_panel_snapshot(self._csv)
+            data = build_status_panel_snapshot(self._csv, screen=self._screen)
         except Exception:
             return
         for row in list(data.get("rows") or []):

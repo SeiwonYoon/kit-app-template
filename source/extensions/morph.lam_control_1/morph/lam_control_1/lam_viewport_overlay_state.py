@@ -93,16 +93,20 @@ _play_prim_hide_retry_sub: Any = None
 # 2D 상태 패널 수동 입력
 _manual_eq_model: str = ""
 
-# Current State: 일시정지/dwell 시에도 마지막 로그 유지
+# Current State: 일시정지/dwell 시에도 마지막 로그 유지 (화면별 — 교차 오염 금지)
+_last_state_title_by_screen: Dict[int, str] = {1: ""}
+# 하위 호환 별칭 (화면1)
 _last_state_title: str = ""
 
 # 현재 선택된 CSV 파일 경로(문자열)
 _selected_csv_path: str = ""
 
-# simulation_play 진행 스냅샷 캐시(dict)
+# simulation_play 진행 스냅샷 캐시(dict) — 화면별
+_progress_snap_by_screen: Dict[int, Dict[str, Any]] = {1: {}}
 _progress_snap: Dict[str, Any] = {}
 
-# 타임라인 녹색 강조(active_keys) 스냅샷
+# 타임라인 녹색 강조(active_keys) 스냅샷 — 화면별
+_active_schedule_keys_by_screen: Dict[int, Tuple[Tuple[Any, ...], ...]] = {1: ()}
 _active_schedule_keys: Tuple[Tuple[Any, ...], ...] = ()
 
 # FOUP별 집계(pick/place 누적) — foup_index -> FoupCounts
@@ -519,15 +523,20 @@ def get_manual_eq_model() -> str:
         return str(_manual_eq_model)
 
 
-def set_last_state_title(title: str) -> None:
+def set_last_state_title(title: str, *, screen: int = 1) -> None:
+    si = max(1, int(screen or 1))
     with _lock:
         global _last_state_title
-        _last_state_title = str(title or "")
+        text = str(title or "")
+        _last_state_title_by_screen[si] = text
+        if si <= 1:
+            _last_state_title = text
 
 
-def get_last_state_title() -> str:
+def get_last_state_title(*, screen: int = 1) -> str:
+    si = max(1, int(screen or 1))
     with _lock:
-        return str(_last_state_title)
+        return str(_last_state_title_by_screen.get(si, "") or "")
 
 
 def set_toggle_foup_status(enabled: bool) -> None:
@@ -836,31 +845,40 @@ def get_toggle_top_view() -> bool:
         return bool(_toggle_top_view)
 
 
-def update_progress_snap(snap: Dict[str, Any]) -> None:
+def update_progress_snap(snap: Dict[str, Any], *, screen: int = 1) -> None:
+    si = max(1, int(screen or 1))
     with _lock:
         global _progress_snap
-        _progress_snap = dict(snap or {})
+        data = dict(snap or {})
+        _progress_snap_by_screen[si] = data
+        if si <= 1:
+            _progress_snap = data
 
 
-def get_progress_snap() -> Dict[str, Any]:
+def get_progress_snap(*, screen: int = 1) -> Dict[str, Any]:
+    si = max(1, int(screen or 1))
     with _lock:
-        return dict(_progress_snap)
+        return dict(_progress_snap_by_screen.get(si) or {})
 
 
-def update_active_schedule_keys(keys: Any) -> None:
+def update_active_schedule_keys(keys: Any, *, screen: int = 1) -> None:
     # keys is a frozenset of tuples (match keys)
+    si = max(1, int(screen or 1))
     try:
         tup = tuple(sorted(tuple(k) for k in (keys or ())))
     except Exception:
         tup = ()
     with _lock:
         global _active_schedule_keys
-        _active_schedule_keys = tup
+        _active_schedule_keys_by_screen[si] = tup
+        if si <= 1:
+            _active_schedule_keys = tup
 
 
-def get_active_schedule_keys() -> Tuple[Tuple[Any, ...], ...]:
+def get_active_schedule_keys(*, screen: int = 1) -> Tuple[Tuple[Any, ...], ...]:
+    si = max(1, int(screen or 1))
     with _lock:
-        return tuple(_active_schedule_keys)
+        return tuple(_active_schedule_keys_by_screen.get(si) or ())
 
 
 def set_foup_counts(

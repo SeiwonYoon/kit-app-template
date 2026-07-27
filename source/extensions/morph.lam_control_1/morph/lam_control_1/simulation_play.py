@@ -4665,8 +4665,13 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
     stage: Any,
     *,
     screen: int = 1,
+    sync_label_tracker: bool = True,
 ) -> Tuple[int, int]:
     """FOUP1~3×25 show, 그 외 슬롯·팔 wafer hide (stage 에 존재하는 경로만).
+
+    Args:
+        sync_label_tracker: True(재생 시작) 시 FOUP baseline 라벨 복구.
+            False(정지 초기화) 시 트래커는 건드리지 않음 — 호출측에서 clear.
 
     Returns:
         (show_ok_count, hide_ok_count)
@@ -4705,19 +4710,19 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
         f"화면{si} FOUP show {show_ok} · 기타 hide {hide_ok}",
         flush=True,
     )
-    try:
-        from .lam_wafer_viewport_labels import (
-            get_wafer_label_tracker,
-            notify_wafer_label_tracker_changed,
-        )
+    if sync_label_tracker:
+        try:
+            from .lam_wafer_viewport_labels import (
+                get_wafer_label_tracker,
+                notify_wafer_label_tracker_changed,
+            )
 
-        tracker = get_wafer_label_tracker(si)
-        # UI 체크와 무관하게 tracking baseline 유지 (표시만 화면별 on/off).
-        # 예전: UI OFF 이면 clear → 화면1 재체크 시 번호가 안 나오는 원인.
-        tracker.reset_foup_baseline(wafer_map, stage=stage)
-        notify_wafer_label_tracker_changed(si)
-    except Exception:
-        pass
+            tracker = get_wafer_label_tracker(si)
+            # UI 체크와 무관하게 tracking baseline 유지 (표시만 화면별 on/off).
+            tracker.reset_foup_baseline(wafer_map, stage=stage)
+            notify_wafer_label_tracker_changed(si)
+        except Exception:
+            pass
     return (show_ok, hide_ok)
 
 
@@ -4954,6 +4959,41 @@ def reset_csv_play_stop_initial_state(
         flush=True,
     )
 
+    # STATUS 패널·진행 스냅 — 해당 화면만 비움 (다른 화면 재생 유지)
+    try:
+        from .lam_viewport_overlay_state import set_last_state_title
+
+        set_last_state_title("", screen=si)
+    except Exception:
+        pass
+    try:
+        _reset_csv_play_progress_snap(
+            process_only=False,
+            json_total=0,
+            csv_total=0.0,
+            t0=0.0,
+            speed_scale=1.0,
+            screen=si,
+        )
+        clear_csv_play_timeline_highlight(screen=si)
+    except Exception:
+        pass
+    try:
+        from .lam_wafer_viewport_labels import (
+            get_wafer_label_tracker,
+            notify_wafer_label_tracker_changed,
+            teardown_wafer_viewport_labels,
+        )
+
+        get_wafer_label_tracker(si).clear()
+        try:
+            teardown_wafer_viewport_labels(screen=si)
+        except Exception:
+            pass
+        notify_wafer_label_tracker_changed(si)
+    except Exception:
+        pass
+
     try:
         # 화면1(default context="")도 해당 context만 중지한다.
         # stop_all_*은 화면2 aux 애니메이션까지 끊으므로 화면별 reset에서 금지.
@@ -4997,7 +5037,10 @@ def reset_csv_play_stop_initial_state(
                 )
             _snap_csv_play_robot_z_home(st)
             _snap_csv_play_scaffold_motion_prims_home(st)
-            apply_csv_play_initial_wafer_visibility_on_stage(st, screen=si)
+            # 정지: wafer prim 위치만 복원. 라벨 트래커는 이미 clear — FOUP 번호 재표시 금지.
+            apply_csv_play_initial_wafer_visibility_on_stage(
+                st, screen=si, sync_label_tracker=False
+            )
             try:
                 from .lam_foup_usage_hide import restore_foup_usage_extra_hide_on_stage
 

@@ -159,7 +159,11 @@ def usd_context_name_for_screen(ext: Any, screen: int) -> Optional[str]:
 
 
 def get_stage_for_screen(ext: Any, screen: int) -> Any:
-    """화면 USD context 의 Stage (없으면 default context)."""
+    """화면 USD context 의 Stage.
+
+    화면2+: aux context 가 없으면 **None** (default/화면1 stage 로 폴백하지 않음 —
+    화면1 wafer visibility·라벨 오염 방지).
+    """
     si = max(1, int(screen))
     if si <= 1:
         try:
@@ -170,24 +174,14 @@ def get_stage_for_screen(ext: Any, screen: int) -> Any:
             return None
     ctx_name = usd_context_name_for_screen(ext, si)
     if not ctx_name:
-        try:
-            from .lam_prim_utils import get_stage
-
-            return get_stage()
-        except Exception:
-            return None
+        return None
     try:
         import omni.usd as ou
 
         ctx = ou.get_context(str(ctx_name))
         return ctx.get_stage() if ctx is not None else None
     except Exception:
-        try:
-            from .lam_prim_utils import get_stage
-
-            return get_stage()
-        except Exception:
-            return None
+        return None
 
 
 def resolve_viewport_window_for_screen(

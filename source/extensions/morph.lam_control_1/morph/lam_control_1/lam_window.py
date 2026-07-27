@@ -119,7 +119,7 @@ class LamWindow:
         self._csv_sim_windows: Dict[int, LamSimulationCsvPlayWindow] = {}
         self._csv_viewport_hud: Optional[LamCsvViewportControlsHud] = None
         self._wafer_foup_labels: Optional[LamWaferFoupViewportLabels] = None
-        self._status_panel: Optional[LamViewportStatusPanel] = None
+        self._status_panel_by_screen: Dict[int, LamViewportStatusPanel] = {}
         self._status_panel_web_notifier: Optional[LamStatusPanelWebNotifier] = None
         self._foup_status_3d: Optional[LamFoupStatus3dPanel] = None
         self._foup_status_3d_by_screen: Dict[int, LamFoupStatus3dPanel] = {}
@@ -598,6 +598,42 @@ class LamWindow:
         self._wafer_foup_labels = wafer
         wafer.sync_layers(delay_frames=delay_frames)
 
+    def _sync_status_panel_for_screen(
+        self,
+        screen: int,
+        csv_win: LamSimulationCsvPlayWindow,
+        *,
+        viewport_window: Any = None,
+    ) -> None:
+        """화면별 Viewport STATUS 2D 패널 — SHOW_VIEWPORT_STATUS_PANEL."""
+        si = max(1, int(screen))
+        try:
+            from .lam_sim_control_defaults import SHOW_VIEWPORT_STATUS_PANEL
+        except Exception:
+            SHOW_VIEWPORT_STATUS_PANEL = False
+        by_screen = self._status_panel_by_screen
+        if not bool(SHOW_VIEWPORT_STATUS_PANEL):
+            panel = by_screen.pop(si, None)
+            if panel is not None:
+                try:
+                    panel.destroy()
+                except Exception:
+                    pass
+            return
+        panel = by_screen.get(si)
+        if panel is None:
+            panel = LamViewportStatusPanel(
+                csv_win,
+                viewport=self._viewport,
+                screen=si,
+            )
+            by_screen[si] = panel
+        else:
+            panel._csv = csv_win
+        if viewport_window is not None:
+            panel._viewport_window = viewport_window
+        panel.sync_layers()
+
     def _sync_csv_viewport_hud(self) -> None:
         """defaults에서 허용할 때만 Viewport 우상단 CSV 미니 패널을 표시."""
         if self._csv_sim_windows.get(1) is None:
@@ -626,19 +662,15 @@ class LamWindow:
         except Exception:
             SHOW_VIEWPORT_STATUS_PANEL = False
         if bool(SHOW_VIEWPORT_STATUS_PANEL):
-            if self._status_panel is None:
-                self._status_panel = LamViewportStatusPanel(
-                    csv_win,
-                    viewport=self._viewport,
-                )
-            self._status_panel.sync_layers()
+            self._sync_status_panel_for_screen(1, csv_win)
         else:
-            if self._status_panel is not None:
-                try:
-                    self._status_panel.destroy()
-                except Exception:
-                    pass
-            self._status_panel = None
+            for si in list(self._status_panel_by_screen.keys()):
+                panel = self._status_panel_by_screen.pop(si, None)
+                if panel is not None:
+                    try:
+                        panel.destroy()
+                    except Exception:
+                        pass
 
         # STATUS 패널 UI 플래그와 무관 — 내용 변경 시 웹 V2T_notify_status_panel
         if csv_win is not None:
@@ -748,12 +780,12 @@ class LamWindow:
         except Exception:
             pass
         self._csv_viewport_hud = None
-        try:
-            if self._status_panel is not None:
-                self._status_panel.destroy()
-        except Exception:
-            pass
-        self._status_panel = None
+        for panel in list(self._status_panel_by_screen.values()):
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        self._status_panel_by_screen.clear()
         try:
             if self._status_panel_web_notifier is not None:
                 self._status_panel_web_notifier.destroy()
