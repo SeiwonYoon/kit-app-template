@@ -7416,52 +7416,6 @@ class LamSimulationCsvPlayWindow:
             return True
         return False
 
-    def _fan_out_process_only_to_aux_screens(self, desired: bool) -> None:
-        """화면1 HUD·공유 체크박스 → 재생 중인 화면2+ 에도 동일 모드 전파.
-
-        모델 set_value 는 Kit main 에서만 (debounce 백그라운드에서 omni.ui 금지).
-        """
-        lam = self._lam_window_ref
-        if lam is None:
-            return
-        wins = getattr(lam, "_csv_sim_windows", None)
-        if not isinstance(wins, dict):
-            return
-        for si, win in wins.items():
-            if int(si) <= int(self._screen) or win is None:
-                continue
-            try:
-                if not win._csv_play_is_active():
-                    continue
-                if not csv_play_session_active(screen=int(si)):
-                    continue
-                snap = get_csv_play_progress_snap(screen=int(si))
-                if bool(snap.get("process_only")) == bool(desired):
-                    continue
-
-                def _sync_model(
-                    w=win, d=bool(desired), screen_i=int(si)
-                ) -> None:
-                    try:
-                        m = w._process_only_model
-                        w._process_only_model_syncing = True
-                        try:
-                            if m is not None and bool(w._read_process_only()) != d:
-                                m.set_value(d)
-                        finally:
-                            w._process_only_model_syncing = False
-                    except Exception:
-                        pass
-
-                try:
-                    _post_kit_main_thread(_sync_model)
-                except Exception:
-                    pass
-                win._process_only_switch_target = bool(desired)
-                win._try_start_live_process_only_switch(bool(desired))
-            except Exception:
-                continue
-
     def _resolve_prepared_playback_for_live_switch(self) -> Optional[CachedCsvPlayback]:
         cached = self._prepared_playback
         if cached is not None:
@@ -7490,10 +7444,8 @@ class LamSimulationCsvPlayWindow:
             f"pending={self._process_only_switch_pending}",
             flush=True,
         )
-        # 화면1 전환을 먼저 시작한 뒤 화면2+ 에 전파
+        # 화면별 독립 — 타 화면으로 공정만보기 전파하지 않음
         self._try_start_live_process_only_switch(desired)
-        if self._screen <= 1:
-            self._fan_out_process_only_to_aux_screens(desired)
 
     def _try_start_live_process_only_switch(self, desired: bool) -> None:
         """해당 화면 재생 중이면 pause → 공정만보기/일반 모드로 이어서 재생.
@@ -7543,26 +7495,26 @@ class LamSimulationCsvPlayWindow:
                     pass
                 return
             snap = get_csv_play_progress_snap(screen=si)
+            desired_b = bool(desired)
+            snap_po = bool(snap.get("process_only"))
             last_applied = getattr(self, "_process_only_last_applied", None)
-            if (
-                last_applied is not None
-                and bool(last_applied) == bool(desired)
-                and csv_play_session_active(screen=si)
-            ):
+            # snap·last_applied 가 모두 목표와 일치할 때만 skip.
+            # last_applied 만 OFF 로 맞춰지면 snap=ON 인 채 전환이 영구 skip 되는 버그가 있었다.
+            if csv_play_session_active(screen=si) and snap_po == desired_b:
+                if last_applied is None or bool(last_applied) == desired_b:
+                    print(
+                        f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — "
+                        f"이미 {'ON' if desired_b else 'OFF'} "
+                        f"(snap={snap_po} applied={last_applied})",
+                        flush=True,
+                    )
+                    self._process_only_last_applied = desired_b
+                    return
                 print(
-                    f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — "
-                    f"이미 적용·재생 중 applied={desired}",
+                    f"{_PRINT_PREFIX} 공정만보기 전환 재시도 화면{si} — "
+                    f"목표={desired_b} snap={snap_po} last_applied={last_applied}",
                     flush=True,
                 )
-                return
-            if bool(snap.get("process_only")) == bool(desired):
-                print(
-                    f"{_PRINT_PREFIX} 공정만보기 전환 skip 화면{si} — "
-                    f"이미 {'ON' if desired else 'OFF'}",
-                    flush=True,
-                )
-                self._process_only_last_applied = bool(desired)
-                return
             cached = self._resolve_prepared_playback_for_live_switch()
             if cached is None:
                 print(
