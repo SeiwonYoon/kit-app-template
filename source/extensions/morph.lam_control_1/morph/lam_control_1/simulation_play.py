@@ -4280,6 +4280,92 @@ def _csv_play_process_only_lane_worker(
         lane_last_csv = max(lane_last_csv, float(block.time_sec))
 
 
+def _process_only_sequential_settings() -> Tuple[bool, float]:
+    """공정만보기 순차 실행 설정 — ``lam_sim_control_defaults`` SSOT."""
+    try:
+        from .lam_sim_control_defaults import (  # type: ignore
+            PROCESS_ONLY_SEQUENTIAL_GAP_SEC,
+            PROCESS_ONLY_SEQUENTIAL_LANES,
+        )
+
+        return (
+            bool(PROCESS_ONLY_SEQUENTIAL_LANES),
+            max(0.0, float(PROCESS_ONLY_SEQUENTIAL_GAP_SEC or 0.0)),
+        )
+    except Exception:
+        return False, 0.0
+
+
+def _process_only_sync_playhead_to_block(
+    block: CsvTimedPlaybackBlock,
+    *,
+    screen: Optional[int] = None,
+) -> None:
+    """순차 공정만보기 — 블록 시작 시 진행 시계·UI 스냅을 해당 CSV t 로 맞춤."""
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
+    target_csv = float(block.time_sec)
+    _process_only_mark_block_started(block, screen=si)
+    sess = csv_play_screen_session(si)
+    with sess.process_only_playhead_lock:
+        if target_csv > sess.process_only_playhead_csv:
+            sess.process_only_playhead_csv = target_csv
+        sess.process_only_playhead_wall = time.monotonic()
+    with sess.progress_snap_lock:
+        sess.progress_snap["csv_t_display"] = target_csv
+    _notify_csv_play_progress_ui(screen=si)
+
+
+def _csv_play_process_only_sequential_worker(
+    items: List[Tuple[int, CsvTimedPlaybackBlock]],
+    registry: Any,
+    scheduler: Any,
+    *,
+    t0: float,
+    lane_coordinator: _CsvPlaybackLaneCoordinator,
+    json_done_counter: List[int],
+    json_done_lock: threading.Lock,
+    all_json_blocks: List[CsvTimedPlaybackBlock],
+    usd_context_name: Optional[str] = None,
+    lam_window: Any = None,
+    play_screen: Optional[int] = None,
+    play_epoch: Optional[int] = None,
+    gap_sec: float = 0.0,
+) -> None:
+    """공정만보기 순차 모드 — 전역 시간순 1스레드, JSON 간 겹침 없음."""
+    _ = (t0, all_json_blocks)
+    si = max(1, int(play_screen if play_screen is not None else current_csv_play_screen()))
+    gap = max(0.0, float(gap_sec or 0.0))
+    for ord_i, (index, block) in enumerate(items):
+        if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
+            return
+        if ord_i > 0 and gap > 1e-9:
+            if not _sleep_csv_playback(gap, screen=si, play_epoch=play_epoch):
+                return
+        if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
+            return
+        if not _wait_csv_play_hold_before_new_json(screen=si, play_epoch=play_epoch):
+            return
+        _process_only_sync_playhead_to_block(block, screen=si)
+        with json_done_lock:
+            json_done_before = int(json_done_counter[0])
+        _csv_playback_execute_json_block(
+            block,
+            index,
+            registry,
+            scheduler,
+            t0=t0,
+            speed_scale=1.0,
+            lane_coordinator=lane_coordinator,
+            json_done_before=json_done_before,
+            usd_context_name=usd_context_name,
+            lam_window=lam_window,
+            play_screen=play_screen,
+            play_epoch=play_epoch,
+        )
+        with json_done_lock:
+            json_done_counter[0] = max(int(json_done_counter[0]), json_done_before + 1)
+
+
 def _run_csv_timed_playback_process_only(
     registry: Any,
     scheduler: Any,
@@ -4365,14 +4451,25 @@ def _run_csv_timed_playback_process_only(
         return
     csv_total = max(float(b.time_sec) for b in ordered)
 
+    seq_lanes, seq_gap = _process_only_sequential_settings()
     resume_note = f" · 이어서 t≥{resume:.1f}s" if resume > 1e-9 else ""
-    print(
-        f"{_PRINT_PREFIX} ▶ 공정만보기 재생 | JSON {n_json_remaining}건 | "
-        f"CSV t 표시 0~{csv_total:.1f}s | ATM {len(atm_items)} · VTM {len(vtm_items)} | "
-        f"배속 1x · idle 구간만 점프 · CSV t 간격으로 레인 시작(겹침 시 병렬)"
-        f"{resume_note}",
-        flush=True,
-    )
+    if seq_lanes:
+        gap_note = f" · JSON 간격 {seq_gap:g}s" if seq_gap > 1e-9 else ""
+        print(
+            f"{_PRINT_PREFIX} ▶ 공정만보기 재생(순차) | JSON {n_json_remaining}건 | "
+            f"CSV t 표시 0~{csv_total:.1f}s | ATM {len(atm_items)} · VTM {len(vtm_items)} | "
+            f"배속 1x · 이전 JSON 완료 후 다음 시작{gap_note}"
+            f"{resume_note}",
+            flush=True,
+        )
+    else:
+        print(
+            f"{_PRINT_PREFIX} ▶ 공정만보기 재생 | JSON {n_json_remaining}건 | "
+            f"CSV t 표시 0~{csv_total:.1f}s | ATM {len(atm_items)} · VTM {len(vtm_items)} | "
+            f"배속 1x · idle 구간만 점프 · CSV t 간격으로 레인 시작(겹침 시 병렬)"
+            f"{resume_note}",
+            flush=True,
+        )
 
     wall_off = max(0.0, float(wall_elapsed_offset or 0.0))
     t0 = time.monotonic() - wall_off
@@ -4452,36 +4549,51 @@ def _run_csv_timed_playback_process_only(
             "play_screen": si,
             "play_epoch": play_epoch,
         }
-        if atm_items:
+        if seq_lanes:
+            sequential_items = sorted(
+                atm_items + vtm_items + other_items,
+                key=lambda x: (x[1].time_sec, x[1].sort_order),
+            )
             workers.append(
                 _spawn_csv_play_bound_thread(
                     si,
-                    name=f"lam-csv-play-atm-seq-s{si}",
-                    target=_csv_play_process_only_lane_worker,
-                    args=(atm_items, "atm", registry, scheduler),
-                    kwargs=lane_kw,
+                    name=f"lam-csv-play-seq-s{si}",
+                    target=_csv_play_process_only_sequential_worker,
+                    args=(sequential_items, registry, scheduler),
+                    kwargs={**lane_kw, "gap_sec": seq_gap},
                 )
             )
-        if vtm_items:
-            workers.append(
-                _spawn_csv_play_bound_thread(
-                    si,
-                    name=f"lam-csv-play-vtm-seq-s{si}",
-                    target=_csv_play_process_only_lane_worker,
-                    args=(vtm_items, "vtm", registry, scheduler),
-                    kwargs=lane_kw,
+        else:
+            if atm_items:
+                workers.append(
+                    _spawn_csv_play_bound_thread(
+                        si,
+                        name=f"lam-csv-play-atm-seq-s{si}",
+                        target=_csv_play_process_only_lane_worker,
+                        args=(atm_items, "atm", registry, scheduler),
+                        kwargs=lane_kw,
+                    )
                 )
-            )
-        if other_items:
-            workers.append(
-                _spawn_csv_play_bound_thread(
-                    si,
-                    name=f"lam-csv-play-other-seq-s{si}",
-                    target=_csv_play_process_only_lane_worker,
-                    args=(other_items, None, registry, scheduler),
-                    kwargs=lane_kw,
+            if vtm_items:
+                workers.append(
+                    _spawn_csv_play_bound_thread(
+                        si,
+                        name=f"lam-csv-play-vtm-seq-s{si}",
+                        target=_csv_play_process_only_lane_worker,
+                        args=(vtm_items, "vtm", registry, scheduler),
+                        kwargs=lane_kw,
+                    )
                 )
-            )
+            if other_items:
+                workers.append(
+                    _spawn_csv_play_bound_thread(
+                        si,
+                        name=f"lam-csv-play-other-seq-s{si}",
+                        target=_csv_play_process_only_lane_worker,
+                        args=(other_items, None, registry, scheduler),
+                        kwargs=lane_kw,
+                    )
+                )
         for t in workers:
             if csv_playback_stop_requested(screen=si):
                 stopped = True

@@ -73,6 +73,19 @@ SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = True
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 # ---------------------------------------------------------------------------
+# 공정만보기 — JSON 실행 순서 (일반 재생·병렬 공정만보기에는 영향 없음)
+# ---------------------------------------------------------------------------
+# False(기본): 지금과 동일 — CSV 시각(t)이 겹치면 ATM·VTM이 동시에 움직일 수 있음.
+# True: 공정만보기일 때만 JSON을 시작 시각 순으로 하나씩 실행.
+#       이전 JSON 애니메이션이 끝난 뒤에만 다음 JSON 시작 (레인 간 겹침 없음).
+#       예) VTM 10초 실행 중 t=5 ATM이 있어도, ATM은 VTM 완료 후에 시작.
+PROCESS_ONLY_SEQUENTIAL_LANES: bool = True
+
+# 위 순차 모드가 True일 때만 적용 — JSON이 끝난 뒤 다음 JSON 시작 전 추가 대기 [초].
+# 0 = 끝나자마자 바로 다음 JSON, 2 = 2초 쉬었다가 다음 JSON.
+PROCESS_ONLY_SEQUENTIAL_GAP_SEC: float = 0.5
+
+# ---------------------------------------------------------------------------
 # FOUP 번호별 추가 숨김 prim (인덱스 = FOUP 번호)
 # ---------------------------------------------------------------------------
 # ``FOUP_USAGE_EXTRA_HIDE_PRIMS_1`` = FOUP1 관련 경로, ``_2`` = FOUP2, ``_3`` = FOUP3.
@@ -103,7 +116,7 @@ FEDERATION_QUERY_URL: str = (
     "http://10.61.59.208/queries/mcc-target-prev-lot-history/run"
 )
 # 페이지당 row 수 — sk.hyview_messaging.lam_handler_config 에서 override 가능.
-FEDERATION_FETCH_LIMIT: int = 50
+FEDERATION_FETCH_LIMIT: int = 1000
 # 화면당 전체 pagination fetch 타임아웃 [s].
 FEDERATION_FETCH_TIMEOUT_SEC: float = 300.0
 # True → HTTP 대신 data/federation_fixture 샘플 JSON (오프라인 파서 검증).
@@ -175,6 +188,8 @@ __all__ = [
     "SHOW_VIEWPORT_CSV_PANEL",
     "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
+    "PROCESS_ONLY_SEQUENTIAL_LANES",
+    "PROCESS_ONLY_SEQUENTIAL_GAP_SEC",
     "FOUP_USAGE_EXTRA_HIDE_PRIMS_1",
     "FOUP_USAGE_EXTRA_HIDE_PRIMS_2",
     "FOUP_USAGE_EXTRA_HIDE_PRIMS_3",
