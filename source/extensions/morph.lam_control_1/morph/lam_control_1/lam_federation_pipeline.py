@@ -1180,6 +1180,17 @@ def run_federation_start_simulation(
         _federation_force_stop_requested_screens(
             ext, lam_window, [s for s, _ in jobs]
         )
+        try:
+            from .lam_play_start_sequence import (  # type: ignore
+                run_play_start_request_standby_for_screens,
+            )
+
+            run_play_start_request_standby_for_screens(
+                lam_window,
+                [s for s, _ in jobs],
+            )
+        except Exception as exc:
+            _fed_diag("S06_standby_fail", str(exc))
 
         results: List[ScreenPipelineResult] = []
         # Phase A: fetch+parse+prerun 만 (play 보류). 순차 처리로 main-thread 경합 회피.

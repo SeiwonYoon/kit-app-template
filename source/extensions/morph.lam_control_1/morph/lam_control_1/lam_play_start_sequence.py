@@ -348,8 +348,215 @@ def run_aux_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
     return run_screen_play_start_preflight(runtime, settings)
 
 
+def _read_bool_model(m: Any) -> bool:
+    if m is None:
+        return False
+    try:
+        return bool(m.get_value_as_bool())
+    except Exception:
+        pass
+    try:
+        return bool(m.as_bool)
+    except Exception:
+        pass
+    try:
+        return bool(m.get_value())
+    except Exception:
+        return False
+
+
+def _reset_play_start_overlay_checkboxes(
+    *,
+    screen: int,
+    csv_window: Any,
+    lam_window: Any,
+    runtime: Any,
+) -> None:
+    """시작 요청 직후 오버레이 체크 해제 (일시정지 이어서 재생 제외)."""
+    if csv_window is None:
+        return
+    try:
+        csv_window.ensure_playback_models()
+    except Exception:
+        pass
+
+    read_bool = getattr(csv_window, "_read_bool_model", None)
+    if not callable(read_bool):
+        read_bool = _read_bool_model
+
+    uses_global = bool(
+        getattr(csv_window, "_uses_global_overlay_models", lambda: int(screen) <= 1)()
+    )
+
+    if uses_global:
+        from .lam_viewport_overlay_state import (  # type: ignore
+            get_toggle_play_prim_hide,
+            set_toggle_device_labels,
+            set_toggle_foup_status,
+            set_toggle_play_prim_hide,
+            set_toggle_top_view,
+        )
+
+        if get_toggle_play_prim_hide():
+            set_toggle_play_prim_hide(False)
+        set_toggle_foup_status(False)
+        set_toggle_device_labels(False)
+        set_toggle_top_view(False)
+    else:
+        prim_m = getattr(csv_window, "_play_prim_hide_model", None)
+        was_prim_hide = read_bool(prim_m)
+
+        csv_window._overlay_checkbox_syncing = True
+        try:
+            for attr in (
+                "_foup_status_show_model",
+                "_device_labels_show_model",
+                "_wafer_label_show_model",
+                "_process_only_model",
+                "_top_view_model",
+            ):
+                m = getattr(csv_window, attr, None)
+                if m is not None:
+                    try:
+                        m.set_value(False)
+                    except Exception:
+                        pass
+        finally:
+            csv_window._overlay_checkbox_syncing = False
+
+        if was_prim_hide:
+            sync_prim_fn = getattr(csv_window, "sync_play_prim_hide_checkbox_ui", None)
+            if callable(sync_prim_fn):
+                sync_prim_fn(False)
+            elif prim_m is not None:
+                csv_window._overlay_checkbox_syncing = True
+                try:
+                    prim_m.set_value(False)
+                except Exception:
+                    pass
+                finally:
+                    csv_window._overlay_checkbox_syncing = False
+            if runtime is not None:
+                from .lam_csv_screen_runtime import apply_prim_hide_for_screen  # type: ignore
+
+                apply_prim_hide_for_screen(runtime, enabled=False, force=True)
+        if runtime is not None:
+            from .lam_csv_screen_runtime import apply_top_view_for_screen  # type: ignore
+
+            apply_top_view_for_screen(runtime, enabled=False, force=True)
+        sync_fn = getattr(csv_window, "_request_screen_3d_overlay_sync", None)
+        if callable(sync_fn):
+            sync_fn()
+
+    wl_m = getattr(csv_window, "_wafer_label_show_model", None)
+    if wl_m is not None:
+        try:
+            wl_m.set_value(False)
+        except Exception:
+            pass
+    apply_wafer = getattr(csv_window, "apply_wafer_label_visibility_from_ui", None)
+    if callable(apply_wafer):
+        try:
+            apply_wafer(lam_window=lam_window)
+        except Exception:
+            pass
+    po_fn = getattr(csv_window, "_schedule_live_process_only_changed", None)
+    if callable(po_fn):
+        try:
+            po_fn(desired=False)
+        except Exception:
+            pass
+
+
+def _run_play_start_request_standby_impl(
+    lam_window: Any,
+    screen: int,
+    csv_window: Any = None,
+) -> bool:
+    from .lam_csv_screen_runtime import resolve_csv_screen_runtime  # type: ignore
+    from .lam_play_camera_fly import (  # type: ignore
+        _get_active_viewport_api,
+        apply_play_camera_start_view_standby,
+    )
+
+    si = max(1, int(screen))
+    if csv_window is None and lam_window is not None:
+        sim_wins = getattr(lam_window, "_csv_sim_windows", {})
+        if isinstance(sim_wins, dict):
+            csv_window = sim_wins.get(si)
+    runtime = resolve_csv_screen_runtime(
+        lam_window,
+        si,
+        csv_window=csv_window,
+        require_aux=False,
+    )
+    if csv_window is None and runtime is not None:
+        csv_window = getattr(runtime, "csv_window", None)
+    vp_api = None
+    ctx = ""
+    if runtime is not None:
+        vp_api = runtime.viewport_api
+        ctx = str(runtime.context_name or "")
+    if si <= 1 and vp_api is None:
+        vp_api = _get_active_viewport_api()
+    cam_ok = apply_play_camera_start_view_standby(vp_api, ctx)
+    _reset_play_start_overlay_checkboxes(
+        screen=si,
+        csv_window=csv_window,
+        lam_window=lam_window,
+        runtime=runtime,
+    )
+    print(
+        f"{_PRINT_PREFIX} play start standby screen{si} cam_ok={cam_ok}",
+        flush=True,
+    )
+    return cam_ok
+
+
+def run_play_start_request_standby(
+    lam_window: Any,
+    screen: int,
+    csv_window: Any = None,
+) -> bool:
+    """시작 요청 직후 — START_VIEW 대기 + 오버레이 체크 해제 (resume 제외 호출)."""
+    result: list[bool] = [False]
+
+    def _go() -> None:
+        result[0] = _run_play_start_request_standby_impl(
+            lam_window,
+            screen,
+            csv_window,
+        )
+
+    try:
+        from .lam_sequence_engine import _dispatch_main_wait  # type: ignore
+
+        _dispatch_main_wait(_go, timeout=8.0)
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} play start standby dispatch failed screen{screen}: {exc}",
+            flush=True,
+        )
+        return False
+    return bool(result[0])
+
+
+def run_play_start_request_standby_for_screens(
+    lam_window: Any,
+    screens: list[int],
+) -> None:
+    """웹 Federation 등 — 화면별 standby (fetch/parse 전)."""
+    sim_wins = getattr(lam_window, "_csv_sim_windows", {}) if lam_window else {}
+    for raw in screens:
+        si = max(1, int(raw))
+        cw = sim_wins.get(si) if isinstance(sim_wins, dict) else None
+        run_play_start_request_standby(lam_window, si, csv_window=cw)
+
+
 __all__ = [
     "run_aux_screen_play_start_preflight",
     "run_play_start_preflight",
+    "run_play_start_request_standby",
+    "run_play_start_request_standby_for_screens",
     "run_screen_play_start_preflight",
 ]

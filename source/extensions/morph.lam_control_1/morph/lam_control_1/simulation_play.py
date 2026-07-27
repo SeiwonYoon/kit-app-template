@@ -8545,6 +8545,20 @@ class LamSimulationCsvPlayWindow:
             # 정지(초기화)·일시정지 직후 request_stop 이 남은 stop 플래그를 해제하지 않으면
             # worker 의 preflight·run_simulation_from_csv 진입 전에 조용히 return 됨.
             clear_csv_playback_stop(screen=self._screen)
+        if not resume_from_pause:
+            try:
+                from .lam_play_start_sequence import run_play_start_request_standby
+
+                run_play_start_request_standby(
+                    self._lam_window_ref,
+                    self._screen,
+                    csv_window=self,
+                )
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} play start standby failed screen{self._screen}: {exc}",
+                    flush=True,
+                )
         if pause_ck is None:
             prepared = None
         else:

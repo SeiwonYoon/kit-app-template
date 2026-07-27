@@ -76,7 +76,7 @@ default_load_usd_path = "usd/master_1.usd"
 # 2화면 분할 시 보조 타일(화면2+)에 열 Master USD — 화면1과 **경로만 다르고 내용 동일**한 복사본 권장.
 # 설정 시 런타임 copy_async·Flatten prewarm 을 생략하고, 보조 화면은 독립 Discover+Extract 한다.
 # 비우면 기존처럼 화면1 Master 를 복제한다.
-default_aux_load_usd_path = "usd/master_2.usd"
+default_aux_load_usd_path = "usd/master_3.usd"
 
 _PRINT_PREFIX = "[LAM/WIN]"
 

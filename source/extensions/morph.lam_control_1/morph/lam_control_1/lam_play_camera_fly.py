@@ -1432,6 +1432,48 @@ def play_camera_start_view_spec() -> Optional[CameraViewSnapshot]:
     return _snapshot_from_preset_spec(_play_camera_start_view_pref())
 
 
+def apply_play_camera_start_view_standby(
+    viewport_api: Any = None,
+    usd_context_name: str = "",
+) -> bool:
+    """시뮬 시작 요청 직후 — 화면 수별 START_VIEW preset 을 Perspective 로 즉시 대기.
+
+    preflight/worker 전에 fly kickoff 와 동일한 시작점을 맞춘다.
+    """
+    if play_camera_use_preset_coords():
+        return False
+    start_pref = _play_camera_start_view_pref()
+    start_snap = _snapshot_from_preset_spec(start_pref)
+    if start_snap is None:
+        return False
+    ctx = str(usd_context_name or "").strip()
+    vp = viewport_api
+    if vp is None:
+        vp = _get_active_viewport_api()
+    fly_start_up = _up_from_preset_spec(start_pref)
+    ok = False
+    with camera_fly_usd_context(ctx or None):
+        if vp is not None:
+            clear_pre_top_view_hold_for_viewport(vp, ctx)
+            restore_perspective_on_viewport(vp, ctx)
+        ok = bool(
+            apply_camera_view(
+                start_snap,
+                up_xyz=fly_start_up,
+                camera_path=_PERSP_CAMERA_PATH,
+            )
+        )
+        if vp is not None and ok:
+            restore_perspective_on_viewport(vp, ctx)
+    if ok:
+        print(
+            f"{_PRINT_PREFIX} play start standby — START_VIEW preset "
+            f"screens={current_visible_screen_count()} ctx={ctx!r}",
+            flush=True,
+        )
+    return ok
+
+
 def play_camera_prim_view_spec() -> Optional[CameraViewSnapshot]:
     """config PLAY_CAMERA_PRIM_VIEW[_N_SCREEN] (None 이면 prim 현재 상태 사용)."""
     return _snapshot_from_preset_spec(_play_camera_prim_view_pref())
@@ -3101,6 +3143,7 @@ __all__ = [
     "CameraPrimBaseline",
     "CameraViewSnapshot",
     "apply_camera_view",
+    "apply_play_camera_start_view_standby",
     "apply_play_camera_prim_view_spec",
     "apply_play_camera_aperture",
     "start_play_camera_aperture_blend",
