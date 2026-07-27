@@ -4,6 +4,53 @@
 웹 → Kit 요청은 `T2V_*`, Kit → 웹 응답·통지는 `V2T_*` 이벤트로 주고받는다.
 요청 없이 Kit이 보내는 통지(예: STATUS 패널)도 `V2T_*`이며, envelope는 응답과 동일하게 `{code, message, data}` 형식을 쓴다.
 
+
+## 데이터샘플 예시 (Simulation GET 응답 형식)
+
+Federation POST는 `columns`/`rows` 객체이고, Simulation GET은 아래처럼 **객체 배열**이다. 필드명은 동일하다.
+
+[
+  {
+    "lot_flag": "prev",
+    "module_nm": "AtmArm-EndEffector11",
+    "lot_id": "TAGUB84",
+    "cassette_id": "6PDB5400",
+    "cassette_slot": "25",
+    "recipe_id": "AJ_SC2HM_R14_M14_2345",
+    "eqp_tm": "2026-06-01 01:04:11.180000",
+    "eqp_start_tm": "2026-06-01 00:14:27.270000",
+    "eqp_end_tm": "2026-06-01 00:14:44.420000",
+    "process_tm": "0.285833",
+    "eqp_id": "4EKFA417"
+  },
+  {
+    "lot_flag": "prev",
+    "module_nm": "AirLock1-iSlot1",
+    "lot_id": "TAGUB84",
+    "cassette_id": "6PDB5400",
+    "cassette_slot": "25",
+    "recipe_id": "AJ_SC2HM_R14_M14_2345",
+    "eqp_tm": "2026-06-01 01:04:11.180000",
+    "eqp_start_tm": "2026-06-01 00:14:44.420000",
+    "eqp_end_tm": "2026-06-01 00:15:15.190000",
+    "process_tm": "0.512833",
+    "eqp_id": "4EKFA417"
+  },
+  {
+    "lot_flag": "prev",
+    "module_nm": "TransferChamber-EndEffector2",
+    "lot_id": "TAGUB84",
+    "cassette_id": "6PDB5400",
+    "cassette_slot": "25",
+    "recipe_id": "AJ_SC2HM_R14_M14_2345",
+    "eqp_tm": "2026-06-01 01:04:11.180000",
+    "eqp_start_tm": "2026-06-01 00:15:15.190000",
+    "eqp_end_tm": "2026-06-01 00:15:23.950000",
+    "process_tm": "0.146",
+    "eqp_id": "4EKFA417"
+  }
+]
+
 ## 구성 요소
 
 | 계층 | 파일 | 역할 |
@@ -11,7 +58,7 @@
 | 이벤트/키 SSOT | `sk.hyview_messaging/hyview_event_contract.py` | 이벤트명·payload 키 상수 |
 | 메시징 핸들러 | `sk.hyview_messaging/extension_handlers/lam_handler.py` | T2V 수신·payload 파싱·V2T envelope 조립 |
 | Kit 실행 브리지 | `sk.hyview_messaging/lam_sim_bridge.py` | 메인 스레드 마샬링 + Kit 시뮬 실행 위임 |
-| Kit 파이프라인 | `morph.lam_control_1/lam_federation_pipeline.py`, `simulation_play.py` | Federation fetch·prerun·재생·화면별 제어 |
+| Kit 파이프라인 | `morph.lam_control_1/lam_federation_pipeline.py`, `simulation_play.py` | Federation/Simulation GET fetch·prerun·재생·화면별 제어 |
 | 메인 스레드 디스패치 | `morph.lam_control_1/kit_main_dispatch.py` | 메시징 스레드 → Kit main(UI) 스레드 큐잉 |
 
 ## 공통 규칙
@@ -34,10 +81,58 @@
 ### 요청 — `T2V_request_start_simulation`
 
 ```json
-{ "configs": [ { /* case0 설정 */ }, { /* case1 설정 */ } ] }
+{
+  "isMCC": true,
+  "configs": [
+    { "execId": "M15" },
+    { "fab_id": "M14", "mt": "202606", "eqp_id": "4EKFA417", "lot_id": "TAJUC44", "mt_from": "202605", "mt_to": "202606" }
+  ]
+}
 ```
 
-- `configs`: 화면별 설정 배열. Federation API fetch(limit/offset 페이지네이션, `has_next=false`까지) → 파싱 → prerun → 재생까지 수행한다.
+또는 최상위 `isMCC` 없이:
+
+```json
+{
+  "configs": [
+    { "execId": "M15" },
+    { "execId": "M16" }
+  ]
+}
+```
+
+- `configs`: 화면별 설정 배열. `configs[0]` → 화면1, `configs[1]` → 화면2.
+- `isMCC` 등 최상위 필드는 **fetch 경로 선택에 영향 없음** (무시).
+- `{}` 이면 해당 화면 **숨김 + 스킵**.
+
+#### 화면별 데이터 조회 경로 (분기 규칙)
+
+| `configs[n]` 조건 | Kit 조회 방식 |
+|---|---|
+| `execId` 키가 있고 **값이 비어 있지 않음** | **Simulation GET** — `GET …/api/v1/lam/simulations/simulations/{execId}?offset=&limit=` |
+| `execId` 없음 또는 `""` (빈 문자열) | **Federation POST** — 기존 `POST …/queries/…/run` + `has_next` pagination |
+| POST인데 `eqp_id` 등 필수 정보 없음 | 해당 화면 **실패** (`code=1`, `message`에 상세 사유) |
+
+- **화면마다 경로가 다를 수 있음** (예: 화면1=GET, 화면2=POST).
+- 모든 화면의 fetch·파싱·prerun이 끝난 뒤, 성공한 화면만 **동시에 재생** (barrier).
+
+#### Simulation GET (`execId` 경로)
+
+- 웹 config: **`execId`만** 전달하면 됨 (`eqp_id` 등 불필요).
+- Kit URL 조립: `{FEDERATION_SIMULATION_GET_BASE_URL}/api/v1/lam/simulations/simulations/{execId}?offset=0&limit={FEDERATION_FETCH_LIMIT}`
+- 인증: **없음**
+- 응답: **객체 배열** `[{ "module_nm": "…", "lot_id": "…", "eqp_id": "…", … }, …]` (아래 데이터샘플 참고)
+- Pagination: 응답 배열 길이 **< limit** 이면 종료, 아니면 `offset += limit` 반복
+- `eqp_id`는 **응답 row**에 포함 (한 `execId` 내 동일 `eqp_id` 가정)
+
+#### Federation POST (기존 경로)
+
+- 웹 config: `fab_id`, `mt`, `eqp_id`, `lot_id`, `mt_from`, `mt_to` 등
+- Kit가 `limit`·`offset`을 body에 추가하여 POST
+- Pagination: `pagination.has_next == false` 까지 반복
+- `eqp_id`는 **웹 body**에서 모든 row에 주입
+
+- 공통: 수신 데이터 → 파싱 → prerun → 재생
 
 ### 응답 — `V2T_response_start_simulation`
 
@@ -50,9 +145,10 @@
 
 ### 동작
 
-1. 웹 설정(`configs`)으로 Federation API를 요청, 데이터를 페이지 단위로 모두 수신
-2. 수신 데이터를 파싱·prerun 후 화면 표시 전환(`request_screen_visibility`) 완료를 기다렸다가 재생 시작
-3. 완료(또는 실패) 시 V2T 응답 전송
+1. 웹 `configs`를 화면별로 해석 — `execId` 유무에 따라 **Simulation GET** 또는 **Federation POST** 로 데이터를 페이지 단위로 모두 수신
+2. 화면별 파싱·prerun 완료 후 `request_screen_visibility` 적용을 기다림
+3. 성공한 화면만 **동시에** 재생 시작
+4. 완료(또는 실패) 시 V2T 응답 전송
 
 ---
 
@@ -201,7 +297,7 @@
 
 | 방향 | 이벤트명 | payload 핵심 키 | 응답/data |
 |---|---|---|---|
-| T2V → | `T2V_request_start_simulation` | `configs[]` | — |
+| T2V → | `T2V_request_start_simulation` | `configs[]` — 화면별 `execId`(GET) 또는 Federation POST body | — |
 | → V2T | `V2T_response_start_simulation` | — | `results[2]` (미확정, 빈 2칸) |
 | T2V → | `T2V_request_stop_simulation` | `case` | — |
 | → V2T | `V2T_response_stop_simulation` | — | `case` |
