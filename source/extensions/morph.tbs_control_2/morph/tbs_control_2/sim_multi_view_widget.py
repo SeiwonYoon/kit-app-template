@@ -1402,14 +1402,17 @@ def _stage_has_renderable_content(ctx_name: str) -> bool:
 
 
 class _WidgetHudMount:
-    """보조 타일 HUD 용 ``get_frame``."""
+    """화면1 타일 HUD 용 ``get_frame`` — ViewportWidget **위** ``ui.Frame`` 에 자식을 붙인다."""
 
     def __init__(self, overlay: Any) -> None:
         self._overlay = overlay
 
     @contextmanager
     def get_frame(self, _slot: str):
-        yield self._overlay
+        # 반드시 ``with overlay`` 로 스택에 올려야 이후 ui.* 가 이 Frame 자식이 된다.
+        # (yield 만 하면 잘못된 부모에 붙어 클릭이 안 먹음)
+        with self._overlay:
+            yield self._overlay
 
 
 def _resolve_main_viewport_window(ext: Any) -> Any:
@@ -3599,12 +3602,9 @@ def _create_viewport_tile(
         except Exception:
             pass
     _log_widget_tile_api(wn, ctx_name, api)
+    # 타일 위 빈 ZStack overlay 는 클릭을 가로채므로 두지 않음.
+    # EBS HUD / 토글 버튼은 ViewportWindow.get_frame(zz_/zzz_*) 경로를 사용.
     hud_mount: Any = None
-    if str(wn) == "Viewport":
-        hud_overlay = ui.Frame()
-        with hud_overlay:
-            pass
-        hud_mount = _WidgetHudMount(hud_overlay)
     _bind_tile_manipulator_activation(ext, wn, scene_view)
     rec: Dict[str, Any] = {
         "widget": vw_tile,
@@ -3614,7 +3614,7 @@ def _create_viewport_tile(
         "manip_pending": True,
         "api": api,
         "hud_mount": hud_mount,
-        "viewport_window": hud_mount if hud_mount is not None else None,
+        "viewport_window": None,
         "context_name": ctx_name,
         "cell_index": int(cell_idx),
         "camera_path": cam_path,
@@ -3969,9 +3969,23 @@ async def refresh_split_widget_tiles_after_stage(ext: Any, token: int, n: int) -
 
 
 def sync_viewport_hud_when_ready(ext: Any, *, force: bool = False) -> None:
-    """Widget 분할 READY 후 EBS HUD 1회만 마운트."""
-    if not force and bool(getattr(ext, "_tbs_ebs_hud_mounted", False)):
-        return
+    """Widget 분할 READY 후 EBS HUD(+토글 히트박스) 마운트."""
+    if not force:
+        try:
+            from .sim_control_defaults import SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT
+
+            toggle_needed = bool(SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT)
+        except Exception:
+            toggle_needed = True
+        user_wants = bool(getattr(ext, "_tbs_ebs_hud_user_visible", False))
+        hud_ok = (not user_wants) or bool(
+            getattr(ext, "_tbs_ebs_hud_mounted", False)
+        )
+        toggle_ok = (not toggle_needed) or bool(
+            getattr(ext, "_tbs_ebs_hud_toggle_mounted", False)
+        )
+        if hud_ok and toggle_ok:
+            return
     try:
         from .sim_multi_view import startup_dual_orchestration_active
 
@@ -3990,12 +4004,16 @@ def sync_viewport_hud_when_ready(ext: Any, *, force: bool = False) -> None:
     if force:
         try:
             ext._tbs_ebs_hud_mounted = False
+            ext._tbs_ebs_hud_toggle_mounted = False
         except Exception:
             pass
     try:
         hud = getattr(ext, "_tbs_viewport_control_hud", None)
-        if hud is not None and hasattr(hud, "sync_layers"):
-            hud.sync_layers(delay_frames=2, force=force)
+        if hud is not None:
+            if hasattr(hud, "sync_layers"):
+                hud.sync_layers(delay_frames=2, force=force)
+            if hasattr(hud, "sync_toggle_hotspot"):
+                hud.sync_toggle_hotspot(delay_frames=2, force=force)
     except Exception:
         pass
 
@@ -4142,6 +4160,15 @@ async def finalize_widget_split_startup(ext: Any, token: int, n: int) -> None:
     except Exception:
         pass
     sync_viewport_hud_when_ready(ext, force=True)
+    try:
+        hud = getattr(ext, "_tbs_viewport_control_hud", None)
+        if hud is not None and hasattr(hud, "sync_toggle_hotspot"):
+            hud.sync_toggle_hotspot(delay_frames=2, force=True)
+            from .tbs_viewport_control_hud import _schedule_toggle_retries
+
+            _schedule_toggle_retries(hud, attempts=30)
+    except Exception:
+        pass
     try:
         from .sim_viewport_rp_diag import log_finalize_rp_step
 

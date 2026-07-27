@@ -63,9 +63,18 @@ SIM_CONTROL_DEFAULTS = SimControlDefaults()
 # True 면 [RENEWAL_DBG] 줄이 콘솔에 항상 찍힌다. 환경변수 TBS_RENEWAL_DEBUG 로도 켤 수 있음.
 SIM_RENEWAL_DEBUG: bool = True
 
-# Viewport 좌측 상단 EBS 2D 제어 패널 (``TbsViewportControlHud``) 앱 시작 시 표시 여부.
-# False 면 get_frame 레이어를 마운트하지 않는다.
-SHOW_VIEWPORT_EBS_CONTROL_HUD: bool = True
+# ---------------------------------------------------------------------------
+# Viewport EBS 제어 HUD (화면1 좌상단 패널)
+# ---------------------------------------------------------------------------
+# True  → 앱 시작 시 EBS 제어 HUD 를 보여 준다.
+# False → 앱 시작 시 HUD 숨김. (아래 좌하단 토글 버튼으로 나중에 켤 수 있음)
+SHOW_VIEWPORT_EBS_CONTROL_HUD: bool = False
+
+# True  → 화면1 좌하단에 거의 안 보이는 클릭 영역을 둔다.
+#         클릭 1회 = EBS HUD 보이기 ↔ 숨기기 토글.
+# False → 그 클릭 영역 자체를 만들지 않음. (토글 UI 완전 비활성)
+# 참고: 완전 투명(alpha=0)은 Kit 에서 클릭이 무시될 수 있어, 구현은 아주 옅은 배경을 씀.
+SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT: bool = True
 
 # Viewport 우측 상단 시뮬 설정 스냅샷 HUD (화면1 | 시뮬 설정, EP/LOT/초기적재 등).
 # False 면 ``sync_viewport_snapshot_hud_layers`` 가 패널을 붙이지 않는다.
@@ -82,7 +91,7 @@ MAX_VIEWPORT_SPLIT_COUNT: int = 2
 
 # True: ViewportWidget 2분할 host (독립 usd_context·stage).
 # False: Dock + create_viewport_window (TBS_SimSplit_*). TBS_SIM_VIEWPORT_WIDGET_SPLIT=0 도 False.
-USE_VIEWPORT_WIDGET_SPLIT: bool = True
+USE_VIEWPORT_WIDGET_SPLIT: bool = False
 
 # RenderProduct 생성 원인 조사 (증상 수정 아님 — 관측·실험 전용).
 # True → [TBS/rp-invest] / [TBS/rp-timeline] 상세 로그.
@@ -146,6 +155,7 @@ __all__ = [
     "SIM_CONTROL_DEFAULTS",
     "SIM_RENEWAL_DEBUG",
     "SHOW_VIEWPORT_EBS_CONTROL_HUD",
+    "SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT",
     "SHOW_VIEWPORT_SNAPSHOT_HUD",
     "START_WITH_DUAL_SCREEN",
     "MAX_VIEWPORT_SPLIT_COUNT",
