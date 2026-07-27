@@ -7558,6 +7558,11 @@ class LamSimulationCsvPlayWindow:
         )
         # 화면별 독립 — 타 화면으로 공정만보기 전파하지 않음
         self._try_start_live_process_only_switch(desired)
+        if not self._csv_play_is_active():
+            try:
+                self._refresh_csv_schedule_preview(fast_only=True)
+            except Exception:
+                pass
 
     def _try_start_live_process_only_switch(self, desired: bool) -> None:
         """해당 화면 재생 중이면 pause → 공정만보기/일반 모드로 이어서 재생.
@@ -7689,7 +7694,11 @@ class LamSimulationCsvPlayWindow:
                     pause_sch = self._scheduler or scheduler
                     if pause_reg is None or pause_sch is None:
                         raise RuntimeError("registry/scheduler 없음")
-                    sp0 = 1.0 if target0w else speed_now
+                    try:
+                        ui_sp = float(self._read_speed_scale())
+                    except Exception:
+                        ui_sp = float(speed_now)
+                    sp0 = 1.0 if target0w else ui_sp
                     print(
                         f"{_PRINT_PREFIX} 공정만보기 switch checkpoint… 화면{si}",
                         flush=True,
@@ -7736,10 +7745,14 @@ class LamSimulationCsvPlayWindow:
                     except Exception:
                         pass
                     target = bool(self._process_only_switch_target)
+                    try:
+                        ui_sp_resume = float(self._read_speed_scale())
+                    except Exception:
+                        ui_sp_resume = float(speed_now)
                     # 모드 전환: 진행 중 JSON 을 처음부터 다시 돌리지 않음.
                     resume_ck = CsvPlayPauseCheckpoint(
                         csv_path=ck.csv_path,
-                        speed_scale=1.0 if target else speed_now,
+                        speed_scale=1.0 if target else ui_sp_resume,
                         process_only=target,
                         resume_csv_sec=ck.resume_csv_sec,
                         json_done=ck.json_done,
@@ -7948,8 +7961,7 @@ class LamSimulationCsvPlayWindow:
                 return True
 
     def _read_speed_scale(self) -> float:
-        if self._read_process_only():
-            return 1.0
+        """배속 UI 모델값 (공정만보기 체크와 무관 — 사용자가 설정한 일반 재생 배속)."""
         m = self._speed_model
         if m is None:
             return 1.0
@@ -7957,6 +7969,23 @@ class LamSimulationCsvPlayWindow:
             return float(max(0.1, min(20.0, float(m.get_value_as_float()))))
         except Exception:
             return 1.0
+
+    def _playback_speed_scale_for_process_only(self, process_only: bool) -> float:
+        """실제 재생에 쓸 배속 — 공정만보기일 때만 1x, 아니면 UI 배속."""
+        return 1.0 if bool(process_only) else self._read_speed_scale()
+
+    def _apply_speed_ui_change(self) -> None:
+        """배속 UI 변경 → 타임라인 미리보기·(일반 재생 중) 라이브 세션."""
+        in_proc_only_play = bool(
+            self._read_process_only()
+            and csv_play_session_active(screen=self._screen)
+        )
+        if not in_proc_only_play:
+            try:
+                self._refresh_csv_schedule_preview(fast_only=True)
+            except Exception:
+                pass
+        self._apply_live_speed_during_play()
 
     def _wire_speed_model_live_update(self) -> None:
         """Play 중 배속 필드·프리셋 변경 → 즉시 재생 속도 반영."""
@@ -7968,7 +7997,7 @@ class LamSimulationCsvPlayWindow:
         self._speed_model_live_wired = True
 
         def _on_speed_changed(*_a: Any) -> None:
-            self._apply_live_speed_during_play()
+            self._apply_speed_ui_change()
 
         for hook in ("add_value_changed_fn", "add_item_changed_fn"):
             try:
@@ -8005,9 +8034,7 @@ class LamSimulationCsvPlayWindow:
         except Exception:
             pass
         self._log(f"재생 배속 = {value:g}x")
-        if not self._csv_play_thread_alive():
-            self._refresh_csv_schedule_preview(fast_only=True)
-        self._apply_live_speed_during_play()
+        self._apply_speed_ui_change()
 
     def _csv_build_thread_alive(self) -> bool:
         t = self._csv_build_thread
@@ -8305,7 +8332,7 @@ class LamSimulationCsvPlayWindow:
             self._log("CSV 경로 없음")
             return
         process_only = self._read_process_only()
-        sp = 1.0 if process_only else self._read_speed_scale()
+        sp = self._playback_speed_scale_for_process_only(process_only)
         path_s = str(path)
         registry = self._registry
         scheduler = self._scheduler
@@ -8545,9 +8572,7 @@ class LamSimulationCsvPlayWindow:
             return
         process_only = self._read_process_only()
         self._process_only_last_applied = bool(process_only)
-        if process_only:
-            self._set_speed_preset(1.0)
-        sp = self._read_speed_scale()
+        sp = self._playback_speed_scale_for_process_only(process_only)
         pause_ck = match_csv_play_pause_checkpoint(
             str(path),
             speed_scale=sp,
@@ -8814,6 +8839,8 @@ class LamSimulationCsvPlayWindow:
                         process_only = ui_po
                     if process_only:
                         sp = 1.0
+                    else:
+                        sp = self._playback_speed_scale_for_process_only(False)
                     # preflight 레이스로 잠긴 switch pending 해제
                     if self._process_only_switch_pending and not csv_play_session_active(
                         screen=self._screen
