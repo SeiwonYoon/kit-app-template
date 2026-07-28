@@ -1126,7 +1126,11 @@ def _hide_all_show_specs_instant(*, snapshot_restore: Optional[str] = None) -> N
 
 
 def _restore_all_show_specs() -> None:
-    """stop_reset 복원: show 목록도 원래 visibility 로 돌림."""
+    """stop_reset 복원: show 목록도 원래 visibility 로 돌림.
+
+    snapshot 이 없으면 USD 저장 상태를 그대로 둔다.
+    (없으면 True 강제 → 앱/정지 시 숨김 저장 prim 이 켜지던 문제 방지)
+    """
     specs = _load_show_specs()
     paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
     paths = [p for p in paths if p]
@@ -1134,14 +1138,13 @@ def _restore_all_show_specs() -> None:
     with _lock:
         snap = {p: store.pop(p, None) for p in paths}
     for path in paths:
+        tok = snap.get(path)
+        if tok is None:
+            continue
         targets = _build_fade_targets(path)
         _clear_mdl_fade_opacity(targets)
         _show_all_gprims_under(targets)
-        tok = snap.get(path)
-        if tok is None:
-            _set_visible_immediate(path, True)
-        else:
-            _apply_visibility_token(path, tok)
+        _apply_visibility_token(path, tok)
 
 
 def _show_all_instant() -> None:
