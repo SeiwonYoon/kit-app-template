@@ -90,7 +90,7 @@ def _wall_elapsed_for_display(ps: dict, *, screen: Optional[int] = None) -> floa
 
 
 def _format_status_time_line(ps: dict, *, screen: Optional[int] = None) -> str:
-    """예: 재생 0.9% | t 15.1/1773.7s | 실경과 16s/1774s"""
+    """예: 재생 0.9% / t 15/1774s / 실경과 16s/1774s (3줄)."""
     csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
     csv_total = float(ps.get("csv_total", 0.0) or 0.0)
     wall = _wall_elapsed_for_display(ps, screen=screen)
@@ -100,37 +100,46 @@ def _format_status_time_line(ps: dict, *, screen: Optional[int] = None) -> str:
         return "0s"
 
     if ps.get("process_only"):
+        from .simulation_play import resolve_process_only_wall_total_est  # type: ignore
+
         json_done = int(ps.get("json_done", 0) or 0)
         json_total = max(1, int(ps.get("json_total", 1) or 1))
         pct = 100.0 * json_done / json_total
-        wall_total = float(json_total)
+        wall_total = resolve_process_only_wall_total_est(ps, wall)
         return (
-            f"공정만 {pct:.1f}% | t {csv_t:.1f}/{csv_total:.1f}s | "
+            f"공정만 {pct:.1f}%\n"
+            f"t {csv_t:.0f}/{csv_total:.0f}s\n"
             f"실경과 {wall:.0f}s/{wall_total:.0f}s"
         )
 
     pct = (100.0 * csv_t / csv_total) if csv_total > 1e-6 else 0.0
     wall_total = csv_total / sp if csv_total > 1e-6 else 0.0
     return (
-        f"재생 {pct:.1f}% | t {csv_t:.1f}/{csv_total:.1f}s | "
+        f"재생 {pct:.1f}%\n"
+        f"t {csv_t:.0f}/{csv_total:.0f}s\n"
         f"실경과 {wall:.0f}s/{wall_total:.0f}s"
     )
 
 
 def _play_context_idle(ps: dict, *, screen: Optional[int] = None) -> bool:
     """Play 전·정지(초기화) 후 — Time 0s, Current State 초기화."""
+    try:
+        from .simulation_play import (  # type: ignore
+            csv_play_session_active,
+            get_csv_play_pause_checkpoint,
+        )
+
+        if csv_play_session_active(screen=screen):
+            return False
+        if get_csv_play_pause_checkpoint(screen=screen) is not None:
+            return False
+    except Exception:
+        pass
     csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
     csv_total = float(ps.get("csv_total", 0.0) or 0.0)
     wall = float(ps.get("wall_elapsed_display", 0.0) or 0.0)
     if csv_total > 1e-6 or csv_t > 1e-6 or wall > 1e-6:
         return False
-    try:
-        from .simulation_play import get_csv_play_pause_checkpoint  # type: ignore
-
-        if get_csv_play_pause_checkpoint(screen=screen) is not None:
-            return False
-    except Exception:
-        pass
     return True
 
 
@@ -214,15 +223,14 @@ def build_status_panel_snapshot(
             )
 
             active = get_csv_play_timeline_active_keys_snap(screen=si)
-            ent = None
             for e in getattr(csv_window, "_schedule_row_entries", []) or []:
-                if _schedule_entry_match_key(e) in active:
-                    ent = e
-                    break
-            if ent is not None:
-                active_state = _format_current_state_line(ent)
-                if active_state:
+                if _schedule_entry_match_key(e) not in active:
+                    continue
+                candidate = _format_current_state_line(e)
+                if candidate:
+                    active_state = candidate
                     set_last_state_title(active_state, screen=si)
+                    break
         except Exception:
             pass
         display_state = active_state or get_last_state_title(screen=si)

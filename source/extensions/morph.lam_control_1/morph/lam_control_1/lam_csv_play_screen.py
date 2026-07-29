@@ -69,6 +69,7 @@ class CsvPlayScreenSession:
             "csv_total": 0.0,
             "t0": 0.0,
             "speed_scale": 1.0,
+            "wall_total_est": 0.0,
         }
     )
     process_only_playhead_lock: threading.Lock = field(default_factory=threading.Lock)

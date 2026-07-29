@@ -232,7 +232,7 @@ PLAY_HIDE_PRIM_SPECS: List[PlayHidePrimSpec] = [
 # - fade 는 사용하지 않고 즉시 visible 만 강제한다. (lam_play_prim_hide.py)
 PLAY_SHOW_PRIM_SPECS: List[PlayHidePrimSpec] = [
     # 예시:
-    PlayHidePrimSpec(prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r06___________1085"),
+    PlayHidePrimSpec(prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1001_000___________1262"),
 ]
 
 
@@ -257,6 +257,7 @@ STATUS_PANEL_PADDING_PX: int = 10
 STATUS_PANEL_TITLE_FONT_SIZE: int = 14
 STATUS_PANEL_ROW_FONT_SIZE: int = 16  # 행별 label/value 미지정 시 공통 기본값
 STATUS_PANEL_ROW_HEIGHT_PX: int = 26
+STATUS_PANEL_TIME_ROW_HEIGHT_PX: int = 56
 STATUS_PANEL_STATE_ROW_HEIGHT_PX: int = 72
 
 STATUS_PANEL_BG_COLOR_HEX: int = 0xE6181C22
@@ -285,7 +286,7 @@ class StatusRowSpec:
     - "{컬럼명}" 형태면, CSV의 "현재 재생행(없으면 최초행)"에서 해당 컬럼 값을 찾아 표시.
       예: "{eqp_id}", "{lot_id}", "{cassette_slot}", "{module_nm}"
     - 예약 토큰(대소문자 무시):
-      - "{time}": ``재생 0.9% | t 15.1/1773.7s | 실경과 16s/1774s`` (스냅샷·배속 기준)
+      - "{time}": ``재생 0.9%`` / ``t 15/1774s`` / ``실경과 16s/1774s`` (3줄, 스냅샷·배속 기준)
       - "{state}": ``웨이퍼#N · lot_id · event_json`` (JSON은 이름만, dwell 시 JSON 생략) — 일시정지/dwell 시 마지막 값 유지
       - "{eq_model}": `STATUS_PANEL_EQ_MODEL_VALUE` (기본 수동값; 필요 시 사용)
 
@@ -332,7 +333,7 @@ STATUS_PANEL_ROWS: List[StatusRowSpec] = [
         key="time",
         name="Time",
         value="{time}",
-        height_px=STATUS_PANEL_ROW_HEIGHT_PX,
+        height_px=STATUS_PANEL_TIME_ROW_HEIGHT_PX,
     ),
     StatusRowSpec(
         key="state",
@@ -521,6 +522,7 @@ __all__ = [
     "STATUS_PANEL_TITLE_FONT_SIZE",
     "STATUS_PANEL_ROW_FONT_SIZE",
     "STATUS_PANEL_ROW_HEIGHT_PX",
+    "STATUS_PANEL_TIME_ROW_HEIGHT_PX",
     "STATUS_PANEL_STATE_ROW_HEIGHT_PX",
     "STATUS_PANEL_BG_COLOR_HEX",
     "STATUS_PANEL_BORDER_COLOR_HEX",

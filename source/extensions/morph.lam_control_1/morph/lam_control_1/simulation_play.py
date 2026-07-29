@@ -2542,6 +2542,7 @@ def _reset_csv_play_progress_snap(
                 "csv_total": float(csv_total),
                 "t0": float(t0),
                 "speed_scale": float(max(0.01, speed_scale or 1.0)),
+                "wall_total_est": 0.0,
             }
         )
 
@@ -3979,7 +3980,7 @@ def _notify_csv_play_progress_ui(*, screen: Optional[int] = None) -> None:
         wall_elapsed = max(wall_elapsed, time.monotonic() - t0)
     if snap.get("process_only"):
         csv_t = _process_only_playhead_csv_now(screen=si)
-        wall_total_est = float(max(1, snap.get("json_total", 1) or 1))
+        wall_total_est = resolve_process_only_wall_total_est(snap, wall_elapsed)
     else:
         if csv_play_session_active(screen=si):
             sp = get_csv_play_live_speed_scale(screen=si)
@@ -4162,6 +4163,51 @@ def _partition_json_blocks_by_lane(
         else:
             other.append((i, b))
     return atm, vtm, other
+
+
+def _estimate_process_only_wall_total_sec(
+    atm_items: List[Tuple[int, CsvTimedPlaybackBlock]],
+    vtm_items: List[Tuple[int, CsvTimedPlaybackBlock]],
+    other_items: List[Tuple[int, CsvTimedPlaybackBlock]],
+    *,
+    sequential: bool,
+    gap_sec: float,
+) -> float:
+    """공정만보기 예상 실경과 [s] — JSON steps 합(레인 병렬 시 max)."""
+
+    def _items_duration(items: List[Tuple[int, CsvTimedPlaybackBlock]]) -> float:
+        durs = [_lam_estimate_raw_duration_sec(b.steps) for _, b in items if b.steps]
+        if not durs:
+            return 0.0
+        total = sum(durs)
+        if sequential and gap_sec > 1e-9:
+            total += float(gap_sec) * max(0, len(durs) - 1)
+        return total
+
+    if sequential:
+        merged = sorted(
+            atm_items + vtm_items + other_items,
+            key=lambda x: (x[1].time_sec, x[1].sort_order),
+        )
+        return max(1.0, _items_duration(merged))
+    return max(
+        1.0,
+        _items_duration(atm_items),
+        _items_duration(vtm_items),
+        _items_duration(other_items),
+    )
+
+
+def resolve_process_only_wall_total_est(
+    snap: Dict[str, Any],
+    wall_elapsed: float,
+) -> float:
+    """공정만보기 실경과 분모 [s] — 재생 시작 시 산출한 고정 예상값(재생 중 증가하지 않음)."""
+    base = float(snap.get("wall_total_est", 0.0) or 0.0)
+    if base > 1e-6:
+        return base
+    wall = max(0.0, float(wall_elapsed))
+    return max(wall, 1.0)
 
 
 def _csv_play_normal_lane_worker(
@@ -4521,12 +4567,20 @@ def _run_csv_timed_playback_process_only(
         speed_scale=1.0,
         screen=si,
     )
+    wall_total_est = _estimate_process_only_wall_total_sec(
+        atm_items,
+        vtm_items,
+        other_items,
+        sequential=seq_lanes,
+        gap_sec=seq_gap,
+    )
     sess = csv_play_screen_session(si)
     with sess.progress_snap_lock:
         sess.progress_snap["csv_t_display"] = float(resume)
         sess.progress_snap["csv_time_offset"] = float(resume)
         sess.progress_snap["wall_elapsed_display"] = float(wall_off)
         sess.progress_snap["json_done"] = max(0, int(initial_json_done))
+        sess.progress_snap["wall_total_est"] = float(wall_total_est)
     _notify_csv_play_progress_ui(screen=si)
     sess.progress_stop.clear()
     ticker = threading.Thread(
