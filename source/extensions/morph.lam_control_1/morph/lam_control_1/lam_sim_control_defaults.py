@@ -115,10 +115,17 @@ FOUP_USAGE_EXTRA_HIDE_PRIMS_3: list = [
 FEDERATION_QUERY_URL: str = (
     "http://10.61.59.208/queries/mcc-target-prev-lot-history/run"
 )
-# Simulation GET base — ``{base}/api/v1/lam/simulations/simulations/{execId}``
+# Simulation GET base — ``{base}/api/v1/lam/simulations/{exec_id}``
 FEDERATION_SIMULATION_GET_BASE_URL: str = (
     "http://hytwindev.skhynix.com/svc/fab"
 )
+# Simulation GET 전용 HTTP 헤더 이름 (Federation POST ``FEDERATION_EXTRA_HEADERS`` 와 별도).
+# 실무에서 헤더명이 바뀌면 이 파일만 수정한다.
+SIMULATION_GET_HEADER_FX_SERVICE_KEY: str = "Fx-Service-Key"
+SIMULATION_GET_HEADER_FX_EMPLOYEE_KEY: str = "Fx-Employee-Key"
+# ``accept`` — 불필요하면 ``SIMULATION_GET_INCLUDE_ACCEPT_HEADER = False`` 로 끈다.
+SIMULATION_GET_INCLUDE_ACCEPT_HEADER: bool = True
+SIMULATION_GET_ACCEPT_VALUE: str = "*/*"
 # 페이지당 row 수 — sk.hyview_messaging.lam_handler_config 에서 override 가능.
 FEDERATION_FETCH_LIMIT: int = 1000
 # 화면당 전체 pagination fetch 타임아웃 [s].
@@ -199,6 +206,10 @@ __all__ = [
     "FOUP_USAGE_EXTRA_HIDE_PRIMS_3",
     "FEDERATION_QUERY_URL",
     "FEDERATION_SIMULATION_GET_BASE_URL",
+    "SIMULATION_GET_HEADER_FX_SERVICE_KEY",
+    "SIMULATION_GET_HEADER_FX_EMPLOYEE_KEY",
+    "SIMULATION_GET_INCLUDE_ACCEPT_HEADER",
+    "SIMULATION_GET_ACCEPT_VALUE",
     "FEDERATION_FETCH_LIMIT",
     "FEDERATION_FETCH_TIMEOUT_SEC",
     "FEDERATION_USE_FIXTURE",

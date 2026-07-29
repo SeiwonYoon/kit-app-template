@@ -22,7 +22,12 @@ from .lam_csv_prerun_playback import (
     build_prerun_result_from_cached,
     maybe_export_csv_prerun_json,
 )
-from .lam_federation_client import fetch_federation_pages, fetch_simulation_get_pages
+from .lam_federation_client import (
+    build_simulation_get_headers,
+    fetch_federation_pages,
+    fetch_simulation_get_pages,
+    simulation_get_auth_from_body,
+)
 from .lam_federation_load_hud import set_federation_load_status
 from .lam_screen_visibility import request_screen_visibility
 from .simulation_play import (
@@ -1005,17 +1010,27 @@ def _process_one_screen(
     meta["fetch_mode"] = "simulation_get" if use_get else "federation_post"
     try:
         if use_get:
-            exec_id = str(body.get("execId") or "").strip()
+            exec_id, fx_svc, fx_emp = simulation_get_auth_from_body(body)
             sim_base = str(simulation_get_base_url or "").strip()
             if not sim_base:
                 msg = (
                     f"screen{screen}: FEDERATION_SIMULATION_GET_BASE_URL is empty "
-                    f"but execId={exec_id!r} requires simulation GET"
+                    f"but exec_id={exec_id!r} requires simulation GET"
                 )
                 _fed_load_hud(
                     screen, "failed", detail=msg, ext=ext, lam_window=lam_window
                 )
                 return ScreenPipelineResult(screen, False, msg, meta)
+            if not exec_id:
+                msg = f"screen{screen}: exec_id is required for simulation GET"
+                _fed_load_hud(
+                    screen, "failed", detail=msg, ext=ext, lam_window=lam_window
+                )
+                return ScreenPipelineResult(screen, False, msg, meta)
+            get_headers = build_simulation_get_headers(
+                fx_service_key=fx_svc,
+                fx_employee_key=fx_emp,
+            )
             api_body = dict(body or {})
             _fed_load_hud(screen, "requesting", ext=ext, lam_window=lam_window)
             merged, fetch_meta = fetch_simulation_get_pages(
@@ -1025,6 +1040,7 @@ def _process_one_screen(
                 screen=screen,
                 timeout_sec=timeout_sec,
                 quiet=not _federation_verbose_parse_log(),
+                headers=get_headers,
             )
         else:
             api_body = _normalize_federation_body_periods(body)

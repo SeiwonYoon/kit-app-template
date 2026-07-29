@@ -11,10 +11,10 @@ from .kit_main_dispatch import schedule_on_main_thread
 _PRINT_PREFIX = "[LAM/fed-test]"
 WINDOW_TITLE = "LAM Federation API Test"
 
-# Simulation GET 테스트용 기본 execId (URL 기본값에만 사용).
-_DEFAULT_GET_EXEC_ID = "M15"
+# Simulation GET 테스트용 기본 exec_id (URL 기본값에만 사용).
+_DEFAULT_GET_EXEC_ID = "demo_run_260728101507241292"
 _DEFAULT_GET_URL_TEMPLATE = (
-    "http://hytwindev.skhynix.com/svc/fab/api/v1/lam/simulations/simulations/"
+    "http://hytwindev.skhynix.com/svc/fab/api/v1/lam/simulations/"
     f"{_DEFAULT_GET_EXEC_ID}?offset=0&limit={{limit}}"
 )
 
@@ -57,6 +57,8 @@ class LamFederationTestWindow:
         self._offset_field = None
         self._token_field = None
         self._headers_field = None
+        self._get_fx_service_key_field = None
+        self._get_fx_employee_key_field = None
         self._fixture_field = None
         self._screen_field = None
         self._save_json_field = None
@@ -219,6 +221,18 @@ class LamFederationTestWindow:
             raise ValueError("extra headers must be a JSON object")
         return {str(k): str(v) for k, v in data.items()}
 
+    def _read_get_auth_headers(self) -> Dict[str, str]:
+        from .lam_federation_client import build_simulation_get_headers
+
+        svc_m = _widget_model(self._get_fx_service_key_field)
+        emp_m = _widget_model(self._get_fx_employee_key_field)
+        svc = str(svc_m.get_value_as_string() or "").strip() if svc_m else ""
+        emp = str(emp_m.get_value_as_string() or "").strip() if emp_m else ""
+        return build_simulation_get_headers(
+            fx_service_key=svc,
+            fx_employee_key=emp,
+        )
+
     def _ui_values(self) -> Dict[str, Any]:
         """메인(UI) 스레드에서만 호출 — 위젯 model 값을 스냅샷."""
         d = self._defaults()
@@ -351,12 +365,16 @@ class LamFederationTestWindow:
             return
         self._set_busy(True)
         get_url = self._read_get_url()
+        get_headers = self._read_get_auth_headers()
 
         def _work() -> None:
             try:
                 from .lam_federation_client import fetch_simulation_get_once
 
-                status, data, raw = fetch_simulation_get_once(url=get_url)
+                status, data, raw = fetch_simulation_get_once(
+                    url=get_url,
+                    headers=get_headers,
+                )
                 if data:
                     self._set_response_data(data)
                 elif raw:
@@ -379,6 +397,7 @@ class LamFederationTestWindow:
         self._set_busy(True)
         vals = self._ui_values()
         get_url = self._read_get_url()
+        get_headers = self._read_get_auth_headers()
 
         def _work() -> None:
             try:
@@ -394,6 +413,7 @@ class LamFederationTestWindow:
                     url=get_url,
                     screen=vals["screen"],
                     quiet=quiet,
+                    headers=get_headers,
                 )
                 self._set_response_data(merged)
                 print(
@@ -425,7 +445,15 @@ class LamFederationTestWindow:
         body: Dict[str, Any] = {}
         exec_id = str(merged.get("exec_id") or "").strip()
         if exec_id:
-            body["execId"] = exec_id
+            body["exec_id"] = exec_id
+        svc_m = _widget_model(self._get_fx_service_key_field)
+        emp_m = _widget_model(self._get_fx_employee_key_field)
+        svc_key = str(svc_m.get_value_as_string() or "").strip() if svc_m else ""
+        emp_key = str(emp_m.get_value_as_string() or "").strip() if emp_m else ""
+        if svc_key:
+            body["fx_service_key"] = svc_key
+        if emp_key:
+            body["fx_employee_key"] = emp_key
 
         def _done(result: Dict[str, Any]) -> None:
             print(
@@ -552,13 +580,21 @@ class LamFederationTestWindow:
                     self._save_json_field.model.set_value(False)
                 ui.Separator(height=4)
                 ui.Label(
-                    "Simulation GET — URL 전체를 입력합니다 (인증·body 불필요).",
+                    "Simulation GET — URL + Fx 키 (Federation POST headers 와 별도).",
                     word_wrap=True,
                 )
                 with ui.HStack(height=0):
                     ui.Label("GET URL", width=80)
                     self._get_url_field = ui.StringField()
                     self._get_url_field.model.set_value(self._default_get_url(d["limit"]))
+                with ui.HStack(height=0):
+                    ui.Label("Fx-Service-Key", width=120)
+                    self._get_fx_service_key_field = ui.StringField(password=True)
+                    self._get_fx_service_key_field.model.set_value("")
+                with ui.HStack(height=0):
+                    ui.Label("Fx-Employee-Key", width=120)
+                    self._get_fx_employee_key_field = ui.StringField(password=True)
+                    self._get_fx_employee_key_field.model.set_value("")
                 with ui.HStack(height=0):
                     ui.Button("GET 1회", clicked_fn=self._on_get_fetch_once, width=100)
                     ui.Button(

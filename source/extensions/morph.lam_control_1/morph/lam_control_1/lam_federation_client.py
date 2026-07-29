@@ -14,7 +14,55 @@ from .lam_api_timeline_parser import object_array_to_merged
 
 _PRINT_PREFIX = "[LAM/federation]"
 
-_SIMULATION_PATH_SUFFIX = "/api/v1/lam/simulations/simulations/"
+_SIMULATION_PATH_SUFFIX = "/api/v1/lam/simulations/"
+
+
+def build_simulation_get_headers(
+    *,
+    fx_service_key: str = "",
+    fx_employee_key: str = "",
+) -> Dict[str, str]:
+    """Simulation GET 전용 헤더 (Federation POST ``FEDERATION_EXTRA_HEADERS`` 와 분리).
+
+    헤더 이름·``accept`` 포함 여부는 ``lam_sim_control_defaults`` 에서 조정한다.
+    """
+    try:
+        from . import lam_sim_control_defaults as d
+
+        svc_name = str(
+            getattr(d, "SIMULATION_GET_HEADER_FX_SERVICE_KEY", "Fx-Service-Key") or ""
+        ).strip()
+        emp_name = str(
+            getattr(d, "SIMULATION_GET_HEADER_FX_EMPLOYEE_KEY", "Fx-Employee-Key") or ""
+        ).strip()
+        include_accept = bool(getattr(d, "SIMULATION_GET_INCLUDE_ACCEPT_HEADER", True))
+        accept_val = str(getattr(d, "SIMULATION_GET_ACCEPT_VALUE", "*/*") or "*/*")
+    except Exception:
+        svc_name = "Fx-Service-Key"
+        emp_name = "Fx-Employee-Key"
+        include_accept = True
+        accept_val = "*/*"
+
+    headers: Dict[str, str] = {}
+    if include_accept and accept_val.strip():
+        headers["accept"] = accept_val.strip()
+    svc = str(fx_service_key or "").strip()
+    emp = str(fx_employee_key or "").strip()
+    if svc and svc_name:
+        headers[svc_name] = svc
+    if emp and emp_name:
+        headers[emp_name] = emp
+    return headers
+
+
+def simulation_get_auth_from_body(body: Dict[str, Any]) -> Tuple[str, str, str]:
+    """``configs[n]`` → ``(exec_id, fx_service_key, fx_employee_key)``."""
+    cfg = dict(body or {})
+    return (
+        str(cfg.get("exec_id") or "").strip(),
+        str(cfg.get("fx_service_key") or "").strip(),
+        str(cfg.get("fx_employee_key") or "").strip(),
+    )
 
 
 def _fixture_dir() -> Path:
@@ -101,7 +149,7 @@ def build_simulation_get_url(
     offset: int,
     limit: int,
 ) -> str:
-    """Simulation GET URL — ``{base}/api/v1/lam/simulations/simulations/{execId}?offset=&limit=``."""
+    """Simulation GET URL — ``{base}/api/v1/lam/simulations/{exec_id}?offset=&limit=``."""
     base = str(base_url or "").strip().rstrip("/")
     eid = urllib.parse.quote(str(exec_id or "").strip(), safe="")
     if not base or not eid:
@@ -122,7 +170,7 @@ def parse_simulation_get_url(url: str) -> Tuple[str, str, int, int]:
         raise ValueError(f"URL must contain {_SIMULATION_PATH_SUFFIX!r}")
     exec_id = path[idx + len(_SIMULATION_PATH_SUFFIX) :].strip("/")
     if not exec_id:
-        raise ValueError("execId missing in simulation GET URL path")
+        raise ValueError("exec_id missing in simulation GET URL path")
     fab_base = f"{parsed.scheme}://{parsed.netloc}{path[:idx]}".rstrip("/")
     qs = urllib.parse.parse_qs(parsed.query or "")
     offset = int((qs.get("offset") or ["0"])[0])
@@ -134,8 +182,10 @@ def _http_get_json(
     url: str,
     *,
     timeout_sec: float,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, Any, str]:
-    req = urllib.request.Request(url, method="GET")
+    hdrs = {str(k): str(v) for k, v in dict(headers or {}).items() if str(k).strip()}
+    req = urllib.request.Request(url, method="GET", headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=float(timeout_sec)) as resp:
             status = int(getattr(resp, "status", 200) or 200)
@@ -165,9 +215,12 @@ def fetch_simulation_get_once(
     *,
     url: str,
     timeout_sec: float = 60.0,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, Dict[str, Any], str]:
     """테스트 창용 — URL 그대로 GET 1회 → merged 형식."""
-    status, data, raw = _http_get_json(url, timeout_sec=timeout_sec)
+    status, data, raw = _http_get_json(
+        url, timeout_sec=timeout_sec, headers=headers
+    )
     if status and status >= 400:
         return status, {}, raw
     if data is None:
@@ -190,6 +243,7 @@ def fetch_simulation_get_pages(
     screen: int = 1,
     timeout_sec: float = 300.0,
     quiet: bool = False,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """``len(page) < limit`` 될 때까지 Simulation GET pagination 후 병합."""
     t0 = time.perf_counter()
@@ -197,7 +251,7 @@ def fetch_simulation_get_pages(
     if not eid:
         raise ValueError("exec_id is required for simulation GET")
     print(
-        f"{_PRINT_PREFIX} simulation GET start screen={screen} execId={eid!r} "
+        f"{_PRINT_PREFIX} simulation GET start screen={screen} exec_id={eid!r} "
         f"limit={limit}",
         flush=True,
     )
@@ -211,7 +265,9 @@ def fetch_simulation_get_pages(
         page_url = build_simulation_get_url(
             base_url, eid, offset=offset, limit=limit
         )
-        status, data, raw = _http_get_json(page_url, timeout_sec=timeout_sec)
+        status, data, raw = _http_get_json(
+            page_url, timeout_sec=timeout_sec, headers=headers
+        )
         last_status = status
         pages += 1
         if status and status >= 400:
@@ -246,7 +302,7 @@ def fetch_simulation_get_pages(
         "limit": limit,
     }
     print(
-        f"{_PRINT_PREFIX} simulation GET done screen={screen} execId={eid!r} "
+        f"{_PRINT_PREFIX} simulation GET done screen={screen} exec_id={eid!r} "
         f"pages={pages} rows={len(all_objects)} elapsed={elapsed:.2f}s",
         flush=True,
     )
@@ -259,8 +315,9 @@ def fetch_simulation_get_pages_from_url(
     timeout_sec: float = 300.0,
     screen: int = 1,
     quiet: bool = False,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """테스트 창 「GET 전체 fetch」 — URL 에서 base/execId/offset/limit 파싱."""
+    """테스트 창 「GET 전체 fetch」 — URL 에서 base/exec_id/offset/limit 파싱."""
     fab_base, exec_id, offset, limit = parse_simulation_get_url(url)
     return fetch_simulation_get_pages(
         base_url=fab_base,
@@ -270,6 +327,7 @@ def fetch_simulation_get_pages_from_url(
         screen=screen,
         timeout_sec=timeout_sec,
         quiet=quiet,
+        headers=headers,
     )
 
 
@@ -444,6 +502,7 @@ def fetch_single_post(
 
 __all__ = [
     "build_request_headers",
+    "build_simulation_get_headers",
     "build_simulation_get_url",
     "fetch_federation_pages",
     "fetch_simulation_get_once",
@@ -451,4 +510,5 @@ __all__ = [
     "fetch_simulation_get_pages_from_url",
     "fetch_single_post",
     "parse_simulation_get_url",
+    "simulation_get_auth_from_body",
 ]

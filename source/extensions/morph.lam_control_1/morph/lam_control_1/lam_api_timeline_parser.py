@@ -29,9 +29,14 @@ _API_ROW_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def config_exec_id(body: Dict[str, Any]) -> str:
+    """``configs[n]`` 의 Simulation GET 실행 ID (``exec_id``)."""
+    return str((body or {}).get("exec_id") or "").strip()
+
+
 def config_use_simulation_get(body: Dict[str, Any]) -> bool:
-    """``configs[n]`` 에 비어 있지 않은 ``execId`` 가 있으면 Simulation GET 경로."""
-    return bool(str((body or {}).get("execId") or "").strip())
+    """``configs[n]`` 에 비어 있지 않은 ``exec_id`` 가 있으면 Simulation GET 경로."""
+    return bool(config_exec_id(body))
 
 
 def normalize_api_row_dict(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -206,7 +211,7 @@ def federation_virtual_path(screen: int, body: Dict[str, Any]) -> "Path":
     """
     from pathlib import Path
 
-    exec_id = str(body.get("execId") or "").strip()
+    exec_id = config_exec_id(body)
     if exec_id:
         safe = re.sub(r"[^\w\-.]+", "_", f"s{int(screen)}_exec_{exec_id}")[:120]
         return Path("lam_federation_virtual") / f"{safe}.virtual"
@@ -219,6 +224,7 @@ def federation_virtual_path(screen: int, body: Dict[str, Any]) -> "Path":
 
 __all__ = [
     "api_row_to_dict",
+    "config_exec_id",
     "config_use_simulation_get",
     "federation_virtual_path",
     "merged_response_to_dwells",
