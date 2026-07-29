@@ -1182,6 +1182,45 @@ def compute_bar_graph_empty_pct(bar: EpBarPrecomputed, row_order: List[str]) -> 
     return out
 
 
+def _count_initial_full_ports_from_snapshot(snap: Dict[str, Any]) -> int:
+    """스냅샷 기준 초기 적재 포트 수 — 시뮬 ``initial_full_ports`` 와 동일 규칙.
+
+    시뮬 엔진 동작은 바꾸지 않고, 웹 ``lot_counts.all_ep`` 합산용으로만 사용한다.
+    """
+    try:
+        ep_count = int(ep_count_from_snapshot(snap, default=2) or 2)
+    except Exception:
+        ep_count = 2
+    ebs_enabled = bool(snap.get("ebs_enabled", True))
+    n = 0
+    if ebs_enabled:
+        for key in ("init_inout", "init_bp1", "init_bp2", "init_bp3"):
+            try:
+                if bool(snap.get(key)):
+                    n += 1
+            except Exception:
+                pass
+        if ep_count >= 3:
+            try:
+                if bool(snap.get("init_bp4")):
+                    n += 1
+            except Exception:
+                pass
+    for key in ("init_ep1", "init_ep2"):
+        try:
+            if bool(snap.get(key)):
+                n += 1
+        except Exception:
+            pass
+    if ep_count >= 3:
+        try:
+            if bool(snap.get("init_ep3")):
+                n += 1
+        except Exception:
+            pass
+    return max(0, int(n))
+
+
 def compute_bar_graph_lot_counts(
     result: Any,
     bar: EpBarPrecomputed,
@@ -1191,7 +1230,7 @@ def compute_bar_graph_lot_counts(
 ) -> Dict[str, int]:
     """막대별 lot 처리 수 — ``bar_graph.lot_counts``.
 
-    - ``all_ep``: 설정 LOT 수 (``lot_count``)
+    - ``all_ep``: 설정 LOT 수 (``lot_count``) + 초기 적재 포트 수
     - ``ep1``/``ep2``/``ep3``: 해당 EP 에서 ``FOUP_PROCESS_START`` 로 처리된 고유 lot 수
     """
     snap = dict(sim_snapshot or {})
@@ -1205,6 +1244,8 @@ def compute_bar_graph_lot_counts(
             all_n = max(0, int(snap.get("lot_count", 0) or 0))
         except Exception:
             all_n = 0
+    # 웹 표시용: 엔진 목표 LOT(= lot_count + 초기 적재)과 맞춘다. 시뮬 로직 미변경.
+    all_n = max(0, int(all_n) + _count_initial_full_ports_from_snapshot(snap))
 
     per_ep: Dict[str, set] = {}
     for it in getattr(result, "items", None) or ():
