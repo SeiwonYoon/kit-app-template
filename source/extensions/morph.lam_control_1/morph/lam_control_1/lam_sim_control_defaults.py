@@ -73,6 +73,16 @@ SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = False
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 # ---------------------------------------------------------------------------
+# CSV 재생 — 점유 시뮬·visibility 시각 재조정·합성 aligner 예외 (후처리)
+# ---------------------------------------------------------------------------
+# False(기본·필수): 기존과 100% 동일 — plan 빌드 직후 아무 후처리도 하지 않음.
+# True: build_csv_playback_plan 결과만 후처리
+#   · JSON 내 wafer 숨김/보임까지 시간만큼 블록 시작 시각을 앞당김
+#   · 합성 aligner 가 CSV ATM 동작과 겹치면 해당 aligner 삭제
+#   · 점유 위반 후보를 진단 목록으로 모아 재생창 타임라인 아래에 표시
+CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED: bool = False
+
+# ---------------------------------------------------------------------------
 # 공정만보기 — JSON 실행 순서 (일반 재생·병렬 공정만보기에는 영향 없음)
 # ---------------------------------------------------------------------------
 # False(기본): 지금과 동일 — CSV 시각(t)이 겹치면 ATM·VTM이 동시에 움직일 수 있음.
@@ -83,7 +93,7 @@ PROCESS_ONLY_SEQUENTIAL_LANES: bool = True
 
 # 위 순차 모드가 True일 때만 적용 — JSON이 끝난 뒤 다음 JSON 시작 전 추가 대기 [초].
 # 0 = 끝나자마자 바로 다음 JSON, 2 = 2초 쉬었다가 다음 JSON.
-PROCESS_ONLY_SEQUENTIAL_GAP_SEC: float = 0.5
+PROCESS_ONLY_SEQUENTIAL_GAP_SEC: float = 0.2
 
 # ---------------------------------------------------------------------------
 # FOUP 번호별 추가 숨김 prim (인덱스 = FOUP 번호)
@@ -199,6 +209,7 @@ __all__ = [
     "SHOW_VIEWPORT_CSV_PANEL",
     "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
+    "CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED",
     "PROCESS_ONLY_SEQUENTIAL_LANES",
     "PROCESS_ONLY_SEQUENTIAL_GAP_SEC",
     "FOUP_USAGE_EXTRA_HIDE_PRIMS_1",

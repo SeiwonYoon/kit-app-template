@@ -454,10 +454,52 @@ class CachedCsvPlayback:
     build_ms: float = 0.0
     # Federation/파서가 확정한 FOUP 사용 개수. None 이면 dwells 에서 계산.
     used_foup_count: Optional[int] = None
+    # 점유 스케줄러 진단 (플래그 False 이면 항상 빈 튜플 — 기존과 동일)
+    occupancy_diagnostics: Tuple[str, ...] = ()
 
 
 def _csv_playback_config_tag() -> str:
-    return f"vtm_swap={int(VTM_END_EFFECTOR_SWAP_HANDS)}"
+    tag = f"vtm_swap={int(VTM_END_EFFECTOR_SWAP_HANDS)}"
+    # 플래그 False 일 때 기존 태그 문자열을 절대 바꾸지 않음 (캐시 호환)
+    try:
+        from .lam_csv_occupancy_scheduler import occupancy_scheduler_enabled
+
+        if occupancy_scheduler_enabled():
+            tag = f"{tag}|occ=1"
+    except Exception:
+        pass
+    return tag
+
+
+def _maybe_apply_occupancy_scheduler(
+    dwells: List["DwellRecord"],
+    schedule: List["CsvPlaybackScheduleEntry"],
+    blocks: List["CsvTimedPlaybackBlock"],
+) -> Tuple[
+    List["CsvPlaybackScheduleEntry"],
+    List["CsvTimedPlaybackBlock"],
+    Tuple[str, ...],
+]:
+    """플래그 True 일 때만 plan 후처리. False 이면 인자 그대로 반환."""
+    try:
+        from .lam_csv_occupancy_scheduler import (
+            apply_occupancy_scheduler,
+            occupancy_scheduler_enabled,
+        )
+    except Exception:
+        return schedule, blocks, ()
+    if not occupancy_scheduler_enabled():
+        return schedule, blocks, ()
+    try:
+        sch, blk, diags = apply_occupancy_scheduler(dwells, schedule, blocks)
+        texts = tuple(d.as_text() for d in diags)
+        return sch, blk, texts
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} occupancy scheduler skipped (fallback to raw plan): {exc}",
+            flush=True,
+        )
+        return schedule, blocks, ()
 
 
 def _csv_cache_key(path: Path) -> str:
@@ -2296,6 +2338,9 @@ def build_and_cache_csv_playback(
             _estimate_csv_build_units(dwells), progress_tick
         )
     schedule, blocks = build_csv_playback_plan(dwells, progress=prog)
+    schedule, blocks, occ_diags = _maybe_apply_occupancy_scheduler(
+        dwells, schedule, blocks
+    )
     try:
         st = path.stat()
         mtime_ns, size = int(st.st_mtime_ns), int(st.st_size)
@@ -2310,6 +2355,7 @@ def build_and_cache_csv_playback(
         schedule=schedule,
         blocks=blocks,
         build_ms=(time.perf_counter() - t0) * 1000.0,
+        occupancy_diagnostics=occ_diags,
     )
     key = _csv_cache_key(path)
     with _csv_playback_cache_lock:
@@ -2347,6 +2393,9 @@ def build_and_cache_from_dwells(
             _estimate_csv_build_units(dwells), progress_tick
         )
     schedule, blocks = build_csv_playback_plan(dwells, progress=prog)
+    schedule, blocks, occ_diags = _maybe_apply_occupancy_scheduler(
+        dwells, schedule, blocks
+    )
     t_end = float(dwells[-1].end_sec) if dwells else 0.0
     cached = CachedCsvPlayback(
         path=path,
@@ -2357,6 +2406,7 @@ def build_and_cache_from_dwells(
         schedule=schedule,
         blocks=blocks,
         build_ms=(time.perf_counter() - t0) * 1000.0,
+        occupancy_diagnostics=occ_diags,
     )
     key = f"{path}|api|{_csv_playback_config_tag()}|n={len(dwells)}|t={t_end:.3f}"
     with _csv_playback_cache_lock:
@@ -5772,6 +5822,10 @@ class LamSimulationCsvPlayWindow:
         self._schedule_scroll_frame: Any = None
         self._schedule_row_labels: List[Any] = []
         self._schedule_row_entries: List[CsvPlaybackScheduleEntry] = []
+        self._occupancy_diag_stack: Any = None
+        self._occupancy_diag_scroll: Any = None
+        self._occupancy_diag_labels: List[Any] = []
+        self._occupancy_diag_lines: Tuple[str, ...] = ()
         self._schedule_highlight_keys: frozenset = frozenset()
         self._build_progress_model: Any = None
         self._speed_model: Any = None
@@ -6974,6 +7028,32 @@ class LamSimulationCsvPlayWindow:
                         with ui.VStack(spacing=2, height=0) as schedule_stack:
                             self._schedule_rows_stack = schedule_stack
                         self._schedule_scroll_frame = schedule_scroll
+                    # 점유 스케줄러 진단 — 플래그 True 일 때만 UI 생성 (False 시 레이아웃 불변)
+                    try:
+                        from .lam_csv_occupancy_scheduler import (
+                            occupancy_scheduler_enabled,
+                        )
+
+                        _occ_ui = bool(occupancy_scheduler_enabled())
+                    except Exception:
+                        _occ_ui = False
+                    if _occ_ui:
+                        ui.Label(
+                            "점유·정렬 진단 (화면별) — aligner 생략 / 시각 재조정 / 점유 경고",
+                            height=18,
+                        )
+                        with ui.ScrollingFrame(
+                            height=120,
+                            style={
+                                "background_color": 0xFF141820,
+                                "border_width": 1,
+                                "border_color": 0xFF4A3A2A,
+                            },
+                        ) as occ_scroll:
+                            with ui.VStack(spacing=2, height=0) as occ_stack:
+                                self._occupancy_diag_stack = occ_stack
+                            self._occupancy_diag_scroll = occ_scroll
+                        self._refresh_occupancy_diag_ui(())
                     if not hide_below:
                         self._build_progress_model = SimpleStringModel("(빌드·재생 진행 — 대기)")
                         ui.StringField(
@@ -8146,10 +8226,66 @@ class LamSimulationCsvPlayWindow:
             rebuild_main=self._schedule_rows_stack is not None,
             rebuild_hud=self._hud_schedule_rows_stack is not None,
         )
+        try:
+            self._refresh_occupancy_diag_ui(
+                tuple(getattr(cached, "occupancy_diagnostics", None) or ())
+            )
+        except Exception:
+            pass
         self._set_build_progress_text(
             f"준비 완료 (캐시) — dwell {len(cached.dwells)} · "
             f"JSON {sum(1 for e in cached.schedule if e.category != 'dwell')}건"
         )
+
+    def _refresh_occupancy_diag_ui(self, lines: Any) -> None:
+        """타임라인 아래 점유 진단 패널. 스택이 없으면(플래그 False) no-op."""
+        stack = getattr(self, "_occupancy_diag_stack", None)
+        if stack is None:
+            return
+        self._occupancy_diag_lines = tuple(lines or ())
+        labels = getattr(self, "_occupancy_diag_labels", None)
+        if labels is None:
+            self._occupancy_diag_labels = []
+            labels = self._occupancy_diag_labels
+        self._clear_one_timeline_stack(stack, labels)
+        try:
+            import omni.ui as ui  # type: ignore
+        except Exception:
+            return
+        try:
+            with stack:
+                rows = list(self._occupancy_diag_lines)
+                if not rows:
+                    labels.append(
+                        ui.Label(
+                            "(진단 없음 — 이상 없음 또는 스케줄 미준비)",
+                            height=18,
+                            word_wrap=True,
+                            style={"color": 0xFF9AA4B2},
+                        )
+                    )
+                else:
+                    labels.append(
+                        ui.Label(
+                            f"진단 {len(rows)}건",
+                            height=18,
+                            style={"color": 0xFFE0C070},
+                        )
+                    )
+                    for line in rows:
+                        labels.append(
+                            ui.Label(
+                                str(line),
+                                height=18,
+                                word_wrap=True,
+                                style={"color": 0xFFE8E8E8},
+                            )
+                        )
+        except Exception as exc:
+            try:
+                self._log(f"occupancy diag UI: {exc}")
+            except Exception:
+                pass
 
     def _start_background_csv_build(self, path: Path, *, reason: str = "") -> None:
         """백그라운드에서 plan 빌드 + 캐시 (진행률만 UI 갱신, 빌드 로직은 스로틀)."""
@@ -8182,6 +8318,9 @@ class LamSimulationCsvPlayWindow:
                     if total_est > 0
                     else None,
                 )
+                schedule, blocks, occ_diags = _maybe_apply_occupancy_scheduler(
+                    dwells, schedule, blocks
+                )
                 try:
                     st = path.stat()
                     mtime_ns, size = int(st.st_mtime_ns), int(st.st_size)
@@ -8196,6 +8335,7 @@ class LamSimulationCsvPlayWindow:
                     schedule=schedule,
                     blocks=blocks,
                     build_ms=(time.perf_counter() - t_build0) * 1000.0,
+                    occupancy_diagnostics=occ_diags,
                 )
                 key = _csv_cache_key(path)
                 with _csv_playback_cache_lock:
@@ -8248,6 +8388,10 @@ class LamSimulationCsvPlayWindow:
             self._rebuild_schedule_timeline_rows(
                 [], rebuild_main=rebuild_main, rebuild_hud=rebuild_hud
             )
+            try:
+                self._refresh_occupancy_diag_ui(())
+            except Exception:
+                pass
             self._set_build_progress_text("(CSV 없음)")
             return
         hit = get_cached_csv_playback(p)
@@ -8259,6 +8403,12 @@ class LamSimulationCsvPlayWindow:
                 rebuild_main=rebuild_main and self._schedule_rows_stack is not None,
                 rebuild_hud=rebuild_hud and self._hud_schedule_rows_stack is not None,
             )
+            try:
+                self._refresh_occupancy_diag_ui(
+                    tuple(getattr(hit, "occupancy_diagnostics", None) or ())
+                )
+            except Exception:
+                pass
             self._set_build_progress_text(
                 f"준비 완료 (캐시) — dwell {len(hit.dwells)} · "
                 f"JSON {sum(1 for e in hit.schedule if e.category != 'dwell')}건"
