@@ -291,7 +291,7 @@ def build_status_panel_snapshot(
             }
         )
     return {
-        "title": str(STATUS_PANEL_TITLE or "STATUS"),
+        "title": str(STATUS_PANEL_TITLE or ""),
         "rows": rows,
     }
 
@@ -576,14 +576,14 @@ class LamViewportStatusPanel:
                                 },
                             ):
                                 with ui.VStack(spacing=6, width=panel_w):
-                                    ui.Label(
-                                        str(STATUS_PANEL_TITLE or "STATUS"),
-                                        height=18,
-                                        style={
-                                            "font_size": int(STATUS_PANEL_TITLE_FONT_SIZE),
-                                            "color": int(STATUS_PANEL_TEXT_COLOR_HEX),
-                                        },
-                                    )
+                                    # ui.Label(
+                                    #     str(STATUS_PANEL_TITLE or "STATUS"),
+                                    #     height=18,
+                                    #     style={
+                                    #         "font_size": int(STATUS_PANEL_TITLE_FONT_SIZE),
+                                    #         "color": int(STATUS_PANEL_TEXT_COLOR_HEX),
+                                    #     },
+                                    # )
 
                                     # 표(테이블): 전체 테두리 1개 + 내부 구분선만
                                     with ui.Frame(

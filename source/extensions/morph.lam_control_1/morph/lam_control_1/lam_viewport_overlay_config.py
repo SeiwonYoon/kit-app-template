@@ -248,11 +248,11 @@ CSV_COL_MODULE_NM: str = "module_nm"
 # ---------------------------------------------------------------------------
 # 기능 #1: 2D 상태 패널 기본값
 # ---------------------------------------------------------------------------
-STATUS_PANEL_TITLE: str = "STATUS"
+STATUS_PANEL_TITLE: str = ""
 
 # 패널 레이아웃/스타일(사용자가 여기서 조정) — 가로 전체 너비는 STATUS_PANEL_WIDTH_PX
-STATUS_PANEL_WIDTH_PX: int = 250
-STATUS_PANEL_LABEL_COL_WIDTH_PX: int = 90
+STATUS_PANEL_WIDTH_PX: int = 270
+STATUS_PANEL_LABEL_COL_WIDTH_PX: int = 80
 STATUS_PANEL_PADDING_PX: int = 10
 STATUS_PANEL_TITLE_FONT_SIZE: int = 14
 STATUS_PANEL_ROW_FONT_SIZE: int = 16  # 행별 label/value 미지정 시 공통 기본값
@@ -306,14 +306,14 @@ class StatusRowSpec:
 # 사용자가 여기 리스트만 수정하면 행 추가/삭제/순서 변경 가능
 STATUS_PANEL_ROWS: List[StatusRowSpec] = [
     # 수동 입력(고정 텍스트) 예시
-    StatusRowSpec(
-        key="eq_model",
-        name="EQ MODEL",
-        value="KIYO_FXE",
-        height_px=STATUS_PANEL_ROW_HEIGHT_PX,
-        label_font_size=14,   # 좌측만 작게
-        value_font_size=14,
-    ),
+    # StatusRowSpec(
+    #     key="eq_model",
+    #     name="EQ MODEL",
+    #     value="KIYO_FXE",
+    #     height_px=STATUS_PANEL_ROW_HEIGHT_PX,
+    #     label_font_size=14,   # 좌측만 작게
+    #     value_font_size=14,
+    # ),
     # CSV 컬럼 매핑 예시
     StatusRowSpec(
         key="eqp_id",
