@@ -1467,7 +1467,7 @@ class TBSSimulationEngine:
         self._oht_loading_bp1 = False
 
     def _move_bp1_to_buffer(self):
-        """IN/OUT에 있는 LOT을 가장 오래 비어 있던 빈 버퍼로 이송(MOVE_TRANSFERING)."""
+        """IN/OUT에 있는 LOT을 빈 버퍼로 이송(MOVE_TRANSFERING). 빈 슬롯은 BP1부터."""
         lot = self.ports.get(INOUT_PORT)
         if lot is None:
             return
@@ -1545,15 +1545,11 @@ class TBSSimulationEngine:
             self._log(f"{lot.lot_id} | {target_bp} 도착(버퍼)")
 
     def _find_oldest_empty_buffer(self) -> Optional[str]:
-        """비어 있는 버퍼 BP2~BP4 중, 비어 있기 시작한 시각이 가장 이른 포트."""
-        empties = [
-            p
-            for p in self._buffer_ports
-            if self.ports[p] is None and not self._is_port_locked(p) and not self._port_faulty(p)
-        ]
-        if not empties:
-            return None
-        return sorted(empties, key=lambda p: self._buffer_empty_since.get(p, 0.0))[0]
+        """비어 있는 버퍼 중 번호 순으로 가장 앞(BP1 우선)."""
+        for p in self._buffer_ports:
+            if self.ports[p] is None and not self._is_port_locked(p) and not self._port_faulty(p):
+                return p
+        return None
 
     def _find_empty_ep(self) -> Optional[str]:
         """비어 있고 EP로 배정 중이 아닌 EP 포트 하나."""
