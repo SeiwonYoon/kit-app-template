@@ -1154,9 +1154,9 @@ class TBSSimulationEngine:
 
         우선순위(상단일수록 먼저 시도):
         - 0) BP1 -> BUFFER (BP1 적재분이 있으면 즉시 버퍼로)
-        - 1) EP -> OHT 회수 (pickup 티켓이 있으면 FIFO EP 회수)
-        - 2) OHT 투입 (빈 EP면 direct, 아니면 BP1 경유)
-        - 3) BUFFER -> EP 채움
+        - 1) BUFFER -> EP 채움 (회수보다 우선)
+        - 2) EP -> OHT 회수 (pickup 티켓이 있으면 FIFO EP 회수)
+        - 3) OHT 투입 (빈 EP면 direct, 아니면 BP1 경유)
         - 4) 대기 로그 + 짧은 sleep
         """
         yield self.env.timeout(0.1)
@@ -1169,15 +1169,15 @@ class TBSSimulationEngine:
             if did:
                 continue
 
+            did = yield from self._step_buffer_to_ep()
+            if did:
+                continue
+
             did = yield from self._step_pickup_to_oht()
             if did:
                 continue
             if len(self.completed_lots) >= self._total_lots:
                 break
-
-            did = yield from self._step_buffer_to_ep()
-            if did:
-                continue
 
             did = yield from self._step_oht_input()
             if did:
@@ -1205,7 +1205,7 @@ class TBSSimulationEngine:
 
     def _step_pickup_to_oht(self):
         """
-        1) 회수 티켓 처리: 가능한 EP를 FIFO로 회수한다.
+        2) 회수 티켓 처리: 가능한 EP를 FIFO로 회수한다.
         한 번이라도 회수를 수행하면 True를 반환(루프를 즉시 상단으로 돌려 상태를 재평가).
         """
         did_pickup = False
@@ -1221,7 +1221,7 @@ class TBSSimulationEngine:
         return did_pickup
 
     def _step_oht_input(self):
-        """2) OHT 투입: direct(빈 EP) 우선, 아니면 IN/OUT 경유. 1건 실행하면 True."""
+        """3) OHT 투입: direct(빈 EP) 우선, 아니면 IN/OUT 경유. 1건 실행하면 True."""
         # READYTOLOAD(생성/준비) 공정확인을 통과하지 않은 LOT은 아직 투입 공정으로 가져가지 않는다.
         if self._oht_input_queue and not bool(getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)):
             return False
@@ -1243,7 +1243,7 @@ class TBSSimulationEngine:
         return False
 
     def _step_buffer_to_ep(self):
-        """3) 버퍼 → EP 1회 이송 가능하면 실행 후 True."""
+        """1) 버퍼 → EP 1회 이송 가능하면 실행 후 True."""
         if not self._ebs_enabled:
             return False
         ep = self._find_empty_ep()
