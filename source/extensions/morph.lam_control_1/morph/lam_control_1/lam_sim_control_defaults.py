@@ -73,14 +73,14 @@ SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = False
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 # ---------------------------------------------------------------------------
-# CSV 재생 — 점유 시뮬·visibility 시각 재조정·합성 aligner 예외 (후처리)
+# CSV 재생 — 점유 시뮬·visibility 시각 재조정 (후처리)
 # ---------------------------------------------------------------------------
-# False(기본·필수): 기존과 100% 동일 — plan 빌드 직후 아무 후처리도 하지 않음.
+# False(기본·필수): 기존과 동일 — plan 빌드 직후 이 후처리를 하지 않음.
 # True: build_csv_playback_plan 결과만 후처리
 #   · JSON 내 wafer 숨김/보임까지 시간만큼 블록 시작 시각을 앞당김
-#   · 합성 aligner 가 CSV ATM 동작과 겹치면 해당 aligner 삭제
 #   · 점유 위반 후보를 진단 목록으로 모아 재생창 타임라인 아래에 표시
-CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED: bool = False
+# 합성 aligner(place 강제 / pick 시점 분리)는 플래그와 무관하게 plan 빌드에서 적용.
+CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED: bool = True
 
 # ---------------------------------------------------------------------------
 # 공정만보기 — JSON 실행 순서 (일반 재생·병렬 공정만보기에는 영향 없음)

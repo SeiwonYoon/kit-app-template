@@ -1,8 +1,9 @@
-"""CSV Play 점유 시뮬·시각 재조정·합성 aligner 예외 (후처리 전용).
+"""CSV Play 점유 시뮬·visibility 시각 재조정 (후처리 전용).
 
 ``CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED`` 가 False 이면 호출하지 않는다.
 호출부에서 플래그로 가드하므로, 이 모듈은 True 경로 전용이다.
-기존 ``build_csv_playback_plan`` 본체는 수정하지 않는다.
+합성 aligner 는 ``simulation_play`` 빌드 단계에서 공통 규칙으로 처리하며,
+이 후처리에서 aligner 를 삭제하지 않는다.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ _PRINT_PREFIX = "[LAM/occ-sched]"
 _VIS_TYPES = frozenset(
     {"PRIM_VISIBILITY", "SET_PRIM_VISIBILITY", "PRIM_HIDE", "PRIM_SHOW"}
 )
-_ALIGNER_CATS = frozenset({"aligner_place", "aligner_pick"})
 
 
 @dataclass(frozen=True)
@@ -53,36 +53,32 @@ def apply_occupancy_scheduler(
     if not blocks:
         return list(schedule or []), list(blocks or []), tuple()
 
-    # 1) 합성 aligner — CSV ATM 동작과 시간 겹치면 삭제
-    blocks2, schedule2, d1 = _drop_conflicting_synth_aligners(schedule, blocks)
+    # 1) visibility 오프셋만큼 블록 시작 시각 앞당김
+    blocks2, schedule2, d1 = _shift_blocks_by_visibility_offset(blocks, schedule)
     diags.extend(d1)
 
-    # 2) visibility 오프셋만큼 블록 시작 시각 앞당김
-    blocks3, schedule3, d2 = _shift_blocks_by_visibility_offset(blocks2, schedule2)
+    # 2) 점유 dry-run — 위반 후보만 진단 (재생 목록은 유지, 시각 이동만 반영)
+    d2 = _occupancy_dry_run_diagnostics(dwells, blocks2)
     diags.extend(d2)
 
-    # 3) 점유 dry-run — 위반 후보만 진단 (재생 목록은 유지, 시각·삭제만 반영)
-    d3 = _occupancy_dry_run_diagnostics(dwells, blocks3)
-    diags.extend(d3)
-
     # 최종 정렬 + row id
-    schedule3.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
-    blocks3.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
+    schedule2.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
+    blocks2.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
     try:
         from .simulation_play import _reattach_block_schedules, _stamp_schedule_row_ids
 
-        schedule3 = _stamp_schedule_row_ids(schedule3)
-        blocks3 = _reattach_block_schedules(blocks3, schedule3)
+        schedule2 = _stamp_schedule_row_ids(schedule2)
+        blocks2 = _reattach_block_schedules(blocks2, schedule2)
     except Exception:
         pass
 
     if diags:
         print(
             f"{_PRINT_PREFIX} 후처리 진단 {len(diags)}건 "
-            f"(aligner 삭제/시각이동/점유경고)",
+            f"(시각이동/점유경고)",
             flush=True,
         )
-    return schedule3, blocks3, tuple(diags)
+    return schedule2, blocks2, tuple(diags)
 
 
 def _step_duration_sec(st: Dict[str, Any]) -> float:
@@ -151,108 +147,6 @@ def visibility_offset_until_occupancy_sec(steps: Sequence[Dict[str, Any]]) -> fl
         elapsed = group_end
         i = j if j > i + 1 else i + 1
     return 0.0
-
-
-def _event_is_atm(ent: Any) -> bool:
-    en = str(getattr(ent, "event_name", "") or "").strip().lower()
-    if en.startswith("atm_"):
-        return True
-    cat = str(getattr(ent, "category", "") or "").strip().lower()
-    if cat in ("pick", "place", "aligner_place", "aligner_pick"):
-        return True
-    if cat == "transfer" and "atm" in str(getattr(ent, "title_ko", "") or "").lower():
-        return True
-    return False
-
-
-def _drop_conflicting_synth_aligners(
-    schedule: List[Any],
-    blocks: List[Any],
-) -> Tuple[List[Any], List[Any], List[OccupancyDiagLine]]:
-    """FOUP pick 후 합성 aligner 구간에 다른 ATM 동작이 있으면 aligner 제거."""
-    diags: List[OccupancyDiagLine] = []
-    try:
-        from .simulation_play import (
-            FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC,
-            FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC,
-        )
-
-        place_d = float(FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC)
-        pick_d = float(FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC)
-    except Exception:
-        place_d, pick_d = 2.5, 6.0
-
-    # pick 시각 → 해당 투어 aligner 제거 여부
-    drop_aligner_anchors: set = set()
-    picks: List[Tuple[float, Any]] = []
-    for e in schedule or []:
-        if str(getattr(e, "category", "") or "") != "pick":
-            continue
-        picks.append((float(getattr(e, "time_sec", 0.0) or 0.0), e))
-
-    for anchor_t, pick_e in picks:
-        win_lo = anchor_t + 1e-6
-        win_hi = anchor_t + pick_d + 1e-6
-        conflict = None
-        for e in schedule or []:
-            cat = str(getattr(e, "category", "") or "")
-            if cat in _ALIGNER_CATS or cat == "dwell" or cat == "pick":
-                continue
-            if not _event_is_atm(e):
-                continue
-            t = float(getattr(e, "time_sec", 0.0) or 0.0)
-            if win_lo < t <= win_hi:
-                conflict = e
-                break
-        if conflict is not None:
-            drop_aligner_anchors.add(round(anchor_t, 6))
-            diags.append(
-                OccupancyDiagLine(
-                    t_sec=float(anchor_t),
-                    kind="aligner_skip",
-                    message=(
-                        f"합성 aligner 생략 — ATM 동작과 겹침 "
-                        f"(t={float(getattr(conflict, 'time_sec', 0) or 0):.1f}s "
-                        f"{getattr(conflict, 'event_name', '') or getattr(conflict, 'category', '')})"
-                    ),
-                )
-            )
-
-    if not drop_aligner_anchors:
-        return list(blocks), list(schedule), diags
-
-    def _aligner_belongs_to_dropped(ent: Any) -> bool:
-        if str(getattr(ent, "category", "") or "") not in _ALIGNER_CATS:
-            return False
-        t = float(getattr(ent, "time_sec", 0.0) or 0.0)
-        # place = anchor+2.5, pick = anchor+6
-        for a in drop_aligner_anchors:
-            if abs(t - (a + place_d)) < 0.05 or abs(t - (a + pick_d)) < 0.05:
-                return True
-        return False
-
-    new_blocks: List[Any] = []
-    for b in blocks:
-        sch = getattr(b, "schedule", None)
-        if sch is not None and _aligner_belongs_to_dropped(sch):
-            continue
-        cat = str(getattr(b, "category", "") or "")
-        if cat in _ALIGNER_CATS:
-            t = float(getattr(b, "time_sec", 0.0) or 0.0)
-            drop = False
-            for a in drop_aligner_anchors:
-                if abs(t - (a + place_d)) < 0.05 or abs(t - (a + pick_d)) < 0.05:
-                    drop = True
-                    break
-            if drop:
-                continue
-        new_blocks.append(b)
-    new_sched = [
-        getattr(b, "schedule")
-        for b in new_blocks
-        if getattr(b, "schedule", None) is not None
-    ]
-    return new_blocks, new_sched, diags
 
 
 def _shift_blocks_by_visibility_offset(

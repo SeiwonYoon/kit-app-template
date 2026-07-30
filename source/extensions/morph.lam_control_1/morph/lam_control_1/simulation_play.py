@@ -32,7 +32,7 @@ from datetime import datetime
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import weakref
 
 from .lam_slot_z_config import (
@@ -1213,9 +1213,14 @@ class CsvPlayPauseCheckpoint:
 
 
 # FOUP pick 직후 CSV에 없는 Aligner 전처리 (현장 규칙, 합성 타임라인만).
-# 시각 = 투어 FOUP pick 의 CSV t(``first.start_sec``) + 아래 오프셋 [s].
+# 세트1(항상): FOUP pick → place = FOUP pick t + PLACE_DELAY.
+# 세트2(Aligner pick): 끼어든 다른 wafer ATM 동작이 없으면 FOUP pick t + PICK_DELAY.
+#   있으면 해당 wafer 다음 이송(보통 airlock place) 시각 직전(LEAD)에 pick 후 대기.
 FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC: float = 2.5
 FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC: float = 6
+FOUP_PICK_SYNTH_ALIGNER_PICK_LEAD_BEFORE_NEXT_SEC: float = (
+    FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC - FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC
+)
 
 _SCHEDULE_CATEGORY_ORDER: Dict[str, int] = {
     "pick": 0,
@@ -1609,6 +1614,89 @@ def _aligner_exec_hint(pick_or_place: str) -> str:
     return f"build_steps_for_event({event!r})  →  lam_sim_actions.{event}()  [{po_ko}]"
 
 
+def _other_wafer_atm_action_times_in_window(
+    dwells: Sequence["DwellRecord"],
+    *,
+    exclude_lot_id: str,
+    exclude_cassette_slot: int,
+    window_lo: float,
+    window_hi: float,
+) -> List[float]:
+    """다른 wafer 의 ATM 관련 동작 시각 (window_lo, window_hi] — 끼어듦 판별용."""
+    times: List[float] = []
+    lo = float(window_lo)
+    hi = float(window_hi)
+    if hi <= lo + 1e-9:
+        return times
+    for (lot_id, cassette_slot), tour in _group_dwell_tours(list(dwells)):
+        if lot_id == exclude_lot_id and int(cassette_slot) == int(exclude_cassette_slot):
+            continue
+        if not tour:
+            continue
+        first, last = tour[0], tour[-1]
+        if first.slot_key == LOGICAL_SLOT_ATM_ARM:
+            t = float(first.start_sec)
+            if lo < t <= hi:
+                times.append(t)
+        for i in range(len(tour) - 1):
+            prev_d, curr_d = tour[i], tour[i + 1]
+            if _classify_transfer_robot(prev_d.slot_key, curr_d.slot_key) != "ATM":
+                continue
+            t = float(curr_d.start_sec)
+            if lo < t <= hi:
+                times.append(t)
+        if last.slot_key == LOGICAL_SLOT_ATM_ARM:
+            t = float(last.end_sec)
+            if lo < t <= hi:
+                times.append(t)
+    return times
+
+
+def _resolve_synth_aligner_pick_time(
+    *,
+    anchor_time_sec: float,
+    place_t: float,
+    lot_id: str,
+    cassette_slot: int,
+    tour: Sequence["DwellRecord"],
+    all_dwells: Sequence["DwellRecord"],
+) -> Tuple[float, bool, Optional[float]]:
+    """Aligner pick 시각.
+
+    Returns:
+        (pick_t, deferred, next_transfer_t)
+        deferred=True 이면 다른 wafer ATM 끼어듦으로 다음 이송 직전 pick.
+    """
+    anchor = float(anchor_time_sec)
+    default_pick = anchor + FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC
+    next_t: Optional[float] = None
+    if len(tour) >= 2:
+        next_t = float(tour[1].start_sec)
+
+    if next_t is None:
+        return default_pick, False, None
+
+    iv = _other_wafer_atm_action_times_in_window(
+        all_dwells,
+        exclude_lot_id=lot_id,
+        exclude_cassette_slot=int(cassette_slot),
+        window_lo=anchor,
+        window_hi=next_t,
+    )
+    if not iv:
+        return default_pick, False, next_t
+
+    lead = float(FOUP_PICK_SYNTH_ALIGNER_PICK_LEAD_BEFORE_NEXT_SEC)
+    last_iv = max(float(x) for x in iv)
+    pick_t = next_t - lead
+    pick_t = max(float(place_t) + 0.05, pick_t)
+    if pick_t <= last_iv + 1e-6:
+        pick_t = max(float(place_t) + 0.05, last_iv + 0.05)
+    if pick_t >= next_t - 1e-4:
+        pick_t = max(float(place_t) + 0.05, next_t - 0.05)
+    return float(pick_t), True, next_t
+
+
 def _aligner_schedule_entry(
     *,
     time_sec: float,
@@ -1618,19 +1706,41 @@ def _aligner_schedule_entry(
     lot_id: str,
     anchor_time_sec: float,
     steps: LamSimJsonSteps,
+    deferred_pick: bool = False,
+    next_transfer_t: Optional[float] = None,
 ) -> CsvPlaybackScheduleEntry:
     po = (pick_or_place or "pick").strip().lower()
     event = f"atm_aligner_{po}"
     category = "aligner_place" if po == "place" else "aligner_pick"
     _ev, json_path = _schedule_entry_json_fields(event)
-    place_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC
-    pick_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC
     if po == "place":
         delay_ko = f"FOUP pick(t={anchor_time_sec:.3f}s) 후 +{FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC:g}s"
+        meaning_ko = (
+            "EAP CSV 에는 없지만, FOUP 에서 집은 웨이퍼를 Aligner 에 내려놓는 "
+            "전처리(세트1, 항상 강제)."
+        )
+    elif deferred_pick:
+        nxt = (
+            f"다음 이송 t={float(next_transfer_t):.3f}s"
+            if next_transfer_t is not None
+            else "다음 이송"
+        )
+        delay_ko = (
+            f"다른 wafer ATM 동작 우선 후, {nxt} 직전 Aligner pick "
+            f"(t={float(time_sec):.3f}s) → 팔에 들고 대기"
+        )
+        meaning_ko = (
+            "끼어든 ATM 공정을 먼저 재생한 뒤, 이 웨이퍼를 목적지로 옮기기 직전에 "
+            "Aligner 에서 집어 ATM 팔에 들고 대기(세트2)."
+        )
     else:
         delay_ko = (
             f"FOUP pick(t={anchor_time_sec:.3f}s) 후 "
-            f"+{FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC:g}s"
+            f"+{FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC:g}s (끼어듦 없음)"
+        )
+        meaning_ko = (
+            "EAP CSV 에는 없지만, Aligner 에 맡긴 웨이퍼를 다시 ATM 팔로 집어 "
+            "다음 이송(airlock 등)까지 대기(세트2)."
         )
     title_place = (
         f"[재생] ATM 팔 → Aligner · lot={lot_id!r} · 웨이퍼#{cassette_slot} "
@@ -1649,10 +1759,7 @@ def _aligner_schedule_entry(
             "CSV 행 없음 — FOUP pick 직후 현장 규칙으로 타임라인에 자동 삽입. "
             f"{delay_ko}."
         ),
-        meaning_ko=(
-            "EAP CSV 에는 없지만, FOUP 에서 집은 웨이퍼를 Aligner 에 잠시 맡겼다가 "
-            "다시 ATM 팔로 집어 오는 전처리 공정."
-        ),
+        meaning_ko=meaning_ko,
         exec_ko=_aligner_exec_hint(po),
         step_count=len(steps),
         event_name=event,
@@ -1668,11 +1775,11 @@ def _aligner_schedule_entry_meta(
     cassette_slot: int,
     lot_id: str,
     anchor_time_sec: float,
+    deferred_pick: bool = False,
+    next_transfer_t: Optional[float] = None,
 ) -> CsvPlaybackScheduleEntry:
     po = (pick_or_place or "pick").strip().lower()
     event = f"atm_aligner_{po}"
-    category = "aligner_place" if po == "place" else "aligner_pick"
-    _ev, json_path = _schedule_entry_json_fields(event)
     ent = _aligner_schedule_entry(
         time_sec=time_sec,
         pick_or_place=po,
@@ -1681,6 +1788,8 @@ def _aligner_schedule_entry_meta(
         lot_id=lot_id,
         anchor_time_sec=anchor_time_sec,
         steps=[],
+        deferred_pick=deferred_pick,
+        next_transfer_t=next_transfer_t,
     )
     return CsvPlaybackScheduleEntry(
         time_sec=ent.time_sec,
@@ -1692,7 +1801,7 @@ def _aligner_schedule_entry_meta(
         exec_ko=ent.exec_ko,
         step_count=_event_step_count_estimate(event),
         event_name=event,
-        json_path=json_path,
+        json_path=ent.json_path,
     )
 
 
@@ -1704,16 +1813,29 @@ def _append_aligner_after_foup_pick(
     foup_index: int,
     cassette_slot: int,
     lot_id: str,
+    tour: Sequence["DwellRecord"],
+    all_dwells: Sequence["DwellRecord"],
     progress: Optional[_ThrottledBuildProgress] = None,
 ) -> None:
-    """FOUP pick 시각 기준 합성 aligner place → pick (CSV 파일은 변경하지 않음)."""
+    """FOUP pick 후 합성 aligner: place 항상(+PLACE_DELAY), pick 은 끼어듦에 따라 시점 분리.
+
+    CSV 파일은 변경하지 않음. 점유 플래그와 무관하게 항상 적용.
+    """
     place_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC
-    pick_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC
+    pick_t, deferred_pick, next_transfer_t = _resolve_synth_aligner_pick_time(
+        anchor_time_sec=anchor_time_sec,
+        place_t=place_t,
+        lot_id=lot_id,
+        cassette_slot=cassette_slot,
+        tour=tour,
+        all_dwells=all_dwells,
+    )
     for po, t_sec, label in (
         ("place", place_t, "aligner_place"),
         ("pick", pick_t, "aligner_pick"),
     ):
         try:
+            deferred = bool(deferred_pick and po == "pick")
             if blocks is not None:
                 steps = build_aligner_after_foup_pick_steps(po, cassette_slot=cassette_slot)
                 if not steps:
@@ -1726,6 +1848,8 @@ def _append_aligner_after_foup_pick(
                     lot_id=lot_id,
                     anchor_time_sec=anchor_time_sec,
                     steps=steps,
+                    deferred_pick=deferred,
+                    next_transfer_t=next_transfer_t,
                 )
                 schedule.append(ent)
                 blocks.append(_block_from_schedule(ent, steps, label=label))
@@ -1738,6 +1862,8 @@ def _append_aligner_after_foup_pick(
                         cassette_slot=cassette_slot,
                         lot_id=lot_id,
                         anchor_time_sec=anchor_time_sec,
+                        deferred_pick=deferred,
+                        next_transfer_t=next_transfer_t,
                     )
                 )
         except Exception as exc:
@@ -2216,6 +2342,8 @@ def build_csv_playback_schedule_meta(
                 foup_index=foup_n,
                 cassette_slot=cassette_slot,
                 lot_id=lot_id,
+                tour=tour,
+                all_dwells=dwells,
             )
         for i in range(len(tour) - 1):
             ent = _transfer_schedule_entry_meta(tour[i], tour[i + 1])
@@ -2301,6 +2429,8 @@ def build_csv_playback_plan(
                             foup_index=foup_n,
                             cassette_slot=cassette_slot,
                             lot_id=lot_id,
+                            tour=tour,
+                            all_dwells=dwells,
                             progress=progress,
                         )
                 except Exception as exc:
@@ -7073,7 +7203,7 @@ class LamSimulationCsvPlayWindow:
                         _occ_ui = False
                     if _occ_ui:
                         ui.Label(
-                            "점유·정렬 진단 (화면별) — aligner 생략 / 시각 재조정 / 점유 경고",
+                            "점유·정렬 진단 (화면별) — 시각 재조정 / 점유 경고",
                             height=18,
                         )
                         with ui.ScrollingFrame(
