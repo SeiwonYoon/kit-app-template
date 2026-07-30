@@ -117,18 +117,21 @@ FOUP_USAGE_EXTRA_HIDE_PRIMS_3: list = [
 # ---------------------------------------------------------------------------
 # Federation API (HyView / 웹 T2V → Kit fetch)
 # ---------------------------------------------------------------------------
-# POST 대상 — 실무 내부망. 로컬·테스트 창에서도 편집 가능.
-# FEDERATION_QUERY_URL: str = (
-#     "http://federation.digitaltwin.internal/queries/mcc-target-prev-lot-history/run"
-# )
+# 호스트는 저장소 루트 ``.env`` (로컬/개발/운영) → ``config.py`` 가 로드.
+# 공통 path 는 config 에서 이어 붙이거나 client 가 붙인다.
+# ``.env`` 없거나 키 비면 아래 default_host(로컬) 로 fallback.
+from .config import (  # noqa: E402
+    federation_query_url as _federation_query_url,
+    federation_simulation_get_base_url as _federation_simulation_get_base_url,
+)
 
-FEDERATION_QUERY_URL: str = (
-    "http://10.61.59.208/queries/mcc-target-prev-lot-history/run"
-)
-# Simulation GET base — ``{base}/api/v1/lam/simulations/{exec_id}``
-FEDERATION_SIMULATION_GET_BASE_URL: str = (
-    "http://hytwindev.skhynix.com/svc/fab"
-)
+# POST 전체 URL = .env FEDERATION_QUERY_URL + /queries/mcc-target-prev-lot-history/run
+FEDERATION_QUERY_URL: str = _federation_query_url()
+# Simulation GET base — ``{base}/api/v1/lam/simulations/{exec_id}`` (path 는 client)
+FEDERATION_SIMULATION_GET_BASE_URL: str = _federation_simulation_get_base_url()
+print("ㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁㅁ")
+print(FEDERATION_SIMULATION_GET_BASE_URL)
+
 # Simulation GET 전용 HTTP 헤더 이름 (Federation POST ``FEDERATION_EXTRA_HEADERS`` 와 별도).
 # 실무에서 헤더명이 바뀌면 이 파일만 수정한다.
 SIMULATION_GET_HEADER_FX_SERVICE_KEY: str = "Fx-Service-Key"
