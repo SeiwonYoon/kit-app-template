@@ -517,6 +517,38 @@ def get_cached_csv_playback(path: Path) -> Optional[CachedCsvPlayback]:
         return _csv_playback_cache.get(key)
 
 
+def find_cached_csv_playback(path: Optional[Path]) -> Optional[CachedCsvPlayback]:
+    """파일 키 hit → 동일 path 의 다른 캐시 키(API·occ 태그 등) fallback.
+
+    공정만보기 실시간 전환 등에서 ``_prepared_playback`` 이 비었을 때 사용.
+    """
+    if path is None:
+        return None
+    hit = get_cached_csv_playback(path)
+    if hit is not None:
+        return hit
+    try:
+        target = path.resolve()
+    except OSError:
+        target = path
+    want_tag = _csv_playback_config_tag()
+    best: Optional[CachedCsvPlayback] = None
+    with _csv_playback_cache_lock:
+        for cached in _csv_playback_cache.values():
+            try:
+                cp = Path(getattr(cached, "path", "") or "").resolve()
+            except OSError:
+                continue
+            if cp != target:
+                continue
+            # 현재 config_tag(occ 포함) 일치 우선
+            if str(getattr(cached, "config_tag", "") or "") == want_tag:
+                return cached
+            if best is None:
+                best = cached
+    return best
+
+
 def clear_csv_playback_cache() -> None:
     with _csv_playback_cache_lock:
         _csv_playback_cache.clear()
@@ -6760,6 +6792,8 @@ class LamSimulationCsvPlayWindow:
             self._rebuild_schedule_timeline_rows([], rebuild_main=False, rebuild_hud=True)
             return
         hit = get_cached_csv_playback(path)
+        if hit is None:
+            hit = find_cached_csv_playback(path)
         if hit is not None:
             self._prepared_playback = hit
             self._rebuild_schedule_timeline_rows(
@@ -7710,9 +7744,28 @@ class LamSimulationCsvPlayWindow:
         if cached is not None:
             return cached
         path = self._selected_csv_path()
-        if path is None:
-            return None
-        return get_cached_csv_playback(path)
+        hit = find_cached_csv_playback(path)
+        if hit is not None:
+            # 이후 전환·미리보기가 다시 잃지 않도록 복구
+            self._prepared_playback = hit
+            return hit
+        return None
+
+    def _preserve_prepared_playback_during_play(self) -> bool:
+        """재생/전환 중이면 prepared 를 미리보기 miss 로 지우면 안 됨."""
+        try:
+            if self._csv_play_is_active():
+                return True
+        except Exception:
+            pass
+        try:
+            if csv_play_session_active(screen=self._screen):
+                return True
+        except Exception:
+            pass
+        if bool(getattr(self, "_process_only_switch_pending", False)):
+            return True
+        return False
 
     def _on_live_process_only_changed(
         self, *, desired_override: Optional[bool] = None
@@ -8296,7 +8349,9 @@ class LamSimulationCsvPlayWindow:
             self._apply_cached_timeline_ui(hit)
             return
 
-        self._prepared_playback = None
+        # 재생 중에는 prepared 를 비우지 않음 — 공정만보기 실시간 전환이 캐시를 잃음
+        if not self._preserve_prepared_playback_during_play():
+            self._prepared_playback = None
         ticker = self._build_ui_ticker
         if ticker is not None:
             ticker.start(1)
@@ -8395,6 +8450,9 @@ class LamSimulationCsvPlayWindow:
             self._set_build_progress_text("(CSV 없음)")
             return
         hit = get_cached_csv_playback(p)
+        if hit is None:
+            # 파일 키 miss (occ 태그·API 키 등) — path 일치 캐시로 UI/prepared 유지
+            hit = find_cached_csv_playback(p)
         if hit is not None:
             self._prepared_playback = hit
             self._rebuild_schedule_timeline_rows(
@@ -8417,7 +8475,9 @@ class LamSimulationCsvPlayWindow:
         try:
             dwells = load_csv_dwell_timeline(p)
             entries = build_csv_playback_schedule_meta(dwells)
-            self._prepared_playback = None
+            # 재생·공정만보기 전환 중 prepared 를 지우면 "재생 캐시 없음" 실패
+            if not self._preserve_prepared_playback_during_play():
+                self._prepared_playback = None
             self._rebuild_schedule_timeline_rows(
                 entries,
                 speed_scale=self._read_speed_scale(),
@@ -9343,6 +9403,7 @@ __all__ = [
     "is_csv_bulk_build_active",
     "CachedCsvPlayback",
     "get_cached_csv_playback",
+    "find_cached_csv_playback",
     "clear_csv_playback_cache",
     "prepare_csv_playback",
     "build_and_cache_csv_playback",
