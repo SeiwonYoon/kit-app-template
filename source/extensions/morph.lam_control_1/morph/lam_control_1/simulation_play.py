@@ -999,6 +999,24 @@ def _event_json_paths_for_display(event_name: str) -> Tuple[str, str]:
         return rel, rel
 
 
+def _vtm_module_slot_key(slot_key: str) -> bool:
+    """VTM 물리 모듈 슬롯(chamber / airlock) 여부 — 이송 target 후보 판별."""
+    sk = (slot_key or "").strip()
+    if sk.startswith("chamber"):
+        rest = sk[len("chamber") :]
+        return rest.isdigit() and 1 <= int(rest) <= 5
+    return sk.startswith("airlock1_") or sk.startswith("airlock2_")
+
+
+def _vtm_transfer_target_slot(prev_sk: str, curr_sk: str) -> str:
+    """EE dwell 없이 VTM 모듈 간 이송일 때 event 대상 slot_key."""
+    if _vtm_module_slot_key(curr_sk):
+        return curr_sk
+    if _vtm_module_slot_key(prev_sk):
+        return prev_sk
+    return curr_sk
+
+
 def _resolve_transfer_event_name(
     prev: DwellRecord, curr: DwellRecord
 ) -> Tuple[str, Optional[int]]:
@@ -1021,15 +1039,7 @@ def _resolve_transfer_event_name(
     elif place_from_arm:
         target, po = curr.slot_key, "place"
     else:
-        target = (
-            curr.slot_key
-            if vtm_clip_station_key_for_slot(curr.slot_key)
-            else (
-                prev.slot_key
-                if vtm_clip_station_key_for_slot(prev.slot_key)
-                else curr.slot_key
-            )
-        )
+        target = _vtm_transfer_target_slot(prev.slot_key, curr.slot_key)
         po = "pick"
     hand = (
         _vtm_hand_side_for_transfer(prev.slot_key, curr.slot_key, pick_into_arm=pick_into_arm)
@@ -1516,15 +1526,7 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
                 hand = _vtm_hand_side_for_transfer(prev.slot_key, curr.slot_key, pick_into_arm=False)
                 po = "place"
             else:
-                target = (
-                    curr.slot_key
-                    if vtm_clip_station_key_for_slot(curr.slot_key)
-                    else (
-                        prev.slot_key
-                        if vtm_clip_station_key_for_slot(prev.slot_key)
-                        else curr.slot_key
-                    )
-                )
+                target = _vtm_transfer_target_slot(prev.slot_key, curr.slot_key)
                 hand = "left"
                 po = "pick"
             event, num = vtm_event_name_for_slot(target, hand, po)
@@ -9468,8 +9470,6 @@ __all__ = [
     "WAFER_PRIM_BY_SLOT_KEY",
     "SLOT_Z_METERS",
     "ATM_HEIGHT_PRIM_PATH",
-    "atm_clip_station_key_for_slot",
-    "vtm_clip_station_key_for_slot",
     "LamSimPlayVirtualConfig",
     "LAM_SIM_VIRTUAL_CONFIG",
     "default_lam_sim_virtual_config",
