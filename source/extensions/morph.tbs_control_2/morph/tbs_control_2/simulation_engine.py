@@ -1450,7 +1450,13 @@ class TBSSimulationEngine:
         self._log("[입력] 루프 종료")
 
     def _can_load_to_bp1(self) -> bool:
-        """OHT LOT을 IN/OUT에 넣을 수 있는지: IN/OUT 비어 있고 버퍼에 빈 슬롯이 있으며 적재 중 아님."""
+        """OHT LOT을 IN/OUT에 넣을 수 있는지: IN/OUT 비어 있고 버퍼에 빈 슬롯이 있으며 적재 중 아님.
+
+        직렬(기본): 버퍼가 **이미 EMPTY** 인 슬롯이 있어야 함.
+        병렬(``SIM_PARALLEL_NONCONFLICTING_MOVES``): BP→EP 이송 중(잠금+점유)인 버퍼는
+        완료 시 EMPTY 가 되므로, OHT→INOUT 를 BP→EP 와 동시에 기동할 수 있게 허용한다.
+        (예: BP4→EP3 진행 중 arrived_inout — 기기 비충돌)
+        """
         if not self._ebs_enabled:
             return False
         if self._port_faulty(INOUT_PORT):
@@ -1459,6 +1465,17 @@ class TBSSimulationEngine:
         any_buffer_empty = any(
             self.ports[p] is None and not self._port_faulty(p) for p in self._buffer_ports
         )
+        if (
+            not any_buffer_empty
+            and bool(getattr(self, "_parallel_nonconflicting_moves", False))
+        ):
+            # BP→EP 진행 중: 점유는 유지되지만 잠금되어 완료 후 비워짐 → 곧 빈 슬롯
+            any_buffer_empty = any(
+                self._is_port_locked(p)
+                and self.ports.get(p) is not None
+                and not self._port_faulty(p)
+                for p in self._buffer_ports
+            )
         return bp1_empty and any_buffer_empty and not self._oht_loading_bp1
 
     def _can_load_to_ep_direct(self) -> bool:

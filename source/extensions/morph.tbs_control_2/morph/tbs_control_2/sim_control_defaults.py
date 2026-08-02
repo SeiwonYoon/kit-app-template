@@ -159,6 +159,7 @@ SIM_BAR_PREVIEW_DEFAULT: bool = True
 #   허용 쌍(오케스트레이터가 yield 대기하지 않음):
 #   · BP→EP ‖ EP→OHT 회수 — 대상 EP 가 서로 다름(빈 EP vs 회수대기 EP)
 #   · BP→EP ‖ OHT→EP / OHT→INOUT — OHT→EP 는 서로 다른 빈 EP 일 때만
+#     (OHT→INOUT: BP→EP 로 비는 중인 버퍼가 있으면 빈 슬롯 조건 완화 — 동시 기동 허용)
 #   비허용: 회수 ‖ OHT 투입(동일 OHT 경로) — 한쪽이 끝날 때까지 다른 쪽 기동 안 함.
 #   INOUT→BP 는 True/False 모두 직렬(완료 대기) 유지.
 SIM_PARALLEL_NONCONFLICTING_MOVES: bool = True
