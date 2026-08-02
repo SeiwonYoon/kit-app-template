@@ -2206,6 +2206,53 @@ def _schedule_entry_match_key(e: CsvPlaybackScheduleEntry) -> Tuple[Any, ...]:
     )
 
 
+def _schedule_entry_soft_match_key(e: CsvPlaybackScheduleEntry) -> Tuple[Any, ...]:
+    """time_sec 변동(직렬 보정·재빌드)에도 Current State/강조 매칭이 되게 하는 보조 키."""
+    row = int(getattr(e, "schedule_row", -1) or -1)
+    return (str(e.category), str(e.event_name), row, int(e.sort_order))
+
+
+def _schedule_entry_matches_active(
+    e: CsvPlaybackScheduleEntry, active: frozenset
+) -> bool:
+    """정확 키 우선, 실패 시 soft 키·(category,event,sort) 보조 매칭."""
+    if not active:
+        return False
+    if _schedule_entry_match_key(e) in active:
+        return True
+    soft = _schedule_entry_soft_match_key(e)
+    if soft in active:
+        return True
+    cat = str(e.category or "")
+    ev = str(e.event_name or "")
+    sort_o = int(e.sort_order)
+    row = int(getattr(e, "schedule_row", -1) or -1)
+    for k in active:
+        if not isinstance(k, tuple) or len(k) != 4:
+            continue
+        # soft: (cat, event, row, sort)
+        if k[0] == cat and k[1] == ev and int(k[3]) == sort_o:
+            try:
+                kr = int(k[2])
+            except Exception:
+                kr = -1
+            if row < 0 or kr < 0 or kr == row:
+                return True
+        # exact: (t, sort, cat, event) — time 무시
+        try:
+            if (
+                isinstance(k[0], (int, float))
+                and not isinstance(k[0], bool)
+                and str(k[2]) == cat
+                and str(k[3]) == ev
+                and int(k[1]) == sort_o
+            ):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _stamp_schedule_row_ids(
     schedule: List[CsvPlaybackScheduleEntry],
 ) -> List[CsvPlaybackScheduleEntry]:
@@ -3146,9 +3193,13 @@ def _csv_play_timeline_highlight_notify(
     _post_kit_main_thread(_ui)
 
 
-def _csv_play_timeline_row_begin_entry(sched: CsvPlaybackScheduleEntry) -> None:
+def _csv_play_timeline_row_begin_entry(
+    sched: CsvPlaybackScheduleEntry,
+    *,
+    screen: Optional[int] = None,
+) -> None:
     key = _schedule_entry_match_key(sched)
-    si = current_csv_play_screen()
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
     try:
         from .lam_viewport_overlay_state import record_foup_event_from_schedule_entry
 
@@ -3158,16 +3209,29 @@ def _csv_play_timeline_row_begin_entry(sched: CsvPlaybackScheduleEntry) -> None:
     sess = csv_play_screen_session(si)
     with sess.timeline_active_keys_lock:
         sess.timeline_active_keys.add(key)
+        # time_sec 이 UI 행과 어긋나도 Current State 매칭되도록 soft 키도 함께 등록
+        try:
+            sess.timeline_active_keys.add(_schedule_entry_soft_match_key(sched))
+        except Exception:
+            pass
         snap = frozenset(sess.timeline_active_keys)
     _csv_play_timeline_highlight_notify(snap, screen=si)
 
 
-def _csv_play_timeline_row_end_entry(sched: CsvPlaybackScheduleEntry) -> None:
+def _csv_play_timeline_row_end_entry(
+    sched: CsvPlaybackScheduleEntry,
+    *,
+    screen: Optional[int] = None,
+) -> None:
     key = _schedule_entry_match_key(sched)
-    si = current_csv_play_screen()
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
     sess = csv_play_screen_session(si)
     with sess.timeline_active_keys_lock:
         sess.timeline_active_keys.discard(key)
+        try:
+            sess.timeline_active_keys.discard(_schedule_entry_soft_match_key(sched))
+        except Exception:
+            pass
         snap = frozenset(sess.timeline_active_keys)
     _csv_play_timeline_highlight_notify(snap, screen=si)
 
@@ -4615,7 +4679,7 @@ def _csv_playback_execute_json_block(
     _notify_csv_play_progress_ui(screen=si)
     wall_elapsed = time.monotonic() - t0
     lane = _playback_lane_from_block(block)
-    _csv_play_timeline_row_begin_entry(sched)
+    _csv_play_timeline_row_begin_entry(sched, screen=si)
     try:
         _run_lam_sim_steps_cancellable(
             registry,
@@ -4630,7 +4694,7 @@ def _csv_playback_execute_json_block(
             play_epoch=play_epoch,
         )
     finally:
-        _csv_play_timeline_row_end_entry(sched)
+        _csv_play_timeline_row_end_entry(sched, screen=si)
     # detach/epoch 무효 후엔 로그·시계 갱신 금지 (과거 t 재출력·널뛰기 방지)
     if csv_play_worker_should_exit(screen=si, play_epoch=play_epoch):
         return
@@ -7922,7 +7986,7 @@ class LamSimulationCsvPlayWindow:
     def _entry_is_timeline_playing(
         self, entry: CsvPlaybackScheduleEntry, active_keys: frozenset
     ) -> bool:
-        return _schedule_entry_match_key(entry) in active_keys
+        return _schedule_entry_matches_active(entry, active_keys)
 
     def _apply_timeline_label_style(self, label: Any, entry: CsvPlaybackScheduleEntry) -> None:
         style = self._timeline_label_style(entry)
@@ -7942,7 +8006,7 @@ class LamSimulationCsvPlayWindow:
         if not active_keys:
             return None
         for i, ent in enumerate(self._schedule_row_entries):
-            if _schedule_entry_match_key(ent) in active_keys:
+            if _schedule_entry_matches_active(ent, active_keys):
                 return i
         return None
 

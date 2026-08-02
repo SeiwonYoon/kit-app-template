@@ -122,7 +122,10 @@ def _format_status_time_line(ps: dict, *, screen: Optional[int] = None) -> str:
 
 
 def _play_context_idle(ps: dict, *, screen: Optional[int] = None) -> bool:
-    """Play 전·정지(초기화) 후 — Time 0s, Current State 초기화."""
+    """Play 전·정지(초기화) 후 — Time 0s 표시용.
+
+    공정만보기 전환·자식 worker 잔존 중에는 idle 로 보지 않아 Current State 가 비지 않게 한다.
+    """
     try:
         from .simulation_play import (  # type: ignore
             csv_play_session_active,
@@ -135,10 +138,27 @@ def _play_context_idle(ps: dict, *, screen: Optional[int] = None) -> bool:
             return False
     except Exception:
         pass
+    try:
+        from .simulation_play import (  # type: ignore
+            _alive_csv_play_child_workers,
+            csv_play_screen_session,
+        )
+
+        if _alive_csv_play_child_workers(screen=screen):
+            return False
+        sess = csv_play_screen_session(screen)
+        if bool(getattr(sess, "mode_switch_drain", False)):
+            return False
+    except Exception:
+        pass
     csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
     csv_total = float(ps.get("csv_total", 0.0) or 0.0)
     wall = float(ps.get("wall_elapsed_display", 0.0) or 0.0)
+    json_done = int(ps.get("json_done", 0) or 0)
+    json_total = int(ps.get("json_total", 0) or 0)
     if csv_total > 1e-6 or csv_t > 1e-6 or wall > 1e-6:
+        return False
+    if json_total > 0 or json_done > 0:
         return False
     return True
 
@@ -207,10 +227,10 @@ def build_status_panel_snapshot(
     idle = _play_context_idle(ps, screen=si)
     csv_t = float(ps.get("csv_t_display", 0.0) or 0.0)
     if idle:
-        # Play 전·정지 후: 다른 화면 재생과 무관하게 해당 화면 패널은 비움
-        set_last_state_title("", screen=si)
+        # Play 전·정지 후: Time 은 0. Current State 는 명시적 정지/초기화에서만 비움.
+        # (공정만보기 전환 중 잠깐 idle 로 보이면 문구를 지우지 않음)
         time_s = "0s"
-        display_state = ""
+        display_state = get_last_state_title(screen=si)
         eqp_id_val = ""
         cur_dwell = None
     else:
@@ -218,13 +238,13 @@ def build_status_panel_snapshot(
         active_state = ""
         try:
             from .simulation_play import (  # type: ignore
-                _schedule_entry_match_key,
+                _schedule_entry_matches_active,
                 get_csv_play_timeline_active_keys_snap,
             )
 
             active = get_csv_play_timeline_active_keys_snap(screen=si)
             for e in getattr(csv_window, "_schedule_row_entries", []) or []:
-                if _schedule_entry_match_key(e) not in active:
+                if not _schedule_entry_matches_active(e, active):
                     continue
                 candidate = _format_current_state_line(e)
                 if candidate:
