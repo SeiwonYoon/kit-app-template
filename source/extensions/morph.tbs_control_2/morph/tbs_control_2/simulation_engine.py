@@ -78,6 +78,7 @@ import random
 import threading
 
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
+from .sim_control_defaults import SIM_PARALLEL_NONCONFLICTING_MOVES as _SIM_PARALLEL_MOVES
 from .sim_lot_fix_proc import LotFixProcEntry, format_lot_id_display
 
 
@@ -428,6 +429,11 @@ class TBSSimulationEngine:
         # 이벤트 블록 로그 #[n] (SIM_START는 #[0] 고정)
         self._sim_log_event_seq = 0
         self._process_time_priority = bool(getattr(self._init_cfg, "process_time_priority", False))
+        # sim_control_defaults.SIM_PARALLEL_NONCONFLICTING_MOVES — False 면 완전 직렬(기존 동일).
+        self._parallel_nonconflicting_moves = bool(_SIM_PARALLEL_MOVES)
+        # True 모드 전용: 동시 기동 수 제한(BP→EP 1건, OHT 경로=회수|투입 1건).
+        self._bp_to_ep_inflight = False
+        self._oht_path_inflight = False
         self._interrupt_anim_cb: Optional[Callable[[], None]] = None
         self._faulty_ports_supplier: Optional[Callable[[], Set[str]]] = None
         self._idle_sec: Dict[str, float] = {}
@@ -874,6 +880,8 @@ class TBSSimulationEngine:
         self._running = True
         self._sim_log_event_seq = 0
         self._locked_ports.clear()
+        self._bp_to_ep_inflight = False
+        self._oht_path_inflight = False
         self._status_log_policy.reset()
         self._total_lots = 0
         self._pickup_tickets = 0
@@ -934,6 +942,8 @@ class TBSSimulationEngine:
         self._running = False
         self._done = True
         self._locked_ports.clear()
+        self._bp_to_ep_inflight = False
+        self._oht_path_inflight = False
         self._status_log_policy.reset()
         self._log(
             f"[SIM] 중지 | completed={len(self.completed_lots)}/{self._total_lots} "
@@ -1147,20 +1157,26 @@ class TBSSimulationEngine:
 
     def _run_serial_flow(self):
         """
-        직렬 실행(메인 오케스트레이터).
+        메인 오케스트레이터.
 
         유지보수 관점에서 "시뮬이 다음에 무엇을 할지 결정하는 곳"을 이 함수 1곳으로 고정한다.
         세부 구현은 _step_* 헬퍼로 분리하되, 실행 순서/우선순위는 여기서만 바꾼다.
 
         우선순위(상단일수록 먼저 시도):
-        - 0) BP1 -> BUFFER (BP1 적재분이 있으면 즉시 버퍼로)
+        - 0) BP1 -> BUFFER (BP1 적재분이 있으면 즉시 버퍼로) — 항상 직렬(완료 대기)
         - 1) BUFFER -> EP 채움 (회수보다 우선)
         - 2) EP -> OHT 회수 (pickup 티켓이 있으면 FIFO EP 회수)
         - 3) OHT 투입 (빈 EP면 direct, 아니면 BP1 경유)
         - 4) 대기 로그 + 짧은 sleep
+
+        ``SIM_PARALLEL_NONCONFLICTING_MOVES``:
+        - False(기본): 1~3 을 ``yield process`` 로 완전 직렬(기존과 동일).
+        - True: 1~3 중 비충돌 쌍은 완료 대기 없이 동시 기동(``_start_parallel_nonconflicting_wave``).
         """
         yield self.env.timeout(0.1)
-        self._log(f"[시작] OHT 추가 LOT 목표={self._max_oht_lots}")
+        parallel = bool(getattr(self, "_parallel_nonconflicting_moves", False))
+        mode_txt = "병렬(비충돌)" if parallel else "직렬"
+        self._log(f"[시작] OHT 추가 LOT 목표={self._max_oht_lots} | 오케스트레이터={mode_txt}")
 
         while self._running and len(self.completed_lots) < self._total_lots:
             self._log_heartbeat_if_due()
@@ -1169,6 +1185,18 @@ class TBSSimulationEngine:
             if did:
                 continue
 
+            if parallel:
+                started = self._start_parallel_nonconflicting_wave()
+                if started:
+                    # 기동만 하고 완료는 기다리지 않음 — 짧은 tick 후 상태 재평가
+                    yield self.env.timeout(0.05)
+                    continue
+                if len(self.completed_lots) >= self._total_lots:
+                    break
+                yield from self._step_idle_wait()
+                continue
+
+            # --- False: 기존 완전 직렬 경로 (변경 없음) ---
             did = yield from self._step_buffer_to_ep()
             if did:
                 continue
@@ -1254,6 +1282,120 @@ class TBSSimulationEngine:
                 yield self.env.process(self._move_bp_to_ep(bp, ep, lot))
                 return True
         return False
+
+    def _start_parallel_nonconflicting_wave(self) -> bool:
+        """비충돌 공정을 완료 대기 없이 기동. 하나라도 기동하면 True.
+
+        - BP→EP 는 회수/OHT 와 동시 가능(EP·포트 잠금으로 충돌 방지).
+        - 회수와 OHT 투입은 동일 OHT 경로라 동시 기동하지 않음(회수 우선).
+        """
+        started = False
+        if self._try_start_buffer_to_ep_nofollow():
+            started = True
+        # 회수 우선 — 성공하면 같은 wave 에서 OHT 투입은 하지 않음
+        if self._try_start_pickup_nofollow():
+            started = True
+        elif self._try_start_oht_input_nofollow():
+            started = True
+        return started
+
+    def _try_start_buffer_to_ep_nofollow(self) -> bool:
+        """BP→EP 를 기동만 하고 완료는 기다리지 않음."""
+        if not self._ebs_enabled:
+            return False
+        if bool(getattr(self, "_bp_to_ep_inflight", False)):
+            return False
+        ep = self._find_empty_ep()
+        bp = self._find_oldest_bp()
+        if not ep or not bp:
+            return False
+        lot = self.ports.get(bp)
+        if lot is None:
+            return False
+        self._bp_to_ep_inflight = True
+        self._dispatching_to_ep[ep] = True
+        self._lock_port(bp)
+        self._lock_port(ep)
+        self.env.process(self._move_bp_to_ep_parallel(bp, ep, lot))
+        return True
+
+    def _move_bp_to_ep_parallel(self, bp_port: str, ep_port: str, lot: Lot):
+        """병렬 모드용 BP→EP 래퍼 — 예약/잠금 정리."""
+        try:
+            yield self.env.process(self._move_bp_to_ep(bp_port, ep_port, lot))
+        finally:
+            self._dispatching_to_ep[ep_port] = False
+            self._unlock_port(ep_port)
+            self._unlock_port(bp_port)
+            self._bp_to_ep_inflight = False
+
+    def _try_start_pickup_nofollow(self) -> bool:
+        """회수 1건을 기동만 하고 완료는 기다리지 않음."""
+        if bool(getattr(self, "_oht_path_inflight", False)):
+            return False
+        if self._pickup_tickets <= 0 or len(self.completed_lots) >= self._total_lots:
+            return False
+        ep_pick = self._find_ep_awaiting_pickup()
+        if not ep_pick:
+            return False
+        self._pickup_tickets -= 1
+        self._oht_path_inflight = True
+        self._lock_port(ep_pick)
+        self.env.process(self._execute_pickup_parallel(ep_pick))
+        return True
+
+    def _execute_pickup_parallel(self, ep_port: str):
+        """병렬 모드용 회수 래퍼 — EP 잠금·OHT 경로 점유 정리."""
+        try:
+            yield self.env.process(self._execute_pickup(ep_port))
+        finally:
+            self._unlock_port(ep_port)
+            self._oht_path_inflight = False
+
+    def _try_start_oht_input_nofollow(self) -> bool:
+        """OHT→EP 또는 OHT→INOUT 을 기동만 하고 완료는 기다리지 않음."""
+        if bool(getattr(self, "_oht_path_inflight", False)):
+            return False
+        if self._oht_input_queue and not bool(
+            getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)
+        ):
+            return False
+
+        if self._oht_input_queue and self._can_load_to_ep_direct():
+            ep_target = self._find_empty_ep()
+            if ep_target:
+                lot = self._oht_input_queue.pop(0)
+                self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
+                self._oht_path_inflight = True
+                self._dispatching_to_ep[ep_target] = True
+                self._lock_port(ep_target)
+                self.env.process(self._load_lot_to_ep_direct_parallel(lot, ep_target))
+                return True
+
+        if self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1():
+            lot = self._oht_input_queue.pop(0)
+            self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
+            self._oht_path_inflight = True
+            self.env.process(self._load_lot_to_inout_parallel(lot))
+            return True
+
+        return False
+
+    def _load_lot_to_ep_direct_parallel(self, lot: Lot, ep_port: str):
+        """병렬 모드용 OHT→EP 래퍼."""
+        try:
+            yield self.env.process(self._load_lot_to_ep_direct(lot, ep_port))
+        finally:
+            self._dispatching_to_ep[ep_port] = False
+            self._unlock_port(ep_port)
+            self._oht_path_inflight = False
+
+    def _load_lot_to_inout_parallel(self, lot: Lot):
+        """병렬 모드용 OHT→INOUT 래퍼."""
+        try:
+            yield self.env.process(self._load_lot_to_inout(lot))
+        finally:
+            self._oht_path_inflight = False
 
     def _step_idle_wait(self):
         """4) 할 일 없을 때: WAIT 로그(디듀프) + 짧은 sleep."""
@@ -1569,7 +1711,10 @@ class TBSSimulationEngine:
         candidates = [
             ep
             for ep in self._ep_ports
-            if self._ep_awaiting_pickup.get(ep) and self.ports.get(ep) is not None
+            if self._ep_awaiting_pickup.get(ep)
+            and self.ports.get(ep) is not None
+            and not self._is_port_locked(ep)
+            and not self._port_faulty(ep)
         ]
         if not candidates:
             return None

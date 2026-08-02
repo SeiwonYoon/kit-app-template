@@ -150,6 +150,19 @@ SIM_PRERUN_EXPORT_JSON: bool = True
 # False → 지금처럼 미리보기 OFF(재생 진행분만 보임).
 SIM_BAR_PREVIEW_DEFAULT: bool = True
 
+# ---------------------------------------------------------------------------
+# 시뮬 오케스트레이터: 비충돌 공정 병렬 기동 (simulation_engine._run_serial_flow)
+# ---------------------------------------------------------------------------
+# False(기본): 기존과 100% 동일 — 매 단계를 ``yield self.env.process(...)`` 로
+#   끝날 때까지 대기한 뒤 다음 우선순위를 본다(완전 직렬).
+# True: 기기가 겹치지 않으면 앞 공정 완료를 기다리지 않고 다음을 즉시 기동.
+#   허용 쌍(오케스트레이터가 yield 대기하지 않음):
+#   · BP→EP ‖ EP→OHT 회수 — 대상 EP 가 서로 다름(빈 EP vs 회수대기 EP)
+#   · BP→EP ‖ OHT→EP / OHT→INOUT — OHT→EP 는 서로 다른 빈 EP 일 때만
+#   비허용: 회수 ‖ OHT 투입(동일 OHT 경로) — 한쪽이 끝날 때까지 다른 쪽 기동 안 함.
+#   INOUT→BP 는 True/False 모두 직렬(완료 대기) 유지.
+SIM_PARALLEL_NONCONFLICTING_MOVES: bool = True
+
 __all__ = [
     "SimControlDefaults",
     "SIM_CONTROL_DEFAULTS",
@@ -175,4 +188,5 @@ __all__ = [
     "SIM_PRERUN_CONSOLE_LOG",
     "SIM_PRERUN_EXPORT_JSON",
     "SIM_BAR_PREVIEW_DEFAULT",
+    "SIM_PARALLEL_NONCONFLICTING_MOVES",
 ]
