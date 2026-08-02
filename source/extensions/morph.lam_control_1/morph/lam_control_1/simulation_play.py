@@ -459,8 +459,9 @@ class CachedCsvPlayback:
 
 
 def _csv_playback_config_tag() -> str:
-    tag = f"vtm_swap={int(VTM_END_EFFECTOR_SWAP_HANDS)}"
-    # 플래그 False 일 때 기존 태그 문자열을 절대 바꾸지 않음 (캐시 호환)
+    # atm_arm_serial=1: FOUP place→pick 직렬·연속 pick 보정 (캐시 무효화)
+    tag = f"vtm_swap={int(VTM_END_EFFECTOR_SWAP_HANDS)}|atm_arm_serial=1"
+    # 플래그 False 일 때 occ 접미는 붙이지 않음
     try:
         from .lam_csv_occupancy_scheduler import occupancy_scheduler_enabled
 
@@ -492,6 +493,10 @@ def _maybe_apply_occupancy_scheduler(
         return schedule, blocks, ()
     try:
         sch, blk, diags = apply_occupancy_scheduler(dwells, schedule, blocks)
+        sch, blk = _apply_atm_arm_place_before_pick(sch, blk)
+        assert blk is not None
+        sch = _stamp_schedule_row_ids(sch)
+        blk = _reattach_block_schedules(blk, sch)
         texts = tuple(d.as_text() for d in diags)
         return sch, blk, texts
     except Exception as exc:
@@ -1233,13 +1238,17 @@ FOUP_PICK_SYNTH_ALIGNER_PICK_LEAD_BEFORE_NEXT_SEC: float = (
 )
 
 _SCHEDULE_CATEGORY_ORDER: Dict[str, int] = {
-    "pick": 0,
+    # 동일 CSV t 에서 FOUP place 가 pick 보다 먼저 (ATM 팔: 비운 뒤 집기).
+    "place": 0,
     "aligner_place": 1,
-    "aligner_pick": 2,
-    "transfer": 3,
-    "place": 4,
+    "transfer": 2,
+    "aligner_pick": 3,
+    "pick": 4,
     "dwell": 5,
 }
+
+# ATM 팔 직렬 보정 — 스텝 길이 추정 불가 시 place→다음 pick 최소 간격 [s].
+ATM_ARM_SERIAL_FALLBACK_DUR_SEC: float = 2.0
 
 _SCHEDULE_CATEGORY_KO: Dict[str, str] = {
     "dwell": "체류",
@@ -2316,6 +2325,234 @@ def _transfer_schedule_entry_meta(
     )
 
 
+def _atm_arm_action_kind_from_entry(
+    *,
+    category: str,
+    event_name: str,
+    title_ko: str = "",
+) -> Optional[str]:
+    """ATM 팔 관련 pick/place 판별. 해당 없으면 None."""
+    cat = (category or "").strip().lower()
+    en = (event_name or "").strip().lower()
+    title = title_ko or ""
+    is_atm = (
+        en.startswith("atm_")
+        or cat in ("pick", "place", "aligner_pick", "aligner_place")
+        or ("ATM" in title and cat == "transfer")
+    )
+    if not is_atm:
+        return None
+    if cat in ("pick", "aligner_pick") or en.endswith("_pick"):
+        return "pick"
+    if cat in ("place", "aligner_place") or en.endswith("_place"):
+        return "place"
+    if cat == "transfer":
+        if "→" in title:
+            left, right = title.split("→", 1)
+            if "ATM 팔" in left or "팔" in left:
+                return "place"
+            if "ATM 팔" in right or "팔" in right:
+                return "pick"
+    return None
+
+
+def _atm_arm_action_kind_from_block(block: "CsvTimedPlaybackBlock") -> Optional[str]:
+    sch = getattr(block, "schedule", None)
+    if sch is None:
+        return None
+    return _atm_arm_action_kind_from_entry(
+        category=str(getattr(sch, "category", "") or ""),
+        event_name=str(getattr(sch, "event_name", "") or ""),
+        title_ko=str(getattr(sch, "title_ko", "") or ""),
+    )
+
+
+def _atm_arm_action_duration_sec(block: "CsvTimedPlaybackBlock") -> float:
+    steps = [s for s in (getattr(block, "steps", None) or []) if isinstance(s, dict)]
+    if steps:
+        try:
+            return float(_lam_estimate_raw_duration_sec(steps))
+        except Exception:
+            pass
+    sch = getattr(block, "schedule", None)
+    if sch is not None and int(getattr(sch, "step_count", 0) or 0) > 0:
+        return float(ATM_ARM_SERIAL_FALLBACK_DUR_SEC)
+    return float(ATM_ARM_SERIAL_FALLBACK_DUR_SEC)
+
+
+def _shift_schedule_entry_time(
+    ent: CsvPlaybackScheduleEntry, new_t: float
+) -> CsvPlaybackScheduleEntry:
+    return replace(ent, time_sec=float(new_t))
+
+
+def _apply_atm_arm_place_before_pick(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """ATM 팔: place 완료 전에는 다음 pick 불가. 연속 pick 시 선행 place 를 앞으로 당김.
+
+    공통 규칙(점유 플래그와 무관). CSV 시각·JSON 길이 기준으로 스케줄만 보정.
+    """
+    if not schedule:
+        return schedule, blocks
+
+    # schedule 항목 id → 인덱스 (block.schedule 과 동일 객체일 수 있음)
+    sched_by_id = {id(e): i for i, e in enumerate(schedule)}
+
+    class _Node:
+        __slots__ = ("kind", "t", "dur", "sched_i", "block_i", "ord")
+
+        def __init__(
+            self,
+            *,
+            kind: str,
+            t: float,
+            dur: float,
+            sched_i: int,
+            block_i: int,
+            ord: int,
+        ) -> None:
+            self.kind = kind
+            self.t = t
+            self.dur = dur
+            self.sched_i = sched_i
+            self.block_i = block_i
+            self.ord = ord
+
+    nodes: List[_Node] = []
+    if blocks:
+        for bi, b in enumerate(blocks):
+            kind = _atm_arm_action_kind_from_block(b)
+            if kind is None:
+                continue
+            sch = b.schedule
+            si = sched_by_id.get(id(sch), -1) if sch is not None else -1
+            if si < 0 and sch is not None:
+                # replace 등으로 참조가 끊긴 경우 키로 재매칭
+                key = _schedule_entry_match_key(sch)
+                for j, e in enumerate(schedule):
+                    if _schedule_entry_match_key(e) == key:
+                        si = j
+                        break
+            nodes.append(
+                _Node(
+                    kind=kind,
+                    t=float(b.time_sec),
+                    dur=_atm_arm_action_duration_sec(b),
+                    sched_i=si,
+                    block_i=bi,
+                    ord=int(getattr(b, "sort_order", 0) or 0),
+                )
+            )
+    else:
+        for si, e in enumerate(schedule):
+            kind = _atm_arm_action_kind_from_entry(
+                category=str(e.category or ""),
+                event_name=str(e.event_name or ""),
+                title_ko=str(e.title_ko or ""),
+            )
+            if kind is None:
+                continue
+            nodes.append(
+                _Node(
+                    kind=kind,
+                    t=float(e.time_sec),
+                    dur=float(ATM_ARM_SERIAL_FALLBACK_DUR_SEC),
+                    sched_i=si,
+                    block_i=-1,
+                    ord=int(e.sort_order),
+                )
+            )
+
+    if not nodes:
+        return schedule, blocks
+
+    # place 우선 순위(동일 t)
+    def _rank(n: _Node) -> Tuple[float, int, int, int]:
+        kind_rank = 0 if n.kind == "place" else 1
+        return (n.t, kind_rank, n.ord, n.sched_i if n.sched_i >= 0 else n.block_i)
+
+    nodes.sort(key=_rank)
+
+    def _commit(n: _Node, new_t: float) -> None:
+        n.t = float(new_t)
+        if n.sched_i >= 0 and n.sched_i < len(schedule):
+            schedule[n.sched_i] = _shift_schedule_entry_time(schedule[n.sched_i], n.t)
+        if blocks is not None and n.block_i >= 0:
+            b = blocks[n.block_i]
+            sch = b.schedule
+            new_sch = (
+                _shift_schedule_entry_time(sch, n.t)
+                if sch is not None
+                else None
+            )
+            if n.sched_i >= 0 and new_sch is not None:
+                schedule[n.sched_i] = new_sch
+            blocks[n.block_i] = replace(
+                b,
+                time_sec=n.t,
+                schedule=new_sch if new_sch is not None else sch,
+            )
+
+    arm_free_at = 0.0
+    holding = False
+    pending_pick_end = 0.0
+    consumed: set = set()
+
+    for i, n in enumerate(nodes):
+        if id(n) in consumed:
+            continue
+        if n.kind == "place":
+            start = max(float(n.t), float(pending_pick_end) if holding else float(arm_free_at))
+            if start > n.t + 1e-9:
+                _commit(n, start)
+            arm_free_at = float(n.t) + max(0.05, float(n.dur))
+            holding = False
+            pending_pick_end = 0.0
+            consumed.add(id(n))
+            continue
+
+        # pick
+        if holding:
+            # 연속 pick 금지 — 뒤에 있는 첫 place 를 이 pick 앞으로 당김
+            place_n: Optional[_Node] = None
+            for m in nodes[i + 1 :]:
+                if id(m) in consumed:
+                    continue
+                if m.kind == "place":
+                    place_n = m
+                    break
+            if place_n is not None:
+                # place 시각은 앞당기지 않음(투어 중간 공정 유지). pick 만 place 뒤로 미룸.
+                place_start = max(
+                    float(place_n.t),
+                    float(pending_pick_end),
+                    float(arm_free_at),
+                )
+                if place_start > place_n.t + 1e-9:
+                    _commit(place_n, place_start)
+                arm_free_at = float(place_n.t) + max(0.05, float(place_n.dur))
+                holding = False
+                pending_pick_end = 0.0
+                consumed.add(id(place_n))
+
+        start = max(float(n.t), float(arm_free_at))
+        if start > n.t + 1e-9:
+            _commit(n, start)
+        holding = True
+        pending_pick_end = float(n.t) + max(0.05, float(n.dur))
+        # pick 직후에는 팔 점유 — free_at 은 place 때까지 유지(최소 pick 종료)
+        arm_free_at = max(float(arm_free_at), float(pending_pick_end))
+        consumed.add(id(n))
+
+    # 최종 정렬
+    schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
+    if blocks is not None:
+        blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
+    return schedule, blocks
+
+
 def build_csv_playback_schedule_meta(
     dwells: List[DwellRecord],
 ) -> List[CsvPlaybackScheduleEntry]:
@@ -2361,6 +2598,7 @@ def build_csv_playback_schedule_meta(
                 )
             )
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
+    schedule, _ = _apply_atm_arm_place_before_pick(schedule, None)
     return _stamp_schedule_row_ids(schedule)
 
 
@@ -2482,6 +2720,8 @@ def build_csv_playback_plan(
 
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
     blocks.sort(key=lambda b: (b.time_sec, b.sort_order))
+    schedule, blocks = _apply_atm_arm_place_before_pick(schedule, blocks)
+    assert blocks is not None
     schedule = _stamp_schedule_row_ids(schedule)
     blocks = _reattach_block_schedules(blocks, schedule)
     return schedule, blocks
