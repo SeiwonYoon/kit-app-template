@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
@@ -14,11 +15,14 @@ from pxr import Usd, UsdGeom
 
 from .lam_viewport_overlay_config import (
     DEVICE_LABEL_CHAR_WIDTH_FACTOR,
+    DEVICE_LABEL_PM_OCCUPIED_BG_RGBA,
     DEVICE_LABEL_SPECS,
     DEVICE_LABEL_WIDTH_SLACK_PX,
     DeviceLabelSpec,
 )
 from .lam_viewport_overlay_state import get_toggle_device_labels
+
+_PM_LABEL_NAME_RE = re.compile(r"^PM([1-5])$", re.IGNORECASE)
 
 if TYPE_CHECKING:
     from .lam_viewport import LamViewport
@@ -215,7 +219,39 @@ class LamViewportDeviceLabels3d:
         self._built = False
         self._post_update_sub: Any = None
         self._last_tick = 0.0
+        self._last_occ_rev: int = -1
         self._sync_token: float = 0.0
+
+    def _floorplan_occ_revision(self) -> int:
+        try:
+            from .lam_floorplan_occupancy import get_floorplan_occupancy
+
+            return int(get_floorplan_occupancy(self._screen).revision)
+        except Exception:
+            return -1
+
+    def _pm_region_for_spec_name(self, name: str) -> Optional[str]:
+        """``PM1``~``PM5`` 라벨명 → 평면도 region ``pm1``~``pm5``. 그 외는 None."""
+        m = _PM_LABEL_NAME_RE.fullmatch(str(name or "").strip())
+        if not m:
+            return None
+        return f"pm{int(m.group(1))}"
+
+    def _bg_rgba_for_spec(self, spec: DeviceLabelSpec) -> Tuple[float, float, float, float]:
+        """PM1~5 만 점유 시 파란 배경. 그 외·비점유는 spec 기본색."""
+        base = tuple(spec.bg_rgba)
+        region = self._pm_region_for_spec_name(spec.name)
+        if not region:
+            return base  # type: ignore[return-value]
+        try:
+            from .lam_floorplan_occupancy import get_floorplan_occupancy
+
+            snap = get_floorplan_occupancy(self._screen).snapshot()
+            if snap.get(region):
+                return tuple(DEVICE_LABEL_PM_OCCUPIED_BG_RGBA)  # type: ignore[return-value]
+        except Exception:
+            pass
+        return base  # type: ignore[return-value]
 
     def _device_labels_toggle_on(self) -> bool:
         if self._screen <= 1:
@@ -479,9 +515,12 @@ class LamViewportDeviceLabels3d:
             if not self._device_labels_toggle_on():
                 self.destroy()
                 return
+            occ_rev = self._floorplan_occ_revision()
             now = time.time()
-            if now - self._last_tick < 0.5:
+            # 점유 변경 시 즉시 배경 갱신, 그 외(위치 추적)는 0.5s 주기
+            if occ_rev == self._last_occ_rev and (now - self._last_tick) < 0.5:
                 return
+            self._last_occ_rev = occ_rev
             self._last_tick = now
             self._rebuild()
 
@@ -534,7 +573,7 @@ class LamViewportDeviceLabels3d:
         fs = int(spec.font_size)
         pad_h, pad_v = int(spec.padding_px[0]), int(spec.padding_px[1])
         panel_w, panel_h = _estimate_label_panel_size(text, fs, (pad_h, pad_v))
-        bg = tuple(spec.bg_rgba)
+        bg = self._bg_rgba_for_spec(spec)
         border = tuple(spec.border_rgba)
         text_color = tuple(spec.color_rgba)
 
