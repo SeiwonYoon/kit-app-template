@@ -162,7 +162,8 @@ SIM_BAR_PREVIEW_DEFAULT: bool = True
 #     (OHT→INOUT: BP→EP 로 비는 중인 버퍼가 있으면 빈 슬롯 조건 완화 — 동시 기동 허용)
 #   비허용: 회수 ‖ OHT 투입(동일 OHT 경로) — 한쪽이 끝날 때까지 다른 쪽 기동 안 함.
 #   INOUT→BP 는 True/False 모두 직렬(완료 대기) 유지.
-SIM_PARALLEL_NONCONFLICTING_MOVES: bool = True
+# ※ 병렬(True)은 포트/2화면/점유 버그 안정화 후 재검증. 실무·기본은 False.
+SIM_PARALLEL_NONCONFLICTING_MOVES: bool = False
 
 __all__ = [
     "SimControlDefaults",

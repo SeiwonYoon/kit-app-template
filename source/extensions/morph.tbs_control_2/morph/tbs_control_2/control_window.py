@@ -1426,6 +1426,17 @@ def _execute_mapped_sequence_stub(
                     try:
                         src_apply = dict(src_r)
                         src_apply["_from_renewal_step"] = True
+                        try:
+                            from .control_sim_playback_plan import (
+                                _register_removed_prim_hide_hold_for_renewal,
+                                prim_occ_for_playback_visibility,
+                            )
+
+                            _register_removed_prim_hide_hold_for_renewal(
+                                ext, int(scr_i), src_apply, None
+                            )
+                        except Exception:
+                            pass
                         last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
                         occ_now: Dict[str, Any] = {}
                         if isinstance(last_by, dict) and isinstance(last_by.get(str(scr_i)), dict):
@@ -2338,7 +2349,7 @@ def _usd_context_name_for_sim_screen(ext: Any, screen: int) -> Optional[str]:
 
     - 화면 1: ``None`` → 기본 ``omni.usd`` 컨텍스트.
     - 화면 2 이상: ``sim_multi_view`` 가 실제 생성한 이름(``ext._sim_multi_context_names``) 우선,
-      없으면 ``morph_tbs_split_aux_{screen-1}`` 폴백.
+      없으면 ``morph_tbs_split_aux_{screen-1}`` (절대 기본 ctx 로 폴백하지 않음 — 화면1 오염 방지).
     """
     try:
         s = int(screen)
@@ -2353,8 +2364,29 @@ def _usd_context_name_for_sim_screen(ext: Any, screen: int) -> Optional[str]:
     idx = s - 2
     if 0 <= idx < len(names):
         nm = str(names[idx] or "").strip()
-        return nm if nm else None
+        if nm:
+            return nm
     return f"morph_tbs_split_aux_{s - 1}"
+
+
+def _resolve_payload_sim_screen(ext: Any, payload: Optional[Dict[str, Any]]) -> Optional[int]:
+    """payload ``tbs_sim_screen`` → 1..N. 멀티에서 태그 없으면 None(호출부가 drop)."""
+    n = _sim_monitor_channel_count(ext)
+    raw = ""
+    try:
+        if isinstance(payload, dict):
+            raw = str(payload.get("tbs_sim_screen", "") or "").strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        return 1 if n <= 1 else None
+    try:
+        scr = int(raw)
+    except Exception:
+        return 1 if n <= 1 else None
+    if scr < 1:
+        return 1 if n <= 1 else None
+    return max(1, min(int(n), int(scr)))
 
 
 def _sim_monitor_channel_count(ext: Any) -> int:
@@ -6336,6 +6368,14 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
 
 
 def _deliver_playback_heartbeat_progress(ext: Any, payload: Dict[str, Any]) -> None:
+    scr_opt = _resolve_payload_sim_screen(ext, payload if isinstance(payload, dict) else {})
+    if scr_opt is None:
+        try:
+            print("[TBS/port-screen] drop heartbeat (no tbs_sim_screen)", flush=True)
+        except Exception:
+            pass
+        return
+    scr = int(scr_opt)
     try:
         _sim_ui_sink_progress(ext, dict(payload or {}))
     except Exception:
@@ -6346,7 +6386,6 @@ def _deliver_playback_heartbeat_progress(ext: Any, payload: Dict[str, Any]) -> N
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return
     try:
-        scr = int(str((payload or {}).get("tbs_sim_screen", "1") or "1").strip() or "1")
         tnow = float(str((payload or {}).get("sim_time", "0") or "0").strip() or "0")
         player = get_sim_playback_player(ext, scr)
         if player is not None:
@@ -6354,7 +6393,7 @@ def _deliver_playback_heartbeat_progress(ext: Any, payload: Dict[str, Any]) -> N
                 tnow = float(player.sim_now(scr))
             except Exception:
                 pass
-        from .control_sim_playback_plan import playback_plan_active, refresh_playback_display_at_sim
+        from .control_sim_playback_plan import refresh_playback_display_at_sim
 
         refresh_playback_display_at_sim(ext, scr, tnow)
         _refresh_foup_playback_heartbeat(ext, scr, tnow)
@@ -6538,11 +6577,17 @@ def _build_playback_time_tick_payload(
 
 def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
     p = payload if isinstance(payload, dict) else {}
-    try:
-        scr = int(str(p.get("tbs_sim_screen", "1") or "1").strip() or "1")
-    except Exception:
-        scr = 1
-    scr = max(1, scr)
+    scr_opt = _resolve_payload_sim_screen(ext, p)
+    if scr_opt is None:
+        try:
+            print(
+                f"[TBS/port-screen] drop PROGRESS (no tbs_sim_screen)",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return
+    scr = max(1, int(scr_opt))
     playback_tick = _is_playback_time_tick_payload(p)
     if not playback_tick:
         try:
@@ -6811,16 +6856,26 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
         if gen_evt != gen_now:
             if bool(getattr(ext, "_sim_playback_started", False)):
                 try:
-                    set_json_wall_busy(ext, max(1, int(str(p.get("tbs_sim_screen", "1") or "1").strip() or "1")), False)
+                    scr_b = _resolve_payload_sim_screen(ext, p)
+                    if scr_b is not None:
+                        set_json_wall_busy(ext, int(scr_b), False)
                 except Exception:
                     pass
             return
     except Exception:
         pass
-    try:
-        scr = int(str(p.get("tbs_sim_screen", "1") or "1").strip() or "1")
-    except Exception:
-        scr = 1
+    scr_opt = _resolve_payload_sim_screen(ext, p)
+    if scr_opt is None:
+        try:
+            print(
+                f"[TBS/port-screen] drop ANIM_EVENT (no tbs_sim_screen) "
+                f"seq={p.get('seq') or p.get('event') or '-'}",
+                flush=True,
+            )
+        except Exception:
+            pass
+        return
+    scr = int(scr_opt)
     occ = p.get("ports_occupancy", {})
     if not isinstance(occ, dict):
         occ = {}
@@ -6866,7 +6921,9 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
                 occ = dict(occ_prev)
     except Exception:
         pass
-    # PORT_OCC_REFRESH / 마지막 occ 스냅샷 — 일반 애니 handle 전에 처리
+    # PORT_OCC_REFRESH: 재생 중에는 last-occ 도 쓰지 않음(잘못된 screen 오염 방지). live 만 반영.
+    if seq_u == "PORT_OCC_REFRESH" and bool(getattr(ext, "_sim_playback_started", False)):
+        return
     try:
         if (
             seq_u == "PORT_OCC_REFRESH"
@@ -6905,9 +6962,12 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
         active_ep = _remember_foup_active_ep(ext, scr, p)
         try:
             apply_port_lot_prim_visibility_for_context(ctx_nm, occ)
-        except Exception:
+        except Exception as exc:
             try:
-                apply_port_lot_prim_visibility(occ)
+                print(
+                    f"[TBS/port-screen] visibility skip scr={scr} ctx={ctx_nm!r}: {exc}",
+                    flush=True,
+                )
             except Exception:
                 pass
         try:
@@ -7797,12 +7857,15 @@ def _resolve_foup_proc_active_ep(
     scr = int(screen)
     try:
         engines = getattr(ext, "_sim_engines", None)
-        if isinstance(engines, dict):
+        eng = None
+        if isinstance(engines, list) and 0 <= (scr - 1) < len(engines):
+            eng = engines[scr - 1]
+        elif isinstance(engines, dict):
             eng = engines.get(str(scr)) or engines.get(scr)
-            if eng is not None:
-                ep = str(getattr(eng, "_foup_proc_active_ep", "") or "").strip().upper()
-                if ep:
-                    return ep
+        if eng is not None:
+            ep = str(getattr(eng, "_foup_proc_active_ep", "") or "").strip().upper()
+            if ep:
+                return ep
     except Exception:
         pass
     try:
@@ -7831,20 +7894,37 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
         occ = {}
     occ_panel = dict(occ)
     occ_prims = dict(occ)
-    if bool(getattr(ext, "_sim_playback_started", False)):
-        try:
-            from .control_sim_playback_plan import prim_occ_for_playback_visibility
+    # REMOVED renewal / hide-hold: 패널 EMPTY 여도 prim 은 hold 구간 유지
+    try:
+        from .control_sim_playback_plan import prim_occ_for_playback_visibility
 
-            occ_prims = prim_occ_for_playback_visibility(ext, scr, dict(occ_panel))
-        except Exception:
-            occ_prims = dict(occ_panel)
+        occ_prims = prim_occ_for_playback_visibility(ext, scr, dict(occ_panel))
+    except Exception:
+        if bool(payload.get("_from_renewal_step")):
+            try:
+                by_hold = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+                prev = by_hold.get(str(scr)) if isinstance(by_hold, dict) else None
+                if isinstance(prev, dict):
+                    for pk, pv in prev.items():
+                        pu = str(pk or "").strip().upper()
+                        if not pu:
+                            continue
+                        if str(pv or "").strip() and not str(
+                            occ_panel.get(pu) or occ_panel.get(pk) or ""
+                        ).strip():
+                            occ_prims[pu] = str(pv)
+            except Exception:
+                pass
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
     active_ep = _remember_foup_active_ep(ext, scr, payload)
     try:
         apply_port_lot_prim_visibility_for_context(ctx_nm, occ_prims)
-    except Exception:
+    except Exception as exc:
         try:
-            apply_port_lot_prim_visibility(occ_prims)
+            print(
+                f"[TBS/port-screen] state_only visibility skip scr={scr} ctx={ctx_nm!r}: {exc}",
+                flush=True,
+            )
         except Exception:
             pass
     try:
@@ -10172,15 +10252,23 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     - ``payload["tbs_sim_screen"]``(엔진 ``event_tags`` 병합)으로 **멀티 모니터** 중 해당 열의
       ``progress_label`` 에만 쓴다. 단일 모드는 첫 채널 + ``_sim_progress_text`` 레거시 모델.
     - RUNNING 일 때 동일 내용 반복 갱신을 줄이기 위해 ``_sim_progress_last_key`` 로 디듀프한다.
+    - 멀티에서 ``tbs_sim_screen`` 누락 시 drop (화면1 오염 방지).
     """
+    scr_opt = _resolve_payload_sim_screen(ext, payload if isinstance(payload, dict) else {})
+    if scr_opt is None:
+        try:
+            print("[TBS/port-screen] drop progress UI (no tbs_sim_screen)", flush=True)
+        except Exception:
+            pass
+        return
+    panel_slot = str(int(scr_opt))
     label = str(payload.get("label", "")).strip()
     # EP 타임라인 전용 업데이트는 텍스트를 덮어쓰지 않고 그래프만 갱신한다.
     try:
         if str(payload.get("timeline_only", "")).strip() in ("1", "true", "True", "ON", "on"):
             chans2 = getattr(ext, "_sim_monitor_channels", None)
-            panel_slot = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
             try:
-                si_tl = int(str(panel_slot or "1").strip() or "1")
+                si_tl = int(panel_slot)
             except Exception:
                 si_tl = 1
             # 재생(plan): 막대·포트는 renewal/heartbeat plan replay 전용 — timeline_only 가 sim_now 로 되돌리지 않게
@@ -10232,7 +10320,7 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 if not isinstance(last_by, dict):
                     last_by = {}
                     ext._sim_last_ports_occupancy_by_screen = last_by
-                sk_occ = str(panel_slot or "1").strip() or "1"
+                sk_occ = str(panel_slot)
                 last_occ = last_by.get(sk_occ)
                 if not isinstance(last_occ, dict):
                     # 시작 직후·첫 이벤트 전: 이벤트로 점유 스냅샷이 아직 없어도 EP 타임라인은 진행되어야 한다.
@@ -10295,10 +10383,7 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     total = str(payload.get("total", "0.0"))
     sim_time = str(payload.get("sim_time", "0.00"))
     detail = str(payload.get("detail", ""))
-    try:
-        panel_slot = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
-    except Exception:
-        panel_slot = "1"
+    # panel_slot 은 함수 상단 _resolve_payload_sim_screen 에서 확정
     event_seq = str(payload.get("event_seq") or payload.get("sequence_name") or "").strip()
     linked_anim = str(payload.get("linked_anim_json") or "").strip()
     try:
@@ -10462,7 +10547,7 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     dedupe_key = f"_panel_{panel_slot}"
     # total_est는 포트상태 아래 전용 그래프에서도 사용하므로 화면별로 저장
     try:
-        pslot_g = str(payload.get("tbs_sim_screen", "") or "1").strip() or "1"
+        pslot_g = str(panel_slot)
         try:
             te = float(str(payload.get("sim_total_est_sec", "")).strip() or "0.0")
         except Exception:
@@ -11249,10 +11334,17 @@ def handle_sim_event_for_animation(ext: Any, payload: Dict[str, str], verbose: b
                 print(f"[FOUP] prim path missing: port={port_id}", flush=True)
             return
         # 1-C) 분할 화면별 USD 컨텍스트 결정(어떤 화면의 stage 위에서 움직일지)
-        try:
-            scr = int(str(payload.get("tbs_sim_screen", "1") or "1").strip() or "1")
-        except Exception:
-            scr = 1
+        scr_opt_f = _resolve_payload_sim_screen(ext, payload if isinstance(payload, dict) else {})
+        if scr_opt_f is None:
+            try:
+                print(
+                    f"[TBS/port-screen] drop FOUP (no tbs_sim_screen) seq={seq_u0}",
+                    flush=True,
+                )
+            except Exception:
+                pass
+            return
+        scr = int(scr_opt_f)
         ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
         # 1-D) FOUP 진행중 보호 마킹(옵션 A):
         #     - START: 즉시 mark(True) → 다른 시퀀스가 중간에 시작해도 baseline 복원에서 제외되어

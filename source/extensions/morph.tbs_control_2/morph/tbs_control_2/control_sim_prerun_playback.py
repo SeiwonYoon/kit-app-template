@@ -423,7 +423,8 @@ def predict_ports_occupancy_at_playback_sync(
     except Exception:
         t_sync = None
     if t_sync is None:
-        return predict_ports_occupancy_after_anim(occ, src)
+        # sync 시각을 못 구하면 조기 EMPTY(REMOVED start) 예측 금지 — base 유지
+        return occ
     if float(at_t) + 1e-9 >= float(t_sync):
         return predict_ports_occupancy_after_anim(occ, src)
     return occ

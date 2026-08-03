@@ -1226,6 +1226,11 @@ class TBSSimulationEngine:
         """0) IN/OUT 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True."""
         if not self._ebs_enabled:
             return False
+        # OHT→INOUT 내부 INOUT→BP 와 오케스트레이터 재진입이 겹치면 동일 LOT 이중 점유 가능
+        if bool(getattr(self, "_oht_loading_bp1", False)):
+            return False
+        if self._is_port_locked(INOUT_PORT):
+            return False
         if self.ports.get(INOUT_PORT) is not None and self._find_oldest_empty_buffer():
             yield self.env.process(self._move_bp1_to_buffer())
             return True

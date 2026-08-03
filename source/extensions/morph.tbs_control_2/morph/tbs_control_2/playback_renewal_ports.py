@@ -144,10 +144,27 @@ def renewal_playback_port_sync_for_step(step: PlaybackScheduledStep) -> Optional
         t0s = float(step.t_event or 0.0)
 
     # renewal 마커는 확정됐는데 offset 산출이 실패/0 이면 → JSON 시작(t0+lead)에 적용.
-    # (offset=None 으로 return None 하면 milestone 자체가 안 생겨 MOVE/REMOVED 가
-    #  "갱신 안됨 → 다음 이벤트에 이전 것 갱신" 으로 한 박자 밀린다.)
+    # REMOVED 만 예외: 시작 직후 포트 EMPTY 금지 → anim/proc 구간의 집기 추정 시각 사용.
     off = _renewal_offset_sec_for_step(step)
     off_eff = 0.0 if (off is None or float(off) <= 1e-9) else float(off)
+    try:
+        ev_u = str(
+            (step.progress_payload or {}).get("event_seq")
+            or (step.event_payload or {}).get("seq")
+            or ""
+        ).strip().upper()
+    except Exception:
+        ev_u = ""
+    if ev_u == "REMOVED" and float(off_eff) <= 1e-9:
+        try:
+            dur = float(step.anim_sec or 0.0)
+            if dur <= 1e-9:
+                dur = float(step.proc_sec or 0.0)
+            if dur > 1e-9:
+                # 집는 모션 근처(전반~중반) — 시작(t0) 직후 clear 방지
+                off_eff = max(0.05, min(float(dur) * 0.35, float(dur) - 0.05))
+        except Exception:
+            pass
 
     try:
         from .json_playback_timing import playback_port_sync_sim_time, resolve_playback_proc_anim

@@ -371,10 +371,9 @@ def _register_removed_prim_hide_hold_for_renewal(
     sched: Any,
 ) -> None:
     """
-    REMOVED renewal — 패널은 비우되 FOUP prim 은 공정 종료(proc_end) 까지 보이게 hold 등록.
+    REMOVED renewal — 패널은 비우되 FOUP prim 은 **JSON 종료** 까지 보이게 hold 등록.
+    재생·라이브 공통.
     """
-    if not bool(getattr(ext, "_sim_playback_started", False)):
-        return
     try:
         from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
     except Exception:
@@ -386,17 +385,25 @@ def _register_removed_prim_hide_hold_for_renewal(
     lot = str(src.get("lot_id") or "").strip()
     if not port or not lot:
         return
-    proc_end: Optional[float] = None
+    hide_end: Optional[float] = None
     if sched is not None:
         try:
             from .playback_schedule import find_scheduled_step_for_anim_src
 
             step = find_scheduled_step_for_anim_src(sched, dict(src))
             if step is not None:
-                proc_end = float(step.t_proc_end or 0.0)
+                # JSON 종료 우선 (요구: 객체 숨김 = json end)
+                for attr in ("t_json_end", "t_anim_end", "t_proc_end"):
+                    try:
+                        v = float(getattr(step, attr, 0.0) or 0.0)
+                    except Exception:
+                        v = 0.0
+                    if v > 1e-9:
+                        hide_end = v
+                        break
         except Exception:
-            proc_end = None
-    if proc_end is None or proc_end <= 1e-9:
+            hide_end = None
+    if hide_end is None or hide_end <= 1e-9:
         try:
             t0 = float(
                 str(
@@ -408,15 +415,23 @@ def _register_removed_prim_hide_hold_for_renewal(
                 ).strip()
                 or "0"
             )
+            anim = float(str(src.get("anim_sec") or "0").strip() or "0")
             proc = float(str(src.get("proc_sec") or "0").strip() or "0")
-            if proc > 1e-9:
-                proc_end = float(t0) + float(proc)
+            # json/애니 길이 우선, 없으면 공정 길이
+            dur = anim if anim > 1e-9 else proc
+            if dur > 1e-9:
+                hide_end = float(t0) + float(dur)
         except Exception:
-            proc_end = None
-    if proc_end is None or proc_end <= 1e-9:
-        return
+            hide_end = None
+    if hide_end is None or hide_end <= 1e-9:
+        # fallback: 아주 짧게라도 hold (renewal 직후 즉시 hide 방지)
+        try:
+            t0 = float(str(src.get("event_start_sim_time") or src.get("t") or "0").strip() or "0")
+            hide_end = float(t0) + 1.0
+        except Exception:
+            return
     holds = _removed_prim_hide_holds(ext, int(screen))
-    holds[str(port).strip().upper()] = {"lot": str(lot), "proc_end_t": float(proc_end)}
+    holds[str(port).strip().upper()] = {"lot": str(lot), "proc_end_t": float(hide_end)}
 
 
 def prim_occ_for_playback_visibility(
@@ -425,11 +440,9 @@ def prim_occ_for_playback_visibility(
     panel_occ: Dict[str, str],
 ) -> Dict[str, str]:
     """
-    재생 중 3D prim 가시성용 occ — REMOVED hold 가 있으면 해당 포트 lot 을 유지(보임).
-    패널 occ(``panel_occ``) 와 분리해서 쓴다.
+    3D prim 가시성용 occ — REMOVED hold 가 있으면 해당 포트 lot 을 유지(보임).
+    패널 occ(``panel_occ``) 와 분리. 재생·라이브 renewal 공통.
     """
-    if not bool(getattr(ext, "_sim_playback_started", False)):
-        return _ensure_panel_occ_keys(dict(panel_occ))
     out = _ensure_panel_occ_keys(dict(panel_occ))
     holds = _removed_prim_hide_holds(ext, int(screen))
     if not holds:
