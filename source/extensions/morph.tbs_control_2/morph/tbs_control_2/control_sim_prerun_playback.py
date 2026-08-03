@@ -966,6 +966,18 @@ class SimTimelinePlayer:
         with self._lock:
             return float(self._sim_now_by_screen.get(int(screen), 0.0))
 
+    def clamp_sim_now_max(self, screen: int, t_max: float) -> None:
+        """``playback_process_frontier_sim`` 등 — ``sim_now`` 를 공정 경계 이하로."""
+        scr = int(screen)
+        try:
+            cap = float(t_max)
+        except Exception:
+            return
+        with self._lock:
+            cur = float(self._sim_now_by_screen.get(scr, 0.0))
+            if cur > cap + 1e-9:
+                self._sim_now_by_screen[scr] = float(cap)
+
     def cursor(self, screen: int) -> int:
         with self._lock:
             return int(self._cursor_by_screen.get(int(screen), 0))

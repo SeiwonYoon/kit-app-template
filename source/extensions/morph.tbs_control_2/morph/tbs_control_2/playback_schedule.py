@@ -481,7 +481,8 @@ def build_playback_schedule(
         panel_at_step_start = dict(panel_occ)
 
         # anim JSON — 엔진 occ 는 RUNNING(t0)부터 종료 후 값을 실어 보냄. 누적 panel_occ 에 섞지 않음.
-        if step_kind != _STEP_KIND_JSON:
+        # FOUP* 도 점유를 바꾸지 않는데 엔진 스냅샷을 넣으면 미래 LOT 이 panel 누적에 섞일 수 있음 → 제외.
+        if step_kind not in (_STEP_KIND_JSON, _STEP_KIND_FOUP, _STEP_KIND_FOUP_PROC):
             po_ev = event_p.get("ports_occupancy")
             po_pr = progress_p.get("ports_occupancy")
             for po in (po_pr, po_ev):
@@ -668,10 +669,14 @@ def build_playback_schedule(
             t_playback_sync = float(t_ev)
 
         if not bool(has_renewal):
-            ports_panel = tuple(
-                (str(k).strip().upper(), str(panel_occ.get(k, "") or ""))
-                for k in panel_ports
-            )
+            # FOUP 는 포트 점유 미변경 — panel milestone 용 ports_occ_panel 비움
+            if step_kind in (_STEP_KIND_FOUP, _STEP_KIND_FOUP_PROC):
+                ports_panel = ()
+            else:
+                ports_panel = tuple(
+                    (str(k).strip().upper(), str(panel_occ.get(k, "") or ""))
+                    for k in panel_ports
+                )
         else:
             ports_panel = ()
 

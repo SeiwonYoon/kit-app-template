@@ -310,6 +310,7 @@ from .control_sim_playback_gate import (
     is_screen_runner_busy,
     json_wall_duration_sec,
     set_json_wall_busy,
+    set_proc_gate_end,
     try_release_json_wall_when_idle,
 )
 from .control_sim_playback_speed import (
@@ -6323,6 +6324,22 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
         if needs_json_gate:
             try:
                 set_json_wall_busy(ext, scr, True)
+            except Exception:
+                pass
+            # proc_wait: JSON wall 이 먼저 풀려도 공정 종료 전 다음 gated emit 금지
+            try:
+                t0 = float(
+                    str(
+                        pl.get("event_start_sim_time")
+                        or pl.get("t")
+                        or pl.get("sim_time")
+                        or "0"
+                    ).strip()
+                    or "0"
+                )
+                proc = float(str(pl.get("proc_sec") or "0").strip() or "0")
+                if proc > 1e-9:
+                    set_proc_gate_end(ext, scr, float(t0) + float(proc))
             except Exception:
                 pass
         try:

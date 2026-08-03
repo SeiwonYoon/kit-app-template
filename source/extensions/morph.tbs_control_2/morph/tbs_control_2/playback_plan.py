@@ -1,7 +1,8 @@
 """
 프리런 PlaybackSchedule + 타임라인 → UI 마일스톤 SSOT (포트·막대 공통).
 
-프리런 1회: 엔진 ``ports_occupancy`` 타임라인 + 스케줄 step panel occ 를 merge 해 ``occ_full`` 확정.
+프리런 1회: 스케줄 step panel occ 를 중심으로 ``occ_full`` 확정.
+FOUP progress 등 점유 비변경 틱의 엔진 스냅샷은 넣지 않는다(미래 LOT 깜빡임 방지).
 재생: ``sim_now`` lookup 만.
 """
 
@@ -113,8 +114,11 @@ def _collect_engine_port_occ_changes(
     """
     프리런 타임라인 — event·progress 의 ``ports_occupancy``.
 
-    - anim 포트 이벤트(ARRIVED/MOVE/…): ``playback_schedule`` milestone 이 SSOT.
-    - renewal JSON 실행~공정 종료 구간: 엔진 occ 전부 스킵 — renewal sim 마일스톤만.
+    - anim 포트 이벤트(ARRIVED/MOVE/…): ``playback_schedule`` milestone 이 SSOT → 스킵.
+    - renewal JSON 실행~공정 종료 구간: 엔진 occ 전부 스킵.
+    - FOUP·READYTO*·progress 틱: 스킵.
+      (FOUP progress 는 공정 중에도 엔진 전체 스냅샷을 실어, 다른 포트/미래 LOT 이
+       포트 패널에 잠깐 뜨는 버그의 원인이 됨. 점유 변경은 JSON step milestone 만.)
     """
     from .control_sim_prerun_playback import _normalize_anim_event_seq
 
@@ -128,12 +132,26 @@ def _collect_engine_port_occ_changes(
         renewal_windows = renewal_json_engine_occ_block_windows(schedule)
     except Exception:
         renewal_windows = ()
+
+    # 포트 점유를 바꾸지 않거나, JSON SSOT 와 충돌하는 시퀀스
+    _ignore_seqs = frozenset(
+        {
+            "PORT_OCC_REFRESH",
+            "FOUP_PROCESS",
+            "FOUP_PROCESS_START",
+            "FOUP_PROCESS_END",
+            "READYTOLOAD",
+            "READYTOUNLOAD",
+        }
+    )
+
     out: List[Tuple[float, int, Dict[str, str]]] = []
     seq_i = 0
     last_sig = ""
     for it in sorted_items or ():
         kind = str(it.kind or "").strip().lower()
-        if kind not in ("event", "progress") or not isinstance(it.payload, dict):
+        # progress 틱(FOUP RUNNING 등)의 ports_occupancy 는 패널 SSOT 에 넣지 않음
+        if kind != "event" or not isinstance(it.payload, dict):
             continue
         try:
             t_ev = float(getattr(it, "t", 0.0) or 0.0)
@@ -147,16 +165,10 @@ def _collect_engine_port_occ_changes(
         ev = _normalize_anim_event_seq(
             _s_val(p.get("event_seq") or p.get("sequence_name") or p.get("seq"))
         )
-        if ev == "PORT_OCC_REFRESH":
+        if ev in _ignore_seqs:
             continue
         if ev in _ANIM_PORT_UPDATE_SEQS:
             continue
-        if kind == "progress":
-            st = _s_val(p.get("status")).upper()
-            if st not in ("RUNNING", "DONE"):
-                continue
-            if st == "DONE" and ev in _ANIM_PORT_UPDATE_SEQS:
-                continue
         occ_d = _normalize_occ_payload(p.get("ports_occupancy"), port_keys)
         if not occ_d:
             continue
@@ -177,6 +189,8 @@ def _collect_schedule_port_occ_points(
 
     - renewal JSON: ``playback_renewal_ports`` SSOT (renewal sim 1회, proc_end 없음).
     - 그 외 anim JSON: 공정 종료 1회.
+    - FOUP/event_only: 포트 점유 변경 없음 → 마일스톤 미생성.
+    - sync_t 는 이벤트 순서·t_event 대비 역행하지 않게 clamp (미래 LOT 조기 표시 방지).
     """
     from .playback_renewal_ports import (
         renewal_full_panel_occ_for_step,
@@ -189,11 +203,13 @@ def _collect_schedule_port_occ_points(
     running: Dict[str, str] = {p: "" for p in panel_ports}
 
     out: List[Tuple[float, int, Dict[str, str]]] = []
+    last_sync_t = -1.0
     for step in schedule.steps or ():
         if not isinstance(step, PlaybackScheduledStep):
             continue
 
-        if str(step.kind or "").strip().lower() == "occ_refresh":
+        kind = str(step.kind or "").strip().lower()
+        if kind in ("occ_refresh", "foup", "foup_process", "event_only"):
             continue
 
         is_renewal_json = bool(step.has_renewal) or step_json_has_renewal_marker(step)
@@ -217,7 +233,13 @@ def _collect_schedule_port_occ_points(
                         panel_ports=panel_ports,
                     )
             if sync_t is not None and occ_r:
-                out.append((float(sync_t), 50000 + int(step.index), dict(occ_r)))
+                try:
+                    t_ev = float(step.t_event or 0.0)
+                except Exception:
+                    t_ev = 0.0
+                sync_f = max(float(sync_t), float(t_ev), float(last_sync_t))
+                out.append((sync_f, 50000 + int(step.index), dict(occ_r)))
+                last_sync_t = float(sync_f)
                 for k in panel_ports:
                     running[k] = str(occ_r.get(k, "") or "")
             elif step.ports_occ_after:
@@ -235,15 +257,17 @@ def _collect_schedule_port_occ_points(
             if step.t_playback_json_end is not None:
                 sync_t = float(step.t_playback_json_end)
             else:
-                kind = str(step.kind or "").strip().lower()
-                if kind in ("occ_refresh", "foup", "foup_process", "event_only"):
-                    sync_t = float(step.t_event)
-                else:
-                    sync_t = float(step.t_proc_end)
+                sync_t = float(step.t_proc_end)
         occ_d = _occ_tuple_to_dict(panel_pairs)
         if not occ_d:
             continue
-        out.append((float(sync_t), 10000 + int(step.index), dict(occ_d)))
+        try:
+            t_ev = float(step.t_event or 0.0)
+        except Exception:
+            t_ev = 0.0
+        sync_f = max(float(sync_t), float(t_ev), float(last_sync_t))
+        out.append((sync_f, 10000 + int(step.index), dict(occ_d)))
+        last_sync_t = float(sync_f)
         for k in panel_ports:
             if k in occ_d:
                 running[k] = str(occ_d.get(k, "") or "")
@@ -302,8 +326,8 @@ def build_playback_ui_milestones(
     """
     프리런 1회 UI SSOT.
 
-    1) 엔진 ``ports_occupancy`` (event·progress)
-    2) 스케줄 step ``ports_occ_panel`` / renewal·proc_end 분리
+    1) 스케줄 step ``ports_occ_panel`` / renewal·json-end (점유 변경 SSOT)
+    2) 엔진 event occ 는 anim/FOUP/progress 제외한 잔여만 (실질적으로 거의 없음)
     → ``occ_full`` 마일스톤만 저장.
     """
     from .control_sim_bar_graph import _collect_foup_milestones_from_items

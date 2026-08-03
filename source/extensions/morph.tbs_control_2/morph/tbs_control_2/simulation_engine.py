@@ -33,8 +33,9 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
 
 【공정 흐름(직렬 모드)】
 1) LOT 생성 타이머·회수 타이머를 별도 프로세스로 상시 구동
-2) _run_serial_flow: 회수 티켓 → OHT 투입 → BP→EP 이동(EP 안착 시 즉시 회수 대기)
-3) EP에서는 별도 PROCESS 대기 없음; 회수 티켓으로 READYTOUNLOAD+EP→OHT 실행
+2) _run_serial_flow: BP→EP → 회수 → IN/OUT→BP → OHT 투입
+   (OHT→IN/OUT 안착 후 IN/OUT→BP 를 같은 함수에서 체인하지 않음)
+3) EP FOUP 공정(전역 capacity=1) 후 회수 대기 → REMOVED
 4) total_lots(초기 적재 + max_oht_lots) 완료 시 종료/요약
 
 【요약·마킹 헬퍼】
@@ -1162,16 +1163,17 @@ class TBSSimulationEngine:
         유지보수 관점에서 "시뮬이 다음에 무엇을 할지 결정하는 곳"을 이 함수 1곳으로 고정한다.
         세부 구현은 _step_* 헬퍼로 분리하되, 실행 순서/우선순위는 여기서만 바꾼다.
 
-        우선순위(상단일수록 먼저 시도):
-        - 0) BP1 -> BUFFER (BP1 적재분이 있으면 즉시 버퍼로) — 항상 직렬(완료 대기)
-        - 1) BUFFER -> EP 채움 (회수보다 우선)
+        우선순위(상단일수록 먼저 시도) — EBS 효율: 빈 EP 채움·회수가 IN/OUT→BP 보다 앞:
+        - 1) BUFFER -> EP 채움
         - 2) EP -> OHT 회수 (pickup 티켓이 있으면 FIFO EP 회수)
-        - 3) OHT 투입 (빈 EP면 direct, 아니면 BP1 경유)
-        - 4) 대기 로그 + 짧은 sleep
+        - 3) IN/OUT -> BUFFER (IN/OUT 적재분을 버퍼로) — OHT→IN/OUT 과 체인하지 않음
+        - 4) OHT 투입 (빈 EP면 direct, 아니면 IN/OUT 경유; IN/OUT 안착 후 루프 재평가)
+        - 5) 대기 로그 + 짧은 sleep
 
         ``SIM_PARALLEL_NONCONFLICTING_MOVES``:
-        - False(기본): 1~3 을 ``yield process`` 로 완전 직렬(기존과 동일).
-        - True: 1~3 중 비충돌 쌍은 완료 대기 없이 동시 기동(``_start_parallel_nonconflicting_wave``).
+        - False(기본): 위를 ``yield process`` 로 완전 직렬.
+        - True: 1·2·4 중 비충돌 쌍은 완료 대기 없이 동시 기동(``_start_parallel_nonconflicting_wave``).
+          IN/OUT→BP 는 wave 가 할 일 없을 때만 직렬 실행.
         """
         yield self.env.timeout(0.1)
         parallel = bool(getattr(self, "_parallel_nonconflicting_moves", False))
@@ -1181,22 +1183,22 @@ class TBSSimulationEngine:
         while self._running and len(self.completed_lots) < self._total_lots:
             self._log_heartbeat_if_due()
 
-            did = yield from self._step_bp1_to_buffer()
-            if did:
-                continue
-
             if parallel:
                 started = self._start_parallel_nonconflicting_wave()
                 if started:
                     # 기동만 하고 완료는 기다리지 않음 — 짧은 tick 후 상태 재평가
                     yield self.env.timeout(0.05)
                     continue
+                # wave 할 일 없음 → IN/OUT 적재분을 버퍼로 (직렬 1건)
+                did = yield from self._step_bp1_to_buffer()
+                if did:
+                    continue
                 if len(self.completed_lots) >= self._total_lots:
                     break
                 yield from self._step_idle_wait()
                 continue
 
-            # --- False: 기존 완전 직렬 경로 (변경 없음) ---
+            # --- False: 완전 직렬 — BP→EP · 회수 우선, IN/OUT→BP 는 그 다음 ---
             did = yield from self._step_buffer_to_ep()
             if did:
                 continue
@@ -1206,6 +1208,10 @@ class TBSSimulationEngine:
                 continue
             if len(self.completed_lots) >= self._total_lots:
                 break
+
+            did = yield from self._step_bp1_to_buffer()
+            if did:
+                continue
 
             did = yield from self._step_oht_input()
             if did:
@@ -1223,10 +1229,13 @@ class TBSSimulationEngine:
             self._log_final_summary()
 
     def _step_bp1_to_buffer(self):
-        """0) IN/OUT 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True."""
+        """IN/OUT 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True.
+
+        OHT→IN/OUT 과 체인하지 않는다 — 오케스트레이터가 BP→EP·회수 다음 순서로 호출한다.
+        """
         if not self._ebs_enabled:
             return False
-        # OHT→INOUT 내부 INOUT→BP 와 오케스트레이터 재진입이 겹치면 동일 LOT 이중 점유 가능
+        # OHT→INOUT 이동 중에는 IN/OUT 미안착 — 재진입 방지
         if bool(getattr(self, "_oht_loading_bp1", False)):
             return False
         if self._is_port_locked(INOUT_PORT):
@@ -1567,68 +1576,79 @@ class TBSSimulationEngine:
         self._log(f"{lot.lot_id} | {ep_port} 도착(직접)")
 
     def _load_lot_to_inout(self, lot: Lot):
-        """OHT 대기열 LOT을 IN/OUT으로 투입(ARRIVED 이벤트·대기 후 IN/OUT 안착, 이어서 버퍼로 이송)."""
+        """OHT 대기열 LOT을 IN/OUT으로 투입(ARRIVED·대기 후 IN/OUT 안착).
+
+        IN/OUT 안착 후 IN/OUT→BP 를 **여기서 이어서 돌리지 않는다**(체인 분리).
+        버퍼 이송은 오케스트레이터 ``_step_bp1_to_buffer`` 가 BP→EP·회수 다음 순서로 수행한다.
+        """
         self._oht_loading_bp1 = True
-        oht_time, fix_key = self._presampled_lot_move("oht_to_bp1", lot, self._timing.rand_oht_to_bp1)
-        lot_disp = self._lot_display_id(lot)
-        # 각 공정 확인(on_gate): UI 확인 팝업과 동기화되는 블로킹 게이트
-        anim_wait = self._request_gate({
-            "seq": "ARRIVED",
-            "port_id": INOUT_PORT,
-            "lot_id": lot.lot_id,
-            "est_sec": f"{oht_time:.1f}",
-            "title": "OHT -> IN/OUT 경유 안착",
-        })
-        aw_u, total_wait, proc_only = self._proc_anim_pair(oht_time, anim_wait)
-        self._stage_mark(lot.lot_id, "oht_to_inout_start")
-        self._log_brief_step(lot_disp, "OHT→IN/OUT", oht_time, aw_u)
-        # 요구사항 반영:
-        # OHT->IN/OUT 단계는 MOVE가 아니라 ARRIVED(포트 안착 이벤트)로 애니메이션을 구동한다.
-        _in_evt: Dict[str, str] = {
-            "seq": "ARRIVED",
-            "port_id": INOUT_PORT,
-            "lot_id": lot.lot_id,
-            # JSON 재생 속도 자동 배속(공정시간 동기화)용
-            "proc_sec": f"{float(oht_time):.3f}",
-        }
-        self._enrich_lot_payload(_in_evt, lot, fix_key, oht_time)
-        self._emit_event(_in_evt)
-        proc_txt = (
-            f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
-            if self._process_time_priority
-            else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
-        )
-        self._log_event_block(
-            seq="ARRIVED",
-            summary="OHT -> IN/OUT 경유 안착",
-            lot_id=lot_disp,
-            anim_line=f"애니메이션: arrived_inout.json (추정 {aw_u:.1f}s)",
-            proc_line=proc_txt,
-        )
-        _in_prog: Dict[str, str] = {}
-        self._enrich_lot_payload(_in_prog, lot, fix_key, oht_time)
-        yield self.env.process(
-            self._wait_with_progress(
-                total_sec=total_wait,
-                label=f"OHT->{INOUT_PORT} {lot_disp}",
-                detail=f"{lot_disp} OHT->IN/OUT 이동(도착포트=IN/OUT) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
-                proc_sec=oht_time,
-                anim_sec=float(anim_wait),
-                progress_interval=self._log_cfg.progress_interval(),
-                event_seq="ARRIVED",
-                linked_anim_json="arrived_inout.json",
-                from_port_id="OHT",
-                to_port_id=INOUT_PORT,
-                lot_id=lot.lot_id,
-                port_id=INOUT_PORT,
-                progress_extra=_in_prog or None,
+        try:
+            oht_time, fix_key = self._presampled_lot_move("oht_to_bp1", lot, self._timing.rand_oht_to_bp1)
+            lot_disp = self._lot_display_id(lot)
+            # 각 공정 확인(on_gate): UI 확인 팝업과 동기화되는 블로킹 게이트
+            anim_wait = self._request_gate({
+                "seq": "ARRIVED",
+                "port_id": INOUT_PORT,
+                "lot_id": lot.lot_id,
+                "est_sec": f"{oht_time:.1f}",
+                "title": "OHT -> IN/OUT 경유 안착",
+            })
+            aw_u, total_wait, proc_only = self._proc_anim_pair(oht_time, anim_wait)
+            self._stage_mark(lot.lot_id, "oht_to_inout_start")
+            self._log_brief_step(lot_disp, "OHT→IN/OUT", oht_time, aw_u)
+            # 요구사항 반영:
+            # OHT->IN/OUT 단계는 MOVE가 아니라 ARRIVED(포트 안착 이벤트)로 애니메이션을 구동한다.
+            _in_evt: Dict[str, str] = {
+                "seq": "ARRIVED",
+                "port_id": INOUT_PORT,
+                "lot_id": lot.lot_id,
+                # JSON 재생 속도 자동 배속(공정시간 동기화)용
+                "proc_sec": f"{float(oht_time):.3f}",
+            }
+            self._enrich_lot_payload(_in_evt, lot, fix_key, oht_time)
+            self._emit_event(_in_evt)
+            proc_txt = (
+                f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
+                if self._process_time_priority
+                else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
             )
-        )
-        self._stage_mark(lot.lot_id, "oht_to_inout_end")
-        self._set_port(INOUT_PORT, "ARRIVED", "FULL", lot, emit_arrived_event=False)
-        self._log(f"{lot_disp} | IN/OUT 도착")
-        yield self.env.process(self._move_bp1_to_buffer())
-        self._oht_loading_bp1 = False
+            self._log_event_block(
+                seq="ARRIVED",
+                summary="OHT -> IN/OUT 경유 안착",
+                lot_id=lot_disp,
+                anim_line=f"애니메이션: arrived_inout.json (추정 {aw_u:.1f}s)",
+                proc_line=proc_txt,
+            )
+            _in_prog: Dict[str, str] = {}
+            self._enrich_lot_payload(_in_prog, lot, fix_key, oht_time)
+            yield self.env.process(
+                self._wait_with_progress(
+                    total_sec=total_wait,
+                    label=f"OHT->{INOUT_PORT} {lot_disp}",
+                    detail=f"{lot_disp} OHT->IN/OUT 이동(도착포트=IN/OUT) | 공정={oht_time:.1f}s 애니={aw_u:.1f}s",
+                    proc_sec=oht_time,
+                    anim_sec=float(anim_wait),
+                    progress_interval=self._log_cfg.progress_interval(),
+                    event_seq="ARRIVED",
+                    linked_anim_json="arrived_inout.json",
+                    from_port_id="OHT",
+                    to_port_id=INOUT_PORT,
+                    lot_id=lot.lot_id,
+                    port_id=INOUT_PORT,
+                    progress_extra=_in_prog or None,
+                )
+            )
+            self._stage_mark(lot.lot_id, "oht_to_inout_end")
+            self._set_port(INOUT_PORT, "ARRIVED", "FULL", lot, emit_arrived_event=False)
+            self._log(f"{lot_disp} | IN/OUT 도착 (→BP는 오케스트레이터)")
+            self._emit_port_occ_refresh("IN/OUT 안착 후 포트 표시 갱신")
+        finally:
+            # 안착 완료(또는 중단) 시 플래그 해제 → _step_bp1_to_buffer 가 이어서 가능
+            self._oht_loading_bp1 = False
+        try:
+            self._kick_serial_flow()
+        except Exception:
+            pass
 
     def _move_bp1_to_buffer(self):
         """IN/OUT에 있는 LOT을 빈 버퍼로 이송(MOVE_TRANSFERING). 빈 슬롯은 BP1부터."""

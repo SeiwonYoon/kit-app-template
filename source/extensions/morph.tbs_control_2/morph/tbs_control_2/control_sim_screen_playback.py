@@ -55,9 +55,22 @@ class ScreenPlaybackSession:
         except Exception:
             return False
 
-    def advance_clock_only(self) -> None:
-        if self.is_playing():
-            self.player.advance_sim_clock()
+    def advance_clock_only(self, ext: Any = None) -> None:
+        if not self.is_playing():
+            return
+        self.player.advance_sim_clock()
+        # 공정 경계 SSOT: json_wall busy 중 sim_now 가 현재 gated 이벤트
+        # 공정 종료를 넘지 않게 한다 (emit·plan lookup 과 동일 frontier).
+        if ext is None:
+            return
+        try:
+            from .control_sim_playback_plan import playback_process_frontier_sim
+
+            fr = playback_process_frontier_sim(ext, int(self.screen))
+            if fr is not None:
+                self.player.clamp_sim_now_max(int(self.screen), float(fr))
+        except Exception:
+            pass
 
     def emit_due_and_sync(
         self,
@@ -85,7 +98,13 @@ class ScreenPlaybackSession:
         if not self.is_playing():
             return
         scr = int(self.screen)
-        tnow = self.sim_now()
+        # 포트·FOUP·진행률 공통: frontier 적용된 단일 sim 축
+        try:
+            from .control_sim_playback_plan import apply_playback_frontier
+
+            tnow = float(apply_playback_frontier(ext, scr, float(self.sim_now())))
+        except Exception:
+            tnow = self.sim_now()
         prog_iv = _HB_PROG_INTERVAL if prog_hb_interval is None else float(prog_hb_interval)
 
         if (now_wall - self.hb_ep_wall) >= _HB_EP_INTERVAL:
@@ -234,7 +253,7 @@ class SimPlaybackRuntime:
         multi = len(playing) > 1
         prog_iv = _HB_PROG_INTERVAL_MULTI if multi else _HB_PROG_INTERVAL
         for sess in playing:
-            sess.advance_clock_only()
+            sess.advance_clock_only(ext)
         try:
             from .control_window import (
                 _drain_playback_json_job_queues,

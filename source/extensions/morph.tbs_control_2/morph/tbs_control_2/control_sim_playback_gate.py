@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 
 def compute_json_effective_speed(user_sp: float, proc_sec: float, est_total: float) -> float:
@@ -45,6 +45,75 @@ def set_json_wall_busy(ext: Any, screen: int, busy: bool) -> None:
 
 def is_json_wall_busy(ext: Any, screen: int) -> bool:
     return bool(_json_busy_map(ext).get(str(max(1, int(screen))), False))
+
+
+def _proc_gate_map(ext: Any) -> dict:
+    by = getattr(ext, "_sim_playback_proc_gate_by_screen", None)
+    if not isinstance(by, dict):
+        by = {}
+        try:
+            ext._sim_playback_proc_gate_by_screen = by
+        except Exception:
+            pass
+    return by
+
+
+def set_proc_gate_end(ext: Any, screen: int, t_proc_end: float) -> None:
+    """
+    직전 gated 이벤트의 공정 종료 sim 시각.
+
+    JSON wall 이 먼저 풀려도 ``sim_now < t_proc_end`` 이면 다음 gated emit 금지
+    (진행률이 아직 해당 ARRIVED/MOVE 인데 다음 포트 공정이 먼저 나가는 것 방지).
+    """
+    try:
+        te = float(t_proc_end)
+    except Exception:
+        return
+    if te <= 1e-9:
+        return
+    _proc_gate_map(ext)[str(max(1, int(screen)))] = float(te)
+
+
+def clear_proc_gate_end(ext: Any, screen: int) -> None:
+    try:
+        _proc_gate_map(ext).pop(str(max(1, int(screen))), None)
+    except Exception:
+        pass
+
+
+def get_proc_gate_end(ext: Any, screen: int) -> Optional[float]:
+    try:
+        v = _proc_gate_map(ext).get(str(max(1, int(screen))))
+        if v is None:
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def _sim_now_for_gate(ext: Any, screen: int) -> float:
+    try:
+        from .control_sim_screen_playback import get_sim_playback_player
+
+        pl = get_sim_playback_player(ext, int(screen))
+        if pl is not None:
+            return float(pl.sim_now(int(screen)))
+    except Exception:
+        pass
+    return 0.0
+
+
+def is_proc_wait_blocking(ext: Any, screen: int) -> bool:
+    """``sim_now`` 가 직전 gated 이벤트 공정 종료 이전이면 True."""
+    pe = get_proc_gate_end(ext, int(screen))
+    if pe is None:
+        return False
+    try:
+        if float(_sim_now_for_gate(ext, int(screen))) + 1e-6 < float(pe):
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def _runner_for_screen(ext: Any, screen: int) -> Any:
@@ -135,13 +204,18 @@ def can_emit_timeline_event(ext: Any, screen: int) -> bool:
     """
     타임라인 ``kind=event`` emit 허용.
 
-    JSON 가 한 건이라도 wall-clock 세션 중이거나 러너가 busy 이면 **다음 event 금지**.
-    progress/log/sim_now 는 SimTimelinePlayer 가 계속 처리한다.
+    - ``json_wall_busy`` / runner / motion busy → 금지
+    - **proc_wait**: 직전 gated 이벤트 ``t_proc_end`` 전 → 금지
+      (JSON 만 먼저 끝나 wall 이 풀려도 공정 진행 중 다음 ARRIVED/MOVE 차단)
+
+    progress/log/FOUP(non-gated)·sim_now 는 SimTimelinePlayer 가 계속 처리한다.
     """
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return True
     scr = max(1, int(screen))
     if is_json_wall_busy(ext, scr):
+        return False
+    if is_proc_wait_blocking(ext, scr):
         return False
     if is_screen_runner_busy(ext, scr):
         return False
@@ -157,6 +231,8 @@ def clear_playback_gate_state(ext: Any) -> None:
     except Exception:
         pass
     try:
+        from .control_sim_playback_speed import clear_playback_step_speed_locks
+
         clear_playback_step_speed_locks(ext)
     except Exception:
         pass
@@ -169,12 +245,16 @@ def clear_proc_gates(ext: Any) -> None:
 __all__ = [
     "can_emit_timeline_event",
     "clear_playback_gate_state",
+    "clear_proc_gate_end",
     "clear_proc_gates",
     "compute_json_effective_speed",
+    "get_proc_gate_end",
     "is_json_wall_busy",
+    "is_proc_wait_blocking",
     "is_screen_channel_motion_busy",
     "is_screen_runner_busy",
     "json_wall_duration_sec",
     "set_json_wall_busy",
+    "set_proc_gate_end",
     "try_release_json_wall_when_idle",
 ]
