@@ -1531,62 +1531,66 @@ class LamSequenceRunner:
         paths = _resolve_prim_paths(stage, prim_id)
         if not paths:
             _seq_log(
-                f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY skip — prim={prim_id!r}",
+                f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY skip USD — prim={prim_id!r}",
                 flush=True,
             )
-            return max(0.0, tail)
+        else:
 
-        def _do_in_main() -> None:
-            ctx_nm = self._usd_context_name
-            prev = _push_lam_stage_context(ctx_nm)
-            try:
-                from .lam_usd_stage_context import get_stage_for_context_name
+            def _do_in_main() -> None:
+                ctx_nm = self._usd_context_name
+                prev = _push_lam_stage_context(ctx_nm)
+                try:
+                    from .lam_usd_stage_context import get_stage_for_context_name
 
-                st = (
-                    get_stage_for_context_name(ctx_nm)
-                    if ctx_nm
-                    else _stage()
-                )
-                if st is None:
-                    return
-                for p in paths:
-                    try:
-                        prim = st.GetPrimAtPath(p)
-                        if not prim or not prim.IsValid():
-                            continue
-                        img = UsdGeom.Imageable(prim)
-                        if not img:
-                            continue
-                        if visible:
-                            img.MakeVisible()
-                        else:
-                            img.MakeInvisible()
-                    except Exception as exc:
-                        _seq_log(
-                            f"{_PRINT_PREFIX} (main) SET_PRIM_VISIBILITY failed path={p}: {exc}",
-                            flush=True,
-                        )
-            finally:
-                _pop_lam_stage_context(prev)
+                    st = (
+                        get_stage_for_context_name(ctx_nm)
+                        if ctx_nm
+                        else _stage()
+                    )
+                    if st is None:
+                        return
+                    for p in paths:
+                        try:
+                            prim = st.GetPrimAtPath(p)
+                            if not prim or not prim.IsValid():
+                                continue
+                            img = UsdGeom.Imageable(prim)
+                            if not img:
+                                continue
+                            if visible:
+                                img.MakeVisible()
+                            else:
+                                img.MakeInvisible()
+                        except Exception as exc:
+                            _seq_log(
+                                f"{_PRINT_PREFIX} (main) SET_PRIM_VISIBILITY failed path={p}: {exc}",
+                                flush=True,
+                            )
+                finally:
+                    _pop_lam_stage_context(prev)
 
-        _dispatch_main_wait(_do_in_main, timeout=5.0)
+            _dispatch_main_wait(_do_in_main, timeout=5.0)
+
+        # 읽기 전용 관찰자 — stage 에 prim 이 없어도 JSON visibility 스텝 시점에 통지
+        # (USD write 실패와 무관; 시뮬 스케줄/동작은 변경하지 않음)
         label_ctx = step.get("_lam_wafer_label_ctx")
         if label_ctx:
             try:
-                from .lam_wafer_viewport_labels import (
-                    get_wafer_label_tracker,
-                    wafer_label_tracking_enabled,
-                )
+                from .lam_visibility_occupancy_bus import notify_wafer_visibility_applied
 
-                if wafer_label_tracking_enabled():
-                    si = int(getattr(self, "_play_screen", 1) or 1)
-                    tracker = get_wafer_label_tracker(si)
-                    for p in paths:
-                        tracker.on_visibility(p, visible, label_ctx, screen=si)
+                si = int(getattr(self, "_play_screen", 1) or 1)
+                obs_paths = list(paths) if paths else (
+                    [prim_id.strip()] if prim_id.strip() else []
+                )
+                if obs_paths:
+                    notify_wafer_visibility_applied(
+                        obs_paths, visible, label_ctx, screen=si
+                    )
             except Exception:
                 pass
         _seq_log(
-            f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY paths={paths} visible={visible} tail={tail:.3f}s",
+            f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY paths={paths or [prim_id]!r} "
+            f"visible={visible} tail={tail:.3f}s",
             flush=True,
         )
         return max(0.0, tail)

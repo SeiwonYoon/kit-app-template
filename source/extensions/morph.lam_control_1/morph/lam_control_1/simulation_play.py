@@ -5609,6 +5609,12 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
             notify_wafer_label_tracker_changed(si)
         except Exception:
             pass
+        try:
+            from .lam_floorplan_occupancy import seed_floorplan_foup_baseline
+
+            seed_floorplan_foup_baseline(si)
+        except Exception:
+            pass
     return (show_ok, hide_ok)
 
 
@@ -5877,6 +5883,12 @@ def reset_csv_play_stop_initial_state(
         except Exception:
             pass
         notify_wafer_label_tracker_changed(si)
+        try:
+            from .lam_floorplan_occupancy import clear_floorplan_occupancy
+
+            clear_floorplan_occupancy(si)
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -6639,6 +6651,7 @@ class LamSimulationCsvPlayWindow:
         self._hud_schedule_row_labels: List[Any] = []
         self._hud_build_progress_model: Any = None
         self._csv_play_thread: Optional[threading.Thread] = None
+        self._floorplan_ui: Optional[Dict[str, Any]] = None
         self._csv_play_launch_lock = threading.Lock()
         self._process_only_schedule_token: int = 0
         self._process_only_last_live_desired: Optional[bool] = None
@@ -6725,6 +6738,13 @@ class LamSimulationCsvPlayWindow:
         self._hud_schedule_row_labels = []
         self._hud_build_progress_model = None
         self._prepared_playback = None
+        try:
+            from .lam_equipment_floorplan_ui import unbind_floorplan_occupancy_ui
+
+            unbind_floorplan_occupancy_ui(self._floorplan_ui)
+        except Exception:
+            pass
+        self._floorplan_ui = None
 
     def _log(self, msg: str) -> None:
         print(f"{_PRINT_PREFIX} {msg}", flush=True)
@@ -7628,7 +7648,8 @@ class LamSimulationCsvPlayWindow:
         except Exception:
             SimpleStringModel = None  # type: ignore
         hide_below = csv_play_hide_ui_below_timeline()
-        win_h = 580 if hide_below else 920
+        # 평면도(~200) + 기존 높이
+        win_h = (580 if hide_below else 920) + 220
         self._window = ui.Window(self.window_title(), width=640, height=win_h)
         if self._screen > 1:
             try:
@@ -7791,6 +7812,14 @@ class LamSimulationCsvPlayWindow:
                         width=300,
                     )
                     ui.Spacer()
+                try:
+                    from .lam_equipment_floorplan_ui import mount_equipment_floorplan_ui
+
+                    mount_equipment_floorplan_ui(
+                        ui, self, height=200.0, screen=int(self._screen)
+                    )
+                except Exception as exc:
+                    self._log(f"equipment floorplan UI: {exc}")
                 ui.Label(
                     "CSV 재생 타임라인 — JSON 재생 중인 행만 녹색 · [타임라인 갱신] 또는 Play 시 준비",
                     height=18,
