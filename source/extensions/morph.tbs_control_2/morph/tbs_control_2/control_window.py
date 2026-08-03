@@ -12684,6 +12684,8 @@ def on_sim_start_clicked(ext: Any) -> None:
         try:
             ext._sim_prerun_done_evt = threading.Event()
             ext._sim_prerun_results_by_screen = None
+            # web start_simulation 이 finalize 전에 이전 export 를 집어가지 않도록 비움
+            ext._sim_prerun_export_json_by_screen = {}
             ext._sim_playback_schedule_by_screen = None
             try:
                 from .control_sim_playback_plan import clear_playback_plan_runtime_state

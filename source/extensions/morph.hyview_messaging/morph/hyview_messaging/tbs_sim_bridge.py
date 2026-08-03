@@ -346,20 +346,63 @@ def handle_ebs_enable(
 
 
 async def _wait_prerun_done(ext: Any, *, timeout_sec: float = 600.0) -> bool:
+    """프리런 스레드 완료 + 웹 응답용 export JSON 준비까지 대기.
+
+    ``_sim_prerun_done_evt`` 만 보고 return 하면 ``_finalize_prerun_ui_assets`` 전에
+    ``_collect_start_result`` 가 돌아 ``timetable_rows: []`` 가 간헐적으로 나간다.
+    drain(finalize) 후 export 가 채워졌는지 확인한다.
+    """
     ev = getattr(ext, "_sim_prerun_done_evt", None)
     app = kit_app.get_app()
     deadline = time.monotonic() + float(timeout_sec)
     while time.monotonic() < deadline:
-        if ev is not None and hasattr(ev, "is_set") and ev.is_set():
-            return True
         try:
             from morph.tbs_control_2.control_window import _drain_sim_log_queue
 
             _drain_sim_log_queue(ext)
         except Exception:
             pass
+        if ev is not None and hasattr(ev, "is_set") and ev.is_set():
+            if _prerun_web_export_ready(ext):
+                return True
         await app.next_update_async()
+    # timeout — 마지막 drain 후 ready 이면 성공, 아니면 기존처럼 event 만 본다
+    try:
+        from morph.tbs_control_2.control_window import _drain_sim_log_queue
+
+        _drain_sim_log_queue(ext)
+    except Exception:
+        pass
+    if _prerun_web_export_ready(ext):
+        return True
     return bool(ev is not None and hasattr(ev, "is_set") and ev.is_set())
+
+
+def _prerun_web_export_ready(ext: Any) -> bool:
+    """start_simulation 수집용 — 프리런 결과 화면마다 export 문서가 준비됐는지."""
+    results = getattr(ext, "_sim_prerun_results_by_screen", None)
+    if not isinstance(results, dict) or not results:
+        return False
+    export = getattr(ext, "_sim_prerun_export_json_by_screen", None)
+    if not isinstance(export, dict) or not export:
+        return False
+    for key in results.keys():
+        try:
+            scr = int(key)
+        except Exception:
+            continue
+        doc = export.get(str(scr))
+        if not isinstance(doc, dict):
+            doc = export.get(scr)
+        if not isinstance(doc, dict) or not doc:
+            return False
+        tl = doc.get("timeline")
+        if not isinstance(tl, dict):
+            return False
+        rows = tl.get("timetable_rows")
+        if not isinstance(rows, list):
+            return False
+    return True
 
 
 def _collect_start_result(ext: Any) -> List[Dict[str, Any]]:
