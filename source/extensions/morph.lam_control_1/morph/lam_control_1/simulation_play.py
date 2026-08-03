@@ -459,10 +459,10 @@ class CachedCsvPlayback:
 
 
 def _csv_playback_config_tag() -> str:
-    # atm_arm_serial / vtm_slot_serial: 팔·슬롯 직렬 보정 (캐시 무효화)
+    # occ_order_swap: 점유/팔홀딩 충돌 시 순서 swap 만 (통째 시프트 아님)
     tag = (
         f"vtm_swap={int(VTM_END_EFFECTOR_SWAP_HANDS)}"
-        f"|atm_arm_serial=1|vtm_slot_serial=1"
+        f"|occ_order_swap=2"
     )
     try:
         from .lam_csv_occupancy_scheduler import occupancy_scheduler_enabled
@@ -495,7 +495,7 @@ def _maybe_apply_occupancy_scheduler(
         return schedule, blocks, ()
     try:
         sch, blk, diags = apply_occupancy_scheduler(dwells, schedule, blocks)
-        sch, blk = _apply_csv_playback_arm_serial_rules(sch, blk)
+        sch, blk = _apply_csv_playback_arm_serial_rules(sch, blk, dwells=dwells)
         assert blk is not None
         sch = _stamp_schedule_row_ids(sch)
         blk = _reattach_block_schedules(blk, sch)
@@ -1249,10 +1249,8 @@ _SCHEDULE_CATEGORY_ORDER: Dict[str, int] = {
     "dwell": 5,
 }
 
-# ATM 팔 직렬 보정 — 스텝 길이 추정 불가 시 place→다음 pick 최소 간격 [s].
+# ATM 팔 직렬 보정 — 스텝 길이 추정 불가 시 폴백(레거시, 점유 swap 경로에서는 미사용).
 ATM_ARM_SERIAL_FALLBACK_DUR_SEC: float = 2.0
-# VTM 동일 슬롯: place 가 pick 보다 이 이내(초)만큼 이르거나 같으면 충돌로 보고 place 를 pick 뒤로.
-VTM_SLOT_PLACE_BEFORE_PICK_EPS_SEC: float = 0.5
 
 _VTM_EVENT_NAME_RE = re.compile(
     r"^vtm_(?:chamber(\d+)|airlock(\d+))_(left|right)_(pick|place)$",
@@ -2442,171 +2440,123 @@ def _shift_schedule_entry_time(
     return replace(ent, time_sec=float(new_t))
 
 
-def _apply_atm_arm_place_before_pick(
-    schedule: List[CsvPlaybackScheduleEntry],
-    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
-) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
-    """ATM 팔: place 완료 전에는 다음 pick 불가. 연속 pick 시 선행 place 를 앞으로 당김.
+def _wafer_id_from_schedule_title(title: str) -> Optional[Tuple[str, int]]:
+    lot = ""
+    m = re.search(r"lot=['\"]([^'\"]+)['\"]", title or "")
+    if m:
+        lot = m.group(1).strip()
+    cassette = -1
+    m2 = re.search(r"웨이퍼#(\d+)", title or "")
+    if m2:
+        try:
+            cassette = int(m2.group(1))
+        except Exception:
+            cassette = -1
+    if lot and cassette >= 0:
+        return (lot, cassette)
+    return None
 
-    공통 규칙(점유 플래그와 무관). CSV 시각·JSON 길이 기준으로 스케줄만 보정.
+
+def _slot_number_hint_from_title(title: str) -> Optional[int]:
+    """title_ko 에서 airlockN_M / 슬롯 힌트."""
+    am = re.search(r"airlock\d+_(\d+)", title or "", flags=re.IGNORECASE)
+    if am:
+        try:
+            return int(am.group(1))
+        except Exception:
+            return None
+    return None
+
+
+def _resolve_action_slot_and_kind(
+    *,
+    event_name: str,
+    title_ko: str = "",
+    category: str = "",
+) -> Optional[Tuple[str, str, str]]:
+    """``(slot_key, pick|place, arm_key)`` — 슬롯 점유/팔 홀딩 대상만. 아니면 None.
+
+    arm_key: ``LOGICAL:ATM_ARM`` / ``LOGICAL:VTM_EE_L`` / ``LOGICAL:VTM_EE_R`` / "".
     """
-    if not schedule:
-        return schedule, blocks
+    en = (event_name or "").strip()
+    cat = (category or "").strip().lower()
+    title = title_ko or ""
+    po = ""
+    if cat in ("pick", "aligner_pick") or en.lower().endswith("_pick"):
+        po = "pick"
+    elif cat in ("place", "aligner_place") or en.lower().endswith("_place"):
+        po = "place"
+    elif cat == "transfer" and ("→" in title or "->" in title):
+        sep = "→" if "→" in title else "->"
+        left, right = title.split(sep, 1)
+        if "ATM 팔" in left or ("팔" in left and "ATM" in left):
+            po = "place"
+        elif "ATM 팔" in right or ("팔" in right and "ATM" in right):
+            po = "pick"
+        elif "팔" in left:
+            po = "place"
+        elif "팔" in right:
+            po = "pick"
+    if po not in ("pick", "place"):
+        return None
 
-    # schedule 항목 id → 인덱스 (block.schedule 과 동일 객체일 수 있음)
-    sched_by_id = {id(e): i for i, e in enumerate(schedule)}
+    arm_key = ""
+    en_l = en.lower()
+    if en_l.startswith("atm_") or cat in ("pick", "place", "aligner_pick", "aligner_place"):
+        arm_key = LOGICAL_SLOT_ATM_ARM
+    elif en_l.startswith("vtm_"):
+        if "_left_" in en_l:
+            arm_key = (
+                LOGICAL_SLOT_VTM_EE_R if VTM_END_EFFECTOR_SWAP_HANDS else LOGICAL_SLOT_VTM_EE_L
+            )
+        elif "_right_" in en_l:
+            arm_key = (
+                LOGICAL_SLOT_VTM_EE_L if VTM_END_EFFECTOR_SWAP_HANDS else LOGICAL_SLOT_VTM_EE_R
+            )
 
-    class _Node:
-        __slots__ = ("kind", "t", "dur", "sched_i", "block_i", "ord")
+    wid = _wafer_id_from_schedule_title(title)
+    slot_hint = _slot_number_hint_from_title(title)
+    if slot_hint is None and wid is not None:
+        # FOUP/buffer/cooling: cassette 번호를 slot_number 로
+        if re.match(r"^atm_foup\d+_", en_l) or re.match(r"^atm_buffer\d+_", en_l):
+            slot_hint = int(wid[1])
+        elif en_l.startswith("atm_coolstation_"):
+            slot_hint = int(wid[1]) if 1 <= int(wid[1]) <= 7 else None
 
-        def __init__(
-            self,
-            *,
-            kind: str,
-            t: float,
-            dur: float,
-            sched_i: int,
-            block_i: int,
-            ord: int,
-        ) -> None:
-            self.kind = kind
-            self.t = t
-            self.dur = dur
-            self.sched_i = sched_i
-            self.block_i = block_i
-            self.ord = ord
+    # title 에 이미 airlockN_M / chamberN 이 있으면 그대로 사용
+    am_full = re.search(r"(airlock\d+_\d+)", title, flags=re.IGNORECASE)
+    if am_full and ("airlock" in en_l or "에어록" in title):
+        return am_full.group(1).lower(), po, arm_key
+    cm_full = re.search(r"\b(chamber\d+)\b", title, flags=re.IGNORECASE)
+    if cm_full and "chamber" in en_l:
+        return cm_full.group(1).lower(), po, arm_key
 
-    nodes: List[_Node] = []
-    if blocks:
-        for bi, b in enumerate(blocks):
-            kind = _atm_arm_action_kind_from_block(b)
-            if kind is None:
-                continue
-            sch = b.schedule
-            si = sched_by_id.get(id(sch), -1) if sch is not None else -1
-            if si < 0 and sch is not None:
-                # replace 등으로 참조가 끊긴 경우 키로 재매칭
-                key = _schedule_entry_match_key(sch)
-                for j, e in enumerate(schedule):
-                    if _schedule_entry_match_key(e) == key:
-                        si = j
-                        break
-            nodes.append(
-                _Node(
-                    kind=kind,
-                    t=float(b.time_sec),
-                    dur=_atm_arm_action_duration_sec(b),
-                    sched_i=si,
-                    block_i=bi,
-                    ord=int(getattr(b, "sort_order", 0) or 0),
+    try:
+        from .lam_event_sequences import slot_key_for_event
+
+        sk = slot_key_for_event(en, slot_hint)
+    except Exception:
+        # transfer 등 이벤트명 비표준 — title 의 목적지/출발 slot 라벨은 스킵
+        meta = _parse_vtm_event_meta(en, title)
+        if meta is None:
+            return None
+        sk, _hand, po2 = meta
+        po = po2
+        if not arm_key and en_l.startswith("vtm_"):
+            if "_left_" in en_l:
+                arm_key = (
+                    LOGICAL_SLOT_VTM_EE_R
+                    if VTM_END_EFFECTOR_SWAP_HANDS
+                    else LOGICAL_SLOT_VTM_EE_L
                 )
-            )
-    else:
-        for si, e in enumerate(schedule):
-            kind = _atm_arm_action_kind_from_entry(
-                category=str(e.category or ""),
-                event_name=str(e.event_name or ""),
-                title_ko=str(e.title_ko or ""),
-            )
-            if kind is None:
-                continue
-            nodes.append(
-                _Node(
-                    kind=kind,
-                    t=float(e.time_sec),
-                    dur=float(ATM_ARM_SERIAL_FALLBACK_DUR_SEC),
-                    sched_i=si,
-                    block_i=-1,
-                    ord=int(e.sort_order),
+            elif "_right_" in en_l:
+                arm_key = (
+                    LOGICAL_SLOT_VTM_EE_L
+                    if VTM_END_EFFECTOR_SWAP_HANDS
+                    else LOGICAL_SLOT_VTM_EE_R
                 )
-            )
-
-    if not nodes:
-        return schedule, blocks
-
-    # place 우선 순위(동일 t)
-    def _rank(n: _Node) -> Tuple[float, int, int, int]:
-        kind_rank = 0 if n.kind == "place" else 1
-        return (n.t, kind_rank, n.ord, n.sched_i if n.sched_i >= 0 else n.block_i)
-
-    nodes.sort(key=_rank)
-
-    def _commit(n: _Node, new_t: float) -> None:
-        n.t = float(new_t)
-        if n.sched_i >= 0 and n.sched_i < len(schedule):
-            schedule[n.sched_i] = _shift_schedule_entry_time(schedule[n.sched_i], n.t)
-        if blocks is not None and n.block_i >= 0:
-            b = blocks[n.block_i]
-            sch = b.schedule
-            new_sch = (
-                _shift_schedule_entry_time(sch, n.t)
-                if sch is not None
-                else None
-            )
-            if n.sched_i >= 0 and new_sch is not None:
-                schedule[n.sched_i] = new_sch
-            blocks[n.block_i] = replace(
-                b,
-                time_sec=n.t,
-                schedule=new_sch if new_sch is not None else sch,
-            )
-
-    arm_free_at = 0.0
-    holding = False
-    pending_pick_end = 0.0
-    consumed: set = set()
-
-    for i, n in enumerate(nodes):
-        if id(n) in consumed:
-            continue
-        if n.kind == "place":
-            start = max(float(n.t), float(pending_pick_end) if holding else float(arm_free_at))
-            if start > n.t + 1e-9:
-                _commit(n, start)
-            arm_free_at = float(n.t) + max(0.05, float(n.dur))
-            holding = False
-            pending_pick_end = 0.0
-            consumed.add(id(n))
-            continue
-
-        # pick
-        if holding:
-            # 연속 pick 금지 — 뒤에 있는 첫 place 를 이 pick 앞으로 당김
-            place_n: Optional[_Node] = None
-            for m in nodes[i + 1 :]:
-                if id(m) in consumed:
-                    continue
-                if m.kind == "place":
-                    place_n = m
-                    break
-            if place_n is not None:
-                # place 시각은 앞당기지 않음(투어 중간 공정 유지). pick 만 place 뒤로 미룸.
-                place_start = max(
-                    float(place_n.t),
-                    float(pending_pick_end),
-                    float(arm_free_at),
-                )
-                if place_start > place_n.t + 1e-9:
-                    _commit(place_n, place_start)
-                arm_free_at = float(place_n.t) + max(0.05, float(place_n.dur))
-                holding = False
-                pending_pick_end = 0.0
-                consumed.add(id(place_n))
-
-        start = max(float(n.t), float(arm_free_at))
-        if start > n.t + 1e-9:
-            _commit(n, start)
-        holding = True
-        pending_pick_end = float(n.t) + max(0.05, float(n.dur))
-        # pick 직후에는 팔 점유 — free_at 은 place 때까지 유지(최소 pick 종료)
-        arm_free_at = max(float(arm_free_at), float(pending_pick_end))
-        consumed.add(id(n))
-
-    # 최종 정렬
-    schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
-    if blocks is not None:
-        blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
-    return schedule, blocks
+        return sk, po, arm_key
+    return sk, po, arm_key
 
 
 def _parse_vtm_event_meta(
@@ -2627,196 +2577,258 @@ def _parse_vtm_event_meta(
     return f"airlock{int(airlock_n)}", hand, po
 
 
-def _apply_vtm_slot_hand_serial(
+def _seed_slot_occupancy_from_dwells(
+    dwells: Optional[Sequence["DwellRecord"]],
+) -> Dict[str, Optional[Tuple[str, int]]]:
+    """투어 첫 dwell 위치 → 초기 슬롯 점유."""
+    occ: Dict[str, Optional[Tuple[str, int]]] = {}
+    if not dwells:
+        return occ
+    try:
+        for (lot_id, cassette_slot), tour in _group_dwell_tours(list(dwells)):
+            if not tour:
+                continue
+            first = tour[0]
+            sk = str(getattr(first, "slot_key", "") or "")
+            wid = (str(lot_id), int(cassette_slot))
+            if sk == LOGICAL_SLOT_ATM_ARM:
+                fi = int(getattr(first, "foup_index", 1) or 1)
+                occ[f"foup{fi}_{int(cassette_slot)}"] = wid
+            elif sk in (LOGICAL_SLOT_VTM_EE_L, LOGICAL_SLOT_VTM_EE_R):
+                continue
+            elif sk:
+                occ[sk] = wid
+    except Exception:
+        pass
+    return occ
+
+
+class _OccActionNode:
+    __slots__ = (
+        "slot",
+        "kind",
+        "arm",
+        "wafer",
+        "t",
+        "ord",
+        "sched_i",
+        "block_i",
+    )
+
+    def __init__(
+        self,
+        *,
+        slot: str,
+        kind: str,
+        arm: str,
+        wafer: Optional[Tuple[str, int]],
+        t: float,
+        ord: int,
+        sched_i: int,
+        block_i: int,
+    ) -> None:
+        self.slot = slot
+        self.kind = kind
+        self.arm = arm
+        self.wafer = wafer
+        self.t = float(t)
+        self.ord = int(ord)
+        self.sched_i = int(sched_i)
+        self.block_i = int(block_i)
+
+
+def _collect_occ_action_nodes(
     schedule: List[CsvPlaybackScheduleEntry],
-    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
-) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
-    """VTM 전용 — 충돌 시에만 시각을 **뒤로** 미룸 (다른 동작·ATM 불변).
-
-    1) 동일 슬롯 pick+place 가 같거나 place 가 미세하게 더 이르면 → **pick 후 place**
-       (실무: 점유 슬롯에서 집고, 다른 팔이 그 슬롯에 내려놓음)
-    2) 같은 손 연속 pick → 그 손의 place 완료 뒤로 pick 지연 (place 시각은 앞당기지 않음)
-    """
-    if not schedule:
-        return schedule, blocks
-
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+) -> List[_OccActionNode]:
     sched_by_id = {id(e): i for i, e in enumerate(schedule)}
-    eps = float(VTM_SLOT_PLACE_BEFORE_PICK_EPS_SEC)
+    nodes: List[_OccActionNode] = []
 
-    class _Node:
-        __slots__ = ("station", "hand", "kind", "t", "dur", "sched_i", "block_i", "ord")
-
-        def __init__(
-            self,
-            *,
-            station: str,
-            hand: str,
-            kind: str,
-            t: float,
-            dur: float,
-            sched_i: int,
-            block_i: int,
-            ord: int,
-        ) -> None:
-            self.station = station
-            self.hand = hand
-            self.kind = kind
-            self.t = t
-            self.dur = dur
-            self.sched_i = sched_i
-            self.block_i = block_i
-            self.ord = ord
-
-    nodes: List[_Node] = []
-
-    def _append_from(si: int, bi: int, t: float, ord_v: int, en: str, title: str, dur: float) -> None:
-        meta = _parse_vtm_event_meta(en, title)
+    def _add(
+        *,
+        si: int,
+        bi: int,
+        t: float,
+        ord_v: int,
+        en: str,
+        title: str,
+        cat: str,
+    ) -> None:
+        meta = _resolve_action_slot_and_kind(
+            event_name=en, title_ko=title, category=cat
+        )
         if meta is None:
             return
-        station, hand, po = meta
+        slot, po, arm = meta
         nodes.append(
-            _Node(
-                station=station,
-                hand=hand,
+            _OccActionNode(
+                slot=str(slot),
                 kind=po,
+                arm=str(arm or ""),
+                wafer=_wafer_id_from_schedule_title(title),
                 t=float(t),
-                dur=max(0.05, float(dur)),
+                ord=int(ord_v),
                 sched_i=si,
                 block_i=bi,
-                ord=int(ord_v),
             )
         )
 
     if blocks:
         for bi, b in enumerate(blocks):
             sch = b.schedule
-            en = str(getattr(sch, "event_name", "") or "") if sch is not None else ""
-            if not en.lower().startswith("vtm_"):
+            if sch is None:
                 continue
-            si = sched_by_id.get(id(sch), -1) if sch is not None else -1
-            if si < 0 and sch is not None:
+            cat = str(getattr(sch, "category", "") or "")
+            if cat == "dwell":
+                continue
+            en = str(getattr(sch, "event_name", "") or "")
+            title = str(getattr(sch, "title_ko", "") or "")
+            si = sched_by_id.get(id(sch), -1)
+            if si < 0:
                 key = _schedule_entry_match_key(sch)
                 for j, e in enumerate(schedule):
                     if _schedule_entry_match_key(e) == key:
                         si = j
                         break
-            title = str(getattr(sch, "title_ko", "") or "") if sch is not None else ""
-            _append_from(
-                si,
-                bi,
-                float(b.time_sec),
-                int(getattr(b, "sort_order", 0) or 0),
-                en,
-                title,
-                _atm_arm_action_duration_sec(b),
+            _add(
+                si=si,
+                bi=bi,
+                t=float(b.time_sec),
+                ord_v=int(getattr(b, "sort_order", 0) or 0),
+                en=en,
+                title=title,
+                cat=cat,
             )
     else:
         for si, e in enumerate(schedule):
-            en = str(e.event_name or "")
-            if not en.lower().startswith("vtm_"):
+            cat = str(e.category or "")
+            if cat == "dwell":
                 continue
-            _append_from(
-                si,
-                -1,
-                float(e.time_sec),
-                int(e.sort_order),
-                en,
-                str(e.title_ko or ""),
-                float(ATM_ARM_SERIAL_FALLBACK_DUR_SEC),
+            _add(
+                si=si,
+                bi=-1,
+                t=float(e.time_sec),
+                ord_v=int(e.sort_order),
+                en=str(e.event_name or ""),
+                title=str(e.title_ko or ""),
+                cat=cat,
             )
+    nodes.sort(key=lambda n: (float(n.t), int(n.ord), n.sched_i if n.sched_i >= 0 else n.block_i))
+    return nodes
 
-    if not nodes:
+
+def _commit_action_node_time(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+    n: _OccActionNode,
+    new_t: float,
+    new_ord: Optional[int] = None,
+) -> None:
+    """단일 액션의 time_sec(·sort_order)만 교체 — 통째 시프트 아님."""
+    n.t = float(new_t)
+    if new_ord is not None:
+        n.ord = int(new_ord)
+    if n.sched_i >= 0 and n.sched_i < len(schedule):
+        ent = schedule[n.sched_i]
+        kw = {"time_sec": float(new_t)}
+        if new_ord is not None:
+            kw["sort_order"] = int(new_ord)
+        schedule[n.sched_i] = replace(ent, **kw)
+    if blocks is not None and n.block_i >= 0 and n.block_i < len(blocks):
+        b = blocks[n.block_i]
+        sch = b.schedule
+        new_sch = sch
+        if sch is not None:
+            skw = {"time_sec": float(new_t)}
+            if new_ord is not None:
+                skw["sort_order"] = int(new_ord)
+            new_sch = replace(sch, **skw)
+            if n.sched_i >= 0 and n.sched_i < len(schedule):
+                schedule[n.sched_i] = new_sch
+        bkw: Dict[str, Any] = {"time_sec": float(new_t), "schedule": new_sch}
+        if new_ord is not None:
+            bkw["sort_order"] = int(new_ord)
+        blocks[n.block_i] = replace(b, **bkw)
+
+
+def _swap_action_order(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+    earlier: _OccActionNode,
+    later: _OccActionNode,
+) -> None:
+    """later 를 earlier 앞으로 — 두 이벤트의 (t, sort_order) 만 교환."""
+    ta, tb = float(earlier.t), float(later.t)
+    oa, ob = int(earlier.ord), int(later.ord)
+    _commit_action_node_time(schedule, blocks, later, ta, oa)
+    _commit_action_node_time(schedule, blocks, earlier, tb, ob)
+
+
+def _apply_slot_occupancy_order_swaps(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """슬롯 점유 충돌 시에만 앞/뒤 동작 순서를 swap (Aligner 철학).
+
+    - place 대상에 이미 웨이퍼 → 같은 슬롯의 이후 pick 을 앞으로
+    - pick 대상이 비어 있음 → 같은 슬롯의 이후 place 를 앞으로
+    통째로 시각을 밀지 않음. 무관한 이벤트는 불변.
+    """
+    if not schedule:
         return schedule, blocks
 
-    def _commit(n: _Node, new_t: float) -> None:
-        if new_t <= n.t + 1e-9:
-            return
-        n.t = float(new_t)
-        if n.sched_i >= 0 and n.sched_i < len(schedule):
-            schedule[n.sched_i] = _shift_schedule_entry_time(schedule[n.sched_i], n.t)
-        if blocks is not None and n.block_i >= 0:
-            b = blocks[n.block_i]
-            sch = b.schedule
-            new_sch = _shift_schedule_entry_time(sch, n.t) if sch is not None else None
-            if n.sched_i >= 0 and new_sch is not None:
-                schedule[n.sched_i] = new_sch
-            blocks[n.block_i] = replace(
-                b,
-                time_sec=n.t,
-                schedule=new_sch if new_sch is not None else sch,
-            )
-
-    # --- 1) 동일 슬롯: place 가 pick 과 같거나 미세하게 이르면 place 를 pick 완료 뒤로 ---
-    by_station: Dict[str, List[_Node]] = {}
-    for n in nodes:
-        by_station.setdefault(n.station, []).append(n)
-    for _st, group in by_station.items():
-        picks = [n for n in group if n.kind == "pick"]
-        places = [n for n in group if n.kind == "place"]
-        if not picks or not places:
-            continue
-        for pk in picks:
-            pk_end = float(pk.t) + float(pk.dur)
-            for pl in places:
-                # place 가 pick 보다 확실히 뒤면 그대로 둠
-                if float(pl.t) > float(pk.t) + eps:
-                    continue
-                # place 시각 <= pick+eps (동일·미세 선행) → pick 후 place
-                _commit(pl, max(float(pl.t), pk_end))
-
-    # --- 2) 손별 연속 pick: place 는 앞당기지 않고 pick 만 뒤로 ---
-    nodes.sort(
-        key=lambda n: (
-            float(n.t),
-            0 if n.kind == "place" else 1,
-            n.ord,
-            n.sched_i if n.sched_i >= 0 else n.block_i,
-        )
-    )
-    hand_free_at = {"left": 0.0, "right": 0.0}
-    hand_holding = {"left": False, "right": False}
-    hand_pick_end = {"left": 0.0, "right": 0.0}
-    consumed: set = set()
-
-    for i, n in enumerate(nodes):
-        if id(n) in consumed:
-            continue
-        h = n.hand if n.hand in ("left", "right") else "left"
-        if n.kind == "place":
-            start = max(float(n.t), float(hand_pick_end[h]) if hand_holding[h] else float(hand_free_at[h]))
-            _commit(n, start)
-            hand_free_at[h] = float(n.t) + float(n.dur)
-            hand_holding[h] = False
-            hand_pick_end[h] = 0.0
-            consumed.add(id(n))
-            continue
-
-        if hand_holding[h]:
-            place_n = None
-            for m in nodes[i + 1 :]:
-                if id(m) in consumed:
-                    continue
-                if m.kind == "place" and m.hand == h:
-                    place_n = m
-                    break
-            if place_n is not None:
-                place_start = max(
-                    float(place_n.t),
-                    float(hand_pick_end[h]),
-                    float(hand_free_at[h]),
-                )
-                _commit(place_n, place_start)
-                hand_free_at[h] = float(place_n.t) + float(place_n.dur)
-                hand_holding[h] = False
-                hand_pick_end[h] = 0.0
-                consumed.add(id(place_n))
-
-        start = max(float(n.t), float(hand_free_at[h]))
-        _commit(n, start)
-        hand_holding[h] = True
-        hand_pick_end[h] = float(n.t) + float(n.dur)
-        hand_free_at[h] = max(float(hand_free_at[h]), float(hand_pick_end[h]))
-        consumed.add(id(n))
+    max_passes = max(8, len(schedule) * 2)
+    for _pass in range(max_passes):
+        nodes = _collect_occ_action_nodes(schedule, blocks)
+        if not nodes:
+            break
+        occ = _seed_slot_occupancy_from_dwells(dwells)
+        swapped = False
+        for i, n in enumerate(nodes):
+            sk = n.slot
+            if n.kind == "place":
+                cur = occ.get(sk)
+                if cur is not None:
+                    # 점유 중 place → 이후 같은 슬롯 pick 을 앞으로
+                    resolver: Optional[_OccActionNode] = None
+                    for m in nodes[i + 1 :]:
+                        if m.kind != "pick" or m.slot != sk:
+                            continue
+                        if cur is not None and m.wafer is not None and m.wafer != cur:
+                            continue
+                        resolver = m
+                        break
+                    if resolver is None:
+                        for m in nodes[i + 1 :]:
+                            if m.kind == "pick" and m.slot == sk:
+                                resolver = m
+                                break
+                    if resolver is not None:
+                        _swap_action_order(schedule, blocks, n, resolver)
+                        swapped = True
+                        break
+                # 충돌 없거나 해소 불가 → 점유 반영 후 진행
+                if n.wafer is not None:
+                    occ[sk] = n.wafer
+                else:
+                    occ[sk] = ("?", -1)
+            elif n.kind == "pick":
+                cur = occ.get(sk)
+                if cur is None:
+                    resolver = None
+                    for m in nodes[i + 1 :]:
+                        if m.kind == "place" and m.slot == sk:
+                            resolver = m
+                            break
+                    if resolver is not None:
+                        _swap_action_order(schedule, blocks, n, resolver)
+                        swapped = True
+                        break
+                else:
+                    occ[sk] = None
+        if not swapped:
+            break
 
     schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
     if blocks is not None:
@@ -2824,13 +2836,79 @@ def _apply_vtm_slot_hand_serial(
     return schedule, blocks
 
 
-def _apply_csv_playback_arm_serial_rules(
+def _apply_arm_holding_order_swaps(
     schedule: List[CsvPlaybackScheduleEntry],
     blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
 ) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
-    """ATM 직렬 후 VTM 슬롯/손 직렬 — 각각 해당 이벤트만 수정."""
-    schedule, blocks = _apply_atm_arm_place_before_pick(schedule, blocks)
-    schedule, blocks = _apply_vtm_slot_hand_serial(schedule, blocks)
+    """팔이 웨이퍼를 든 채 또 pick 하려 하면 — 같은 팔의 이후 place 를 앞으로 swap.
+
+    ATM/VTM 공통. 시각 대량 시프트 없음.
+    """
+    if not schedule:
+        return schedule, blocks
+
+    max_passes = max(8, len(schedule) * 2)
+    for _pass in range(max_passes):
+        nodes = _collect_occ_action_nodes(schedule, blocks)
+        arm_nodes = [n for n in nodes if n.arm]
+        if not arm_nodes:
+            break
+        holding: Dict[str, bool] = {}
+        swapped = False
+        for i, n in enumerate(arm_nodes):
+            h = n.arm
+            if n.kind == "place":
+                holding[h] = False
+                continue
+            # pick
+            if holding.get(h):
+                resolver = None
+                for m in arm_nodes[i + 1 :]:
+                    if m.arm == h and m.kind == "place":
+                        resolver = m
+                        break
+                if resolver is not None:
+                    _swap_action_order(schedule, blocks, n, resolver)
+                    swapped = True
+                    break
+            holding[h] = True
+        if not swapped:
+            break
+
+    schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
+    if blocks is not None:
+        blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
+    return schedule, blocks
+
+
+def _apply_atm_arm_place_before_pick(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """호환 별칭 — 팔 홀딩 충돌 시 순서 swap."""
+    return _apply_arm_holding_order_swaps(schedule, blocks)
+
+
+def _apply_vtm_slot_hand_serial(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """호환 별칭 — 슬롯 점유 충돌 시 순서 swap (dwells 없이 호출 시 초기점유 빈 맵)."""
+    return _apply_slot_occupancy_order_swaps(schedule, blocks, dwells=None)
+
+
+def _apply_csv_playback_arm_serial_rules(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """점유·팔홀딩 충돌 구간의 순서만 swap (통째 시프트 없음).
+
+    1) 슬롯 점유 충돌 (ATM/VTM place-on-full, pick-on-empty)
+    2) 팔 홀딩 중 연속 pick (ATM/VTM 같은 팔)
+    """
+    schedule, blocks = _apply_slot_occupancy_order_swaps(schedule, blocks, dwells=dwells)
+    schedule, blocks = _apply_arm_holding_order_swaps(schedule, blocks)
     return schedule, blocks
 
 
@@ -2879,7 +2957,7 @@ def build_csv_playback_schedule_meta(
                 )
             )
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
-    schedule, _ = _apply_csv_playback_arm_serial_rules(schedule, None)
+    schedule, _ = _apply_csv_playback_arm_serial_rules(schedule, None, dwells=dwells)
     return _stamp_schedule_row_ids(schedule)
 
 
@@ -3001,7 +3079,9 @@ def build_csv_playback_plan(
 
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
     blocks.sort(key=lambda b: (b.time_sec, b.sort_order))
-    schedule, blocks = _apply_csv_playback_arm_serial_rules(schedule, blocks)
+    schedule, blocks = _apply_csv_playback_arm_serial_rules(
+        schedule, blocks, dwells=dwells
+    )
     assert blocks is not None
     schedule = _stamp_schedule_row_ids(schedule)
     blocks = _reattach_block_schedules(blocks, schedule)

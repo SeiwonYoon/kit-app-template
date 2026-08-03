@@ -165,7 +165,7 @@ FEDERATION_VERBOSE_PARSE_LOG: bool = False
 # Bearer 예: FEDERATION_BEARER_TOKEN = "eyJ..."
 FEDERATION_BEARER_TOKEN: str = ""
 # 추가 헤더 예: {"X-API-Key": "..."}
-FEDERATION_EXTRA_HEADERS: dict = { "Host": "federation.digitaltwin.internal" }
+FEDERATION_EXTRA_HEADERS: dict = {}
 
 
 def default_viewport_split_count() -> int:
