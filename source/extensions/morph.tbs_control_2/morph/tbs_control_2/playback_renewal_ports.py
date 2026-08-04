@@ -123,19 +123,14 @@ def _renewal_offset_sec_for_step(step: PlaybackScheduledStep) -> Optional[float]
 
 
 def renewal_playback_port_sync_for_step(step: PlaybackScheduledStep) -> Optional[float]:
-    """renewal JSON step → 재생 sim 축 포트 갱신 시각 (없으면 None)."""
+    """renewal JSON step → 재생 sim 축 포트 갱신 시각 (없으면 None).
+
+    JSON 내 renewal offset 으로 항상 재계산한다.
+    스케줄 ``t_playback_port_sync`` 가 JSON 종료로 잘못 bake 된 경우에도
+    프리런 막대·포트 마일스톤이 renewal 시각에 맞춰지도록 한다.
+    """
     if not step_json_has_renewal_marker(step):
         return None
-
-    # 프리런 스케줄이 이미 확정한 sync 를 plan 이 재해석하지 않도록 우선 사용.
-    if step.t_playback_port_sync is not None:
-        try:
-            sync_sched = float(step.t_playback_port_sync)
-            proc_end = float(step.t_proc_end or 0.0)
-            if sync_sched <= proc_end + 1e-3 or proc_end <= 1e-9:
-                return sync_sched
-        except Exception:
-            pass
 
     p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
     try:
@@ -151,6 +146,7 @@ def renewal_playback_port_sync_for_step(step: PlaybackScheduledStep) -> Optional
         ev_u = str(
             (step.progress_payload or {}).get("event_seq")
             or (step.event_payload or {}).get("seq")
+            or step.event_seq
             or ""
         ).strip().upper()
     except Exception:
@@ -174,15 +170,35 @@ def renewal_playback_port_sync_for_step(step: PlaybackScheduledStep) -> Optional
             float(step.anim_sec or 0.0),
             json_est_sec=float(step.json_est_sec or 0.0),
         )
-        return playback_port_sync_sim_time(
+        computed = playback_port_sync_sim_time(
             float(t0s),
             float(proc_pb),
             float(anim_pb),
             has_renewal=True,
             renewal_offset_sec=float(off_eff),
         )
+        if computed is not None:
+            return float(computed)
     except Exception:
-        return None
+        pass
+
+    # offset 재계산 실패 시에만 스케줄 sync 사용 (JSON 종료 근사는 제외)
+    if step.t_playback_port_sync is not None:
+        try:
+            sync_sched = float(step.t_playback_port_sync)
+            json_end = None
+            if step.t_json_end is not None:
+                json_end = float(step.t_json_end)
+            elif step.t_playback_json_end is not None:
+                json_end = float(step.t_playback_json_end)
+            else:
+                json_end = float(step.t_proc_end or 0.0)
+            if json_end is not None and abs(sync_sched - float(json_end)) <= 1e-3:
+                return None
+            return sync_sched
+        except Exception:
+            pass
+    return None
 
 
 def renewal_port_occ_pairs_for_step(

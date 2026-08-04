@@ -45,7 +45,7 @@ _FRAME_SLOT_TOGGLE_WIDGET = "morph.tbs_control_2:zzz_ebs_hud_toggle"
 _PANEL_W = 300
 _PANEL_PAD = 8
 _TOP_SPACER_H = 12
-_MAX_SCROLL_H = 520
+_MAX_SCROLL_H = 300
 
 # 좌하단 토글 버튼 (확인용 80px 의 1/4 = 20px)
 _TOGGLE_HOTSPOT_W = 20
@@ -462,6 +462,7 @@ class TbsViewportControlHud:
             with ui.HStack():
                 with ui.Frame(
                     width=_PANEL_W,
+                    height=300,
                     style={
                         "border_width": 1,
                         "border_color": 0xFF5A6A80,

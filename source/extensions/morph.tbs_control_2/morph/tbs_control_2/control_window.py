@@ -640,8 +640,21 @@ def _resolve_rule_entry(seq: str, payload: Dict[str, str]) -> Tuple[Optional[str
     return (None, None, None)
 
 
+def _canonical_event_seq_for_anim_map(seq: str) -> str:
+    """짧은 별칭(ARRIVED/MOVE_TRANSFERING) → EVENT_JSON_CASE_MAP 키(EAPEIS_…)."""
+    s = str(seq or "").strip().upper()
+    if not s:
+        return ""
+    aliased = SIM_SEQ_ALIAS.get(s)
+    if aliased:
+        return str(aliased).strip().upper()
+    return s
+
+
 def _resolve_event_case_map_entry(seq: str, payload: Dict[str, str]) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
-    table = EVENT_JSON_CASE_MAP.get(seq, {})
+    seq_u = str(seq or "").strip().upper()
+    seq_c = _canonical_event_seq_for_anim_map(seq_u)
+    table = EVENT_JSON_CASE_MAP.get(seq_c) or EVENT_JSON_CASE_MAP.get(seq_u) or {}
     if not isinstance(table, dict) or not table:
         return (None, None, None)
     p_from = _case_map_port_token(str(payload.get("from_port_id", "") or ""))
@@ -657,7 +670,7 @@ def _resolve_event_case_map_entry(seq: str, payload: Dict[str, str]) -> Tuple[Op
         "runner": "sequence_editor",
         "description": f"top-case-map:{key}",
     }
-    return (j.strip(), meta, f"top_case_map:{seq}:{key}")
+    return (j.strip(), meta, f"top_case_map:{seq_c or seq_u}:{key}")
 
 
 def _resolve_event_animation_entry(seq: str, payload: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str], str]:
@@ -666,13 +679,17 @@ def _resolve_event_animation_entry(seq: str, payload: Optional[Dict[str, str]] =
     - json_path_str: 실제 JSON 경로 문자열(없으면 None)
     - meta: runner/description 등 부가정보
     """
-    # 0) 파일 최상단 케이스 매핑(운영 우선)
-    j_case, meta_case, case_name = _resolve_event_case_map_entry(seq, payload or {})
+    seq_u = str(seq or "").strip().upper()
+    seq_c = _canonical_event_seq_for_anim_map(seq_u)
+    # 0) 파일 최상단 케이스 매핑(운영 우선) — 짧은 별칭도 canonical 로 조회
+    j_case, meta_case, case_name = _resolve_event_case_map_entry(seq_c or seq_u, payload or {})
     if j_case:
         return (j_case, meta_case, case_name, "top_case_map")
 
     # 1) 상태 기반 rules 우선
-    j_rule, meta_rule, rule_name = _resolve_rule_entry(seq, payload or {})
+    j_rule, meta_rule, rule_name = _resolve_rule_entry(seq_c or seq_u, payload or {})
+    if not j_rule and seq_u and seq_u != seq_c:
+        j_rule, meta_rule, rule_name = _resolve_rule_entry(seq_u, payload or {})
     if j_rule:
         return (j_rule, meta_rule, rule_name or "(unnamed-rule)", "rules")
 
@@ -681,19 +698,14 @@ def _resolve_event_animation_entry(seq: str, payload: Optional[Dict[str, str]] =
     if not m:
         return (None, None, None, "")
 
-    # 키 우선순위:
-    # 1) 정식 seq (EAPEIS_PORT_...)
-    # 2) 별칭(READYTOLOAD 등)
-    # 3) raw 값
-    raw_alias = None
+    # 키 우선순위: 정식 seq · 별칭 · raw
+    cand: List[str] = []
+    for key in (seq_c, seq_u):
+        if key and key not in cand:
+            cand.append(key)
     for alias, canonical in SIM_SEQ_ALIAS.items():
-        if canonical == seq:
-            raw_alias = alias
-            break
-
-    cand = [seq]
-    if raw_alias:
-        cand.append(raw_alias)
+        if str(canonical).strip().upper() == seq_c and alias not in cand:
+            cand.append(str(alias).strip().upper())
 
     for key in cand:
         if key not in m:
@@ -811,6 +823,13 @@ def _estimate_step_duration_sec_for_log(step: Dict[str, Any], *, speed_scale: fl
     except Exception:
         return None
     return None
+
+
+def _group_end_index(steps: List[dict], a: int) -> int:
+    """JSON 시퀀스 병렬 그룹 끝 인덱스 — tbs_lam_sequence_engine 과 동일."""
+    from .tbs_lam_sequence_engine import _group_end_index as _lam_group_end_index
+
+    return int(_lam_group_end_index(steps, a))
 
 
 def _estimate_sequence_total_duration_sec_for_log(steps: List[Dict[str, Any]], *, speed_scale: float = 1.0) -> Optional[float]:
@@ -8946,6 +8965,19 @@ def _finalize_prerun_ui_assets(
                 pass
     try:
         _merge_prerun_ui_screen_dict(ext, "_sim_ep_bar_prerun_by_screen", bar_by, merge=merge)
+        try:
+            from .control_sim_playback_plan import clear_runtime_bar_rows
+
+            if merge and isinstance(bar_by, dict):
+                for _sk in bar_by.keys():
+                    try:
+                        clear_runtime_bar_rows(ext, screen=int(_sk))
+                    except Exception:
+                        pass
+            else:
+                clear_runtime_bar_rows(ext)
+        except Exception:
+            pass
         _merge_prerun_ui_screen_dict(ext, "_sim_timetable_row_metas_by_screen", meta_by, merge=merge)
         _merge_prerun_ui_screen_dict(ext, "_sim_seek_snapshots_by_screen", seek_by, merge=merge)
         _merge_prerun_ui_screen_dict(ext, "_sim_prerun_export_json_by_screen", export_by, merge=merge)

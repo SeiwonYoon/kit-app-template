@@ -141,8 +141,8 @@ def _apply_renewal_fields_for_json_step(
             json_path = jp
     elif file_renewal:
         has_renewal = True
-    elif bool(has_renewal) and renewal_off is None:
-        has_renewal = False
+    # renewal_off 미산출만으로 has_renewal 을 끄지 않는다.
+    # (끄면 ANIM 분기에서 심어 둔 JSON-end sync 가 그대로 막대 마일스톤이 된다.)
 
     if not bool(has_renewal):
         return (
@@ -553,6 +553,28 @@ def build_playback_schedule(
 
             ev_u = _normalize_anim_event_seq(_s(progress_p, "event_seq") or _s(progress_p, "sequence_name") or seq_u)
             src_ev = _post_anim_src_from_progress_and_event(progress_p, event_p)
+            # ANIM sync 대입 전에 파일/steps renewal 을 먼저 확정 — json-end 덮어쓰기 방지
+            if step_kind == _STEP_KIND_JSON and not bool(has_renewal):
+                try:
+                    hr_early, ro_early, jp_early = resolve_renewal_for_json_step(
+                        json_path=json_path,
+                        parsed_steps=parsed_steps,
+                        json_basename=str(json_bn or ""),
+                        linked=linked,
+                    )
+                    if hr_early:
+                        has_renewal = True
+                        if ro_early is not None:
+                            renewal_off = ro_early
+                        if jp_early:
+                            json_path = str(jp_early)
+                    elif not has_renewal:
+                        for cand in (json_path, json_bn, linked):
+                            if cand and has_renewal_marker_in_file(str(cand)):
+                                has_renewal = True
+                                break
+                except Exception:
+                    pass
             try:
                 from .json_playback_timing import (
                     playback_port_sync_sim_time,
@@ -566,6 +588,8 @@ def build_playback_schedule(
                     t_playback_json_end = None
                     ports_panel_json_end = ()
                 elif ev_u in _ANIM_PORT_UPDATE_SEQS:
+                    # from_progress 는 parsed_steps/파일의 renewal 을 반영할 수 있다.
+                    # 과거: json_end > sync 이면 sync 를 JSON 종료로 덮어 renewal bake 를 깨뜨림.
                     t_playback_sync = playback_port_sync_sim_time_from_progress(
                         progress_p,
                         fallback_t=float(t0),
@@ -580,9 +604,7 @@ def build_playback_schedule(
                         has_renewal=False,
                         renewal_offset_sec=None,
                     )
-                    if t_playback_json_end is not None and (
-                        t_playback_sync is None or float(t_playback_json_end) > float(t_playback_sync) + 1e-6
-                    ):
+                    if t_playback_sync is None and t_playback_json_end is not None:
                         t_playback_sync = float(t_playback_json_end)
                     pred_full = predict_ports_occupancy_after_anim(
                         dict(panel_at_step_start),
@@ -722,14 +744,62 @@ def build_playback_schedule(
                 if ku:
                     panel_occ[ku] = str(v or "")
 
+        # apply 이후에도 마커만 늦게 잡히거나 sync 가 JSON 종료로 남은 경우 → renewal 필드를 다시 bake
         if step_kind == _STEP_KIND_JSON:
-            for cand in (json_path, json_bn, linked):
-                if cand and has_renewal_marker_in_file(str(cand)):
-                    has_renewal = True
-                    ports_panel = ()
-                    t_playback_json_end = None
-                    ports_panel_json_end = ()
-                    break
+            late_renewal = bool(has_renewal)
+            if not late_renewal:
+                for cand in (json_path, json_bn, linked):
+                    if cand and has_renewal_marker_in_file(str(cand)):
+                        late_renewal = True
+                        break
+            sync_looks_json_end = False
+            if late_renewal and t_playback_sync is not None:
+                try:
+                    je = float(t_json_end) if float(t_json_end or 0.0) > float(t0) + 1e-9 else float(proc_end)
+                    sync_looks_json_end = abs(float(t_playback_sync) - je) <= 1e-3
+                except Exception:
+                    sync_looks_json_end = False
+            if late_renewal and (
+                not bool(has_renewal)
+                or t_playback_sync is None
+                or sync_looks_json_end
+                or not ports_panel_renewal
+            ):
+                (
+                    has_renewal,
+                    renewal_off,
+                    t_playback_sync,
+                    ports_panel_renewal,
+                    ports_after,
+                    t_playback_json_end,
+                    ports_panel_json_end,
+                    json_path,
+                ) = _apply_renewal_fields_for_json_step(
+                    step_kind=step_kind,
+                    json_path=json_path,
+                    json_bn=str(json_bn or linked or ""),
+                    linked=linked,
+                    parsed_steps=parsed_steps,
+                    t0=float(t0),
+                    proc=float(proc),
+                    anim=float(anim),
+                    has_renewal=True,
+                    renewal_off=renewal_off,
+                    t_playback_sync=None,
+                    ports_panel_renewal=ports_panel_renewal,
+                    ports_after=ports_after,
+                    t_playback_json_end=None,
+                    ports_panel_json_end=(),
+                    panel_at_step_start=dict(panel_at_step_start),
+                    src_ev=src_ev_final,
+                    panel_ports=panel_ports,
+                )
+                ports_panel = ()
+                if ports_after:
+                    for k, v in ports_after:
+                        ku = str(k).strip().upper()
+                        if ku:
+                            panel_occ[ku] = str(v or "")
 
         steps.append(
             PlaybackScheduledStep(

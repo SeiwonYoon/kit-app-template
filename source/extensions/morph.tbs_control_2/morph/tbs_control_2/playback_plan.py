@@ -216,28 +216,70 @@ def _collect_schedule_port_occ_points(
         if is_renewal_json:
             sync_t = renewal_playback_port_sync_for_step(step)
             if sync_t is None:
-                sync_t = step.t_playback_port_sync
-            occ_r: Optional[Dict[str, str]] = None
-            if sync_t is not None:
-                ms = renewal_port_milestone_for_step(
-                    step,
-                    panel_ports=panel_ports,
-                    base_occ=dict(running),
-                )
-                if ms is not None:
-                    _, occ_r = ms
-                else:
-                    occ_r = renewal_full_panel_occ_for_step(
+                # offset/proc 재계산 실패 시에도 JSON-end 로 밀지 말고 lead+offset 으로 보정
+                try:
+                    from .json_playback_timing import json_lead_sec, resolve_playback_proc_anim
+
+                    t0s = float(step.t_event or 0.0)
+                    p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
+                    try:
+                        t0s = float(str(p.get("event_start_sim_time") or t0s))
+                    except Exception:
+                        pass
+                    proc_pb, anim_pb = resolve_playback_proc_anim(
+                        float(step.proc_sec or 0.0),
+                        float(step.anim_sec or 0.0),
+                        json_est_sec=float(step.json_est_sec or 0.0),
+                    )
+                    lead = float(json_lead_sec(float(proc_pb), float(anim_pb)))
+                    off = 0.0
+                    try:
+                        if step.renewal_offset_sec is not None and float(step.renewal_offset_sec) > 1e-9:
+                            off = float(step.renewal_offset_sec)
+                    except Exception:
+                        off = 0.0
+                    run_start = step.t_json_run_start_sim
+                    if run_start is not None and float(run_start) > 1e-9:
+                        sync_t = float(run_start) + float(off)
+                    else:
+                        sync_t = float(t0s) + float(lead) + float(off)
+                except Exception:
+                    sync_t = None
+            if sync_t is None:
+                if step.ports_occ_panel_renewal or step.ports_occ_after:
+                    occ_r_fb = renewal_full_panel_occ_for_step(
                         step,
                         base_occ=dict(running),
                         panel_ports=panel_ports,
                     )
-            if sync_t is not None and occ_r:
+                    if occ_r_fb:
+                        for k in panel_ports:
+                            running[k] = str(occ_r_fb.get(k, "") or "")
+                continue
+            occ_r: Optional[Dict[str, str]] = None
+            ms = renewal_port_milestone_for_step(
+                step,
+                panel_ports=panel_ports,
+                base_occ=dict(running),
+            )
+            if ms is not None:
+                _, occ_r = ms
+            else:
+                occ_r = renewal_full_panel_occ_for_step(
+                    step,
+                    base_occ=dict(running),
+                    panel_ports=panel_ports,
+                )
+            if occ_r:
                 try:
                     t_ev = float(step.t_event or 0.0)
                 except Exception:
                     t_ev = 0.0
-                sync_f = max(float(sync_t), float(t_ev), float(last_sync_t))
+                # renewal 은 last_sync_t 로 끌어올리지 않음 (이전 JSON-end bake 잔여 방지)
+                sync_f = max(float(sync_t), float(t_ev))
+                if sync_f + 1e-9 < float(last_sync_t):
+                    # 완전 역행만 소량 보정 (동일 시각 허용)
+                    sync_f = float(last_sync_t) + 1e-4
                 out.append((sync_f, 50000 + int(step.index), dict(occ_r)))
                 last_sync_t = float(sync_f)
                 for k in panel_ports:
@@ -252,6 +294,28 @@ def _collect_schedule_port_occ_points(
         panel_pairs = step.ports_occ_panel if step.ports_occ_panel else step.ports_occ_after
         if not panel_pairs:
             continue
+        # non-renewal 이라도 파일 마커가 늦게 잡히면 renewal 경로로
+        if step_json_has_renewal_marker(step):
+            sync_t_rn = renewal_playback_port_sync_for_step(step)
+            if sync_t_rn is not None:
+                occ_rn = renewal_full_panel_occ_for_step(
+                    step,
+                    base_occ=dict(running),
+                    panel_ports=panel_ports,
+                )
+                if occ_rn:
+                    try:
+                        t_ev = float(step.t_event or 0.0)
+                    except Exception:
+                        t_ev = 0.0
+                    sync_f = max(float(sync_t_rn), float(t_ev))
+                    if sync_f + 1e-9 < float(last_sync_t):
+                        sync_f = float(last_sync_t) + 1e-4
+                    out.append((sync_f, 50000 + int(step.index), dict(occ_rn)))
+                    last_sync_t = float(sync_f)
+                    for k in panel_ports:
+                        running[k] = str(occ_rn.get(k, "") or "")
+                    continue
         sync_t = step.t_playback_port_sync
         if sync_t is None:
             if step.t_playback_json_end is not None:

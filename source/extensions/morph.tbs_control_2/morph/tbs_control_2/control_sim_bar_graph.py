@@ -478,6 +478,154 @@ def truncate_bar_rows_at_t(rows: Dict[str, List[Dict[str, Any]]], t_cut: float) 
     return out
 
 
+def slice_bar_rows_after_t(
+    rows: Dict[str, List[Dict[str, Any]]], t_start: float
+) -> Dict[str, List[Dict[str, Any]]]:
+    """``t_start`` 이후 구간만 남긴다 (truncate 의 여집합)."""
+    t0 = max(0.0, float(t_start))
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for row_name, segs in (rows or {}).items():
+        acc = 0.0
+        kept: List[Dict[str, Any]] = []
+        for seg in segs or []:
+            if not isinstance(seg, dict):
+                continue
+            dur = float(seg.get("dur", 0.0) or 0.0)
+            if dur <= 1e-12:
+                continue
+            st = bar_state_from_seg(seg)
+            seg_end = acc + dur
+            if seg_end <= t0 + 1e-9:
+                acc = seg_end
+                continue
+            if acc < t0 - 1e-9:
+                rem = seg_end - t0
+                if rem > 1e-12:
+                    kept.append({"state": st, "dur": float(rem)})
+                acc = seg_end
+            else:
+                kept.append({"state": st, "dur": float(dur)})
+                acc = seg_end
+        out[str(row_name)] = kept
+    return out
+
+
+def patch_bar_rows_interval_from_occ(
+    rows: Dict[str, List[Dict[str, Any]]],
+    row_order: List[str],
+    ep_list: List[str],
+    occ: Dict[str, str],
+    *,
+    t_floor: float,
+    t_end: float,
+    fault_ports: Optional[Set[str]] = None,
+    foup_phase: Optional[Dict[str, str]] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    전체 막대 rows 에서 ``[t_floor, t_end)`` 만 occ 기준으로 다시 칠하고
+    그 전·후 구간은 원본을 유지한다.
+
+    프리런 정적 막대(+마스크) UI 는 ``bar_pre.rows`` 전체 색을 1회 그리므로,
+    renewal 때 여기서 패치한 복사본으로 재빌드해야 포트와 같이 lot 차기/비우기가 보인다.
+    """
+    try:
+        t0 = max(0.0, float(t_floor))
+        t1 = max(t0, float(t_end))
+    except Exception:
+        return {str(k): [dict(s) for s in (v or []) if isinstance(s, dict)] for k, v in (rows or {}).items()}
+    base = {
+        str(k): [dict(s) for s in (v or []) if isinstance(s, dict)]
+        for k, v in (rows or {}).items()
+    }
+    for r in row_order:
+        rk = str(r)
+        if rk not in base:
+            base[rk] = []
+    prefix = truncate_bar_rows_at_t(base, t0)
+    suffix = slice_bar_rows_after_t(base, t1)
+    mid_src = {rk: list(prefix.get(rk) or []) for rk in row_order}
+    rewrite_bar_rows_tail_from_occ(
+        mid_src,
+        list(row_order),
+        list(ep_list),
+        dict(occ),
+        t_cut=float(t1),
+        t_floor=float(t0),
+        fault_ports=fault_ports,
+        foup_phase=foup_phase,
+    )
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for rk in row_order:
+        mid = list(mid_src.get(str(rk)) or [])
+        # mid = prefix + painted tail; drop prefix part by taking only last (t1-t0) worth —
+        # rewrite already replaced whole row as prefix+tail, so mid is complete to t1.
+        # suffix attaches after t1.
+        segs = list(mid) + list(suffix.get(str(rk)) or [])
+        out[str(rk)] = merge_bar_row_segments(segs)
+    # keep any extra keys from base
+    for k, v in base.items():
+        if k not in out:
+            out[k] = list(v)
+    return out
+
+
+def rewrite_bar_rows_tail_from_occ(
+    rows_state: Dict[str, List[Dict[str, Any]]],
+    row_order: List[str],
+    ep_list: List[str],
+    occ: Dict[str, str],
+    *,
+    t_cut: float,
+    t_floor: float,
+    fault_ports: Optional[Set[str]] = None,
+    foup_phase: Optional[Dict[str, str]] = None,
+) -> None:
+    """
+    ``[t_floor, t_cut]`` 구간을 현재 occ(포트와 동일) 기준으로 다시 칠한다.
+
+    renewal wall 직후: 포트는 hold 로 lot 차기/비우기가 보이는데, 프리런 막대가
+    JSON end 변곡이면 ``truncate``만으로는 끝까지 empty/load 가 안 바뀐다.
+    tip(1e-6) 보정은 시각적으로 거의 안 보이므로, floor 이전 이력은 유지한 채
+    꼬리만 실제 dur 로 다시 그린다. FOUP start/end 는 floor 이전 세그먼트에 남고,
+    hold 해제 후엔 bar_pre truncate 가 SSOT 를 이어간다.
+    """
+    try:
+        t_end = float(t_cut)
+        t0 = float(t_floor)
+    except Exception:
+        return
+    if t_end + 1e-12 < t0:
+        return
+    tail = max(0.0, t_end - t0)
+    faults = {str(p).strip().upper() for p in (fault_ports or set()) if str(p).strip()}
+    phase = dict(foup_phase or {})
+    # floor 이후는 점유(lot)만 반영 — FOUP 공정색은 floor 이전 이력·hold 해제 후 bar_pre 에 맡김
+    prefix = truncate_bar_rows_at_t(rows_state, t0) if t0 > 1e-9 else {
+        str(k): [] for k in row_order
+    }
+    ep_states = [
+        _resolve_port_bar_state(ep, occ, phase, faults) for ep in ep_list
+    ]
+    all_ep_st = _aggregate_all_ep_state(ep_states)
+    for row_name in row_order:
+        rk = str(row_name)
+        want = all_ep_st if rk == "ALL_EP" else _resolve_port_bar_state(
+            rk, occ, phase, faults
+        )
+        segs = list(prefix.get(rk) or [])
+        if tail > 1e-12:
+            if segs and isinstance(segs[-1], dict) and bar_state_from_seg(segs[-1]) == want:
+                segs[-1] = {
+                    "state": want,
+                    "dur": float(segs[-1].get("dur", 0.0) or 0.0) + float(tail),
+                }
+            else:
+                segs.append({"state": want, "dur": float(tail)})
+        elif not segs and want != BAR_STATE_EMPTY:
+            segs.append({"state": want, "dur": 1e-6})
+        rows_state[rk] = segs
+
+
 def overlay_bar_rows_tip_from_occ(
     rows_state: Dict[str, List[Dict[str, Any]]],
     row_order: List[str],
@@ -488,7 +636,9 @@ def overlay_bar_rows_tip_from_occ(
     foup_active_ep: str = "",
 ) -> None:
     """
-    renewal lead 등 ``sim_now < plan sync`` 구간 — 막대 끝 색만 plan occ 로 보정 (시간축은 sim_now).
+    renewal lead 등 — 막대 끝 색만 occ 로 맞춤 (비-프리런 fallback).
+
+    재생 UI 의 lot 차기/비우기는 프리런 ``bar_pre`` 마일스톤에 bake 한다.
     """
     faults = fault_ports or set()
     foup_phase: Dict[str, str] = {}
@@ -1538,6 +1688,9 @@ __all__ = [
     "merge_bar_row_segments",
     "replay_bar_rows_at_t",
     "truncate_bar_rows_at_t",
+    "slice_bar_rows_after_t",
     "overlay_bar_rows_tip_from_occ",
+    "rewrite_bar_rows_tail_from_occ",
+    "patch_bar_rows_interval_from_occ",
     "write_prerun_export_json",
 ]

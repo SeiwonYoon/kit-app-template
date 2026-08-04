@@ -89,12 +89,14 @@ def estimate_prefix_duration_sec(steps: List[Any], end_exclusive: int) -> float:
     if end_exclusive <= 0 or not steps:
         return 0.0
     try:
-        from .control_window import (
-            _estimate_step_duration_sec_for_log,
-            _group_end_index,
-        )
+        from .control_window import _estimate_step_duration_sec_for_log
+        from .tbs_lam_sequence_engine import _group_end_index
     except Exception:
-        return 0.0
+        try:
+            from .control_window import _estimate_step_duration_sec_for_log
+            from .sequence_engine_legacy import _group_end_index
+        except Exception:
+            return 0.0
 
     end_exclusive = min(int(end_exclusive), len(steps))
     try:

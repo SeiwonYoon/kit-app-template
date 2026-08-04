@@ -389,6 +389,12 @@ def _find_wall_renewal_step(sched: Any, src: Dict[str, Any]) -> Optional[Any]:
     return best
 
 
+def clear_runtime_bar_rows(ext: Any, *, screen: Optional[int] = None) -> None:
+    """레거시 no-op — 막대는 프리런 ``bar_pre`` SSOT 만 사용 (재생 중 재패치 없음)."""
+    del ext, screen
+    return
+
+
 def _renewal_occ_for_playback_sync(
     ext: Any,
     screen: int,
@@ -1011,6 +1017,7 @@ def clear_playback_plan_runtime_state(ext: Any) -> None:
     except Exception:
         pass
     clear_removed_prim_hide_holds(ext)
+    clear_runtime_bar_rows(ext)
 
 
 def rebuild_plan_snapshot_for_screen(ext: Any, screen: int) -> Optional[PlaybackPlanSnapshot]:
@@ -1218,6 +1225,7 @@ def resolve_playback_ui_at_sim(
                     for p in (bar_pre.fault_ports or ())
                     if str(p).strip()
                 }
+            # 막대 색은 프리런 bar_pre SSOT. tip 은 재생 resolve fallback(비-프리런) 보정용만.
             try:
                 overlay_bar_rows_tip_from_occ(
                     bar_rows,
@@ -1440,6 +1448,7 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
     _register_removed_prim_hide_hold_for_renewal(ext, scr, dict(src), sched)
     _set_renewal_occ_hold(ext, scr, dict(delta), float(sync_t), delta=dict(delta))
 
+    # 막대는 프리런 bar_pre(renewal bake) SSOT — 재생 중 재그리기/패치 없음
     refresh_playback_display_at_sim(ext, scr, force=True)
     return True
 
@@ -1542,6 +1551,7 @@ __all__ = [
     "clear_playback_plan_runtime_state",
     "clear_removed_prim_hide_holds",
     "clear_renewal_occ_hold",
+    "clear_runtime_bar_rows",
     "ensure_plan_snapshot",
     "ensure_playback_plans_for_results",
     "get_plan_ports_at_sim",
