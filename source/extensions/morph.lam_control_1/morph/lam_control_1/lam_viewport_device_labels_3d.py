@@ -23,6 +23,8 @@ from .lam_viewport_overlay_config import (
 from .lam_viewport_overlay_state import get_toggle_device_labels
 
 _PM_LABEL_NAME_RE = re.compile(r"^PM([1-5])$", re.IGNORECASE)
+# 실무 라벨: ``PM5 strip`` 등 — PM1~5 문자열이 포함되면 점유 파란 배경 대상
+_PM_LABEL_NAME_CONTAINS_RE = re.compile(r"\bPM([1-5])\b", re.IGNORECASE)
 
 if TYPE_CHECKING:
     from .lam_viewport import LamViewport
@@ -231,8 +233,15 @@ class LamViewportDeviceLabels3d:
             return -1
 
     def _pm_region_for_spec_name(self, name: str) -> Optional[str]:
-        """``PM1``~``PM5`` 라벨명 → 평면도 region ``pm1``~``pm5``. 그 외는 None."""
-        m = _PM_LABEL_NAME_RE.fullmatch(str(name or "").strip())
+        """라벨명에 ``PM1``~``PM5`` 가 포함되면 평면도 region ``pm1``~``pm5``.
+
+        정확 일치(``PM5``)뿐 아니라 ``PM5 strip`` 등 실무 표기도 인식.
+        ``PM10`` 오인 방지를 위해 단어 경계(``\\b``) 사용.
+        """
+        raw = str(name or "").strip()
+        if not raw:
+            return None
+        m = _PM_LABEL_NAME_RE.fullmatch(raw) or _PM_LABEL_NAME_CONTAINS_RE.search(raw)
         if not m:
             return None
         return f"pm{int(m.group(1))}"
