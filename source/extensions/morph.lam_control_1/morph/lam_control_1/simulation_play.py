@@ -568,6 +568,37 @@ def clear_csv_playback_cache() -> None:
         _csv_playback_cache.clear()
 
 
+def invalidate_csv_playback_cache_for_path(path: Optional[Path]) -> int:
+    """해당 CSV/가상 path 의 캐시 엔트리만 제거 (정지 후 재파싱용).
+
+    Returns:
+        삭제된 엔트리 수.
+    """
+    if path is None:
+        return 0
+    try:
+        target = Path(path).resolve()
+    except OSError:
+        try:
+            target = Path(path)
+        except Exception:
+            return 0
+    removed = 0
+    with _csv_playback_cache_lock:
+        drop_keys: List[str] = []
+        for key, cached in _csv_playback_cache.items():
+            try:
+                cp = Path(getattr(cached, "path", "") or "").resolve()
+            except OSError:
+                continue
+            if cp == target:
+                drop_keys.append(key)
+        for key in drop_keys:
+            _csv_playback_cache.pop(key, None)
+            removed += 1
+    return removed
+
+
 def _estimate_csv_build_units(dwells: List["DwellRecord"]) -> int:
     """pick/transfer/place 빌드 횟수 추정 (진행률 분모)."""
     if not dwells:
@@ -9479,6 +9510,31 @@ class LamSimulationCsvPlayWindow:
         t = self._csv_build_thread
         return t is not None and t.is_alive()
 
+    def _invalidate_playback_parse_state_for_fresh_start(self) -> None:
+        """정지(초기화)·웹 start 용 — prepared 제거 + 선택 path 캐시 무효.
+
+        다음 Play/Federation 은 반드시 재파싱. 일시정지 경로는 호출하지 않는다.
+        """
+        self._prepared_playback = None
+        path = None
+        try:
+            path = self._selected_csv_path()
+        except Exception:
+            path = None
+        try:
+            n = invalidate_csv_playback_cache_for_path(path)
+            if n:
+                print(
+                    f"{_PRINT_PREFIX} screen{self._screen} parse cache invalidate "
+                    f"path={getattr(path, 'name', path)!r} removed={n}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} screen{self._screen} cache invalidate: {exc}",
+                flush=True,
+            )
+
     def _apply_cached_timeline_ui(self, cached: CachedCsvPlayback) -> None:
         sp = self._read_speed_scale()
         self._prepared_playback = cached
@@ -9796,7 +9852,7 @@ class LamSimulationCsvPlayWindow:
                 clear_csv_playback_stop(screen=si)
 
     def _reap_csv_play_thread(self, *, timeout: float = 30.0) -> bool:
-        """중지 요청된 재생 스레드·자식 worker join. True = 새 Play 가능."""
+        """중지 요청된 재생 스레드·프리런 빌드·자식 worker join. True = 새 Play 가능."""
         si = int(self._screen)
         t = self._csv_play_thread
         main_ok = True
@@ -9812,8 +9868,22 @@ class LamSimulationCsvPlayWindow:
                     self._csv_play_thread = None
                 else:
                     main_ok = False
+        bt = self._csv_build_thread
+        build_ok = True
+        if bt is not None:
+            if not bt.is_alive():
+                self._csv_build_thread = None
+            else:
+                try:
+                    bt.join(timeout=max(0.05, float(timeout)))
+                except Exception:
+                    pass
+                if not bt.is_alive():
+                    self._csv_build_thread = None
+                else:
+                    build_ok = False
         children_ok = join_csv_play_child_workers(screen=si, timeout=timeout)
-        return main_ok and children_ok
+        return main_ok and build_ok and children_ok
 
     def _schedule_reap_csv_play_thread_after_stop(
         self,
@@ -9912,10 +9982,15 @@ class LamSimulationCsvPlayWindow:
         ``on_complete``는 재생 worker 종료와 stage 초기화가 모두 끝난 뒤
         Kit main thread에서 호출된다. 화면 표시 전환이 이전 위치를 노출하지
         않도록 하기 위한 완료 신호다.
+
+        파싱 캐시·prepared 도 무효화한다 — 다음 Play/웹 start 는 재파싱.
+        (일시정지는 이 경로를 쓰지 않으므로 이어서 재생 유지.)
         """
         clear_csv_play_pause_checkpoint(screen=self._screen)
         self._reset_timeline_playback_highlight_ui()
         self._play_stop_reset_in_progress = True
+        # prepared + path 캐시 무효 — 정지 후 재시작은 새 파싱
+        self._invalidate_playback_parse_state_for_fresh_start()
         try:
             from .lam_csv_screen_runtime import (
                 resolve_csv_screen_runtime,
@@ -9938,7 +10013,8 @@ class LamSimulationCsvPlayWindow:
             reset_foup_play_session(screen=self._screen)
         except Exception:
             pass
-        if self._csv_play_thread_alive():
+        # 재생·프리런(빌드) 중이면 모두 stop
+        if self._csv_play_thread_alive() or self._csv_build_thread_alive():
             request_stop_csv_playback(
                 self._registry,
                 self._scheduler,
@@ -10147,9 +10223,9 @@ class LamSimulationCsvPlayWindow:
             disarm_csv_play_pause_for_resume(screen=self._screen)
         else:
             clear_csv_play_pause_checkpoint(screen=self._screen)
-            # 정지(초기화)·일시정지 직후 request_stop 이 남은 stop 플래그를 해제하지 않으면
-            # worker 의 preflight·run_simulation_from_csv 진입 전에 조용히 return 됨.
+            # 정지(초기화) 이후 — prepared/캐시 쓰지 않고 재파싱
             clear_csv_playback_stop(screen=self._screen)
+            self._invalidate_playback_parse_state_for_fresh_start()
         if not resume_from_pause:
             try:
                 from .lam_play_start_sequence import run_play_start_request_standby
@@ -10612,6 +10688,7 @@ __all__ = [
     "get_cached_csv_playback",
     "find_cached_csv_playback",
     "clear_csv_playback_cache",
+    "invalidate_csv_playback_cache_for_path",
     "prepare_csv_playback",
     "build_and_cache_csv_playback",
     "build_csv_playback_schedule_meta",

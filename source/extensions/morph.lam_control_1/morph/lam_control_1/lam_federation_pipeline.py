@@ -32,6 +32,7 @@ from .lam_federation_load_hud import set_federation_load_status
 from .lam_screen_visibility import request_screen_visibility
 from .simulation_play import (
     build_and_cache_from_dwells,
+    invalidate_csv_playback_cache_for_path,
     run_simulation_from_csv,
     stop_and_reap_csv_play_worker,
 )
@@ -40,6 +41,28 @@ _PRINT_PREFIX = "[LAM/federation-pipe]"
 # 실무 배포 진단용 — 콘솔에서 ``[LAM/FED-DIAG]`` 로 grep.
 # 단계 번호·이름은 docs/LAM_Federation_Deploy_Diagnose_ko.md 와 동일.
 _FED_DIAG_PREFIX = "[LAM/FED-DIAG]"
+
+# 화면별 웹 start 세대 — 새 start 후 이전 fetch/parse 스레드는 결과 폐기
+_fed_start_gen_lock = threading.Lock()
+_fed_start_generation: Dict[int, int] = {}
+
+
+def _bump_federation_start_generation(screen: int) -> int:
+    si = max(1, int(screen))
+    with _fed_start_gen_lock:
+        n = int(_fed_start_generation.get(si, 0) or 0) + 1
+        _fed_start_generation[si] = n
+        return n
+
+
+def _federation_start_generation(screen: int) -> int:
+    si = max(1, int(screen))
+    with _fed_start_gen_lock:
+        return int(_fed_start_generation.get(si, 0) or 0)
+
+
+def _federation_start_stale(screen: int, gen: int) -> bool:
+    return int(gen) != _federation_start_generation(screen)
 
 
 def _fed_diag(step: str, message: str, **fields: Any) -> None:
@@ -207,19 +230,25 @@ def _federation_force_stop_reset_for_start(
     ext: Any,
     lam_window: Any,
     screen: int,
-) -> None:
+) -> int:
     """웹 시작 요청용 — 해당 화면을 UI「정지(초기화)」와 동일하게 강제 종료·초기화.
 
-    재생 중이든 아니든 요청 화면만 case별로 처리한다. 완료 후 새 재생이
-    막히지 않도록 stop 플래그를 해제한다.
+    재생·프리런 중이든 아니든 요청 화면만 처리한다. prepared/캐시를 무효화하고
+    start 세대 토큰을 bump 해, 이전 fetch/parse 스레드 결과를 버린다.
+    완료 후 새 재생이 막히지 않도록 stop 플래그를 해제한다.
+
+    Returns:
+        이 start 의 generation token.
     """
     from .simulation_play import clear_csv_playback_stop
 
     si = max(1, int(screen))
+    gen = _bump_federation_start_generation(si)
     _fed_diag(
         "S07_force_stop_begin",
         "stop+reset before federation start",
         screen=si,
+        gen=gen,
     )
     csv_win = _resolve_csv_play_window(lam_window, si)
     if csv_win is None:
@@ -229,8 +258,22 @@ def _federation_force_stop_reset_for_start(
             "S07_force_stop_skip",
             "csv window missing — reap only",
             screen=si,
+            gen=gen,
         )
-        return
+        return gen
+
+    # prepared + 선택 CSV / 이후 federation 가상 path 캐시 무효
+    try:
+        inv = getattr(csv_win, "_invalidate_playback_parse_state_for_fresh_start", None)
+        if callable(inv):
+            inv()
+        else:
+            try:
+                csv_win._prepared_playback = None
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} prepared invalidate: {exc}", flush=True)
 
     done = threading.Event()
 
@@ -274,6 +317,7 @@ def _federation_force_stop_reset_for_start(
             "fallback reap",
             screen=si,
             timeout_sec=_FED_FORCE_STOP_TIMEOUT_SEC,
+            gen=gen,
         )
         _federation_reap_best_effort(csv_win, screen=si, kit_ext=ext)
 
@@ -282,22 +326,29 @@ def _federation_force_stop_reset_for_start(
         clear_csv_playback_stop(screen=si)
     except Exception:
         pass
-    _fed_diag("S07_force_stop_done", "ready for new start", screen=si)
+    _fed_diag("S07_force_stop_done", "ready for new start", screen=si, gen=gen)
+    return gen
 
 
 def _federation_force_stop_requested_screens(
     ext: Any,
     lam_window: Any,
     screens: List[int],
-) -> None:
-    """요청에 포함된 화면만 순차 강제 종료(다른 화면 재생은 유지)."""
+) -> Dict[int, int]:
+    """요청에 포함된 화면만 순차 강제 종료(다른 화면 재생은 유지).
+
+    Returns:
+        ``{screen: generation}`` — 이후 fetch/parse 가 stale 인지 판별.
+    """
     seen = set()
+    gens: Dict[int, int] = {}
     for raw in screens:
         si = max(1, int(raw))
         if si in seen:
             continue
         seen.add(si)
-        _federation_force_stop_reset_for_start(ext, lam_window, si)
+        gens[si] = _federation_force_stop_reset_for_start(ext, lam_window, si)
+    return gens
 
 
 def _federation_resolve_registry_scheduler(
@@ -703,30 +754,37 @@ def _process_merged_response(
     save_response_json: bool = False,
     export_default_prerun: bool = False,
     eqp_id_from_rows: bool = False,
+    start_gen: Optional[int] = None,
 ) -> ScreenPipelineResult:
     """이미 수집됐거나 사용자가 붙여넣은 응답만 파싱·프리런·(옵션)재생한다."""
     from .simulation_play import set_csv_playback_compact_log
 
-    meta: Dict[str, Any] = {"screen": screen}
+    si = max(1, int(screen))
+    gen = int(start_gen) if start_gen is not None else _federation_start_generation(si)
+    meta: Dict[str, Any] = {"screen": si, "start_gen": gen}
+    if _federation_start_stale(si, gen):
+        msg = f"screen{si}: superseded by newer web start (before parse)"
+        _fed_diag("S09_stale", msg, screen=si, gen=gen)
+        return ScreenPipelineResult(si, False, msg, meta)
     quiet = not _federation_verbose_parse_log()
     if quiet:
         set_csv_playback_compact_log(True)
     try:
         eqp_id = str(body.get("eqp_id") or "").strip()
         if not eqp_id_from_rows and not eqp_id:
-            _fed_diag("S09_parse_fail", "eqp_id missing", screen=screen)
+            _fed_diag("S09_parse_fail", "eqp_id missing", screen=si)
             _fed_load_hud(
-                screen,
+                si,
                 "failed",
                 detail="eqp_id missing",
                 ext=ext,
                 lam_window=lam_window,
             )
             return ScreenPipelineResult(
-                screen, False, "eqp_id missing in config body", meta
+                si, False, "eqp_id missing in config body", meta
             )
         _fed_load_hud(
-            screen, "parsing", ext=ext, lam_window=lam_window
+            si, "parsing", ext=ext, lam_window=lam_window
         )
         dwells, parse_stats = merged_response_to_dwells(
             merged,
@@ -734,6 +792,10 @@ def _process_merged_response(
             eqp_id_from_rows=eqp_id_from_rows,
             quiet=quiet,
         )
+        if _federation_start_stale(si, gen):
+            msg = f"screen{si}: superseded by newer web start (after parse)"
+            _fed_diag("S09_stale", msg, screen=si, gen=gen)
+            return ScreenPipelineResult(si, False, msg, meta)
         meta["parse"] = parse_stats
         if eqp_id_from_rows:
             eqp_id = str((parse_stats.get("eqp_ids") or [""])[0] or "").strip()
@@ -741,27 +803,36 @@ def _process_merged_response(
             _fed_diag(
                 "S09_parse_fail",
                 "no dwell records after parse",
-                screen=screen,
+                screen=si,
                 eqp_id=eqp_id or "(from rows)",
             )
             _fed_load_hud(
-                screen,
+                si,
                 "failed",
                 detail="파싱 결과 없음",
                 ext=ext,
                 lam_window=lam_window,
             )
-            return ScreenPipelineResult(screen, False, "no dwell records after parse", meta)
+            return ScreenPipelineResult(si, False, "no dwell records after parse", meta)
         _fed_diag(
             "S09_parse_ok",
             "dwells built",
-            screen=screen,
+            screen=si,
             eqp_id=eqp_id,
             dwells=len(dwells),
         )
-        vpath = federation_virtual_path(screen, body)
+        vpath = federation_virtual_path(si, body)
+        # 이전 파싱 캐시 제거 후 새 dwell 로 plan 재빌드
+        try:
+            invalidate_csv_playback_cache_for_path(vpath)
+        except Exception:
+            pass
         cached = build_and_cache_from_dwells(vpath, dwells)
-        prerun = build_prerun_result_from_cached(cached, screen=screen)
+        if _federation_start_stale(si, gen):
+            msg = f"screen{si}: superseded by newer web start (after plan build)"
+            _fed_diag("S10_stale", msg, screen=si, gen=gen)
+            return ScreenPipelineResult(si, False, msg, meta)
+        prerun = build_prerun_result_from_cached(cached, screen=si)
         _fed_diag(
             "S10_prerun_ok",
             "cached playback ready",
@@ -1004,8 +1075,16 @@ def _process_one_screen(
     auto_play: bool,
     speed_scale: float,
     export_default_prerun: bool = False,
+    start_gen: Optional[int] = None,
 ) -> ScreenPipelineResult:
     meta: Dict[str, Any] = {"screen": screen}
+    si = max(1, int(screen))
+    gen = int(start_gen) if start_gen is not None else _federation_start_generation(si)
+    meta["start_gen"] = gen
+    if _federation_start_stale(si, gen):
+        msg = f"screen{si}: superseded by newer web start (before fetch)"
+        _fed_diag("S08_stale", msg, screen=si, gen=gen)
+        return ScreenPipelineResult(si, False, msg, meta)
     use_get = config_use_simulation_get(body)
     meta["fetch_mode"] = "simulation_get" if use_get else "federation_post"
     try:
@@ -1087,7 +1166,12 @@ def _process_one_screen(
             rows=fetch_meta.get("total_rows"),
             elapsed=fetch_meta.get("elapsed_sec"),
             status=fetch_meta.get("http_status"),
+            gen=gen,
         )
+        if _federation_start_stale(si, gen):
+            msg = f"screen{si}: superseded by newer web start (after fetch)"
+            _fed_diag("S08_stale", msg, screen=si, gen=gen)
+            return ScreenPipelineResult(si, False, msg, meta)
         _fed_load_hud(screen, "received", ext=ext, lam_window=lam_window)
         result = _process_merged_response(
             ext,
@@ -1099,6 +1183,7 @@ def _process_one_screen(
             speed_scale=speed_scale,
             export_default_prerun=export_default_prerun,
             eqp_id_from_rows=use_get,
+            start_gen=gen,
         )
         result.meta["fetch"] = fetch_meta
         return result
@@ -1133,6 +1218,22 @@ def _start_ready_screens_together(
     # 실패분은 유지, 성공분은 play 결과로 갱신
     by_screen = {r.screen: r for r in results}
     for r in ready:
+        if _federation_start_stale(int(r.screen), int((r.meta or {}).get("start_gen") or 0)):
+            _fed_diag(
+                "S11_stale",
+                "skip play — newer web start",
+                screen=r.screen,
+                gen=(r.meta or {}).get("start_gen"),
+            )
+            by_screen[r.screen] = ScreenPipelineResult(
+                r.screen,
+                False,
+                f"screen{r.screen}: superseded before play",
+                dict(r.meta or {}),
+                prerun=r.prerun,
+                cached=r.cached,
+            )
+            continue
         csv_win = _resolve_csv_play_window(lam_window, r.screen)
         _fed_diag("S11_auto_play", "barrier start playback", screen=r.screen)
         err = _start_federation_playback(
@@ -1243,7 +1344,7 @@ def run_federation_start_simulation(
             screens=[s for s, _ in jobs],
         )
         # 웹 시작 = 해당 case 강제 종료(정지초기화) + 이후 fetch/준비/재생 (한 요청)
-        _federation_force_stop_requested_screens(
+        gens = _federation_force_stop_requested_screens(
             ext, lam_window, [s for s, _ in jobs]
         )
         try:
@@ -1280,6 +1381,7 @@ def run_federation_start_simulation(
                     auto_play=False,
                     speed_scale=speed_scale,
                     export_default_prerun=False,
+                    start_gen=gens.get(int(screen)),
                 )
             )
             r = results[-1]
@@ -1380,7 +1482,7 @@ def run_federation_response_simulation(
                 _finish(on_complete, _err("LAM window is not ready"))
                 return
             # 시작 전 해당 화면 강제 종료+초기화 (웹 시작과 동일)
-            _federation_force_stop_reset_for_start(ext, lam_window, si)
+            gen = _federation_force_stop_reset_for_start(ext, lam_window, si)
             result = _process_merged_response(
                 ext,
                 lam_window,
@@ -1392,6 +1494,7 @@ def run_federation_response_simulation(
                 save_response_json=save_response_json,
                 export_default_prerun=False,
                 eqp_id_from_rows=eqp_id_from_rows,
+                start_gen=gen,
             )
             if result.ok:
                 _finish(
