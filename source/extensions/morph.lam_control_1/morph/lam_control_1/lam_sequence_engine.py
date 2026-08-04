@@ -508,8 +508,33 @@ def _reset_tbs_offset_ops_for_paths(
 
 # --------------------------------------------------------------------- runner
 
+def _resolve_playback_screen(play_screen: Optional[int] = None) -> int:
+    """배속·stop 조회용 화면 번호.
+
+    우선순위: 명시 ``play_screen`` → ContextVar(``current_csv_play_screen``) → 1.
+    ``play_screen or 1`` 로 None 을 무조건 1 로 바꾸면 화면2 러너가 화면1 배속을
+    읽는 듀얼 간섭이 생기므로, None 일 때만 ContextVar 를 본다.
+    """
+    if play_screen is not None:
+        try:
+            return max(1, int(play_screen))
+        except Exception:
+            return 1
+    try:
+        from .lam_csv_play_screen import current_csv_play_screen
+
+        return max(1, int(current_csv_play_screen()))
+    except Exception:
+        return 1
+
+
 def _playback_speed_scale(fallback: float, *, play_screen: Optional[int] = None) -> float:
-    """CSV Play 중이면 UI 라이브 배속, 아니면 ``fallback``."""
+    """CSV Play 중이면 **해당 화면** 라이브 배속, 아니면 ``fallback``.
+
+    호출부(특히 ``LamSequenceRunner``)는 가능하면 ``play_screen`` 을 명시한다.
+    follower thread 는 ContextVar 를 상속하지 않으므로 runner 는
+    ``self._live_speed_scale`` 만 써야 한다.
+    """
     try:
         from .simulation_play import (
             csv_play_session_active,
@@ -517,7 +542,7 @@ def _playback_speed_scale(fallback: float, *, play_screen: Optional[int] = None)
             sync_csv_play_live_speed_from_ui,
         )
 
-        si = max(1, int(play_screen or 1))
+        si = _resolve_playback_screen(play_screen)
         if csv_play_session_active(screen=si):
             sync_csv_play_live_speed_from_ui(screen=si)
             return get_csv_play_live_speed_scale(screen=si)
@@ -530,13 +555,12 @@ def _csv_play_nominal_sleep(runner: "LamSequenceRunner", wall_sec: float, *, all
     """CSV Play: wall 대기를 JSON 시간 기준으로 환산해 배속 변경에 따라 가변 대기."""
     if wall_sec <= 1e-9:
         return
-    ps = int(getattr(runner, "_play_screen", 1) or 1)
-    sp0 = _playback_speed_scale(1.0, play_screen=ps)
+    sp0 = runner._live_speed_scale(1.0)
     nominal_remaining = float(wall_sec) * sp0
     while nominal_remaining > 1e-6:
         if allow_stop and runner._stop_flag.is_set():
             return
-        sp = _playback_speed_scale(sp0, play_screen=ps)
+        sp = runner._live_speed_scale(sp0)
         wall_chunk = min(0.05, nominal_remaining / sp)
         time.sleep(wall_chunk)
         nominal_remaining -= wall_chunk * sp
@@ -563,16 +587,39 @@ class LamSequenceRunner:
         self._usd_context_name: Optional[str] = (
             str(usd_context_name).strip() if usd_context_name else None
         ) or None
-        try:
-            self._play_screen: int = max(1, int(play_screen or 1))
-        except Exception:
-            self._play_screen = 1
+        self._play_screen = self._resolve_play_screen_for_init(
+            play_screen, self._usd_context_name
+        )
         self._stop_flag = threading.Event()
         self._hide = LamHideController(usd_context_name=self._usd_context_name)
         # 첫 step 메타 (TBS 와 동일 schema 호환)
         self._start_from_current: bool = False
         self._start_from_current_paths: List[str] = []
         self._start_snapshot: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _resolve_play_screen_for_init(
+        play_screen: Optional[int],
+        usd_context_name: Optional[str],
+    ) -> int:
+        """러너에 고정할 화면 번호 — 이후 배속/stop 은 이 값만 본다 (ContextVar 미의존)."""
+        if play_screen is not None:
+            try:
+                return max(1, int(play_screen))
+            except Exception:
+                pass
+        if usd_context_name:
+            try:
+                from .lam_csv_play_screen import csv_play_screen_for_usd_context
+
+                return max(1, int(csv_play_screen_for_usd_context(usd_context_name)))
+            except Exception:
+                pass
+        return _resolve_playback_screen(None)
+
+    def _live_speed_scale(self, fallback: float) -> float:
+        """이 러너 화면의 라이브 배속. follower thread 포함 유일한 조회 진입점."""
+        return _playback_speed_scale(fallback, play_screen=int(self._play_screen))
 
     # ------------------------------------------------------------------ public
 
@@ -697,7 +744,7 @@ class LamSequenceRunner:
                     _seq_log(f"{_PRINT_PREFIX} _apply_start_snapshot failed: {exc}", flush=True)
 
             d0_ms = int(first.get("step_delay_ms", 0) or 0)
-            sp = _playback_speed_scale(sp)
+            sp = self._live_speed_scale(sp)
             d0 = max(0.0, (d0_ms / 1000.0) / sp)
             if d0 > 0:
                 self._sleep(d0)
@@ -719,12 +766,12 @@ class LamSequenceRunner:
                         break
                 except Exception:
                     pass
-                sp = _playback_speed_scale(sp)
+                sp = self._live_speed_scale(sp)
                 b = _group_end_index(steps, a)
                 self._execute_group(steps, a, b, sp, reset_each_start)
                 next_idx = b + 1
                 if next_idx < len(steps):
-                    sp = _playback_speed_scale(sp)
+                    sp = self._live_speed_scale(sp)
                     delay_ms_next = int((steps[next_idx] or {}).get("step_delay_ms", 0) or 0)
                     delay_next = max(0.0, (delay_ms_next / 1000.0) / sp)
                     if delay_next > 0:
@@ -780,7 +827,7 @@ class LamSequenceRunner:
         """
         if self._stop_flag.is_set():
             return
-        sp = _playback_speed_scale(speed_scale)
+        sp = self._live_speed_scale(speed_scale)
         leader_idx = a
         anchor_idx = b
         t_group_start = time.monotonic()
@@ -801,7 +848,8 @@ class LamSequenceRunner:
                 step_i = steps[i] or {}
 
                 def _runner_for(idx: int = i, step: dict = step_i) -> None:
-                    sp_follow = _playback_speed_scale(sp)
+                    # follower thread 는 ContextVar 미상속 — self._live_speed_scale 만 사용
+                    sp_follow = self._live_speed_scale(sp)
                     delay = max(
                         0.0,
                         (int(step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_follow,
@@ -811,7 +859,7 @@ class LamSequenceRunner:
                     if self._stop_flag.is_set():
                         return
                     start_at = time.monotonic()
-                    sp_step = _playback_speed_scale(sp)
+                    sp_step = self._live_speed_scale(sp)
                     dur = self._start_step(idx, step, sp_step, reset_each_start)
                     if idx == anchor_idx:
                         anchor_finish_at_holder["t"] = start_at + dur
@@ -823,7 +871,7 @@ class LamSequenceRunner:
                 follower_threads.append(t)
 
             anchor_step = steps[anchor_idx] or {}
-            sp_anchor = _playback_speed_scale(sp)
+            sp_anchor = self._live_speed_scale(sp)
             anchor_delay_sec = max(
                 0.0, (int(anchor_step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_anchor
             )
@@ -958,9 +1006,8 @@ class LamSequenceRunner:
 
         while not self._stop_flag.is_set():
             try:
-                from .simulation_play import sync_csv_play_live_speed_from_ui
-
-                sync_csv_play_live_speed_from_ui()
+                # motion wait 중에도 이 화면 배속만 동기화 (다른 화면 세션 비접촉)
+                self._live_speed_scale(1.0)
             except Exception:
                 pass
             if not _any_busy():
