@@ -327,10 +327,17 @@ class LamFoupStatus3dPanel:
 
     def destroy(self) -> None:
         # 예약된 delayed mount 취소
+        was_built = bool(self._built)
         self._sync_token = time.time()
         _ACTIVE_FOUP_PANEL_BY_SCREEN.pop(self._screen, None)
         self._stop_poll()
         self._destroy_layer()
+        if was_built:
+            self._mount_logged = False
+            print(
+                f"{_PRINT_PREFIX} screen{self._screen} FOUP destroy (toggle OFF)",
+                flush=True,
+            )
 
     def reset_play_session(self) -> None:
         """정지(초기화) 후 3D 패널 표시만 리셋 (집계는 overlay_state)."""
@@ -339,11 +346,8 @@ class LamFoupStatus3dPanel:
 
     def sync_layers(self, *, delay_frames: int = 12) -> None:
         if not self._foup_toggle_on():
-            self.destroy()
-            print(
-                f"{_PRINT_PREFIX} screen{self._screen} FOUP destroy (toggle OFF)",
-                flush=True,
-            )
+            if self._built:
+                self.destroy()
             return
         if self._built and self._scene_view is not None and self._root is not None:
             # 이미 mount — 화면2+ 는 타일 창이 바뀌었으면 remount, 아니면 갱신만
@@ -536,10 +540,13 @@ class LamFoupStatus3dPanel:
         except Exception:
             pass
         self._update_ui()
-        print(
-            f"{_PRINT_PREFIX} screen{self._screen} FOUP panel mounted",
-            flush=True,
-        )
+        # mount 로그는 신규 attach 1회만 (sync 반복 스팸 방지)
+        if not getattr(self, "_mount_logged", False):
+            self._mount_logged = True
+            print(
+                f"{_PRINT_PREFIX} screen{self._screen} FOUP panel mounted",
+                flush=True,
+            )
 
     def _start_poll(self) -> None:
         if self._post_update_sub is not None:

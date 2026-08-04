@@ -523,6 +523,65 @@ def _make_slot_z_move_step(
     }
 
 
+def _normalize_pick_place_visibility_modes(
+    event_name: str,
+    steps: List[Dict[str, Any]],
+    *,
+    slot_wafer: str,
+    arm_wafer: str,
+) -> List[Dict[str, Any]]:
+    """이벤트명 기준으로 SLOT/ARM PRIM_VISIBILITY mode 강제.
+
+    스캐폴드 JSON 이 pick 인데 show SLOT 등으로 뒤집혀 있어도
+    애니·라벨·평면도 SSOT 가 같은 hide/show 를 쓰도록 한다.
+    """
+    name = (event_name or "").strip().lower()
+    if name.endswith("_pick"):
+        slot_mode, arm_mode = "hide", "show"
+    elif name.endswith("_place"):
+        slot_mode, arm_mode = "show", "hide"
+    else:
+        return steps
+
+    slot_p = (slot_wafer or "").strip().rstrip("/")
+    arm_p = (arm_wafer or "").strip().rstrip("/")
+    out: List[Dict[str, Any]] = []
+    for st in steps:
+        row = dict(st) if isinstance(st, dict) else st
+        if not isinstance(row, dict):
+            out.append(row)
+            continue
+        t = str(row.get("type") or "").upper()
+        if t not in (
+            "PRIM_VISIBILITY",
+            "SET_PRIM_VISIBILITY",
+            "PRIM_HIDE",
+            "PRIM_SHOW",
+        ):
+            out.append(row)
+            continue
+        prim = str(row.get("prim") or "").strip().rstrip("/")
+        role = None
+        if slot_p and (prim == slot_p or prim.endswith(slot_p) or slot_p.endswith(prim)):
+            role = "slot"
+        elif arm_p and (prim == arm_p or prim.endswith(arm_p) or arm_p.endswith(prim)):
+            role = "arm"
+        elif TOKEN_SLOT_WAFER in str(row.get("prim") or ""):
+            role = "slot"
+        elif TOKEN_ARM_WAFER in str(row.get("prim") or ""):
+            role = "arm"
+        if role == "slot":
+            row["type"] = "PRIM_VISIBILITY"
+            row["mode"] = slot_mode
+            row.pop("visible", None)
+        elif role == "arm":
+            row["type"] = "PRIM_VISIBILITY"
+            row["mode"] = arm_mode
+            row.pop("visible", None)
+        out.append(row)
+    return out
+
+
 def build_steps_for_event(
     event_name: str,
     *,
@@ -591,6 +650,9 @@ def build_steps_for_event(
 
     steps: List[Dict[str, Any]] = copy.deepcopy(raw)
     steps = _substitute_templates(steps, mapping)
+    steps = _normalize_pick_place_visibility_modes(
+        name, steps, slot_wafer=slot_wafer, arm_wafer=arm_wafer
+    )
 
     # --- 4) 자동 Z MOVE (JSON 앞에 삽입) ---
     cfg = LAM_SIM_VIRTUAL_CONFIG

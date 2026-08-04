@@ -460,17 +460,20 @@ class CachedCsvPlayback:
 
 def _csv_playback_config_tag() -> str:
     # occ_order_swap: 점유/팔홀딩 충돌 시 순서 swap 만 (통째 시프트 아님)
-    tag = (
-        f"vtm_swap={int(VTM_END_EFFECTOR_SWAP_HANDS)}"
-        f"|occ_order_swap=2"
-    )
+    tag = f"vtm_swap={int(VTM_END_EFFECTOR_SWAP_HANDS)}"
     try:
-        from .lam_csv_occupancy_scheduler import occupancy_scheduler_enabled
+        from .lam_csv_occupancy_scheduler import (
+            csv_playback_plan_mode,
+            occupancy_scheduler_enabled,
+        )
 
+        mode = csv_playback_plan_mode()
+        # buf_foup=1: Buffer pick 후 FOUP place 없으면 직후 강제 삽입 (절대규칙)
+        tag = f"{tag}|plan={mode}|buf_foup=1"
         if occupancy_scheduler_enabled():
-            tag = f"{tag}|occ=1"
+            tag = f"{tag}|occ_order_swap=2|occ=1"
     except Exception:
-        pass
+        tag = f"{tag}|occ_order_swap=2|buf_foup=1"
     return tag
 
 
@@ -496,6 +499,10 @@ def _maybe_apply_occupancy_scheduler(
     try:
         sch, blk, diags = apply_occupancy_scheduler(dwells, schedule, blocks)
         sch, blk = _apply_csv_playback_arm_serial_rules(sch, blk, dwells=dwells)
+        assert blk is not None
+        sch, blk = _enforce_aligner_absolute_rules(sch, blk)
+        assert blk is not None
+        sch, blk = _ensure_buffer_to_foup_absolute_rules(sch, blk, dwells=dwells)
         assert blk is not None
         sch = _stamp_schedule_row_ids(sch)
         blk = _reattach_block_schedules(blk, sch)
@@ -890,11 +897,13 @@ def reset_lam_sim_to_initial_state(
     scheduler: Any = None,
     *,
     script_text: Optional[str] = None,
+    usd_context_name: Optional[str] = None,
+    screen: Optional[int] = None,
 ) -> None:
     """ATM/VTM Z stage 등 TBS_OFFSET 을 0 으로 — 시퀀스 편집기 Reset 과 동일 정책.
 
     - 진행 중 translate/rotate 애니메이션 중지
-    - ``scheduler.stop_all()`` (있을 때)
+    - ``scheduler.stop_all()`` (있을 때) — **CSV Play 활성 화면이 있으면 생략**
     - Z MOVE prim + 스크립트에 등장한 MOVE/ROTATE/visibility prim 의 TBS translate·rotate 0
     """
     from . import lam_rotate_animation as _lrx
@@ -907,13 +916,32 @@ def reset_lam_sim_to_initial_state(
     for p in paths:
         print(f"{_PRINT_PREFIX}     {p}", flush=True)
 
+    # 듀얼 Play: stop_all_* 가 다른 화면 MOVE/ROTATE 까지 끊지 않게
+    dual_guard = False
     try:
-        _ltx.stop_all_translate_animations()
-        _lrx.stop_all_rotate_animations()
+        for _si in range(1, 5):
+            if csv_play_session_active(screen=_si):
+                dual_guard = True
+                break
+    except Exception:
+        dual_guard = False
+    ctx = (str(usd_context_name).strip() if usd_context_name else "") or None
+    try:
+        if dual_guard:
+            print(
+                f"{_PRINT_PREFIX}   CSV Play 활성 — stop_all_* 생략"
+                f"{f' (context={ctx!r})' if ctx else ' (default context만)'}",
+                flush=True,
+            )
+            _ltx.stop_translate_animations_for_context(ctx)
+            _lrx.stop_rotate_animations_for_context(ctx)
+        else:
+            _ltx.stop_all_translate_animations()
+            _lrx.stop_all_rotate_animations()
     except Exception as exc:
         print(f"{_PRINT_PREFIX}   애니 중지 경고: {exc}", flush=True)
 
-    if scheduler is not None:
+    if scheduler is not None and not dual_guard:
         try:
             stop_fn = getattr(scheduler, "stop_all", None)
             if callable(stop_fn):
@@ -921,9 +949,18 @@ def reset_lam_sim_to_initial_state(
                 print(f"{_PRINT_PREFIX}   scheduler.stop_all() 호출", flush=True)
         except Exception as exc:
             print(f"{_PRINT_PREFIX}   scheduler.stop_all 경고: {exc}", flush=True)
+    elif scheduler is not None and dual_guard:
+        print(
+            f"{_PRINT_PREFIX}   scheduler.stop_all 생략 (CSV Play 활성 — 듀얼 간섭 방지)",
+            flush=True,
+        )
 
     if paths:
-        ok = _dispatch_main_wait(lambda: _reset_tbs_offset_ops_for_paths(paths), timeout=15.0)
+        ok = _dispatch_main_wait(
+            lambda: _reset_tbs_offset_ops_for_paths(paths, usd_context_name=ctx),
+            timeout=15.0,
+            play_screen=screen,
+        )
         if not ok:
             print(f"{_PRINT_PREFIX}   ⚠ TBS reset main-thread 타임아웃", flush=True)
     else:
@@ -1199,6 +1236,9 @@ class CsvPlaybackScheduleEntry:
     event_name: str = ""
     json_path: str = ""
     schedule_row: int = -1
+    # 타임라인 soft 매칭·진단용 (없으면 title_ko 에서 추정)
+    lot_id: str = ""
+    cassette_slot: int = 0
 
 
 @dataclass(frozen=True)
@@ -1678,41 +1718,125 @@ def _resolve_synth_aligner_pick_time(
     cassette_slot: int,
     tour: Sequence["DwellRecord"],
     all_dwells: Sequence["DwellRecord"],
-) -> Tuple[float, bool, Optional[float]]:
-    """Aligner pick 시각.
+) -> Tuple[Optional[float], bool, Optional[float]]:
+    """Aligner pick 시각 — ``lam_aligner_process_rules`` SSOT.
 
     Returns:
-        (pick_t, deferred, next_transfer_t)
-        deferred=True 이면 다른 wafer ATM 끼어듦으로 다음 이송 직전 pick.
+        (pick_t|None, deferred, airlock_place_t)
+        pick_t 가 None 이면 airlock place 가 투어에 없음 → place 만 삽입, pick 보류.
     """
+    from .lam_aligner_process_rules import resolve_aligner_pick_schedule
+
     anchor = float(anchor_time_sec)
-    default_pick = anchor + FOUP_PICK_SYNTH_ALIGNER_PICK_DELAY_SEC
-    next_t: Optional[float] = None
-    if len(tour) >= 2:
-        next_t = float(tour[1].start_sec)
+    airlock_probe = None
+    try:
+        from .lam_aligner_process_rules import find_first_airlock_place_time_in_tour
 
-    if next_t is None:
-        return default_pick, False, None
-
+        airlock_probe = find_first_airlock_place_time_in_tour(tour)
+    except Exception:
+        airlock_probe = None
+    window_hi = float(airlock_probe) if airlock_probe is not None else (
+        float(tour[1].start_sec) if len(tour) >= 2 else anchor + 3600.0
+    )
     iv = _other_wafer_atm_action_times_in_window(
         all_dwells,
         exclude_lot_id=lot_id,
         exclude_cassette_slot=int(cassette_slot),
-        window_lo=anchor,
-        window_hi=next_t,
+        window_lo=float(place_t),
+        window_hi=window_hi,
     )
-    if not iv:
-        return default_pick, False, next_t
-
     lead = float(FOUP_PICK_SYNTH_ALIGNER_PICK_LEAD_BEFORE_NEXT_SEC)
-    last_iv = max(float(x) for x in iv)
-    pick_t = next_t - lead
-    pick_t = max(float(place_t) + 0.05, pick_t)
-    if pick_t <= last_iv + 1e-6:
-        pick_t = max(float(place_t) + 0.05, last_iv + 0.05)
-    if pick_t >= next_t - 1e-4:
-        pick_t = max(float(place_t) + 0.05, next_t - 0.05)
-    return float(pick_t), True, next_t
+    return resolve_aligner_pick_schedule(
+        foup_pick_t=anchor,
+        aligner_place_t=float(place_t),
+        tour=tour,
+        other_atm_action_times=iv,
+        pick_lead_before_airlock_sec=lead,
+    )
+
+
+def _append_aligner_after_foup_pick(
+    *,
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+    anchor_time_sec: float,
+    foup_index: int,
+    cassette_slot: int,
+    lot_id: str,
+    tour: Sequence["DwellRecord"],
+    all_dwells: Sequence["DwellRecord"],
+    progress: Optional[_ThrottledBuildProgress] = None,
+) -> None:
+    """FOUP pick 후 Aligner 절대 규칙 적용.
+
+    - place: FOUP pick 직후 세트(항상)
+    - pick: 같은 wafer 의 **airlock place 직전**에만. airlock 홉이 없으면 pick 미삽입.
+    """
+    try:
+        from .lam_csv_occupancy_scheduler import aligner_synthesis_enabled
+
+        if not aligner_synthesis_enabled():
+            return
+    except Exception:
+        pass
+    place_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC
+    pick_t, deferred_pick, next_transfer_t = _resolve_synth_aligner_pick_time(
+        anchor_time_sec=anchor_time_sec,
+        place_t=place_t,
+        lot_id=lot_id,
+        cassette_slot=cassette_slot,
+        tour=tour,
+        all_dwells=all_dwells,
+    )
+    jobs: List[Tuple[str, float, str]] = [
+        ("place", place_t, "aligner_place"),
+    ]
+    if pick_t is not None:
+        jobs.append(("pick", float(pick_t), "aligner_pick"))
+    else:
+        _lam_sim_log_build(
+            "csv_tour",
+            f"Aligner pick 보류 lot={lot_id!r} wafer#{cassette_slot} "
+            f"— 투어에 ATM→airlock place 없음 (place 만 삽입)",
+        )
+
+    for po, t_sec, label in jobs:
+        try:
+            deferred = bool(deferred_pick and po == "pick")
+            if blocks is not None:
+                steps = build_aligner_after_foup_pick_steps(po, cassette_slot=cassette_slot)
+                if not steps:
+                    continue
+                ent = _aligner_schedule_entry(
+                    time_sec=t_sec,
+                    pick_or_place=po,
+                    foup_index=foup_index,
+                    cassette_slot=cassette_slot,
+                    lot_id=lot_id,
+                    anchor_time_sec=anchor_time_sec,
+                    steps=steps,
+                    deferred_pick=deferred,
+                    next_transfer_t=next_transfer_t,
+                )
+                schedule.append(ent)
+                blocks.append(_block_from_schedule(ent, steps, label=label))
+            else:
+                schedule.append(
+                    _aligner_schedule_entry_meta(
+                        time_sec=t_sec,
+                        pick_or_place=po,
+                        foup_index=foup_index,
+                        cassette_slot=cassette_slot,
+                        lot_id=lot_id,
+                        anchor_time_sec=anchor_time_sec,
+                        deferred_pick=deferred,
+                        next_transfer_t=next_transfer_t,
+                    )
+                )
+        except Exception as exc:
+            _lam_sim_log_build("csv_tour", f"Aligner {po} skip: {exc}")
+        if progress is not None:
+            progress.tick(1)
 
 
 def _aligner_schedule_entry(
@@ -1782,6 +1906,8 @@ def _aligner_schedule_entry(
         step_count=len(steps),
         event_name=event,
         json_path=json_path,
+        lot_id=str(lot_id or ""),
+        cassette_slot=int(cassette_slot or 0),
     )
 
 
@@ -1821,73 +1947,6 @@ def _aligner_schedule_entry_meta(
         event_name=event,
         json_path=ent.json_path,
     )
-
-
-def _append_aligner_after_foup_pick(
-    *,
-    schedule: List[CsvPlaybackScheduleEntry],
-    blocks: Optional[List[CsvTimedPlaybackBlock]],
-    anchor_time_sec: float,
-    foup_index: int,
-    cassette_slot: int,
-    lot_id: str,
-    tour: Sequence["DwellRecord"],
-    all_dwells: Sequence["DwellRecord"],
-    progress: Optional[_ThrottledBuildProgress] = None,
-) -> None:
-    """FOUP pick 후 합성 aligner: place 항상(+PLACE_DELAY), pick 은 끼어듦에 따라 시점 분리.
-
-    CSV 파일은 변경하지 않음. 점유 플래그와 무관하게 항상 적용.
-    """
-    place_t = float(anchor_time_sec) + FOUP_PICK_SYNTH_ALIGNER_PLACE_DELAY_SEC
-    pick_t, deferred_pick, next_transfer_t = _resolve_synth_aligner_pick_time(
-        anchor_time_sec=anchor_time_sec,
-        place_t=place_t,
-        lot_id=lot_id,
-        cassette_slot=cassette_slot,
-        tour=tour,
-        all_dwells=all_dwells,
-    )
-    for po, t_sec, label in (
-        ("place", place_t, "aligner_place"),
-        ("pick", pick_t, "aligner_pick"),
-    ):
-        try:
-            deferred = bool(deferred_pick and po == "pick")
-            if blocks is not None:
-                steps = build_aligner_after_foup_pick_steps(po, cassette_slot=cassette_slot)
-                if not steps:
-                    continue
-                ent = _aligner_schedule_entry(
-                    time_sec=t_sec,
-                    pick_or_place=po,
-                    foup_index=foup_index,
-                    cassette_slot=cassette_slot,
-                    lot_id=lot_id,
-                    anchor_time_sec=anchor_time_sec,
-                    steps=steps,
-                    deferred_pick=deferred,
-                    next_transfer_t=next_transfer_t,
-                )
-                schedule.append(ent)
-                blocks.append(_block_from_schedule(ent, steps, label=label))
-            else:
-                schedule.append(
-                    _aligner_schedule_entry_meta(
-                        time_sec=t_sec,
-                        pick_or_place=po,
-                        foup_index=foup_index,
-                        cassette_slot=cassette_slot,
-                        lot_id=lot_id,
-                        anchor_time_sec=anchor_time_sec,
-                        deferred_pick=deferred,
-                        next_transfer_t=next_transfer_t,
-                    )
-                )
-        except Exception as exc:
-            _lam_sim_log_build("csv_tour", f"Aligner {po} skip: {exc}")
-        if progress is not None:
-            progress.tick(1)
 
 
 def _slot_key_label_ko(slot_key: str) -> str:
@@ -1960,6 +2019,8 @@ def _dwell_schedule_entry(d: DwellRecord) -> CsvPlaybackScheduleEntry:
         step_count=0,
         event_name="",
         json_path="",
+        lot_id=str(d.lot_id or ""),
+        cassette_slot=int(d.cassette_slot or 0),
     )
 
 
@@ -1989,6 +2050,8 @@ def _pick_schedule_entry(
         step_count=len(steps),
         event_name=event,
         json_path=json_path,
+        lot_id=str(lot_id or ""),
+        cassette_slot=int(cassette_slot or 0),
     )
 
 
@@ -2017,6 +2080,8 @@ def _place_schedule_entry(
         step_count=len(steps),
         event_name=event,
         json_path=json_path,
+        lot_id=str(lot_id or ""),
+        cassette_slot=int(cassette_slot or 0),
     )
 
 
@@ -2052,6 +2117,8 @@ def _transfer_schedule_entry(
         step_count=len(steps),
         event_name=event,
         json_path=json_path,
+        lot_id=str(curr.lot_id or ""),
+        cassette_slot=int(curr.cassette_slot or 0),
     )
 
 
@@ -2204,16 +2271,40 @@ def _schedule_entry_match_key(e: CsvPlaybackScheduleEntry) -> Tuple[Any, ...]:
     )
 
 
+def _schedule_entry_lot_cassette(e: CsvPlaybackScheduleEntry) -> Tuple[str, int]:
+    lot = str(getattr(e, "lot_id", "") or "")
+    try:
+        cas = int(getattr(e, "cassette_slot", 0) or 0)
+    except Exception:
+        cas = 0
+    if lot and cas > 0:
+        return lot, cas
+    title = str(getattr(e, "title_ko", "") or "")
+    if not lot:
+        m = re.search(r"lot=['\"]([^'\"]*)['\"]", title)
+        if m:
+            lot = str(m.group(1) or "")
+    if cas <= 0:
+        m = re.search(r"웨이퍼#(\d+)", title)
+        if m:
+            try:
+                cas = int(m.group(1))
+            except Exception:
+                cas = 0
+    return lot, cas
+
+
 def _schedule_entry_soft_match_key(e: CsvPlaybackScheduleEntry) -> Tuple[Any, ...]:
-    """time_sec 변동(직렬 보정·재빌드)에도 Current State/강조 매칭이 되게 하는 보조 키."""
+    """time_sec 변동에도 Current State/강조 매칭 — lot+cassette 포함(타 wafer 오점등 방지)."""
     row = int(getattr(e, "schedule_row", -1) or -1)
-    return (str(e.category), str(e.event_name), row, int(e.sort_order))
+    lot, cas = _schedule_entry_lot_cassette(e)
+    return (str(e.category), str(e.event_name), row, int(e.sort_order), lot, cas)
 
 
 def _schedule_entry_matches_active(
     e: CsvPlaybackScheduleEntry, active: frozenset
 ) -> bool:
-    """정확 키 우선, 실패 시 soft 키·(category,event,sort) 보조 매칭."""
+    """정확 키 우선, 실패 시 soft 키( lot+cassette ). 시간 무시 광역 매칭 금지."""
     if not active:
         return False
     if _schedule_entry_match_key(e) in active:
@@ -2225,29 +2316,32 @@ def _schedule_entry_matches_active(
     ev = str(e.event_name or "")
     sort_o = int(e.sort_order)
     row = int(getattr(e, "schedule_row", -1) or -1)
+    lot, cas = _schedule_entry_lot_cassette(e)
     for k in active:
-        if not isinstance(k, tuple) or len(k) != 4:
+        if not isinstance(k, tuple):
             continue
-        # soft: (cat, event, row, sort)
-        if k[0] == cat and k[1] == ev and int(k[3]) == sort_o:
-            try:
-                kr = int(k[2])
-            except Exception:
-                kr = -1
-            if row < 0 or kr < 0 or kr == row:
-                return True
-        # exact: (t, sort, cat, event) — time 무시
-        try:
+        if len(k) == 6:
             if (
-                isinstance(k[0], (int, float))
-                and not isinstance(k[0], bool)
-                and str(k[2]) == cat
-                and str(k[3]) == ev
-                and int(k[1]) == sort_o
+                k[0] == cat
+                and k[1] == ev
+                and int(k[3]) == sort_o
+                and str(k[4]) == lot
+                and int(k[5]) == cas
             ):
-                return True
-        except Exception:
-            continue
+                try:
+                    kr = int(k[2])
+                except Exception:
+                    kr = -1
+                if row < 0 or kr < 0 or kr == row:
+                    return True
+        elif len(k) == 4 and not isinstance(k[0], (int, float)):
+            if k[0] == cat and k[1] == ev and int(k[3]) == sort_o:
+                try:
+                    kr = int(k[2])
+                except Exception:
+                    kr = -1
+                if row >= 0 and kr == row:
+                    return True
     return False
 
 
@@ -2313,6 +2407,8 @@ def _pick_schedule_entry_meta(
         step_count=_event_step_count_estimate(event),
         event_name=event,
         json_path=json_path,
+        lot_id=str(lot_id or ""),
+        cassette_slot=int(cassette_slot or 0),
     )
 
 
@@ -2340,6 +2436,8 @@ def _place_schedule_entry_meta(
         step_count=_event_step_count_estimate(event),
         event_name=event,
         json_path=json_path,
+        lot_id=str(lot_id or ""),
+        cassette_slot=int(cassette_slot or 0),
     )
 
 
@@ -2376,6 +2474,8 @@ def _transfer_schedule_entry_meta(
         step_count=sc,
         event_name=event,
         json_path=json_path,
+        lot_id=str(curr.lot_id or ""),
+        cassette_slot=int(curr.cassette_slot or 0),
     )
 
 
@@ -2760,6 +2860,16 @@ def _swap_action_order(
     """later 를 earlier 앞으로 — 두 이벤트의 (t, sort_order) 만 교환."""
     ta, tb = float(earlier.t), float(later.t)
     oa, ob = int(earlier.ord), int(later.ord)
+    try:
+        print(
+            f"{_PRINT_PREFIX} [swap] t={min(ta, tb):.1f}s "
+            f"{earlier.kind}@{earlier.slot!r} "
+            f"↔ {later.kind}@{later.slot!r} "
+            f"(wafer {earlier.wafer} / {later.wafer})",
+            flush=True,
+        )
+    except Exception:
+        pass
     _commit_action_node_time(schedule, blocks, later, ta, oa)
     _commit_action_node_time(schedule, blocks, earlier, tb, ob)
 
@@ -2897,6 +3007,303 @@ def _apply_vtm_slot_hand_serial(
     return _apply_slot_occupancy_order_swaps(schedule, blocks, dwells=None)
 
 
+def _enforce_aligner_absolute_rules(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """Aligner pick 직후 같은 wafer 가 airlock 외로 place 되면 해당 pick 제거.
+
+    ATM/VTM greedy swap 등으로 생긴 Aligner→buffer / Aligner→FOUP 를 plan 단계에서 차단.
+    """
+    from .lam_aligner_process_rules import (
+        is_airlock_place_event,
+        is_forbidden_after_aligner_pick_event,
+    )
+
+    if not schedule:
+        return schedule, blocks
+
+    ordered = sorted(
+        enumerate(schedule),
+        key=lambda it: (float(it[1].time_sec), int(it[1].sort_order), it[0]),
+    )
+    remove_idx: set = set()
+
+    for pos, (si, e) in enumerate(ordered):
+        cat = str(e.category or "")
+        en = str(e.event_name or "")
+        if cat != "aligner_pick" and en != "atm_aligner_pick":
+            continue
+        lot, cas = _schedule_entry_lot_cassette(e)
+        next_act: Optional[CsvPlaybackScheduleEntry] = None
+        for _pos2, (sj, o) in enumerate(ordered[pos + 1 :], start=pos + 1):
+            if sj in remove_idx:
+                continue
+            o_lot, o_cas = _schedule_entry_lot_cassette(o)
+            if lot and (o_lot != lot or int(o_cas) != int(cas)):
+                continue
+            o_cat = str(o.category or "")
+            if o_cat == "dwell":
+                continue
+            if o_cat in ("aligner_pick", "aligner_place"):
+                continue
+            next_act = o
+            break
+        if next_act is None:
+            continue
+        nen = str(next_act.event_name or "")
+        ok = is_airlock_place_event(nen)
+        if not ok and (
+            is_forbidden_after_aligner_pick_event(nen)
+            or (
+                nen.startswith("atm_")
+                and nen.endswith("_place")
+                and not is_airlock_place_event(nen)
+            )
+        ):
+            remove_idx.add(si)
+            _lam_sim_log_build(
+                "csv_tour",
+                f"Aligner 절대규칙: pick 제거 lot={lot!r} wafer#{cas} "
+                f"— 직후 금지/비-airlock place {nen!r} (t={float(e.time_sec):.3f}s)",
+            )
+
+    if not remove_idx:
+        return schedule, blocks
+
+    new_schedule = [e for i, e in enumerate(schedule) if i not in remove_idx]
+    new_blocks: Optional[List[CsvTimedPlaybackBlock]] = blocks
+    if blocks is not None:
+        # schedule match key 로 블록 제거 (aligner_pick)
+        drop_keys = {
+            _schedule_entry_match_key(schedule[i]) for i in remove_idx if i < len(schedule)
+        }
+        new_blocks = [
+            b
+            for b in blocks
+            if b.schedule is None
+            or _schedule_entry_match_key(b.schedule) not in drop_keys
+        ]
+    new_schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
+    if new_blocks is not None:
+        new_blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
+        new_schedule = _stamp_schedule_row_ids(new_schedule)
+        new_blocks = _reattach_block_schedules(new_blocks, new_schedule)
+    else:
+        new_schedule = _stamp_schedule_row_ids(new_schedule)
+    return new_schedule, new_blocks
+
+
+def _foup_index_for_lot_cassette(
+    dwells: Optional[Sequence["DwellRecord"]],
+    lot_id: str,
+    cassette_slot: int,
+) -> int:
+    """lot+cassette → 투어 FOUP 번호. dwell 없으면 1."""
+    lid = str(lot_id or "")
+    cas = int(cassette_slot or 0)
+    if dwells and lid and cas > 0:
+        for d in dwells:
+            if str(getattr(d, "lot_id", "") or "") != lid:
+                continue
+            try:
+                if int(getattr(d, "cassette_slot", 0) or 0) != cas:
+                    continue
+            except Exception:
+                continue
+            try:
+                fi = int(getattr(d, "foup_index", 0) or 0)
+            except Exception:
+                fi = 0
+            if fi >= 1:
+                return fi
+    return 1
+
+
+def _ensure_buffer_to_foup_absolute_rules(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+    *,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """Buffer pick 이후 같은 wafer FOUP place 검색 — 없으면 pick 직후 강제 삽입.
+
+    Aligner 절대규칙 적용 **이후**에만 호출. 정상 데이터에서는 no-op 가 원칙.
+
+    사이드버그 가드:
+    - Buffer pick ~ (찾은/삽입할) FOUP place 사이 같은 wafer 의 비-FOUP place 제거.
+    - 메타 pick 스케줄에 lot/cassette 누락 시 검색 실패 → skip+로그.
+    """
+    from .lam_buffer_return_rules import (
+        BUFFER_PICK_SYNTH_FOUP_PLACE_GAP_SEC,
+        is_buffer_pick_event,
+        is_forbidden_place_after_buffer_pick,
+        is_foup_pick_event,
+        is_foup_place_event,
+    )
+
+    if not schedule:
+        return schedule, blocks
+
+    ordered = sorted(
+        enumerate(schedule),
+        key=lambda it: (float(it[1].time_sec), int(it[1].sort_order), it[0]),
+    )
+    remove_idx: set = set()
+    inject: List[Tuple[float, CsvPlaybackScheduleEntry, Optional[LamSimJsonSteps]]] = []
+
+    def _is_foup_return(entry: CsvPlaybackScheduleEntry) -> bool:
+        en = str(entry.event_name or "")
+        cat = str(entry.category or "")
+        return is_foup_place_event(en) or cat == "place"
+
+    for pos, (si, e) in enumerate(ordered):
+        en = str(e.event_name or "")
+        if not is_buffer_pick_event(en):
+            continue
+        if si in remove_idx:
+            continue
+        lot, cas = _schedule_entry_lot_cassette(e)
+        if not lot or cas <= 0:
+            _lam_sim_log_build(
+                "csv_tour",
+                f"Buffer→FOUP: buffer pick 에 lot/cassette 없음 — skip "
+                f"t={float(e.time_sec):.3f}s event={en!r}",
+            )
+            continue
+
+        found_foup = False
+        for _pos2, (sj, o) in enumerate(ordered[pos + 1 :], start=pos + 1):
+            if sj in remove_idx:
+                continue
+            o_lot, o_cas = _schedule_entry_lot_cassette(o)
+            if o_lot != lot or int(o_cas) != int(cas):
+                continue
+            o_cat = str(o.category or "")
+            o_en = str(o.event_name or "")
+            if o_cat == "dwell":
+                continue
+            # 새 FOUP pick = 다음 투어 시작 → 이 구간에서 FOUP 반환 없음으로 간주
+            if is_foup_pick_event(o_en) or o_cat == "pick":
+                break
+            if _is_foup_return(o):
+                found_foup = True
+                break
+            if is_forbidden_place_after_buffer_pick(o_en) or (
+                o_en.lower().endswith("_place")
+                and not is_foup_place_event(o_en)
+                and o_cat not in ("aligner_place",)
+                and not o_en.lower().startswith("atm_aligner_")
+            ):
+                remove_idx.add(sj)
+                _lam_sim_log_build(
+                    "csv_tour",
+                    f"Buffer→FOUP 절대규칙: 비-FOUP place 제거 "
+                    f"lot={lot!r} wafer#{cas} event={o_en!r} "
+                    f"t={float(o.time_sec):.3f}s "
+                    f"(buffer pick 이후·FOUP 반환 전 — 데이터/파싱 오류)",
+                )
+
+        if found_foup:
+            continue
+
+        foup_n = _foup_index_for_lot_cassette(dwells, lot, cas)
+        place_t = float(e.time_sec) + float(BUFFER_PICK_SYNTH_FOUP_PLACE_GAP_SEC)
+        steps: Optional[LamSimJsonSteps] = None
+        if blocks is not None:
+            try:
+                steps = build_foup_pick_place_steps(
+                    foup_index=foup_n,
+                    cassette_slot=cas,
+                    pick_or_place="place",
+                )
+            except Exception as exc:
+                _lam_sim_log_build(
+                    "csv_tour",
+                    f"Buffer→FOUP: FOUP place 스텝 생성 실패 lot={lot!r} wafer#{cas}: {exc}",
+                )
+                steps = []
+            ent = _place_schedule_entry(
+                time_sec=place_t,
+                foup_index=foup_n,
+                cassette_slot=cas,
+                lot_id=lot,
+                steps=steps or [],
+            )
+            ent = replace(
+                ent,
+                csv_read_ko=(
+                    "Buffer pick 이후 같은 wafer 의 FOUP place JSON 없음 "
+                    f"(실무상 비정상) → pick 직후 t={place_t:.3f}s 강제 삽입."
+                ),
+                meaning_ko=(
+                    "Buffer→FOUP 절대규칙: 파싱 결과에 FOUP 반환이 없어 "
+                    "완료 카운트·웨이퍼 회수를 위해 place JSON 을 끼움."
+                ),
+            )
+        else:
+            ent = _place_schedule_entry_meta(
+                time_sec=place_t,
+                foup_index=foup_n,
+                cassette_slot=cas,
+                lot_id=lot,
+            )
+            ent = replace(
+                ent,
+                csv_read_ko=(
+                    "Buffer pick 이후 FOUP place 없음 → pick 직후 강제 삽입(메타)."
+                ),
+            )
+        inject.append((place_t, ent, steps if blocks is not None else None))
+        _lam_sim_log_build(
+            "csv_tour",
+            f"Buffer→FOUP 절대규칙: FOUP{foup_n} place 강제 삽입 "
+            f"lot={lot!r} wafer#{cas} t={place_t:.3f}s "
+            f"(buffer pick t={float(e.time_sec):.3f}s 직후)",
+        )
+
+    if not remove_idx and not inject:
+        return schedule, blocks
+
+    new_schedule = [e for i, e in enumerate(schedule) if i not in remove_idx]
+    new_blocks: Optional[List[CsvTimedPlaybackBlock]] = blocks
+    if blocks is not None and remove_idx:
+        drop_keys = {
+            _schedule_entry_match_key(schedule[i])
+            for i in remove_idx
+            if i < len(schedule)
+        }
+        new_blocks = [
+            b
+            for b in blocks
+            if b.schedule is None
+            or _schedule_entry_match_key(b.schedule) not in drop_keys
+        ]
+
+    if inject:
+        if new_blocks is None and blocks is not None:
+            new_blocks = list(blocks)
+        for _pt, ent, steps in inject:
+            new_schedule.append(ent)
+            if new_blocks is not None and steps is not None:
+                new_blocks.append(
+                    _block_from_schedule(
+                        ent,
+                        steps,
+                        label=f"buffer_return_foup_place({ent.cassette_slot})",
+                    )
+                )
+
+    new_schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
+    if new_blocks is not None:
+        new_blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
+        new_schedule = _stamp_schedule_row_ids(new_schedule)
+        new_blocks = _reattach_block_schedules(new_blocks, new_schedule)
+    else:
+        new_schedule = _stamp_schedule_row_ids(new_schedule)
+    return new_schedule, new_blocks
+
+
 def _apply_csv_playback_arm_serial_rules(
     schedule: List[CsvPlaybackScheduleEntry],
     blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
@@ -2904,9 +3311,15 @@ def _apply_csv_playback_arm_serial_rules(
 ) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
     """점유·팔홀딩 충돌 구간의 순서만 swap (통째 시프트 없음).
 
-    1) 슬롯 점유 충돌 (ATM/VTM place-on-full, pick-on-empty)
-    2) 팔 홀딩 중 연속 pick (ATM/VTM 같은 팔)
+    ``full_occ_correct`` 모드에서만 적용. ``aligner_fix``/``raw`` 에서는 no-op.
     """
+    try:
+        from .lam_csv_occupancy_scheduler import occupancy_scheduler_enabled
+
+        if not occupancy_scheduler_enabled():
+            return schedule, blocks
+    except Exception:
+        return schedule, blocks
     schedule, blocks = _apply_slot_occupancy_order_swaps(schedule, blocks, dwells=dwells)
     schedule, blocks = _apply_arm_holding_order_swaps(schedule, blocks)
     return schedule, blocks
@@ -2958,6 +3371,10 @@ def build_csv_playback_schedule_meta(
             )
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
     schedule, _ = _apply_csv_playback_arm_serial_rules(schedule, None, dwells=dwells)
+    schedule, _ = _enforce_aligner_absolute_rules(schedule, None)
+    schedule, _ = _ensure_buffer_to_foup_absolute_rules(
+        schedule, None, dwells=dwells
+    )
     return _stamp_schedule_row_ids(schedule)
 
 
@@ -3080,6 +3497,12 @@ def build_csv_playback_plan(
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
     blocks.sort(key=lambda b: (b.time_sec, b.sort_order))
     schedule, blocks = _apply_csv_playback_arm_serial_rules(
+        schedule, blocks, dwells=dwells
+    )
+    assert blocks is not None
+    schedule, blocks = _enforce_aligner_absolute_rules(schedule, blocks)
+    assert blocks is not None
+    schedule, blocks = _ensure_buffer_to_foup_absolute_rules(
         schedule, blocks, dwells=dwells
     )
     assert blocks is not None
@@ -3408,16 +3831,23 @@ def _refresh_csv_play_progress_playhead(*, screen: Optional[int] = None) -> floa
 
 
 def _csv_play_progress_mark_json_start(
-    block: CsvTimedPlaybackBlock, *, json_done: int
+    block: CsvTimedPlaybackBlock,
+    *,
+    json_done: int,
+    screen: Optional[int] = None,
 ) -> None:
-    sess = csv_play_screen_session()
+    sess = csv_play_screen_session(screen)
     with sess.progress_snap_lock:
         sess.progress_snap["json_done"] = max(0, int(json_done))
         sess.progress_snap["csv_t_display"] = float(block.time_sec)
 
 
-def _csv_play_progress_mark_json_done(json_done: int) -> None:
-    sess = csv_play_screen_session()
+def _csv_play_progress_mark_json_done(
+    json_done: int,
+    *,
+    screen: Optional[int] = None,
+) -> None:
+    sess = csv_play_screen_session(screen)
     with sess.progress_snap_lock:
         sess.progress_snap["json_done"] = max(0, int(json_done))
 
@@ -4755,7 +5185,7 @@ def _csv_playback_execute_json_block(
     sched = block.schedule
     if sched is None or not block.steps:
         return
-    _csv_play_progress_mark_json_start(block, json_done=json_done_before)
+    _csv_play_progress_mark_json_start(block, json_done=json_done_before, screen=si)
     _notify_csv_play_progress_ui(screen=si)
     wall_elapsed = time.monotonic() - t0
     lane = _playback_lane_from_block(block)
@@ -4780,7 +5210,7 @@ def _csv_playback_execute_json_block(
         return
     if not csv_playback_stop_requested(screen=si):
         _print_csv_compact_line(index, sched, wall_elapsed_sec=wall_elapsed, executed=True)
-    _csv_play_progress_mark_json_done(json_done_before + 1)
+    _csv_play_progress_mark_json_done(json_done_before + 1, screen=si)
     # 모드 전환 resume 기준 — 완료한 JSON CSV t (다음 단계 스킵 방지)
     try:
         sess = csv_play_screen_session(si)
@@ -5487,7 +5917,7 @@ def _run_csv_timed_playback_process_only(
         _join_csv_play_workers(workers, screen=si)
         if csv_playback_stop_requested(screen=si):
             stopped = True
-        _csv_play_progress_mark_json_done(n_json_all)
+        _csv_play_progress_mark_json_done(n_json_all, screen=si)
         _notify_csv_play_progress_ui(screen=si)
     finally:
         sess.progress_stop.set()

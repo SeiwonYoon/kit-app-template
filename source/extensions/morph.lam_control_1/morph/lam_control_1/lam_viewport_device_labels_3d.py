@@ -311,17 +311,21 @@ class LamViewportDeviceLabels3d:
         return _stage()
 
     def destroy(self) -> None:
+        was_built = bool(self._built)
         self._sync_token = time.time()
         self._stop_poll()
         self._destroy_layer()
-
-    def sync_layers(self, *, delay_frames: int = 12) -> None:
-        if not self._device_labels_toggle_on():
-            self.destroy()
+        if was_built:
+            self._mount_logged = False
             print(
                 f"{_PRINT_PREFIX} screen{self._screen} device labels destroy (toggle OFF)",
                 flush=True,
             )
+
+    def sync_layers(self, *, delay_frames: int = 12) -> None:
+        if not self._device_labels_toggle_on():
+            if self._built:
+                self.destroy()
             return
         if self._built and self._scene_view is not None and self._root is not None:
             if self._screen > 1:
@@ -494,10 +498,12 @@ class LamViewportDeviceLabels3d:
         _ACTIVE_DEVICE_PANEL_BY_SCREEN[int(self._screen)] = self
         self._start_poll()
         self._rebuild()
-        print(
-            f"{_PRINT_PREFIX} screen{self._screen} device labels mounted",
-            flush=True,
-        )
+        if not getattr(self, "_mount_logged", False):
+            self._mount_logged = True
+            print(
+                f"{_PRINT_PREFIX} screen{self._screen} device labels mounted",
+                flush=True,
+            )
 
     def _start_poll(self) -> None:
         if self._post_update_sub is not None:

@@ -30,13 +30,35 @@ class OccupancyDiagLine:
         return f"t={self.t_sec:.1f}s [{self.kind}] {self.message}"
 
 
-def occupancy_scheduler_enabled() -> bool:
+def csv_playback_plan_mode() -> str:
+    """``raw`` | ``aligner_fix`` | ``full_occ_correct``."""
+    try:
+        from .lam_sim_control_defaults import CSV_PLAYBACK_PLAN_MODE
+
+        mode = str(CSV_PLAYBACK_PLAN_MODE or "").strip().lower()
+    except Exception:
+        mode = ""
+    if mode in ("raw", "aligner_fix", "full_occ_correct"):
+        return mode
+    # 레거시: OCCUPANCY_SCHEDULER_ENABLED 만 켠 경우
     try:
         from .lam_sim_control_defaults import CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED
 
-        return bool(CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED)
+        if bool(CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED):
+            return "full_occ_correct"
     except Exception:
-        return False
+        pass
+    return "aligner_fix"
+
+
+def occupancy_scheduler_enabled() -> bool:
+    """full_occ_correct 모드에서만 plan 후처리(시각 shift·swap) 활성."""
+    return csv_playback_plan_mode() == "full_occ_correct"
+
+
+def aligner_synthesis_enabled() -> bool:
+    """raw 가 아니면 FOUP pick 후 합성 Aligner 삽입."""
+    return csv_playback_plan_mode() != "raw"
 
 
 def apply_occupancy_scheduler(
@@ -356,7 +378,9 @@ def _occupancy_dry_run_diagnostics(
 
 __all__ = [
     "OccupancyDiagLine",
+    "aligner_synthesis_enabled",
     "apply_occupancy_scheduler",
+    "csv_playback_plan_mode",
     "occupancy_scheduler_enabled",
     "visibility_offset_until_occupancy_sec",
 ]

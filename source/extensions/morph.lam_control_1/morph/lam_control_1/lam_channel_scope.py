@@ -10,7 +10,11 @@ def stop_channel_animations(
     *,
     diag_reason: str = "",
 ) -> None:
-    """지정 USD context 의 translate/rotate 만 중지."""
+    """지정 USD context 의 translate/rotate 만 중지.
+
+    context 가 비어 있으면 예전엔 ``stop_all_*`` — 듀얼 CSV Play 중에는
+    **전역 중지 금지** (다른 화면 애니 절단 방지).
+    """
     try:
         from . import lam_rotate_animation as _lrx
         from . import lam_translate_animation as _ltx
@@ -20,8 +24,23 @@ def stop_channel_animations(
             _ltx.stop_translate_animations_for_context(cn)
             _lrx.stop_rotate_animations_for_context(cn)
         else:
-            _ltx.stop_all_translate_animations()
-            _lrx.stop_all_rotate_animations()
+            dual = False
+            try:
+                from .simulation_play import csv_play_session_active
+
+                for _si in range(1, 5):
+                    if csv_play_session_active(screen=_si):
+                        dual = True
+                        break
+            except Exception:
+                dual = False
+            if dual:
+                # default context 만 — stop_all 금지
+                _ltx.stop_translate_animations_for_context(None)
+                _lrx.stop_rotate_animations_for_context(None)
+            else:
+                _ltx.stop_all_translate_animations()
+                _lrx.stop_all_rotate_animations()
     except Exception:
         pass
     if diag_reason:

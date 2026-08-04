@@ -120,6 +120,18 @@ class LamCsvViewportControlsHud:
         if not viewport_csv_panel_enabled():
             self._destroy_layer()
             return
+        # 이미 같은 viewport 에 mount 되어 있으면 remount 생략 (로그·부하 스팸 방지)
+        try:
+            current = self._resolve_hud_window()
+            if (
+                self._root is not None
+                and self._mounted_window is not None
+                and current is not None
+                and current is self._mounted_window
+            ):
+                return
+        except Exception:
+            pass
         self._sched_token += 1
         token = self._sched_token
 
@@ -140,10 +152,12 @@ class LamCsvViewportControlsHud:
                         return
                 except Exception:
                     pass
-            print(
-                f"{_PRINT_PREFIX} Viewport get_frame unavailable — HUD skipped.",
-                flush=True,
-            )
+            if not getattr(self, "_hud_skip_logged", False):
+                self._hud_skip_logged = True
+                print(
+                    f"{_PRINT_PREFIX} Viewport get_frame unavailable — HUD skipped.",
+                    flush=True,
+                )
 
         _try_mount(max(0, int(delay_frames)))
 
@@ -512,11 +526,13 @@ class LamCsvViewportControlsHud:
             self._root = None
             return
 
-        print(
-            f"{_PRINT_PREFIX} Viewport 패널 표시 "
-            f"(합성 USD + CSV·공정만보기·타임라인, 우측 상단).",
-            flush=True,
-        )
+        if not getattr(self, "_hud_mount_logged", False):
+            self._hud_mount_logged = True
+            print(
+                f"{_PRINT_PREFIX} Viewport 패널 표시 "
+                f"(합성 USD + CSV·공정만보기·타임라인, 우측 상단).",
+                flush=True,
+            )
         try:
             self._csv.apply_wafer_label_visibility_from_ui(lam_window=self._lam)
         except Exception as exc:

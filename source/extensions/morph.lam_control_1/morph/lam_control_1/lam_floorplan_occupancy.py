@@ -262,14 +262,11 @@ class FloorplanOccupancyTracker:
         *,
         screen: int = 1,
     ) -> None:
-        """버스에서 호출 — JSON visibility 스텝 대상(slot/arm) + pick/place 의미로 갱신.
+        """버스에서 호출 — pick/place × slot/arm × visible (라벨 트래커와 동일 의미).
 
-        ``visible`` 모드 플래그에는 의존하지 않는다.
-        (스캐폴드 JSON 이 pick 인데 show SLOT / hide ARM 이어도,
-         SLOT 스텝 실행 시 슬롯 비움 · ARM 스텝 실행 시 팔 채움.)
-        USD 적용 성공 여부와 무관 — 관찰 전용.
+        이벤트 JSON mode 는 ``build_steps_for_event`` 에서 pick/place 에 맞게
+        정규화되므로, 평면도도 visible 플래그를 따른다 (3D·애니 SSOT).
         """
-        _ = visible
         si = max(1, int(screen or self._screen or 1))
         stage = None
         try:
@@ -293,11 +290,11 @@ class FloorplanOccupancyTracker:
         changed = False
         with self._lock:
             if po == "pick":
-                if role == "slot":
+                if role == "slot" and not visible:
                     changed = self._remove_slot_unlocked(slot_key) or changed
                     if label and arm_sk:
                         self._arm_hold[arm_sk] = label
-                elif role == "arm":
+                elif role == "arm" and visible:
                     if not label and arm_sk:
                         label = str(self._arm_hold.get(arm_sk) or "")
                     if not label:
@@ -309,12 +306,12 @@ class FloorplanOccupancyTracker:
                         if arm_sk:
                             self._arm_hold[arm_sk] = label
             elif po == "place":
-                if role == "slot":
+                if role == "slot" and visible:
                     if not label and arm_sk:
                         label = str(self._arm_hold.get(arm_sk) or "")
                     if label:
                         changed = self._set_slot_unlocked(slot_key, label) or changed
-                elif role == "arm":
+                elif role == "arm" and not visible:
                     changed = self._remove_slot_unlocked(arm_sk) or changed
                     if arm_sk:
                         self._arm_hold.pop(arm_sk, None)

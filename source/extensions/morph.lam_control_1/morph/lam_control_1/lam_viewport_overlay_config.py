@@ -442,7 +442,8 @@ TRAFFIC_LIGHT_SHADER_PATHS: Tuple[str, str, str] = (
     "/Looks/Light_Green_01/Light_Green",
     "/Looks/Light_Yellow_01/Light_Yellow",
 )
-# False(기본)=stage 로드 직후 타이머 시작 / True=CSV 재생 중에만 (정지·일시정지·종료 시 정지)
+# False(기본)=stage 로드 직후 타이머 시작·Play 와 무관 / True=CSV 재생 중에만
+# (듀얼 스크린: 기본 False 유지 — 한 화면 Pause가 신호등을 끄지 않음)
 TRAFFIC_LIGHT_EMISSIVE_ONLY_DURING_PLAYBACK: bool = False
 # Enable Emission — lam_traffic_light_emissive.py 에서 inputs:enable_emission 고정 사용
 

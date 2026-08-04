@@ -826,6 +826,7 @@ class LamWaferFoupViewportLabels:
         self._last_tracker_revision = -1
         self._label_transforms.clear()
         if permanent and was_built:
+            self._mount_logged = False
             print(f"{_PRINT_PREFIX} SceneView removed (labels off)", flush=True)
 
     def _stop_position_poll(self) -> None:
@@ -915,7 +916,14 @@ class LamWaferFoupViewportLabels:
 
     def sync_layers(self, *, delay_frames: int = 12) -> None:
         if not self._wafer_labels_ui_on():
+            was = bool(self._built)
             self.destroy()
+            if was:
+                print(f"{_PRINT_PREFIX} SceneView removed (labels off)", flush=True)
+            return
+        # 이미 mount 되어 있으면 rebuild 만 (remount·로그 스팸 방지)
+        if self._built and self._scene_view is not None and self._labels_root is not None:
+            self._schedule_rebuild_labels()
             return
         self._teardown = False
         self._sched_token += 1
@@ -929,7 +937,9 @@ class LamWaferFoupViewportLabels:
                 self._ensure_scene(vw)
                 self._schedule_rebuild_labels()
                 self._start_position_poll()
-                print(f"{_PRINT_PREFIX} SceneView mounted on viewport", flush=True)
+                if not getattr(self, "_mount_logged", False):
+                    self._mount_logged = True
+                    print(f"{_PRINT_PREFIX} SceneView mounted on viewport", flush=True)
                 return
             if remaining > 0:
                 try:

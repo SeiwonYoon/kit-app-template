@@ -38,9 +38,16 @@ SET_PRIM_VISIBILITY / PRIM_VISIBILITY (hide·show, sticky).
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+# SequenceRunner.run 동안 _dispatch_main_wait 가 어느 화면 stop 을 볼지 (듀얼 격리)
+_dispatch_wait_play_screen_ctx: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "lam_dispatch_wait_play_screen",
+    default=None,
+)
 
 # IMPORTANT — background thread 의 진입점. omni.usd / pxr import 가 그 thread 에서 처음
 # 일어나면 main thread (MDL/RTX) 의 import lock 과 cross-wait 으로 deadlock 한다.
@@ -260,7 +267,12 @@ def _dispatch_main(fn: Callable[[], None]) -> None:
                 _seq_log(f"{_PRINT_PREFIX} dispatch_main fn failed: {e2}", flush=True)
 
 
-def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> bool:
+def _dispatch_main_wait(
+    fn: Callable[[], None],
+    *,
+    timeout: float = 15.0,
+    play_screen: Optional[int] = None,
+) -> bool:
     """다음 main update 프레임에서 `fn()` 실행이 완료될 때까지 대기.
 
     Run(reset) 시 TBS_OFFSET 초기화처럼 background thread 에서 반드시 main-thread USD write
@@ -281,9 +293,15 @@ def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> boo
 
     wait_timeout = float(timeout)
     try:
+        from .lam_csv_play_screen import current_csv_play_screen
         from .simulation_play import csv_playback_stop_requested
 
-        if csv_playback_stop_requested():
+        # 듀얼: 해당 화면 stop 만 단축. 인자 → Runner ContextVar → current screen.
+        si = play_screen
+        if si is None:
+            bound = _dispatch_wait_play_screen_ctx.get()
+            si = bound if bound is not None else current_csv_play_screen()
+        if csv_playback_stop_requested(screen=int(si)):
             # 모드 전환·Stop 중 메인이 바쁘면 즉시 fail-open (교착 금지)
             wait_timeout = min(wait_timeout, 0.05)
     except Exception:
@@ -579,8 +597,27 @@ class LamSequenceRunner:
                     _ltx.stop_translate_animations_for_context(self._usd_context_name)
                     _lrx.stop_rotate_animations_for_context(self._usd_context_name)
                 else:
-                    _ltx.stop_all_translate_animations()
-                    _lrx.stop_all_rotate_animations()
+                    # context 없음 + 다른 화면 CSV Play 중이면 stop_all 금지 (듀얼 간섭)
+                    skip_all = False
+                    try:
+                        from .simulation_play import _other_csv_play_screens_active
+
+                        skip_all = bool(
+                            _other_csv_play_screens_active(
+                                exclude_screen=int(self._play_screen)
+                            )
+                        )
+                    except Exception:
+                        skip_all = False
+                    if skip_all:
+                        _seq_log(
+                            f"{_PRINT_PREFIX} stop: skip stop_all_* "
+                            f"(other CSV screen active, play_screen={self._play_screen})",
+                            flush=True,
+                        )
+                    else:
+                        _ltx.stop_all_translate_animations()
+                        _lrx.stop_all_rotate_animations()
             except Exception:
                 pass
             # hide clear 은 USD write — CSV pause/모드전환(cancel_all=False) 에서는
@@ -615,6 +652,7 @@ class LamSequenceRunner:
         prev_quiet = _runner_quiet_log
         _runner_quiet_log = _runner_quiet_log or bool(quiet)
         prev_ctx = _push_lam_stage_context(self._usd_context_name)
+        wait_tok = _dispatch_wait_play_screen_ctx.set(int(self._play_screen))
         try:
             self._stop_flag.clear()
             steps = list(steps or [])
@@ -640,6 +678,7 @@ class LamSequenceRunner:
                             paths, usd_context_name=c
                         ),
                         timeout=15.0,
+                        play_screen=self._play_screen,
                     )
                 except Exception as exc:
                     _seq_log(f"{_PRINT_PREFIX} reset TBS_OFFSET failed: {exc}", flush=True)
@@ -717,6 +756,10 @@ class LamSequenceRunner:
                 except Exception:
                     pass
         finally:
+            try:
+                _dispatch_wait_play_screen_ctx.reset(wait_tok)
+            except Exception:
+                pass
             _pop_lam_stage_context(prev_ctx)
             _runner_quiet_log = prev_quiet
 

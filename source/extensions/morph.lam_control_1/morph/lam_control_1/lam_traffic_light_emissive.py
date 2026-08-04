@@ -259,14 +259,21 @@ def schedule_traffic_light_emissive_after_stage_ready(*, delay_frames: int = 16)
 
 
 def on_csv_playback_started() -> None:
-    """CSV 재생 시작 — playback-only 모드면 타이머 시작."""
+    """CSV 재생 시작 — ONLY_DURING_PLAYBACK=True 일 때만 타이머 시작.
+
+    기본 설정(``TRAFFIC_LIGHT_EMISSIVE_ONLY_DURING_PLAYBACK=False``)에서는 no-op.
+    타이머는 stage 준비 후 상시 동작하며 Play/Pause 와 무관하다.
+    """
     if not _config_enabled() or not _only_during_playback():
         return
     start_traffic_light_emissive_timer(reason="csv_play_start")
 
 
 def on_csv_playback_paused_or_stopped() -> None:
-    """정지·일시정지·시뮬 종료 — playback-only 모드면 타이머 정지."""
+    """정지·일시정지 — ONLY_DURING_PLAYBACK=True 일 때만 타이머 정지.
+
+    기본 False 이면 Play pause/stop 이 신호등을 끄지 않는다 (듀얼 스크린·상시 모드).
+    """
     if not _only_during_playback():
         return
     stop_traffic_light_emissive_timer(reason="csv_play_pause_or_stop")

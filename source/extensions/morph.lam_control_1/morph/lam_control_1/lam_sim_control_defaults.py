@@ -73,14 +73,21 @@ SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = False
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 # ---------------------------------------------------------------------------
-# CSV 재생 — 점유 시뮬·visibility 시각 재조정 (후처리)
+# CSV 재생 — plan 모드 (Aligner / 점유 보정 분리)
 # ---------------------------------------------------------------------------
-# False(기본·필수): 기존과 동일 — plan 빌드 직후 이 후처리를 하지 않음.
-# True: build_csv_playback_plan 결과만 후처리
-#   · JSON 내 wafer 숨김/보임까지 시간만큼 블록 시작 시각을 앞당김
-#   · 점유 위반 후보를 진단 목록으로 모아 재생창 타임라인 아래에 표시
-# 합성 aligner(place 강제 / pick 시점 분리)는 플래그와 무관하게 plan 빌드에서 적용.
-CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED: bool = True
+# raw              : Aligner 합성 OFF, occupancy swap·visibility shift OFF
+# aligner_fix      : Aligner 합성 ON, occupancy swap·visibility shift OFF  ← 기본(합의)
+# full_occ_correct : Aligner ON + 기존 occupancy scheduler(swap·visibility shift)
+#
+# 상세 맵(실무 AI용): docs/lam_control_1_sim_parse_rules_wafer_map_ko.md
+# 체크리스트: docs/lam_control_1_sim_plan_structural_fix_checklist_ko.md
+# ※ 실무 기본은 aligner_fix. full_occ_correct 는 ATM/VTM 순서 보정→번호 꼬임 위험.
+CSV_PLAYBACK_PLAN_MODE: str = "aligner_fix"
+
+# 하위 호환 — True 이고 PLAN_MODE 가 비어 있으면 full 로 취급하는 레거시.
+# PLAN_MODE 가 설정되어 있으면 이 값은 ``full_occ_correct`` 여부 보조로만 사용.
+# False(또는 aligner_fix): plan 빌드 직후 occupancy 후처리 안 함.
+CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED: bool = False
 
 # ---------------------------------------------------------------------------
 # 공정만보기 — JSON 실행 순서 (일반 재생·병렬 공정만보기에는 영향 없음)
@@ -212,6 +219,7 @@ __all__ = [
     "SHOW_VIEWPORT_CSV_PANEL",
     "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
+    "CSV_PLAYBACK_PLAN_MODE",
     "CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED",
     "PROCESS_ONLY_SEQUENTIAL_LANES",
     "PROCESS_ONLY_SEQUENTIAL_GAP_SEC",
