@@ -1388,7 +1388,11 @@ def build_lot_id_to_foup_index(rows: Iterable[ParsedCsvRow]) -> Dict[str, int]:
 
 
 def normalize_csv_timeline(rows: List[ParsedCsvRow]) -> List[ParsedCsvRow]:
-    """전역 타임라인: 최소 ``eqp_start_tm`` = 0, ``process_tm`` 분→초 보정(필요 시)."""
+    """전역 타임라인: 최소 ``eqp_start_tm`` = 0, ``process_tm`` 분→초 보정(필요 시).
+
+    이후 ``rows_to_dwell_records`` 에서 미지원 module 등이 스킵되면 첫 **유효 dwell**
+    이 0보다 클 수 있다. 재생용 최종 t=0 은 ``normalize_dwell_timeline`` 이 맞춘다.
+    """
     if not rows:
         return rows
     adjusted: List[ParsedCsvRow] = []
@@ -1421,6 +1425,35 @@ def normalize_csv_timeline(rows: List[ParsedCsvRow]) -> List[ParsedCsvRow]:
         )
         for x in adjusted
     ]
+
+
+def normalize_dwell_timeline(dwells: List[DwellRecord]) -> List[DwellRecord]:
+    """유효 dwell 기준 재생 타임라인: 최소 ``start_sec`` = 0, 상대 간격 유지.
+
+    Simulation Play 가 첫 공정부터 바로 시작하도록 한다.
+    (행 단위 ``normalize_csv_timeline`` 만으로는 스킵된 행·0초 오염 행 때문에
+    첫 dwell 이 수백 초로 남을 수 있음.)
+    """
+    if not dwells:
+        return dwells
+    t0 = min(float(d.start_sec) for d in dwells)
+    if abs(t0) < 1e-9:
+        return dwells
+    out = [
+        replace(
+            d,
+            start_sec=float(d.start_sec) - t0,
+            end_sec=float(d.end_sec) - t0,
+        )
+        for d in dwells
+    ]
+    if not is_csv_playback_compact_log():
+        print(
+            f"{_PRINT_PREFIX} dwell timeline: shift t0={t0:.3f}s → first valid dwell at 0s "
+            f"(n={len(out)})",
+            flush=True,
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1477,10 +1510,12 @@ def read_csv_rows(csv_path: Path) -> List[ParsedCsvRow]:
 
 
 def load_csv_dwell_timeline(csv_path: Path) -> List[DwellRecord]:
-    """EAP CSV 전체 파이프라인: 읽기 → t=0 정규화 → lot→foup → dwell (시간순 정렬)."""
+    """EAP CSV 전체 파이프라인: 읽기 → 행 t=0 → lot→foup → dwell → **유효 dwell t=0**."""
     raw = normalize_csv_timeline(read_csv_rows(csv_path))
     lot_to_foup = build_lot_id_to_foup_index(raw)
-    dwells = sort_dwells_for_playback(rows_to_dwell_records(raw, lot_to_foup))
+    dwells = normalize_dwell_timeline(
+        sort_dwells_for_playback(rows_to_dwell_records(raw, lot_to_foup))
+    )
     if not is_csv_playback_compact_log():
         print(
             f"{_PRINT_PREFIX} CSV timeline: rows={len(raw)} dwells={len(dwells)} "
@@ -3195,6 +3230,7 @@ def build_csv_playback_schedule_meta(
     dwells: List[DwellRecord],
 ) -> List[CsvPlaybackScheduleEntry]:
     """스텝 조립 없이 타임라인 메타만 (미리보기·캐시 miss 시 UI용, 빠름)."""
+    dwells = normalize_dwell_timeline(list(dwells))
     schedule: List[CsvPlaybackScheduleEntry] = []
     for d in sort_dwells_for_playback(dwells):
         schedule.append(_dwell_schedule_entry(d))
@@ -3251,6 +3287,7 @@ def build_csv_playback_plan(
 ) -> Tuple[List[CsvPlaybackScheduleEntry], List[CsvTimedPlaybackBlock]]:
     """dwell 체류 + pick/transfer/place 를 CSV 시각 순 **타임 블록** 으로 만든다."""
     global _csv_bulk_build_active
+    dwells = normalize_dwell_timeline(list(dwells))
     schedule: List[CsvPlaybackScheduleEntry] = []
     blocks: List[CsvTimedPlaybackBlock] = []
 
@@ -3441,6 +3478,7 @@ def build_and_cache_from_dwells(
 ) -> CachedCsvPlayback:
     """API 파싱 결과 dwell → 재생 plan 빌드 → 세션 캐시 (가상 path)."""
     path = virtual_path.resolve()
+    dwells = normalize_dwell_timeline(list(dwells))
     t0 = time.perf_counter()
     prog: Optional[_ThrottledBuildProgress] = None
     if progress_tick is not None:
@@ -10532,6 +10570,7 @@ __all__ = [
     "CsvTimedPlaybackBlock",
     "build_lot_id_to_foup_index",
     "normalize_csv_timeline",
+    "normalize_dwell_timeline",
     "build_default_wafer_prim_paths",
     "load_wafer_prim_by_slot_key",
     "parse_time_to_seconds",

@@ -10,6 +10,7 @@ from .simulation_play import (
     ParsedCsvRow,
     build_lot_id_to_foup_index,
     normalize_csv_timeline,
+    normalize_dwell_timeline,
     parse_time_to_seconds,
     rows_to_dwell_records,
     sort_dwells_for_playback,
@@ -182,7 +183,9 @@ def merged_response_to_dwells(
     )
     normalized = normalize_csv_timeline(parsed)
     lot_map = build_lot_id_to_foup_index(normalized)
-    dwells = sort_dwells_for_playback(rows_to_dwell_records(normalized, lot_map))
+    dwells = normalize_dwell_timeline(
+        sort_dwells_for_playback(rows_to_dwell_records(normalized, lot_map))
+    )
     eqp_ids = sorted({str(r.eqp_id or "").strip() for r in parsed if str(r.eqp_id or "").strip()})
     stats = {
         "input_rows": len(rows),
