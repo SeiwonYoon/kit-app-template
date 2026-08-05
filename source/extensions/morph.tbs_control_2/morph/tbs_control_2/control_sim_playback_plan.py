@@ -435,7 +435,7 @@ def _playback_ports_at_sim(
     return _ensure_panel_occ_keys(dict(occ))
 
 
-# ── REMOVED JSON: 포트 패널은 renewal, 3D prim 숨김만 proc_end 까지 보류 ─────
+# ── REMOVED JSON: 포트 패널은 renewal, 3D prim 숨김만 JSON 종료까지 보류 ─────
 
 def _removed_prim_hide_holds(ext: Any, screen: int) -> Dict[str, Dict[str, Any]]:
     by = getattr(ext, "_sim_playback_removed_prim_hold_by_screen", None)
@@ -448,6 +448,116 @@ def _removed_prim_hide_holds(ext: Any, screen: int) -> Dict[str, Dict[str, Any]]
         holds = {}
         by[sk] = holds
     return holds
+
+
+def _ensure_removed_prim_hide_holds_from_schedule(ext: Any, screen: int) -> None:
+    """
+    재생 plan EMPTY(renewal sync) 가 wall hold 등록보다 먼저 와도
+    prim 이 한 프레임 꺼지지 않도록, 활성 REMOVED step 에 대해 hold 를 선등록한다.
+
+    hold 구간: ``t_event <= sim_now < t_json_end`` (숨김 = JSON 종료).
+    """
+    if not bool(getattr(ext, "_sim_playback_started", False)):
+        return
+    sched = get_stored_playback_schedule_for_screen(ext, int(screen))
+    if sched is None:
+        return
+    try:
+        from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
+    except Exception:
+        return
+    try:
+        sim_now = float(_sim_now_for_screen(ext, int(screen), None))
+    except Exception:
+        return
+    holds = _removed_prim_hide_holds(ext, int(screen))
+    for step in list(getattr(sched, "steps", None) or ()):
+        try:
+            if str(getattr(step, "kind", "") or "").strip().lower() != "json_step":
+                continue
+            p = getattr(step, "progress_payload", None)
+            if not isinstance(p, dict):
+                p = {}
+            ev = _normalize_anim_event_seq(
+                _s_val(
+                    p.get("event")
+                    or p.get("event_seq")
+                    or getattr(step, "event_seq", None)
+                    or ""
+                )
+            )
+            if ev != "REMOVED":
+                continue
+            t0 = float(getattr(step, "t_event", 0.0) or 0.0)
+            hide_end = 0.0
+            for attr in ("t_json_end", "t_anim_end", "t_proc_end", "t_playback_json_end"):
+                try:
+                    v = float(getattr(step, attr, 0.0) or 0.0)
+                except Exception:
+                    v = 0.0
+                if v > 1e-9:
+                    hide_end = v
+                    break
+            if hide_end <= 1e-9:
+                continue
+            # JSON 시작 전부터 선등록하면 조기 EMPTY 에도 버팀. JSON 끝나면 만료.
+            if float(sim_now) + 1e-6 >= float(hide_end):
+                continue
+            if float(sim_now) + 0.05 < float(t0):
+                # 아직 해당 REMOVED 이벤트 전이면 스킵 (너무 이른 선등록 방지)
+                continue
+            port = _canon_port(
+                p.get("port_id")
+                or p.get("event_port_id")
+                or p.get("to_port_id")
+                or getattr(step, "port_id", None)
+            )
+            lot = str(p.get("lot_id") or getattr(step, "lot_id", "") or "").strip()
+            if not port or not lot:
+                continue
+            prev = holds.get(str(port))
+            # 더 긴(정확한) hide_end 로 갱신
+            if isinstance(prev, dict):
+                try:
+                    prev_end = float(prev.get("proc_end_t", 0.0) or 0.0)
+                except Exception:
+                    prev_end = 0.0
+                if prev_end + 1e-6 >= float(hide_end) and str(prev.get("lot") or "") == lot:
+                    continue
+            holds[str(port)] = {"lot": lot, "proc_end_t": float(hide_end)}
+        except Exception:
+            continue
+
+
+def _ensure_removed_prim_hide_hold_from_active_job(ext: Any, screen: int) -> None:
+    """라이브·재생 공통 — 화면 active REMOVED JSON 이 있으면 hold 선등록."""
+    try:
+        from .control_window import _screen_active_json_job
+    except Exception:
+        return
+    try:
+        job = _screen_active_json_job(ext, int(screen))
+    except Exception:
+        job = None
+    if not isinstance(job, dict):
+        return
+    try:
+        from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
+
+        ev = _normalize_anim_event_seq(
+            _s_val(job.get("event") or job.get("event_seq") or job.get("seq") or "")
+        )
+    except Exception:
+        ev = str(job.get("event") or job.get("event_seq") or "").strip().upper()
+    if ev != "REMOVED":
+        return
+    sched = get_stored_playback_schedule_for_screen(ext, int(screen))
+    src = dict(job)
+    if src.get("event_start_sim_time") in (None, ""):
+        t0 = src.get("_event_start_sim") or src.get("t") or src.get("sim_time")
+        if t0 is not None:
+            src["event_start_sim_time"] = str(t0)
+    _register_removed_prim_hide_hold_for_renewal(ext, int(screen), src, sched)
 
 
 def _register_removed_prim_hide_hold_for_renewal(
@@ -528,7 +638,18 @@ def prim_occ_for_playback_visibility(
     """
     3D prim 가시성용 occ — REMOVED hold 가 있으면 해당 포트 lot 을 유지(보임).
     패널 occ(``panel_occ``) 와 분리. 재생·라이브 renewal 공통.
+
+    plan EMPTY(renewal) 가 hold 등록보다 먼저 와도 깜빡이지 않도록
+    schedule/active-job 에서 hold 를 먼저 확보한다.
     """
+    try:
+        _ensure_removed_prim_hide_holds_from_schedule(ext, int(screen))
+    except Exception:
+        pass
+    try:
+        _ensure_removed_prim_hide_hold_from_active_job(ext, int(screen))
+    except Exception:
+        pass
     out = _ensure_panel_occ_keys(dict(panel_occ))
     holds = _removed_prim_hide_holds(ext, int(screen))
     if not holds:
@@ -1445,6 +1566,11 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
         )
         _dump_plan_milestones_once(ext, scr, snap)
 
+    # 반드시 EMPTY 적용(refresh) 전에 hold 확보 — 한 프레임 숨김 방지
+    try:
+        _ensure_removed_prim_hide_holds_from_schedule(ext, scr)
+    except Exception:
+        pass
     _register_removed_prim_hide_hold_for_renewal(ext, scr, dict(src), sched)
     _set_renewal_occ_hold(ext, scr, dict(delta), float(sync_t), delta=dict(delta))
 

@@ -1205,6 +1205,31 @@ def _execute_mapped_sequence_stub(
                 active_by[str(scr_i)] = active
             except Exception:
                 ext._sim_anim_active = active
+            # REMOVED: JSON 시작 시점에 prim hide-hold 선등록
+            # (renewal EMPTY 가 wall 등록보다 먼저 와도 한 프레임 숨김 방지)
+            try:
+                _ev_h = _normalize_anim_event_seq(
+                    str(active.get("event") or active.get("event_seq") or "")
+                )
+                if _ev_h == "REMOVED":
+                    from .control_sim_playback_plan import (
+                        _register_removed_prim_hide_hold_for_renewal,
+                        get_stored_playback_schedule_for_screen,
+                    )
+
+                    _src_h = dict(active)
+                    _src_h["event_start_sim_time"] = str(
+                        active.get("_event_start_sim")
+                        or active.get("t")
+                        or active.get("sim_time")
+                        or ""
+                    ).strip()
+                    _sched_h = get_stored_playback_schedule_for_screen(ext, int(scr_i))
+                    _register_removed_prim_hide_hold_for_renewal(
+                        ext, int(scr_i), _src_h, _sched_h
+                    )
+            except Exception:
+                pass
             if not bool(has_renewal) and (not bool(getattr(ext, "_sim_playback_started", False))):
                 try:
                     _flush_pending_post_anim_port_applies(ext, scr_i)
@@ -1449,9 +1474,9 @@ def _execute_mapped_sequence_stub(
                         try:
                             from .control_sim_playback_plan import (
                                 _register_removed_prim_hide_hold_for_renewal,
-                                prim_occ_for_playback_visibility,
                             )
 
+                            # EMPTY 패널 적용 전에 hold 먼저 (한 프레임 숨김 방지)
                             _register_removed_prim_hide_hold_for_renewal(
                                 ext, int(scr_i), src_apply, None
                             )
