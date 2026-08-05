@@ -468,12 +468,12 @@ def _csv_playback_config_tag() -> str:
         )
 
         mode = csv_playback_plan_mode()
-        # buf_foup=1: Buffer pick 후 FOUP place 없으면 직후 강제 삽입 (절대규칙)
-        tag = f"{tag}|plan={mode}|buf_foup=1"
+        # atm_end_foup=1: 투어 끝 AtmArm → FOUP place 합성 SSOT (Buffer 전용 강제 규칙 폐지)
+        tag = f"{tag}|plan={mode}|atm_end_foup=1"
         if occupancy_scheduler_enabled():
             tag = f"{tag}|occ_order_swap=2|occ=1"
     except Exception:
-        tag = f"{tag}|occ_order_swap=2|buf_foup=1"
+        tag = f"{tag}|occ_order_swap=2|atm_end_foup=1"
     return tag
 
 
@@ -2104,9 +2104,10 @@ def _place_schedule_entry(
             f"[재생] ATM 팔 → FOUP{foup_index} 반환 · lot={lot_id!r} · 웨이퍼#{cassette_slot}"
         ),
         csv_read_ko=(
-            "투어 마지막 dwell 이 AtmArm 이고 다음 CSV 행이 없음 → FOUP 에 place."
+            "투어 마지막 dwell 이 AtmArm → FOUP place 합성으로 wafer 공정 종료 "
+            "(Buffer/airlock/cooling 등 pick 출처 무관)."
         ),
-        meaning_ko="공정 투어 종료 — 웨이퍼를 FOUP 슬롯에 되돌림.",
+        meaning_ko="공정 투어 종료 SSOT — ATM 팔의 wafer 를 FOUP 슬롯에 되돌림.",
         exec_ko=_foup_exec_hint(foup_index, cassette_slot, "place"),
         step_count=len(steps),
         event_name=event,
@@ -2460,9 +2461,10 @@ def _place_schedule_entry_meta(
             f"[재생] ATM 팔 → FOUP{foup_index} 반환 · lot={lot_id!r} · 웨이퍼#{cassette_slot}"
         ),
         csv_read_ko=(
-            f"투어 마지막 dwell 이 AtmArm — FOUP{foup_index} 슬롯 {cassette_slot} 에 place."
+            f"투어 마지막 dwell 이 AtmArm → FOUP{foup_index} place 합성 "
+            f"(슬롯 {cassette_slot}, pick 출처 무관)."
         ),
-        meaning_ko="공정 투어 종료 — ATM 팔에서 FOUP 슬롯으로 반환.",
+        meaning_ko="공정 투어 종료 SSOT — ATM 팔에서 FOUP 슬롯으로 반환.",
         exec_ko=_foup_exec_hint(foup_index, cassette_slot, "place"),
         step_count=_event_step_count_estimate(event),
         event_name=event,
@@ -3157,182 +3159,15 @@ def _ensure_buffer_to_foup_absolute_rules(
     *,
     dwells: Optional[Sequence["DwellRecord"]] = None,
 ) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
-    """Buffer pick 이후 같은 wafer FOUP place 검색 — 없으면 pick 직후 강제 삽입.
+    """Deprecated no-op.
 
-    Aligner 절대규칙 적용 **이후**에만 호출. 정상 데이터에서는 no-op 가 원칙.
-
-    사이드버그 가드:
-    - Buffer pick ~ (찾은/삽입할) FOUP place 사이 같은 wafer 의 비-FOUP place 제거.
-    - 메타 pick 스케줄에 lot/cassette 누락 시 검색 실패 → skip+로그.
+    이전: Buffer pick 이후 FOUP place 없으면 강제 삽입·사이 비-FOUP place 제거.
+    현재 SSOT: wafer 투어 **마지막 dwell 이 AtmArm** 이면
+    ``build_csv_playback_plan`` / schedule 빌드에서 FOUP place 를 합성해 공정을 종료.
+    Buffer/airlock/cooling 등 pick 출처와 무관하다.
     """
-    from .lam_buffer_return_rules import (
-        BUFFER_PICK_SYNTH_FOUP_PLACE_GAP_SEC,
-        is_buffer_pick_event,
-        is_forbidden_place_after_buffer_pick,
-        is_foup_pick_event,
-        is_foup_place_event,
-    )
-
-    if not schedule:
-        return schedule, blocks
-
-    ordered = sorted(
-        enumerate(schedule),
-        key=lambda it: (float(it[1].time_sec), int(it[1].sort_order), it[0]),
-    )
-    remove_idx: set = set()
-    inject: List[Tuple[float, CsvPlaybackScheduleEntry, Optional[LamSimJsonSteps]]] = []
-
-    def _is_foup_return(entry: CsvPlaybackScheduleEntry) -> bool:
-        en = str(entry.event_name or "")
-        cat = str(entry.category or "")
-        return is_foup_place_event(en) or cat == "place"
-
-    for pos, (si, e) in enumerate(ordered):
-        en = str(e.event_name or "")
-        if not is_buffer_pick_event(en):
-            continue
-        if si in remove_idx:
-            continue
-        lot, cas = _schedule_entry_lot_cassette(e)
-        if not lot or cas <= 0:
-            _lam_sim_log_build(
-                "csv_tour",
-                f"Buffer→FOUP: buffer pick 에 lot/cassette 없음 — skip "
-                f"t={float(e.time_sec):.3f}s event={en!r}",
-            )
-            continue
-
-        found_foup = False
-        for _pos2, (sj, o) in enumerate(ordered[pos + 1 :], start=pos + 1):
-            if sj in remove_idx:
-                continue
-            o_lot, o_cas = _schedule_entry_lot_cassette(o)
-            if o_lot != lot or int(o_cas) != int(cas):
-                continue
-            o_cat = str(o.category or "")
-            o_en = str(o.event_name or "")
-            if o_cat == "dwell":
-                continue
-            # 새 FOUP pick = 다음 투어 시작 → 이 구간에서 FOUP 반환 없음으로 간주
-            if is_foup_pick_event(o_en) or o_cat == "pick":
-                break
-            if _is_foup_return(o):
-                found_foup = True
-                break
-            if is_forbidden_place_after_buffer_pick(o_en) or (
-                o_en.lower().endswith("_place")
-                and not is_foup_place_event(o_en)
-                and o_cat not in ("aligner_place",)
-                and not o_en.lower().startswith("atm_aligner_")
-            ):
-                remove_idx.add(sj)
-                _lam_sim_log_build(
-                    "csv_tour",
-                    f"Buffer→FOUP 절대규칙: 비-FOUP place 제거 "
-                    f"lot={lot!r} wafer#{cas} event={o_en!r} "
-                    f"t={float(o.time_sec):.3f}s "
-                    f"(buffer pick 이후·FOUP 반환 전 — 데이터/파싱 오류)",
-                )
-
-        if found_foup:
-            continue
-
-        foup_n = _foup_index_for_lot_cassette(dwells, lot, cas)
-        place_t = float(e.time_sec) + float(BUFFER_PICK_SYNTH_FOUP_PLACE_GAP_SEC)
-        steps: Optional[LamSimJsonSteps] = None
-        if blocks is not None:
-            try:
-                steps = build_foup_pick_place_steps(
-                    foup_index=foup_n,
-                    cassette_slot=cas,
-                    pick_or_place="place",
-                )
-            except Exception as exc:
-                _lam_sim_log_build(
-                    "csv_tour",
-                    f"Buffer→FOUP: FOUP place 스텝 생성 실패 lot={lot!r} wafer#{cas}: {exc}",
-                )
-                steps = []
-            ent = _place_schedule_entry(
-                time_sec=place_t,
-                foup_index=foup_n,
-                cassette_slot=cas,
-                lot_id=lot,
-                steps=steps or [],
-            )
-            ent = replace(
-                ent,
-                csv_read_ko=(
-                    "Buffer pick 이후 같은 wafer 의 FOUP place JSON 없음 "
-                    f"(실무상 비정상) → pick 직후 t={place_t:.3f}s 강제 삽입."
-                ),
-                meaning_ko=(
-                    "Buffer→FOUP 절대규칙: 파싱 결과에 FOUP 반환이 없어 "
-                    "완료 카운트·웨이퍼 회수를 위해 place JSON 을 끼움."
-                ),
-            )
-        else:
-            ent = _place_schedule_entry_meta(
-                time_sec=place_t,
-                foup_index=foup_n,
-                cassette_slot=cas,
-                lot_id=lot,
-            )
-            ent = replace(
-                ent,
-                csv_read_ko=(
-                    "Buffer pick 이후 FOUP place 없음 → pick 직후 강제 삽입(메타)."
-                ),
-            )
-        inject.append((place_t, ent, steps if blocks is not None else None))
-        _lam_sim_log_build(
-            "csv_tour",
-            f"Buffer→FOUP 절대규칙: FOUP{foup_n} place 강제 삽입 "
-            f"lot={lot!r} wafer#{cas} t={place_t:.3f}s "
-            f"(buffer pick t={float(e.time_sec):.3f}s 직후)",
-        )
-
-    if not remove_idx and not inject:
-        return schedule, blocks
-
-    new_schedule = [e for i, e in enumerate(schedule) if i not in remove_idx]
-    new_blocks: Optional[List[CsvTimedPlaybackBlock]] = blocks
-    if blocks is not None and remove_idx:
-        drop_keys = {
-            _schedule_entry_match_key(schedule[i])
-            for i in remove_idx
-            if i < len(schedule)
-        }
-        new_blocks = [
-            b
-            for b in blocks
-            if b.schedule is None
-            or _schedule_entry_match_key(b.schedule) not in drop_keys
-        ]
-
-    if inject:
-        if new_blocks is None and blocks is not None:
-            new_blocks = list(blocks)
-        for _pt, ent, steps in inject:
-            new_schedule.append(ent)
-            if new_blocks is not None and steps is not None:
-                new_blocks.append(
-                    _block_from_schedule(
-                        ent,
-                        steps,
-                        label=f"buffer_return_foup_place({ent.cassette_slot})",
-                    )
-                )
-
-    new_schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
-    if new_blocks is not None:
-        new_blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
-        new_schedule = _stamp_schedule_row_ids(new_schedule)
-        new_blocks = _reattach_block_schedules(new_blocks, new_schedule)
-    else:
-        new_schedule = _stamp_schedule_row_ids(new_schedule)
-    return new_schedule, new_blocks
+    _ = (dwells,)
+    return schedule, blocks
 
 
 def _apply_csv_playback_arm_serial_rules(
@@ -3496,6 +3331,7 @@ def build_csv_playback_plan(
                     progress.tick(1)
 
             if last.slot_key == LOGICAL_SLOT_ATM_ARM:
+                # SSOT: 투어 끝 AtmArm → FOUP place (이전 공정 직후 = last.end_sec)
                 try:
                     place_st = build_foup_pick_place_steps(
                         foup_index=foup_n,
