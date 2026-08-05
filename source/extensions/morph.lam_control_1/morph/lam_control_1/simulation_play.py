@@ -9319,17 +9319,51 @@ class LamSimulationCsvPlayWindow:
         return 1.0 if bool(process_only) else self._read_speed_scale()
 
     def _apply_speed_ui_change(self) -> None:
-        """배속 UI 변경 → 타임라인 미리보기·(일반 재생 중) 라이브 세션."""
+        """배속 UI 변경 → 타임라인 배속 라벨·(일반 재생 중) 라이브 세션.
+
+        재생/Federation 등 현재 준비된 schedule 을 덮지 않는다.
+        (과거: ``_refresh_csv_schedule_preview`` → combo 기본 CSV 로 타임라인이 바뀌던 버그)
+        """
         in_proc_only_play = bool(
             self._read_process_only()
             and csv_play_session_active(screen=self._screen)
         )
         if not in_proc_only_play:
             try:
-                self._refresh_csv_schedule_preview(fast_only=True)
+                self._refresh_timeline_for_speed_change()
             except Exception:
                 pass
         self._apply_live_speed_during_play()
+
+    def _refresh_timeline_for_speed_change(self) -> None:
+        """배속 숫자만 반영. 현재 prepared / 표시 중 schedule 유지.
+
+        combo 의 ``_selected_csv_path`` 로 재파싱하지 않음 — Play 중 API·다른 CSV
+        타임라인이 기본 파일로 바뀌는 것을 방지.
+        """
+        if not self._has_timeline_ui():
+            return
+        sp = self._read_speed_scale()
+        prepared = self._prepared_playback
+        if prepared is not None and prepared.schedule:
+            self._rebuild_schedule_timeline_rows(
+                prepared.schedule,
+                speed_scale=sp,
+                rebuild_main=self._schedule_rows_stack is not None,
+                rebuild_hud=self._hud_schedule_rows_stack is not None,
+            )
+            return
+        entries = list(getattr(self, "_schedule_row_entries", None) or [])
+        if entries:
+            self._rebuild_schedule_timeline_rows(
+                entries,
+                speed_scale=sp,
+                rebuild_main=self._schedule_rows_stack is not None,
+                rebuild_hud=self._hud_schedule_rows_stack is not None,
+            )
+            return
+        # 표시할 재생 schedule 이 없을 때만 combo CSV 미리보기
+        self._refresh_csv_schedule_preview(fast_only=True)
 
     def _wire_speed_model_live_update(self) -> None:
         """Play 중 배속 필드·프리셋 변경 → 즉시 재생 속도 반영."""
