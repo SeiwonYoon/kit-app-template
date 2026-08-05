@@ -355,7 +355,7 @@ FOUP_ANCHOR_PRIM_BY_INDEX: Dict[int, str] = {
 }
 
 # FOUP 패널 위치 오프셋(객체 중심 기준) — 초기값은 임시. 실제로 보며 조정.
-FOUP_PANEL_OFFSET_XYZ_M: Tuple[float, float, float] = (-20, -50, 0.10)
+FOUP_PANEL_OFFSET_XYZ_M: Tuple[float, float, float] = (-20, -35, 0.10)
 
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
 FOUP_PANEL_WIDTH_PX: int = 220
