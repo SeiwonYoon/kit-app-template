@@ -371,6 +371,13 @@ class FloorplanOccupancyTracker:
                 fn(si, snap)
             except Exception:
                 pass
+        # Viewport 패널: subscribe lambda 외에도 강제 in-place 갱신
+        try:
+            from .lam_viewport_floorplan_panel import refresh_floorplan_panels_ui
+
+            refresh_floorplan_panels_ui(screen=si)
+        except Exception:
+            pass
 
 
 _trackers: Dict[int, FloorplanOccupancyTracker] = {}

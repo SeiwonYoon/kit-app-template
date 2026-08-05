@@ -35,14 +35,16 @@ from .simulation_play import LamSimulationCsvPlayWindow
 from .lam_viewport import LamViewport
 from .lam_csv_viewport_hud import (
     LamCsvViewportControlsHud,
-    viewport_csv_panel_enabled,
+    viewport_csv_panel_feature_enabled,
 )
 from .lam_viewport_status_panel import LamStatusPanelWebNotifier, LamViewportStatusPanel
 from .lam_viewport_foup_status_3d import LamFoupStatus3dPanel
 from .lam_viewport_device_labels_3d import LamViewportDeviceLabels3d
+from .lam_viewport_floorplan_panel import LamViewportFloorplanPanel
 from .lam_viewport_overlay_state import (
     apply_startup_checkbox_side_effects,
     get_toggle_device_labels,
+    get_toggle_floorplan_panel,
     get_toggle_foup_status,
     register_toggle_listener,
     schedule_play_prim_hide_sync_after_stage_ready,
@@ -121,10 +123,17 @@ class LamWindow:
         self._wafer_foup_labels: Optional[LamWaferFoupViewportLabels] = None
         self._status_panel_by_screen: Dict[int, LamViewportStatusPanel] = {}
         self._status_panel_web_notifier: Optional[LamStatusPanelWebNotifier] = None
+        try:
+            from .lam_sim_control_defaults import SHOW_VIEWPORT_STATUS_PANEL
+
+            self._show_viewport_status_panel_rt = bool(SHOW_VIEWPORT_STATUS_PANEL)
+        except Exception:
+            self._show_viewport_status_panel_rt = False
         self._foup_status_3d: Optional[LamFoupStatus3dPanel] = None
         self._foup_status_3d_by_screen: Dict[int, LamFoupStatus3dPanel] = {}
         self._device_labels_3d: Optional[LamViewportDeviceLabels3d] = None
         self._device_labels_3d_by_screen: Dict[int, LamViewportDeviceLabels3d] = {}
+        self._floorplan_panel_by_screen: Dict[int, LamViewportFloorplanPanel] = {}
         self._wafer_foup_labels_by_screen: Dict[int, LamWaferFoupViewportLabels] = {}
         self._overlay_toggle_listener_registered: bool = False
         self._external_runner: Optional[LamExternalEventRunner] = None
@@ -261,9 +270,20 @@ class LamWindow:
         """
         self._sync_aux_kit_window_visibility()
         try:
-            from .lam_sim_control_defaults import FEDERATION_TEST_WINDOW_AUTO_SHOW
+            ext = self._kit_ext
+            show_fed = None
+            if ext is not None:
+                mdl = getattr(ext, "_ui_show_federation_test_model", None)
+                if mdl is not None:
+                    try:
+                        show_fed = bool(mdl.as_bool)
+                    except Exception:
+                        show_fed = None
+            if show_fed is None:
+                from .lam_sim_control_defaults import FEDERATION_TEST_WINDOW_AUTO_SHOW
 
-            if bool(FEDERATION_TEST_WINDOW_AUTO_SHOW):
+                show_fed = bool(FEDERATION_TEST_WINDOW_AUTO_SHOW)
+            if show_fed:
                 self._open_federation_test()
             elif self._federation_test_window is not None:
                 win = getattr(self._federation_test_window, "_window", None)
@@ -605,14 +625,11 @@ class LamWindow:
         *,
         viewport_window: Any = None,
     ) -> None:
-        """화면별 Viewport STATUS 2D 패널 — SHOW_VIEWPORT_STATUS_PANEL."""
+        """화면별 Viewport STATUS 2D 패널 — 창 표시「STATUS 패널」런타임 플래그."""
         si = max(1, int(screen))
-        try:
-            from .lam_sim_control_defaults import SHOW_VIEWPORT_STATUS_PANEL
-        except Exception:
-            SHOW_VIEWPORT_STATUS_PANEL = False
+        wanted = bool(getattr(self, "_show_viewport_status_panel_rt", False))
         by_screen = self._status_panel_by_screen
-        if not bool(SHOW_VIEWPORT_STATUS_PANEL):
+        if not wanted:
             panel = by_screen.pop(si, None)
             if panel is not None:
                 try:
@@ -635,21 +652,41 @@ class LamWindow:
         panel.sync_layers()
 
     def _sync_csv_viewport_hud(self) -> None:
-        """defaults에서 허용할 때만 Viewport 우상단 CSV 미니 패널을 표시."""
+        """CSV Viewport HUD + (옵션) 좌상단 투명 토글 버튼.
+
+        - ``SHOW_VIEWPORT_CSV_PANEL``: 시작 시 패널 표시 의도
+        - ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT``: Federation HUD 아래 토글
+        """
         if self._csv_sim_windows.get(1) is None:
             self._ensure_csv_sim_play_window(1)
         csv_win = self._primary_csv_sim_window()
         assert csv_win is not None
         csv_win.ensure_playback_models()
         apply_startup_checkbox_side_effects()
-        if viewport_csv_panel_enabled():
+
+        # 기능 ON 이면 HUD 컨트롤러 유지 (시작 시 패널 숨김이어도 토글 버튼은 마운트)
+        if viewport_csv_panel_feature_enabled():
             if self._csv_viewport_hud is None:
                 self._csv_viewport_hud = LamCsvViewportControlsHud(
                     csv_win,
                     lam_window=self,
                     viewport=self._viewport,
                 )
-            self._csv_viewport_hud.sync_layers()
+            else:
+                try:
+                    self._csv_viewport_hud._csv = csv_win
+                    self._csv_viewport_hud._lam = self
+                    self._csv_viewport_hud._viewport = self._viewport
+                except Exception:
+                    pass
+            try:
+                self._csv_viewport_hud.sync_toggle_hotspot()
+            except Exception as exc:
+                print(f"[LAM] CSV HUD toggle sync: {exc}", flush=True)
+            try:
+                self._csv_viewport_hud.sync_layers()
+            except Exception as exc:
+                print(f"[LAM] CSV HUD panel sync: {exc}", flush=True)
         else:
             if self._csv_viewport_hud is not None:
                 try:
@@ -657,11 +694,7 @@ class LamWindow:
                 except Exception:
                     pass
                 self._csv_viewport_hud = None
-        try:
-            from .lam_sim_control_defaults import SHOW_VIEWPORT_STATUS_PANEL
-        except Exception:
-            SHOW_VIEWPORT_STATUS_PANEL = False
-        if bool(SHOW_VIEWPORT_STATUS_PANEL):
+        if bool(getattr(self, "_show_viewport_status_panel_rt", False)):
             self._sync_status_panel_for_screen(1, csv_win)
         else:
             for si in list(self._status_panel_by_screen.keys()):
@@ -698,6 +731,18 @@ class LamWindow:
             )
         self._device_labels_3d.sync_layers()
 
+        # Viewport 우하단 장비배치도 (토글 ON일 때만)
+        by_fp = self._floorplan_panel_by_screen
+        fp = by_fp.get(1)
+        if fp is None:
+            fp = LamViewportFloorplanPanel(
+                csv_win,
+                viewport=self._viewport,
+                screen=1,
+            )
+            by_fp[1] = fp
+        fp.sync_layers()
+
         # 토글 체크박스 OFF/ON 시 즉시 show/hide 되도록 리스너 1회 등록
         if not self._overlay_toggle_listener_registered:
             self._overlay_toggle_listener_registered = True
@@ -720,6 +765,15 @@ class LamWindow:
                             self._device_labels_3d.destroy()
                 except Exception:
                     pass
+                try:
+                    panel = self._floorplan_panel_by_screen.get(1)
+                    if panel is not None:
+                        if get_toggle_floorplan_panel():
+                            panel.sync_layers(delay_frames=0)
+                        else:
+                            panel.destroy()
+                except Exception:
+                    pass
 
             register_toggle_listener(_on_overlay_toggle_changed)
 
@@ -728,6 +782,7 @@ class LamWindow:
         try:
             from .lam_viewport_overlay_state import (
                 get_toggle_device_labels,
+                get_toggle_floorplan_panel,
                 get_toggle_foup_status,
             )
         except Exception:
@@ -746,6 +801,15 @@ class LamWindow:
                     self._device_labels_3d.sync_layers(delay_frames=0)
                 else:
                     self._device_labels_3d.destroy()
+        except Exception:
+            pass
+        try:
+            panel = self._floorplan_panel_by_screen.get(1)
+            if panel is not None:
+                if get_toggle_floorplan_panel():
+                    panel.sync_layers(delay_frames=0)
+                else:
+                    panel.destroy()
         except Exception:
             pass
 
@@ -816,6 +880,12 @@ class LamWindow:
             except Exception:
                 pass
         self._device_labels_3d_by_screen.clear()
+        for panel in list(self._floorplan_panel_by_screen.values()):
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        self._floorplan_panel_by_screen.clear()
         for panel in list(self._wafer_foup_labels_by_screen.values()):
             try:
                 panel.destroy()

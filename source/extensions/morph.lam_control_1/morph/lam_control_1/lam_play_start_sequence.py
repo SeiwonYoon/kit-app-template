@@ -401,6 +401,7 @@ def _reset_play_start_overlay_checkboxes(
             set_toggle_play_prim_hide(False)
         set_toggle_foup_status(False)
         set_toggle_device_labels(False)
+        # 장비배치도(Viewport)는 Play 중에도 유지 — 시뮬창 배치도와 동일 occupancy 갱신
         set_toggle_top_view(False)
     else:
         prim_m = getattr(csv_window, "_play_prim_hide_model", None)

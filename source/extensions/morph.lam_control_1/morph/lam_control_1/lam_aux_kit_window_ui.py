@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
 # (ext 모델 속성, HUD 라벨, resolver key)
 _AUX_KIT_WINDOW_SPECS: Tuple[Tuple[str, str, str], ...] = (
     ("_ui_show_lam_usd_model", "Multi-USD Load", "usd"),
     ("_ui_show_lam_sequence_model", "Sequence Editor", "sequence"),
+)
+
+# Viewport 오버레이·Federation 테스트 (상수 기본값, 런타임 토글)
+_AUX_VIEWPORT_PANEL_SPECS: Tuple[Tuple[str, str], ...] = (
+    ("_ui_show_viewport_floorplan_model", "장비배치도"),
+    ("_ui_show_viewport_status_model", "STATUS 패널"),
+    ("_ui_show_federation_test_model", "Federation 테스트"),
 )
 
 _CHECKBOX_STYLE = {"color": 0xFFFFFFFF}
@@ -90,6 +97,9 @@ def init_lam_aux_kit_window_models(ext: Any) -> None:
         return
     try:
         from .lam_sim_control_defaults import (
+            FEDERATION_TEST_WINDOW_AUTO_SHOW,
+            SHOW_VIEWPORT_FLOORPLAN_PANEL,
+            SHOW_VIEWPORT_STATUS_PANEL,
             UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT,
             UI_SHOW_LAM_SEQUENCE_EDITOR_DEFAULT,
             UI_SHOW_LAM_USD_WINDOW_DEFAULT,
@@ -98,6 +108,9 @@ def init_lam_aux_kit_window_models(ext: Any) -> None:
         UI_SHOW_LAM_USD_WINDOW_DEFAULT = False
         UI_SHOW_LAM_SEQUENCE_EDITOR_DEFAULT = False
         UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT = True
+        SHOW_VIEWPORT_FLOORPLAN_PANEL = False
+        SHOW_VIEWPORT_STATUS_PANEL = False
+        FEDERATION_TEST_WINDOW_AUTO_SHOW = False
 
     if getattr(ext, "_ui_show_lam_usd_model", None) is None:
         ext._ui_show_lam_usd_model = ui.SimpleBoolModel(
@@ -121,6 +134,53 @@ def init_lam_aux_kit_window_models(ext: Any) -> None:
         except Exception:
             pass
 
+    if getattr(ext, "_ui_show_viewport_floorplan_model", None) is None:
+        ext._ui_show_viewport_floorplan_model = ui.SimpleBoolModel(
+            bool(SHOW_VIEWPORT_FLOORPLAN_PANEL)
+        )
+        try:
+            from .lam_viewport_floorplan_panel import (
+                set_viewport_floorplan_panel_feature_rt,
+            )
+
+            set_viewport_floorplan_panel_feature_rt(bool(SHOW_VIEWPORT_FLOORPLAN_PANEL))
+        except Exception:
+            pass
+        try:
+            ext._ui_show_viewport_floorplan_model.add_value_changed_fn(
+                lambda _m: _on_viewport_floorplan_visibility_changed(ext)
+            )
+        except Exception:
+            pass
+
+    if getattr(ext, "_ui_show_viewport_status_model", None) is None:
+        ext._ui_show_viewport_status_model = ui.SimpleBoolModel(
+            bool(SHOW_VIEWPORT_STATUS_PANEL)
+        )
+        try:
+            lam = _lam_window(ext)
+            if lam is not None:
+                lam._show_viewport_status_panel_rt = bool(SHOW_VIEWPORT_STATUS_PANEL)
+        except Exception:
+            pass
+        try:
+            ext._ui_show_viewport_status_model.add_value_changed_fn(
+                lambda _m: _on_viewport_status_visibility_changed(ext)
+            )
+        except Exception:
+            pass
+
+    if getattr(ext, "_ui_show_federation_test_model", None) is None:
+        ext._ui_show_federation_test_model = ui.SimpleBoolModel(
+            bool(FEDERATION_TEST_WINDOW_AUTO_SHOW)
+        )
+        try:
+            ext._ui_show_federation_test_model.add_value_changed_fn(
+                lambda _m: _on_federation_test_visibility_changed(ext)
+            )
+        except Exception:
+            pass
+
     for si in _csv_play_screen_indices(ext):
         ensure_csv_play_screen_model(ext, si)
 
@@ -133,6 +193,14 @@ def _resolve_aux_kit_windows(ext: Any, which: str) -> List[Any]:
     if which == "sequence":
         editor = getattr(lam_win, "_sequence_editor", None) if lam_win is not None else None
         w = getattr(editor, "_window", None) if editor is not None else None
+        return [w] if w is not None else []
+    if which == "federation_test":
+        fed = (
+            getattr(lam_win, "_federation_test_window", None)
+            if lam_win is not None
+            else None
+        )
+        w = getattr(fed, "_window", None) if fed is not None else None
         return [w] if w is not None else []
     if which.startswith("csv_play:"):
         try:
@@ -173,6 +241,12 @@ def sync_aux_kit_window_visibility(ext: Any) -> None:
         for win in _resolve_aux_kit_windows(ext, f"csv_play:{si}"):
             _set_kit_window_visible(win, visible)
 
+    # Federation 테스트 — 창이 이미 있을 때만 visible 반영 (생성은 change 핸들러)
+    _sync_federation_test_visibility(ext, create_if_needed=False)
+    # Viewport 패널은 change 시 적용; startup sync 시 1회 반영
+    _apply_viewport_floorplan_visibility(ext)
+    _apply_viewport_status_visibility(ext)
+
 
 def _on_aux_kit_window_visibility_changed(
     ext: Any, which: str, _model: Any = None
@@ -203,6 +277,138 @@ def _on_csv_play_screen_visibility_changed(ext: Any, screen: int) -> None:
         visible = True
     for win in _resolve_aux_kit_windows(ext, f"csv_play:{si}"):
         _set_kit_window_visible(win, visible)
+
+
+def _apply_viewport_floorplan_visibility(ext: Any) -> None:
+    mdl = getattr(ext, "_ui_show_viewport_floorplan_model", None)
+    if mdl is None:
+        return
+    try:
+        visible = bool(mdl.as_bool)
+    except Exception:
+        visible = False
+    try:
+        from .lam_viewport_floorplan_panel import (
+            force_remove_floorplan_panels,
+            set_viewport_floorplan_panel_feature_rt,
+        )
+        from .lam_viewport_overlay_state import set_toggle_floorplan_panel
+
+        set_viewport_floorplan_panel_feature_rt(visible)
+        if visible:
+            set_toggle_floorplan_panel(True)
+            lam = _lam_window(ext)
+            if lam is None:
+                return
+            for si in _csv_play_screen_indices(ext):
+                csv_win = getattr(lam, "_csv_sim_windows", {}).get(si)
+                if csv_win is None:
+                    continue
+                if hasattr(lam, "sync_csv_viewport_overlays_for_screen"):
+                    try:
+                        lam.sync_csv_viewport_overlays_for_screen(si)
+                    except Exception:
+                        pass
+                elif si == 1 and hasattr(lam, "_sync_csv_viewport_hud"):
+                    try:
+                        lam._sync_csv_viewport_hud()
+                    except Exception:
+                        pass
+        else:
+            # feature OFF 먼저 — toggle bounce 와 무관하게 패널 clear
+            set_viewport_floorplan_panel_feature_rt(False)
+            try:
+                set_toggle_floorplan_panel(False)
+            except Exception:
+                pass
+            force_remove_floorplan_panels()
+            lam = _lam_window(ext)
+            by_fp = getattr(lam, "_floorplan_panel_by_screen", None) if lam else None
+            if isinstance(by_fp, dict):
+                for panel in list(by_fp.values()):
+                    try:
+                        panel.destroy()
+                    except Exception:
+                        pass
+                by_fp.clear()
+    except Exception:
+        pass
+
+
+def _on_viewport_floorplan_visibility_changed(ext: Any) -> None:
+    _apply_viewport_floorplan_visibility(ext)
+
+
+def _apply_viewport_status_visibility(ext: Any) -> None:
+    mdl = getattr(ext, "_ui_show_viewport_status_model", None)
+    if mdl is None:
+        return
+    try:
+        visible = bool(mdl.as_bool)
+    except Exception:
+        visible = False
+    lam = _lam_window(ext)
+    if lam is None:
+        return
+    try:
+        lam._show_viewport_status_panel_rt = bool(visible)
+    except Exception:
+        pass
+    if not visible:
+        by_screen = getattr(lam, "_status_panel_by_screen", None)
+        if isinstance(by_screen, dict):
+            for panel in list(by_screen.values()):
+                try:
+                    panel.destroy()
+                except Exception:
+                    pass
+            by_screen.clear()
+        return
+    for si in _csv_play_screen_indices(ext):
+        csv_win = getattr(lam, "_csv_sim_windows", {}).get(si)
+        if csv_win is None:
+            continue
+        if hasattr(lam, "_sync_status_panel_for_screen"):
+            try:
+                lam._sync_status_panel_for_screen(si, csv_win)
+            except Exception:
+                pass
+
+
+def _on_viewport_status_visibility_changed(ext: Any) -> None:
+    _apply_viewport_status_visibility(ext)
+
+
+def _sync_federation_test_visibility(
+    ext: Any, *, create_if_needed: bool = True
+) -> None:
+    mdl = getattr(ext, "_ui_show_federation_test_model", None)
+    if mdl is None:
+        return
+    try:
+        visible = bool(mdl.as_bool)
+    except Exception:
+        visible = False
+    lam = _lam_window(ext)
+    if lam is None:
+        return
+    if visible:
+        if create_if_needed or getattr(lam, "_federation_test_window", None) is not None:
+            try:
+                if hasattr(lam, "_open_federation_test"):
+                    lam._open_federation_test()
+                else:
+                    for win in _resolve_aux_kit_windows(ext, "federation_test"):
+                        _set_kit_window_visible(win, True)
+            except Exception:
+                pass
+        return
+    for win in _resolve_aux_kit_windows(ext, "federation_test"):
+        _set_kit_window_visible(win, False)
+
+
+def _on_federation_test_visibility_changed(ext: Any) -> None:
+    _sync_federation_test_visibility(ext, create_if_needed=True)
 
 
 def mount_aux_kit_window_checkboxes_ui(
@@ -237,6 +443,13 @@ def mount_aux_kit_window_checkboxes_ui(
             if len(_csv_play_screen_indices(ext)) <= 1
             else f"CSV 시뮬 재생 — 화면{si}"
         )
+        with ui.HStack(spacing=4, height=row_height):
+            ui.CheckBox(model=mdl, width=20, height=row_height, style=_CHECKBOX_STYLE)
+            ui.Label(label, width=label_width if label_width > 0 else 0)
+    for model_attr, label in _AUX_VIEWPORT_PANEL_SPECS:
+        mdl = getattr(ext, model_attr, None)
+        if mdl is None:
+            continue
         with ui.HStack(spacing=4, height=row_height):
             ui.CheckBox(model=mdl, width=20, height=row_height, style=_CHECKBOX_STYLE)
             ui.Label(label, width=label_width if label_width > 0 else 0)

@@ -75,6 +75,11 @@ try:
 except Exception:
     _tv0 = False
 
+try:
+    from .lam_sim_control_defaults import STARTUP_CHECK_FLOORPLAN_PANEL as _fp0
+except Exception:
+    _fp0 = False
+
 # 토글(체크박스) 상태 — 시뮬창/HUD 동기화용
 _toggle_foup_status: bool = _f0
 _toggle_device_labels: bool = _d0
@@ -82,10 +87,21 @@ _toggle_pick_whitelist: bool = _p0
 _toggle_play_prim_hide: bool = bool(_ph0)
 _toggle_play_camera_fly: bool = bool(_cf0)
 _toggle_top_view: bool = bool(_tv0)
+_toggle_floorplan_panel: bool = bool(_fp0)
 
 # 토글이 UI/모델 이벤트로 왕복하는 것을 막기 위한 디바운스(초단기 반전 무시)
-_last_toggle_change_ts: Dict[str, float] = {"foup": 0.0, "device": 0.0, "pick": 0.0}
-_last_toggle_change_val: Dict[str, bool] = {"foup": _f0, "device": _d0, "pick": _p0}
+_last_toggle_change_ts: Dict[str, float] = {
+    "foup": 0.0,
+    "device": 0.0,
+    "pick": 0.0,
+    "floorplan": 0.0,
+}
+_last_toggle_change_val: Dict[str, bool] = {
+    "foup": _f0,
+    "device": _d0,
+    "pick": _p0,
+    "floorplan": bool(_fp0),
+}
 
 _startup_checkbox_side_effects_applied: bool = False
 _play_prim_hide_retry_sub: Any = None
@@ -148,6 +164,7 @@ _ui_models_lock = threading.Lock()
 _ui_model_foup: Any = None
 _ui_model_device: Any = None
 _ui_model_pick: Any = None
+_ui_model_floorplan: Any = None
 _ui_model_play_prim_hide: Any = None
 _ui_model_play_camera_fly: Any = None
 _ui_model_top_view: Any = None
@@ -164,8 +181,13 @@ def ui_models_are_syncing() -> bool:
 
 
 def _ensure_ui_models() -> None:
-    global _ui_model_foup, _ui_model_device, _ui_model_pick
-    if _ui_model_foup is not None and _ui_model_device is not None and _ui_model_pick is not None:
+    global _ui_model_foup, _ui_model_device, _ui_model_pick, _ui_model_floorplan
+    if (
+        _ui_model_foup is not None
+        and _ui_model_device is not None
+        and _ui_model_pick is not None
+        and _ui_model_floorplan is not None
+    ):
         return
     try:
         from omni.ui import SimpleBoolModel  # type: ignore
@@ -178,6 +200,8 @@ def _ensure_ui_models() -> None:
             _ui_model_device = SimpleBoolModel(bool(get_toggle_device_labels()))
         if _ui_model_pick is None:
             _ui_model_pick = SimpleBoolModel(bool(get_toggle_pick_whitelist()))
+        if _ui_model_floorplan is None:
+            _ui_model_floorplan = SimpleBoolModel(bool(get_toggle_floorplan_panel()))
     _install_ui_model_hooks()
 
 
@@ -201,7 +225,12 @@ def _install_ui_model_hooks() -> None:
     global _ui_model_hooks_installed
     if _ui_model_hooks_installed:
         return
-    if _ui_model_foup is None or _ui_model_device is None or _ui_model_pick is None:
+    if (
+        _ui_model_foup is None
+        or _ui_model_device is None
+        or _ui_model_pick is None
+        or _ui_model_floorplan is None
+    ):
         return
 
     def _on_any_changed(*_a: Any) -> None:
@@ -212,14 +241,16 @@ def _install_ui_model_hooks() -> None:
             f = _read_model_bool(_ui_model_foup)
             d = _read_model_bool(_ui_model_device)
             p = _read_model_bool(_ui_model_pick)
-            print(f"[LAM/OverlayUIModel] f={f} d={d} p={p}", flush=True)
+            fp = _read_model_bool(_ui_model_floorplan)
+            print(f"[LAM/OverlayUIModel] f={f} d={d} p={p} fp={fp}", flush=True)
             set_toggle_foup_status(f)
             set_toggle_device_labels(d)
             set_toggle_pick_whitelist(p)
+            set_toggle_floorplan_panel(fp)
         except Exception:
             pass
 
-    for m in (_ui_model_foup, _ui_model_device, _ui_model_pick):
+    for m in (_ui_model_foup, _ui_model_device, _ui_model_pick, _ui_model_floorplan):
         for hook in ("add_value_changed_fn", "add_item_changed_fn"):
             try:
                 fn = getattr(m, hook, None)
@@ -243,6 +274,11 @@ def get_ui_model_device_labels() -> Any:
 def get_ui_model_pick_whitelist() -> Any:
     _ensure_ui_models()
     return _ui_model_pick
+
+
+def get_ui_model_floorplan_panel() -> Any:
+    _ensure_ui_models()
+    return _ui_model_floorplan
 
 
 def _ensure_play_prim_hide_ui_model() -> None:
@@ -309,7 +345,12 @@ def _sync_ui_model_values() -> None:
     """state -> UI 모델 값 동기화(재귀 방지)."""
     global _ui_model_syncing
     _ensure_ui_models()
-    if _ui_model_foup is None or _ui_model_device is None or _ui_model_pick is None:
+    if (
+        _ui_model_foup is None
+        or _ui_model_device is None
+        or _ui_model_pick is None
+        or _ui_model_floorplan is None
+    ):
         return
     if _ui_model_syncing:
         return
@@ -325,6 +366,10 @@ def _sync_ui_model_values() -> None:
             pass
         try:
             _ui_model_pick.set_value(bool(get_toggle_pick_whitelist()))
+        except Exception:
+            pass
+        try:
+            _ui_model_floorplan.set_value(bool(get_toggle_floorplan_panel()))
         except Exception:
             pass
     finally:
@@ -612,6 +657,46 @@ def set_toggle_device_labels(enabled: bool) -> None:
 def get_toggle_device_labels() -> bool:
     with _lock:
         return bool(_toggle_device_labels)
+
+
+def set_toggle_floorplan_panel(enabled: bool) -> None:
+    prev = get_toggle_floorplan_panel()
+    import time as _t
+
+    now = float(_t.time())
+    if bool(enabled) != bool(prev):
+        last_ts = float(_last_toggle_change_ts.get("floorplan", 0.0))
+        last_val = bool(_last_toggle_change_val.get("floorplan", prev))
+        if (now - last_ts) < 0.3 and bool(enabled) != bool(last_val):
+            print(
+                f"[LAM/OverlayState] ignore bounce floorplan {prev} -> {enabled} "
+                f"(last {last_val} @{now - last_ts:.3f}s)",
+                flush=True,
+            )
+            return
+    with _lock:
+        global _toggle_floorplan_panel
+        _toggle_floorplan_panel = bool(enabled)
+    _last_toggle_change_ts["floorplan"] = now
+    _last_toggle_change_val["floorplan"] = bool(enabled)
+    print(
+        f"[LAM/OverlayState] set_toggle_floorplan_panel {prev} -> {bool(enabled)}",
+        flush=True,
+    )
+    if not bool(enabled):
+        try:
+            from .lam_viewport_floorplan_panel import force_remove_floorplan_panels
+
+            force_remove_floorplan_panels(screen=1)
+        except Exception:
+            pass
+    _notify_toggle_listeners()
+    _sync_ui_model_values()
+
+
+def get_toggle_floorplan_panel() -> bool:
+    with _lock:
+        return bool(_toggle_floorplan_panel)
 
 
 def set_toggle_pick_whitelist(enabled: bool) -> None:
@@ -1012,6 +1097,7 @@ def get_snapshot() -> Dict[str, Any]:
             "manual_eq_model": str(_manual_eq_model),
             "toggle_foup_status": bool(_toggle_foup_status),
             "toggle_device_labels": bool(_toggle_device_labels),
+            "toggle_floorplan_panel": bool(_toggle_floorplan_panel),
             "toggle_pick_whitelist": bool(_toggle_pick_whitelist),
             "toggle_play_prim_hide": bool(_toggle_play_prim_hide),
             "toggle_top_view": bool(_toggle_top_view),
@@ -1031,6 +1117,9 @@ __all__ = [
     "get_toggle_foup_status",
     "set_toggle_device_labels",
     "get_toggle_device_labels",
+    "set_toggle_floorplan_panel",
+    "get_toggle_floorplan_panel",
+    "get_ui_model_floorplan_panel",
     "apply_startup_checkbox_side_effects",
     "sync_play_prim_hide_side_effect",
     "schedule_play_prim_hide_sync_after_stage_ready",

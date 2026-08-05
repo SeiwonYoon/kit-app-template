@@ -58,13 +58,24 @@ LOCK_VIEWPORT_SPLIT_USER_RESIZE: bool = True
 # Viewport HUD 「창 표시」 체크박스 — 앱 시작 시 기본 visible.
 UI_SHOW_LAM_USD_WINDOW_DEFAULT: bool = False
 UI_SHOW_LAM_SEQUENCE_EDITOR_DEFAULT: bool = False
-UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT: bool = True
+UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT: bool = False
 
-# Viewport 우상단 STATUS 패널 (EQ MODEL / Time / Current State). False → 미표시.
-SHOW_VIEWPORT_STATUS_PANEL: bool = True
+# Viewport 우상단 STATUS 패널 (EQ MODEL / Time / Current State).
+# False → 미표시. 창 표시「STATUS 패널」체크박스가 런타임 표시 여부를 덮어쓴다.
+SHOW_VIEWPORT_STATUS_PANEL: bool = False
 
-# Viewport 우상단 CSV 시뮬 재생 HUD. False → 미표시.
+# Viewport 우상단 CSV 시뮬 재생 HUD.
+# SHOW_VIEWPORT_CSV_PANEL: 앱 시작 시 HUD 표시 여부
+# SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT: 화면1 좌상단(Federation HUD 바로 아래)
+#   투명 클릭 버튼 — 클릭 시 CSV HUD 보이기/숨기기 (시작 플래그와 독립)
 SHOW_VIEWPORT_CSV_PANEL: bool = False
+SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT: bool = True
+
+# Viewport 우하단 장비배치도 패널.
+# SHOW_VIEWPORT_FLOORPLAN_PANEL: 기능·체크박스 자체 on/off (창 표시「장비배치도」기본값)
+# STARTUP_CHECK_FLOORPLAN_PANEL: 앱 시작 시 체크(표시) 기본값
+SHOW_VIEWPORT_FLOORPLAN_PANEL: bool = False
+STARTUP_CHECK_FLOORPLAN_PANEL: bool = True
 
 # Viewport 좌상단 Federation API 로딩 HUD (요청중/실패/수신/파싱/준비완료). False → 미표시.
 SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = False
@@ -153,9 +164,9 @@ FEDERATION_FETCH_TIMEOUT_SEC: float = 300.0
 # True → HTTP 대신 data/federation_fixture 샘플 JSON (오프라인 파서 검증).
 FEDERATION_USE_FIXTURE: bool = False
 # True → 앱 시작 시 「LAM Federation API Test」 테스트 창을 자동으로 연다.
-# False여도 LAM 메인 창의 「Federation API 테스트」 버튼으로 수동 실행 가능.
+# False여도 창 표시「Federation 테스트」체크박스·메인 창 버튼으로 런타임 표시 가능.
 # 기동 중 동기 open_stage 직전 창 도킹 경합을 피하려면 False 권장.
-FEDERATION_TEST_WINDOW_AUTO_SHOW: bool = True
+FEDERATION_TEST_WINDOW_AUTO_SHOW: bool = False
 # 응답 로그에 rows 앞 N개만 출력 (0 = metadata만).
 # ``FEDERATION_VERBOSE_PARSE_LOG=False`` 이면 이 값은 무시되고 샘플을 출력하지 않는다.
 FEDERATION_LOG_ROW_SAMPLE: int = 5
@@ -217,6 +228,9 @@ __all__ = [
     "UI_SHOW_LAM_CSV_PLAY_WINDOW_DEFAULT",
     "SHOW_VIEWPORT_STATUS_PANEL",
     "SHOW_VIEWPORT_CSV_PANEL",
+    "SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT",
+    "SHOW_VIEWPORT_FLOORPLAN_PANEL",
+    "STARTUP_CHECK_FLOORPLAN_PANEL",
     "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
     "CSV_PLAYBACK_PLAN_MODE",

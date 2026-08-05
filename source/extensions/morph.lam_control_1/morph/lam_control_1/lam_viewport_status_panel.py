@@ -478,6 +478,7 @@ class LamViewportStatusPanel:
         self._post_update_sub: Any = None
         self._mounted = False
         self._last_tick = 0.0
+        self._sync_token: float = 0.0
         self._frame_slot = _frame_slot_for_screen(self._screen)
 
     def _resolve_viewport_for_panel(self) -> Optional[Any]:
@@ -507,20 +508,42 @@ class LamViewportStatusPanel:
             return cached
         return _resolve_viewport_window(self._viewport)
 
+    def _status_panel_wanted(self) -> bool:
+        """창 표시「STATUS 패널」런타임 플래그 (없으면 defaults)."""
+        try:
+            lam = getattr(self._csv, "_lam_window_ref", None)
+            if lam is not None and hasattr(lam, "_show_viewport_status_panel_rt"):
+                return bool(lam._show_viewport_status_panel_rt)
+        except Exception:
+            pass
+        try:
+            from .lam_sim_control_defaults import SHOW_VIEWPORT_STATUS_PANEL
+
+            return bool(SHOW_VIEWPORT_STATUS_PANEL)
+        except Exception:
+            return False
+
     def destroy(self) -> None:
+        self._sync_token = float(time.time())
         self._stop_poll()
         self._destroy_layer()
 
     def sync_layers(self, *, delay_frames: int = 8) -> None:
+        if not self._status_panel_wanted():
+            self.destroy()
+            return
         try:
             import omni.kit.app as kapp  # type: ignore
         except Exception:
             return
-        token_box = {"token": time.time()}
-        token = token_box["token"]
+        token = float(time.time())
+        self._sync_token = token
 
         def _try(remaining: int) -> None:
-            if token_box["token"] != token:
+            if getattr(self, "_sync_token", 0.0) != token:
+                return
+            if not self._status_panel_wanted():
+                self.destroy()
                 return
             vw = self._resolve_viewport_for_panel()
             if vw is not None:
@@ -537,20 +560,39 @@ class LamViewportStatusPanel:
 
         _try(max(0, int(delay_frames)))
 
+    @staticmethod
+    def _clear_viewport_slot(vw: Any, slot: str) -> None:
+        if vw is None or not callable(getattr(vw, "get_frame", None)):
+            return
+        try:
+            import omni.ui as ui  # type: ignore
+
+            with vw.get_frame(slot):
+                ui.Spacer(height=0)
+        except Exception:
+            pass
+
     def _destroy_layer(self) -> None:
+        root = self._root
         self._root = None
         self._models.clear()
         self._labels.clear()
+        self._mounted = False
+        try:
+            if root is not None:
+                root.visible = False
+        except Exception:
+            pass
         try:
             vw = self._resolve_viewport_for_panel()
-            if vw is None:
-                return
-            with vw.get_frame(self._frame_slot):
-                pass
+            self._clear_viewport_slot(vw, self._frame_slot)
         except Exception:
             pass
 
     def _mount_on_viewport(self, vw: Any) -> None:
+        if not self._status_panel_wanted():
+            self._destroy_layer()
+            return
         try:
             import omni.ui as ui  # type: ignore
             from omni.ui import SimpleStringModel  # type: ignore

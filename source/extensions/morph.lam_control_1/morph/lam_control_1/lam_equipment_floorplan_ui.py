@@ -198,7 +198,11 @@ def apply_floorplan_occupancy_snapshot(
     handle: Optional[Dict[str, Any]],
     snapshot: Dict[str, Tuple[str, ...]],
 ) -> None:
-    """메인 스레드에서 평면도 위젯 텍스트/색만 갱신."""
+    """메인 스레드에서 평면도 위젯 텍스트/색만 갱신.
+
+    시뮬 재생창 · Viewport get_frame 패널 공통. 위젯 in-place 갱신
+    (전체 다시 그리기 아님).
+    """
     if not handle:
         return
     slots = handle.get("slots") or {}
@@ -216,37 +220,64 @@ def apply_floorplan_occupancy_snapshot(
         occupied = bool(wafers)
         rect = widgets.get("rect")
         lbl = widgets.get("label")
+        style = (
+            _occ_style_for(sid)
+            if occupied
+            else (widgets.get("idle_style") or _idle_style_for(sid))
+        )
         try:
             if rect is not None:
-                style = (
-                    _occ_style_for(sid)
-                    if occupied
-                    else (widgets.get("idle_style") or _idle_style_for(sid))
-                )
-                rect.set_style(dict(style))
+                try:
+                    rect.set_style(dict(style))
+                except Exception:
+                    try:
+                        rect.style = dict(style)
+                    except Exception:
+                        pass
+                # Viewport get_frame 일부 빌드에서 style property 미반영 → 재바인딩
+                try:
+                    if hasattr(rect, "invalidate_style"):
+                        rect.invalidate_style()
+                except Exception:
+                    pass
         except Exception:
-            try:
-                if rect is not None:
-                    rect.style = dict(
-                        _occ_style_for(sid) if occupied else _idle_style_for(sid)
-                    )
-            except Exception:
-                pass
+            pass
         try:
             if lbl is not None:
-                lbl.text = text
-                if occupied:
-                    st = (
-                        dict(_LABEL_MULTI_STYLE)
-                        if sid in MULTI_REGIONS
-                        else dict(_LABEL_OCC_STYLE)
+                applied = False
+                for setter in ("set_text",):
+                    try:
+                        fn = getattr(lbl, setter, None)
+                        if callable(fn):
+                            fn(text)
+                            applied = True
+                            break
+                    except Exception:
+                        pass
+                if not applied:
+                    try:
+                        lbl.text = text
+                    except Exception:
+                        try:
+                            setattr(lbl, "text", text)
+                        except Exception:
+                            pass
+                st = (
+                    dict(_LABEL_MULTI_STYLE)
+                    if occupied and sid in MULTI_REGIONS
+                    else (
+                        dict(_LABEL_OCC_STYLE)
+                        if occupied
+                        else dict(_LABEL_STYLE)
                     )
-                else:
-                    st = dict(_LABEL_STYLE)
+                )
                 try:
                     lbl.set_style(st)
                 except Exception:
-                    lbl.style = st
+                    try:
+                        lbl.style = st
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -335,11 +366,12 @@ def bind_floorplan_occupancy_ui(
                 pass
 
         def _on_occ(_screen: int, snap: Dict[str, Tuple[str, ...]]) -> None:
+            # default-arg 로 handle/snap 고정 (지연 실행 시 늦은 바인딩·덮어쓰기 방지)
             try:
                 from .kit_main_dispatch import schedule_on_main_thread
 
                 schedule_on_main_thread(
-                    lambda: apply_floorplan_occupancy_snapshot(handle, snap)
+                    lambda h=handle, s=dict(snap): apply_floorplan_occupancy_snapshot(h, s)
                 )
             except Exception:
                 try:

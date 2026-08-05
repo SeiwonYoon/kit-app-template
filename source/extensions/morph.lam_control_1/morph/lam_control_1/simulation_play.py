@@ -5948,6 +5948,12 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
             from .lam_floorplan_occupancy import seed_floorplan_foup_baseline
 
             seed_floorplan_foup_baseline(si)
+            try:
+                from .lam_viewport_floorplan_panel import refresh_floorplan_panels_ui
+
+                refresh_floorplan_panels_ui(screen=si)
+            except Exception:
+                pass
         except Exception:
             pass
     return (show_ok, hide_ok)
@@ -6971,6 +6977,7 @@ class LamSimulationCsvPlayWindow:
         self._wafer_label_show_model: Any = None
         self._foup_status_show_model: Any = None
         self._device_labels_show_model: Any = None
+        self._floorplan_show_model: Any = None
         self._pick_whitelist_model: Any = None
         self._play_prim_hide_model: Any = None
         self._play_camera_fly_model: Any = None
@@ -7180,6 +7187,7 @@ class LamSimulationCsvPlayWindow:
         display_models = (
             self._foup_status_show_model,
             self._device_labels_show_model,
+            self._floorplan_show_model,
             self._wafer_label_show_model,
         )
         viewport_models = (
@@ -7377,6 +7385,24 @@ class LamSimulationCsvPlayWindow:
                 except Exception:
                     _dev_def = True
                 self._device_labels_show_model = SimpleBoolModel(_dev_def)
+        if self._floorplan_show_model is None:
+            if use_global:
+                try:
+                    from .lam_viewport_overlay_state import get_ui_model_floorplan_panel
+
+                    self._floorplan_show_model = get_ui_model_floorplan_panel()
+                except Exception:
+                    use_global = False
+            if self._floorplan_show_model is None:
+                try:
+                    from .lam_sim_control_defaults import (  # type: ignore
+                        STARTUP_CHECK_FLOORPLAN_PANEL,
+                    )
+
+                    _fp_def = bool(STARTUP_CHECK_FLOORPLAN_PANEL)
+                except Exception:
+                    _fp_def = False
+                self._floorplan_show_model = SimpleBoolModel(_fp_def)
         if self._pick_whitelist_model is None:
             if use_global:
                 try:
@@ -7555,8 +7581,20 @@ class LamSimulationCsvPlayWindow:
 
         f_m = self._foup_status_show_model
         d_m = self._device_labels_show_model
+        fp_m = self._floorplan_show_model
         p_m = self._pick_whitelist_model
         if f_m is None or d_m is None or p_m is None:
+            return
+
+        try:
+            from .lam_viewport_floorplan_panel import (
+                viewport_floorplan_panel_feature_enabled,
+            )
+
+            show_fp = bool(viewport_floorplan_panel_feature_enabled())
+        except Exception:
+            show_fp = True
+        if show_fp and fp_m is None:
             return
 
         # 전역 모델을 공유하므로 여기서 상태→모델 set_value를 반복 수행하지 않는다.
@@ -7599,6 +7637,25 @@ class LamSimulationCsvPlayWindow:
                 tooltip="Viewport 클릭 선택을 whitelist 루트로 제한",
             )
             ui.Spacer()
+
+        if show_fp and fp_m is not None:
+            with ui.HStack(spacing=int(spacing), height=int(row_height)):
+                ui.Label(
+                    "장비배치도",
+                    width=int(label_width),
+                    height=int(row_height),
+                    tooltip="Viewport 우하단 장비배치도 패널 (시뮬 창 배치도와 동일 occupancy)",
+                )
+                if aux_display_fn is not None:
+                    ui.CheckBox(
+                        model=fp_m,
+                        width=20,
+                        height=int(row_height),
+                        changed_fn=aux_display_fn,
+                    )
+                else:
+                    ui.CheckBox(model=fp_m, width=20, height=int(row_height))
+                ui.Spacer()
 
         if aux_display_fn is not None:
             self._install_screen_local_overlay_hooks()

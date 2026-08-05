@@ -648,6 +648,7 @@ def sync_csv_screen_3d_overlays(runtime: CsvScreenRuntime) -> None:
     try:
         from .lam_viewport_foup_status_3d import LamFoupStatus3dPanel
         from .lam_viewport_device_labels_3d import LamViewportDeviceLabels3d
+        from .lam_viewport_floorplan_panel import LamViewportFloorplanPanel
         from .lam_wafer_viewport_labels import LamWaferFoupViewportLabels
     except Exception as exc:
         print(f"{_PRINT_PREFIX} overlay import failed: {exc}", flush=True)
@@ -709,6 +710,27 @@ def sync_csv_screen_3d_overlays(runtime: CsvScreenRuntime) -> None:
         dev.sync_layers(delay_frames=0 if tile_vw is not None else 12)
     except Exception as exc:
         print(f"{_PRINT_PREFIX} screen{si} device labels sync: {exc}", flush=True)
+
+    by_fp = getattr(lam, "_floorplan_panel_by_screen", None)
+    if not isinstance(by_fp, dict):
+        by_fp = {}
+        lam._floorplan_panel_by_screen = by_fp
+    fp = by_fp.get(si)
+    if fp is None:
+        fp = LamViewportFloorplanPanel(
+            csv_win,
+            viewport=getattr(lam, "_viewport", None),
+            screen=si,
+        )
+        by_fp[si] = fp
+    if si > 1:
+        fp._viewport_window = tile_vw
+    elif tile_vw is not None:
+        fp._viewport_window = tile_vw
+    try:
+        fp.sync_layers(delay_frames=0 if tile_vw is not None else 12)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} floorplan panel sync: {exc}", flush=True)
 
     by_wafer = getattr(lam, "_wafer_foup_labels_by_screen", None)
     if not isinstance(by_wafer, dict):
