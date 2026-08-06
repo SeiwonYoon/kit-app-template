@@ -504,6 +504,8 @@ def _maybe_apply_occupancy_scheduler(
         assert blk is not None
         sch, blk = _ensure_buffer_to_foup_absolute_rules(sch, blk, dwells=dwells)
         assert blk is not None
+        sch, blk = _apply_atm_foup_place_gap_serial(sch, blk, dwells=dwells)
+        assert blk is not None
         sch = _stamp_schedule_row_ids(sch)
         blk = _reattach_block_schedules(blk, sch)
         texts = tuple(d.as_text() for d in diags)
@@ -2144,7 +2146,7 @@ def _place_schedule_entry(
         ),
         meaning_ko="공정 투어 종료 SSOT — ATM 팔의 wafer 를 FOUP 슬롯에 되돌림.",
         exec_ko=_foup_exec_hint(foup_index, cassette_slot, "place"),
-        step_count=len(steps),
+        step_count=len(steps or []),
         event_name=event,
         json_path=json_path,
         lot_id=str(lot_id or ""),
@@ -3059,6 +3061,148 @@ def _apply_arm_holding_order_swaps(
     return schedule, blocks
 
 
+# AtmArm-last FOUP place 직후 — 사이 끼어든 ATM 동작을 place 직후로 미룸 (정렬만, 삭제 없음)
+ATM_FOUP_PLACE_FOLLOW_GAP_SEC: float = 0.05
+
+
+def _occ_node_is_foup_place(
+    n: "_OccActionNode",
+    schedule: List[CsvPlaybackScheduleEntry],
+) -> bool:
+    if str(n.kind or "") != "place":
+        return False
+    if 0 <= int(n.sched_i) < len(schedule):
+        en = str(schedule[int(n.sched_i)].event_name or "")
+        return bool(re.match(r"^atm_foup\d+_place$", en, re.IGNORECASE))
+    return False
+
+
+def _occ_node_action_duration_sec(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]],
+    n: "_OccActionNode",
+) -> float:
+    if blocks is not None and 0 <= int(n.block_i) < len(blocks):
+        try:
+            return max(0.05, float(_atm_arm_action_duration_sec(blocks[int(n.block_i)])))
+        except Exception:
+            pass
+    return float(ATM_ARM_SERIAL_FALLBACK_DUR_SEC)
+
+
+def _apply_atm_foup_place_gap_serial(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
+    """AtmArm-last FOUP place 와 그 ``start~place`` 사이 ATM 동작을 place 직후로 미룸.
+
+    - FOUP place 자체·해당 wafer 의 place 이전 ATM 동작은 그대로 둔다.
+    - 사이(다른 wafer ATM 등)만 place 완료 시각 직후로 **시간을 옮겨** 이어 재생 (삭제 없음).
+    - ``aligner_fix`` 포함 전 plan 모드에서 적용.
+    """
+    _ = dwells
+    if not schedule:
+        return schedule, blocks
+
+    gap = float(ATM_FOUP_PLACE_FOLLOW_GAP_SEC)
+    max_passes = max(16, len(schedule) * 3)
+    for _pass in range(max_passes):
+        nodes = _collect_occ_action_nodes(schedule, blocks)
+        atm_nodes = [
+            n for n in nodes if str(n.arm or "") == LOGICAL_SLOT_ATM_ARM
+        ]
+        if not atm_nodes:
+            break
+        place_nodes = [
+            n for n in atm_nodes if _occ_node_is_foup_place(n, schedule)
+        ]
+        if not place_nodes:
+            break
+        place_nodes.sort(
+            key=lambda n: (
+                float(n.t),
+                int(n.ord),
+                int(n.sched_i) if n.sched_i >= 0 else int(n.block_i),
+            )
+        )
+        moved = False
+        for pn in place_nodes:
+            wafer_p = pn.wafer
+            t_place = float(pn.t)
+            # 같은 wafer 의 place 직전 마지막 ATM → window lo (없으면 place 직전 전 구간)
+            t_lo: Optional[float] = None
+            for n in atm_nodes:
+                if int(n.sched_i) == int(pn.sched_i) and int(n.block_i) == int(
+                    pn.block_i
+                ):
+                    continue
+                if wafer_p is not None and n.wafer == wafer_p and float(n.t) < t_place - 1e-12:
+                    if t_lo is None or float(n.t) > float(t_lo):
+                        t_lo = float(n.t)
+            if t_lo is None:
+                t_lo = t_place - 1.0e9
+
+            between: List[_OccActionNode] = []
+            for n in atm_nodes:
+                if int(n.sched_i) == int(pn.sched_i) and int(n.block_i) == int(
+                    pn.block_i
+                ):
+                    continue
+                tn = float(n.t)
+                if not (float(t_lo) + 1e-12 < tn < t_place - 1e-12):
+                    continue
+                # 같은 wafer 가 place 직전까지의 자기 ATM 동작은 유지
+                if wafer_p is not None and n.wafer == wafer_p:
+                    continue
+                between.append(n)
+            if not between:
+                continue
+
+            between.sort(
+                key=lambda n: (
+                    float(n.t),
+                    int(n.ord),
+                    int(n.sched_i) if n.sched_i >= 0 else int(n.block_i),
+                )
+            )
+            place_dur = _occ_node_action_duration_sec(schedule, blocks, pn)
+            cur_t = t_place + max(gap, float(place_dur))
+            for n in between:
+                old_t = float(n.t)
+                new_t = float(cur_t)
+                if abs(new_t - old_t) > 1e-9:
+                    try:
+                        print(
+                            f"{_PRINT_PREFIX} [atm-foup-place-serial] "
+                            f"defer ATM {n.kind}@{n.slot!r} wafer={n.wafer} "
+                            f"t={old_t:.3f}→{new_t:.3f}s "
+                            f"(after foup place wafer={wafer_p} @{t_place:.3f}s)",
+                            flush=True,
+                        )
+                    except Exception:
+                        pass
+                    # place 직후·서로 직렬 — pick 계열 sort 유지
+                    new_ord = int(n.ord)
+                    _commit_action_node_time(
+                        schedule, blocks, n, new_t, new_ord=new_ord
+                    )
+                    moved = True
+                dur = _occ_node_action_duration_sec(schedule, blocks, n)
+                cur_t = new_t + max(gap, float(dur))
+
+        if not moved:
+            break
+        schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
+        if blocks is not None:
+            blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
+
+    schedule.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))
+    if blocks is not None:
+        blocks.sort(key=lambda b: (float(b.time_sec), int(b.sort_order)))
+    return schedule, blocks
+
+
 def _apply_atm_arm_place_before_pick(
     schedule: List[CsvPlaybackScheduleEntry],
     blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
@@ -3277,6 +3421,7 @@ def build_csv_playback_schedule_meta(
     schedule, _ = _ensure_buffer_to_foup_absolute_rules(
         schedule, None, dwells=dwells
     )
+    schedule, _ = _apply_atm_foup_place_gap_serial(schedule, None, dwells=dwells)
     return _stamp_schedule_row_ids(schedule)
 
 
@@ -3375,20 +3520,27 @@ def build_csv_playback_plan(
                         cassette_slot=cassette_slot,
                         pick_or_place="place",
                     )
-                    if place_st:
-                        ent = _place_schedule_entry(
-                            time_sec=last.end_sec,
-                            foup_index=foup_n,
-                            cassette_slot=cassette_slot,
-                            lot_id=lot_id,
-                            steps=place_st,
+                    if not place_st:
+                        _lam_sim_log_build(
+                            "csv_tour",
+                            f"FOUP place steps empty — entry still inserted "
+                            f"(foup{foup_n} slot={cassette_slot} lot={lot_id!r})",
                         )
-                        schedule.append(ent)
-                        blocks.append(
-                            _block_from_schedule(
-                                ent, place_st, label=f"foup{foup_n}_place({cassette_slot})"
-                            )
+                    ent = _place_schedule_entry(
+                        time_sec=last.end_sec,
+                        foup_index=foup_n,
+                        cassette_slot=cassette_slot,
+                        lot_id=lot_id,
+                        steps=place_st or [],
+                    )
+                    schedule.append(ent)
+                    blocks.append(
+                        _block_from_schedule(
+                            ent,
+                            place_st or [],
+                            label=f"foup{foup_n}_place({cassette_slot})",
                         )
+                    )
                 except Exception as exc:
                     _lam_sim_log_build("csv_tour", f"FOUP place skip: {exc}")
                 if progress is not None:
@@ -3407,6 +3559,11 @@ def build_csv_playback_plan(
     schedule, blocks = _enforce_aligner_absolute_rules(schedule, blocks)
     assert blocks is not None
     schedule, blocks = _ensure_buffer_to_foup_absolute_rules(
+        schedule, blocks, dwells=dwells
+    )
+    assert blocks is not None
+    # AtmArm-last FOUP place 사이 ATM 동작 → place 직후 이어재생 (삭제 없음)
+    schedule, blocks = _apply_atm_foup_place_gap_serial(
         schedule, blocks, dwells=dwells
     )
     assert blocks is not None
