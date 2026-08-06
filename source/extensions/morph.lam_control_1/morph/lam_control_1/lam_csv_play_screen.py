@@ -57,6 +57,12 @@ class CsvPlayScreenSession:
     timeline_highlight_cb: Optional[Callable[[frozenset], None]] = None
     timeline_active_keys_lock: threading.Lock = field(default_factory=threading.Lock)
     timeline_active_keys: set = field(default_factory=set)
+    # 화면별 Current State — 실행 중 JSON 스택(최근 begin 이 맨 뒤).
+    # 항목: (match_key, soft_key, state_line, cassette_slot, lot_id)
+    live_status_lock: threading.Lock = field(default_factory=threading.Lock)
+    live_status_stack: List[Tuple[Any, Any, str, int, str]] = field(default_factory=list)
+    live_status_last_cassette: int = 0
+    live_status_last_lot: str = ""
     progress_snap_lock: threading.RLock = field(default_factory=threading.RLock)
     progress_snap: Dict[str, Any] = field(
         default_factory=lambda: {

@@ -235,25 +235,38 @@ def build_status_panel_snapshot(
         cur_dwell = None
     else:
         time_s = _format_status_time_line(ps, screen=si)
-        active_state = ""
+        # 화면별 실시간 실행 스택(최근 begin JSON) — ATM/VTM place·pick 등 웨이퍼 즉시 반영
+        display_state = ""
         try:
-            from .simulation_play import (  # type: ignore
-                _schedule_entry_matches_active,
-                get_csv_play_timeline_active_keys_snap,
-            )
+            from .simulation_play import get_csv_play_live_status_state  # type: ignore
 
-            active = get_csv_play_timeline_active_keys_snap(screen=si)
-            for e in getattr(csv_window, "_schedule_row_entries", []) or []:
-                if not _schedule_entry_matches_active(e, active):
-                    continue
-                candidate = _format_current_state_line(e)
-                if candidate:
-                    active_state = candidate
-                    set_last_state_title(active_state, screen=si)
-                    break
+            display_state = str(get_csv_play_live_status_state(screen=si) or "").strip()
         except Exception:
-            pass
-        display_state = active_state or get_last_state_title(screen=si)
+            display_state = ""
+        if not display_state:
+            # fallback: active 키 중 time_sec 최신 행 (예전 첫 매칭 잔상 완화)
+            try:
+                from .simulation_play import (  # type: ignore
+                    _schedule_entry_matches_active,
+                    get_csv_play_timeline_active_keys_snap,
+                )
+
+                active = get_csv_play_timeline_active_keys_snap(screen=si)
+                matched: list = []
+                for e in getattr(csv_window, "_schedule_row_entries", []) or []:
+                    if not _schedule_entry_matches_active(e, active):
+                        continue
+                    candidate = _format_current_state_line(e)
+                    if candidate:
+                        matched.append((float(getattr(e, "time_sec", 0.0) or 0.0), candidate))
+                if matched:
+                    matched.sort(key=lambda x: x[0])
+                    display_state = matched[-1][1]
+                    set_last_state_title(display_state, screen=si)
+            except Exception:
+                pass
+            if not display_state:
+                display_state = get_last_state_title(screen=si)
 
         cur_dwell = _current_dwell_for_csv_t(csv_window, csv_t)
         eqp_id_val = ""
@@ -274,6 +287,21 @@ def build_status_panel_snapshot(
             return str(STATUS_PANEL_EQ_MODEL_VALUE or "").strip()
         if key in ("eqp_id", "eqpid", "eqp-id"):
             return str(eqp_id_val or "").strip()
+        # wafer 번호 / lot — 실행 중 JSON 웨이퍼 우선 (dwell 시각 겹침으로 이전 슬롯이 남는 문제 방지)
+        live_cas = 0
+        live_lot = ""
+        try:
+            from .simulation_play import get_csv_play_live_status_wafer  # type: ignore
+
+            live_cas, live_lot = get_csv_play_live_status_wafer(screen=si)
+        except Exception:
+            live_cas, live_lot = 0, ""
+        if key in ("cassette_slot", "slot", "wafer", "wafer_번호", "wafer번호"):
+            if int(live_cas or 0) > 0:
+                return str(int(live_cas))
+        if key in ("lot_id", "lot"):
+            if str(live_lot or "").strip():
+                return str(live_lot).strip()
         if cur_dwell is not None:
             if hasattr(cur_dwell, key):
                 try:

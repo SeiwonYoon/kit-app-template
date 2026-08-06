@@ -287,7 +287,8 @@ class StatusRowSpec:
       예: "{eqp_id}", "{lot_id}", "{cassette_slot}", "{module_nm}"
     - 예약 토큰(대소문자 무시):
       - "{time}": ``재생 0.9%`` / ``t 15/1774s`` / ``실경과 16s/1774s`` (3줄, 스냅샷·배속 기준)
-      - "{state}": ``웨이퍼#N · lot_id · event_json`` (JSON은 이름만, dwell 시 JSON 생략) — 일시정지/dwell 시 마지막 값 유지
+      - "{state}": ``웨이퍼#N · lot_id · event_json`` — **화면별** 최근 실행 JSON
+        (ATM/VTM pick·place 등 begin) 기준으로 실시간 갱신. 실행 갭·일시정지 시 직전 값 유지
       - "{eq_model}": `STATUS_PANEL_EQ_MODEL_VALUE` (기본 수동값; 필요 시 사용)
 
     레이아웃:
@@ -321,7 +322,7 @@ STATUS_PANEL_ROWS: List[StatusRowSpec] = [
         value="{eqp_id}",
         height_px=STATUS_PANEL_ROW_HEIGHT_PX,
     ),
-    # wafer 번호 매핑 예시
+    # wafer 번호 — 실행 중 JSON 의 cassette_slot 우선 (Current State 와 동기)
     StatusRowSpec(
         key="cassette_slot",
         name="wafer 번호",

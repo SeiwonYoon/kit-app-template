@@ -3834,12 +3834,61 @@ def _csv_play_timeline_highlight_notify(
     _post_kit_main_thread(_ui)
 
 
+def _status_state_line_from_schedule_entry(sched: CsvPlaybackScheduleEntry) -> str:
+    """STATUS Current State — 웨이퍼# · lot · event (실행 중인 스케줄 엔트리 기준)."""
+    sep = " · "
+    try:
+        from .lam_viewport_overlay_config import STATUS_PANEL_STATE_SEP
+
+        sep = str(STATUS_PANEL_STATE_SEP or sep)
+    except Exception:
+        pass
+    cas, lot = _status_wafer_lot_from_schedule_entry(sched)
+    parts: List[str] = []
+    if cas > 0:
+        parts.append(f"웨이퍼#{cas}")
+    if lot:
+        parts.append(lot)
+    event = str(getattr(sched, "event_name", "") or "").strip()
+    if event.endswith(".json"):
+        event = event[:-5]
+    if event:
+        parts.append(event)
+    return sep.join(parts)
+
+
+def _status_wafer_lot_from_schedule_entry(
+    sched: CsvPlaybackScheduleEntry,
+) -> Tuple[int, str]:
+    """실행 스케줄 → (cassette_slot, lot_id)."""
+    try:
+        cas = int(getattr(sched, "cassette_slot", 0) or 0)
+    except Exception:
+        cas = 0
+    if cas <= 0:
+        title = str(getattr(sched, "title_ko", "") or "")
+        m = re.search(r"웨이퍼#(\d+)", title)
+        if m:
+            try:
+                cas = int(m.group(1))
+            except Exception:
+                cas = 0
+    lot = str(getattr(sched, "lot_id", "") or "").strip()
+    if not lot:
+        title = str(getattr(sched, "title_ko", "") or "")
+        m = re.search(r"lot=['\"]([^'\"]+)['\"]", title)
+        if m:
+            lot = m.group(1).strip()
+    return int(cas), str(lot)
+
+
 def _csv_play_timeline_row_begin_entry(
     sched: CsvPlaybackScheduleEntry,
     *,
     screen: Optional[int] = None,
 ) -> None:
     key = _schedule_entry_match_key(sched)
+    soft = _schedule_entry_soft_match_key(sched)
     si = max(1, int(screen if screen is not None else current_csv_play_screen()))
     try:
         from .lam_viewport_overlay_state import record_foup_event_from_schedule_entry
@@ -3847,15 +3896,30 @@ def _csv_play_timeline_row_begin_entry(
         record_foup_event_from_schedule_entry(sched, screen=si)
     except Exception:
         pass
+    state_line = _status_state_line_from_schedule_entry(sched)
+    cas, lot = _status_wafer_lot_from_schedule_entry(sched)
     sess = csv_play_screen_session(si)
     with sess.timeline_active_keys_lock:
         sess.timeline_active_keys.add(key)
         # time_sec 이 UI 행과 어긋나도 Current State 매칭되도록 soft 키도 함께 등록
         try:
-            sess.timeline_active_keys.add(_schedule_entry_soft_match_key(sched))
+            sess.timeline_active_keys.add(soft)
         except Exception:
             pass
         snap = frozenset(sess.timeline_active_keys)
+    with sess.live_status_lock:
+        sess.live_status_stack.append((key, soft, state_line, int(cas), str(lot)))
+        if cas > 0:
+            sess.live_status_last_cassette = int(cas)
+        if lot:
+            sess.live_status_last_lot = str(lot)
+    if state_line:
+        try:
+            from .lam_viewport_overlay_state import set_last_state_title
+
+            set_last_state_title(state_line, screen=si)
+        except Exception:
+            pass
     _csv_play_timeline_highlight_notify(snap, screen=si)
 
 
@@ -3865,15 +3929,36 @@ def _csv_play_timeline_row_end_entry(
     screen: Optional[int] = None,
 ) -> None:
     key = _schedule_entry_match_key(sched)
+    soft = _schedule_entry_soft_match_key(sched)
     si = max(1, int(screen if screen is not None else current_csv_play_screen()))
     sess = csv_play_screen_session(si)
     with sess.timeline_active_keys_lock:
         sess.timeline_active_keys.discard(key)
         try:
-            sess.timeline_active_keys.discard(_schedule_entry_soft_match_key(sched))
+            sess.timeline_active_keys.discard(soft)
         except Exception:
             pass
         snap = frozenset(sess.timeline_active_keys)
+    with sess.live_status_lock:
+        kept: List[Tuple[Any, Any, str, int, str]] = []
+        for item in sess.live_status_stack:
+            if item[0] == key or item[1] == soft:
+                continue
+            kept.append(item)
+        sess.live_status_stack = kept
+        # 아직 실행 중이면 가장 최근 begin 웨이퍼로. 없으면 last_* 유지(갭 구간).
+        if kept:
+            top = kept[-1]
+            if int(top[3] or 0) > 0:
+                sess.live_status_last_cassette = int(top[3])
+            if str(top[4] or "").strip():
+                sess.live_status_last_lot = str(top[4])
+            try:
+                from .lam_viewport_overlay_state import set_last_state_title
+
+                set_last_state_title(str(top[2] or ""), screen=si)
+            except Exception:
+                pass
     _csv_play_timeline_highlight_notify(snap, screen=si)
 
 
@@ -3883,7 +3968,45 @@ def clear_csv_play_timeline_highlight(*, screen: Optional[int] = None) -> None:
     sess = csv_play_screen_session(si)
     with sess.timeline_active_keys_lock:
         sess.timeline_active_keys.clear()
+    with sess.live_status_lock:
+        sess.live_status_stack.clear()
+        sess.live_status_last_cassette = 0
+        sess.live_status_last_lot = ""
     _csv_play_timeline_highlight_notify(frozenset(), screen=si)
+
+
+def get_csv_play_live_status_state(*, screen: Optional[int] = None) -> str:
+    """화면별 Current State — 실행 중이면 최근 begin 웨이퍼, 없으면 직전 유지값."""
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
+    sess = csv_play_screen_session(si)
+    with sess.live_status_lock:
+        if sess.live_status_stack:
+            return str(sess.live_status_stack[-1][2] or "")
+    try:
+        from .lam_viewport_overlay_state import get_last_state_title
+
+        return str(get_last_state_title(screen=si) or "")
+    except Exception:
+        return ""
+
+
+def get_csv_play_live_status_wafer(
+    *, screen: Optional[int] = None
+) -> Tuple[int, str]:
+    """화면별 실행 중(또는 직전) 웨이퍼 ``(cassette_slot, lot_id)``.
+
+    STATUS ``wafer 번호`` 행이 CSV dwell 시각과 다른 웨이퍼를 보이는 것을 막기 위해
+    JSON begin 기준 값을 우선한다.
+    """
+    si = max(1, int(screen if screen is not None else current_csv_play_screen()))
+    sess = csv_play_screen_session(si)
+    with sess.live_status_lock:
+        if sess.live_status_stack:
+            top = sess.live_status_stack[-1]
+            return int(top[3] or 0), str(top[4] or "")
+        return int(sess.live_status_last_cassette or 0), str(
+            sess.live_status_last_lot or ""
+        )
 
 
 def get_csv_play_timeline_active_keys_snap(*, screen: Optional[int] = None) -> frozenset:
@@ -10886,6 +11009,8 @@ __all__ = [
     "register_csv_play_timeline_window",
     "unregister_csv_play_timeline_window",
     "clear_csv_play_timeline_highlight",
+    "get_csv_play_live_status_state",
+    "get_csv_play_live_status_wafer",
     "format_csv_playback_schedule_row",
     "is_csv_bulk_build_active",
     "CachedCsvPlayback",
