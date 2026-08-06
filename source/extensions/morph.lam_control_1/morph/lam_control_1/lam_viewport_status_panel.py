@@ -13,17 +13,24 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 from .lam_viewport_overlay_config import (
     STATUS_PANEL_BG_COLOR_HEX,
     STATUS_PANEL_BORDER_COLOR_HEX,
+    STATUS_PANEL_BORDER_RADIUS,
+    STATUS_PANEL_BORDER_WIDTH,
+    STATUS_PANEL_CONTENT_PADDING_PX,
     STATUS_PANEL_EQ_MODEL_VALUE,
+    STATUS_PANEL_HEIGHT_PX,
     STATUS_PANEL_LABEL_COL_WIDTH_PX,
     STATUS_PANEL_LABEL_COLOR_HEX,
     STATUS_PANEL_PADDING_PX,
     STATUS_PANEL_ROW_BG_HEX,
     STATUS_PANEL_ROW_FONT_SIZE,
+    STATUS_PANEL_ROW_SEP_COLOR_HEX,
+    STATUS_PANEL_ROW_SEP_HEIGHT_PX,
+    STATUS_PANEL_ROW_SEP_INSET_PX,
     STATUS_PANEL_ROWS,
     STATUS_PANEL_STATE_SEP,
+    STATUS_PANEL_TABLE_BORDER_WIDTH,
     STATUS_PANEL_TEXT_COLOR_HEX,
     STATUS_PANEL_TITLE,
-    STATUS_PANEL_TITLE_FONT_SIZE,
     STATUS_PANEL_WIDTH_PX,
 )
 from .lam_viewport_overlay_state import (
@@ -649,45 +656,58 @@ class LamViewportStatusPanel:
                         with ui.HStack():
                             ui.Spacer()
                             panel_w = int(STATUS_PANEL_WIDTH_PX)
+                            panel_h = max(0, int(STATUS_PANEL_HEIGHT_PX))
                             pad = int(STATUS_PANEL_PADDING_PX)
+                            content_pad = int(STATUS_PANEL_CONTENT_PADDING_PX)
                             label_w = int(STATUS_PANEL_LABEL_COL_WIDTH_PX)
-                            # 값 컬럼은 고정 너비로 강제 (패널이 내용에 따라 커지지 않도록)
-                            # spacing(10) + 내부 좌/우 여백을 고려해 약간 보수적으로 잡음
-                            value_w = max(20, panel_w - (pad * 2) - label_w - 18)
+                            sep_inset = max(0, int(STATUS_PANEL_ROW_SEP_INSET_PX))
+                            # 정수 px 고정 — 1px+서브픽셀 안티앨리어싱으로 두께가 들쭉날쭉해 보이는 것 완화
+                            sep_h = max(1, int(STATUS_PANEL_ROW_SEP_HEIGHT_PX))
+                            # 값 컬럼은 고정 너비 — 좌우 content 패딩·라벨 폭 반영
+                            value_w = max(
+                                20,
+                                panel_w - (pad * 2) - (content_pad * 2) - label_w - 18,
+                            )
+                            border_w = max(0, int(STATUS_PANEL_BORDER_WIDTH))
+                            table_border_w = max(0, int(STATUS_PANEL_TABLE_BORDER_WIDTH))
+                            radius = max(0, int(STATUS_PANEL_BORDER_RADIUS))
 
-                            with ui.Frame(
-                                width=panel_w,
-                                style={
+                            _frame_kw: Dict[str, Any] = {
+                                "width": panel_w,
+                                "style": {
                                     "background_color": int(STATUS_PANEL_BG_COLOR_HEX),
-                                    "border_width": 1,
+                                    "border_width": border_w,
                                     "border_color": int(STATUS_PANEL_BORDER_COLOR_HEX),
-                                    "border_radius": 4,
+                                    "border_radius": radius,
                                     "padding": pad,
                                 },
-                            ):
+                            }
+                            if panel_h > 0:
+                                _frame_kw["height"] = panel_h
+                            with ui.Frame(**_frame_kw):
                                 with ui.VStack(spacing=6, width=panel_w):
-                                    # ui.Label(
-                                    #     str(STATUS_PANEL_TITLE or "STATUS"),
-                                    #     height=18,
-                                    #     style={
-                                    #         "font_size": int(STATUS_PANEL_TITLE_FONT_SIZE),
-                                    #         "color": int(STATUS_PANEL_TEXT_COLOR_HEX),
-                                    #     },
-                                    # )
-
-                                    # 표(테이블): 전체 테두리 1개 + 내부 구분선만
+                                    # 표: 외곽 테두리는 defaults 의 TABLE_BORDER_WIDTH
+                                    # 행 구분선은 inset 적용 (좌우 끝까지 안 붙임)
                                     with ui.Frame(
                                         width=panel_w - pad * 2,
                                         style={
-                                            "border_width": 1,
-                                            "border_color": int(STATUS_PANEL_BORDER_COLOR_HEX),
-                                            "border_radius": 2,
+                                            "border_width": table_border_w,
+                                            "border_color": int(
+                                                STATUS_PANEL_BORDER_COLOR_HEX
+                                            ),
+                                            "border_radius": max(0, radius - 2)
+                                            if radius > 0
+                                            else 0,
                                         },
                                     ):
-                                        with ui.VStack(spacing=0, width=panel_w - pad * 2):
+                                        with ui.VStack(
+                                            spacing=0, width=panel_w - pad * 2
+                                        ):
 
                                             def _row(spec, *, draw_sep: bool) -> None:
-                                                h = int(getattr(spec, "height_px", 26) or 26)
+                                                h = int(
+                                                    getattr(spec, "height_px", 26) or 26
+                                                )
                                                 label_fs = int(
                                                     getattr(
                                                         spec,
@@ -704,19 +724,32 @@ class LamViewportStatusPanel:
                                                     )
                                                     or STATUS_PANEL_ROW_FONT_SIZE
                                                 )
-                                                with ui.ZStack(height=h, width=panel_w - pad * 2):
+                                                inner_w = panel_w - pad * 2
+                                                with ui.ZStack(height=h, width=inner_w):
                                                     ui.Rectangle(
-                                                        style={"background_color": int(STATUS_PANEL_ROW_BG_HEX)}
+                                                        style={
+                                                            "background_color": int(
+                                                                STATUS_PANEL_ROW_BG_HEX
+                                                            )
+                                                        }
                                                     )
-                                                    with ui.HStack(height=h, spacing=10):
+                                                    with ui.HStack(
+                                                        height=h, spacing=0
+                                                    ):
+                                                        ui.Spacer(width=content_pad)
                                                         ui.Label(
-                                                            str(getattr(spec, "name", "")),
+                                                            str(
+                                                                getattr(spec, "name", "")
+                                                            ),
                                                             width=label_w,
                                                             style={
                                                                 "font_size": label_fs,
-                                                                "color": int(STATUS_PANEL_LABEL_COLOR_HEX),
+                                                                "color": int(
+                                                                    STATUS_PANEL_LABEL_COLOR_HEX
+                                                                ),
                                                             },
                                                         )
+                                                        ui.Spacer(width=8)
                                                         v = ui.Label(
                                                             "",
                                                             width=value_w,
@@ -724,23 +757,62 @@ class LamViewportStatusPanel:
                                                             word_wrap=True,
                                                             style={
                                                                 "font_size": value_fs,
-                                                                "color": int(STATUS_PANEL_TEXT_COLOR_HEX),
+                                                                "color": int(
+                                                                    STATUS_PANEL_TEXT_COLOR_HEX
+                                                                ),
                                                             },
                                                         )
-                                                        self._labels[str(getattr(spec, "key", ""))] = v
-                                                if draw_sep:
-                                                    ui.Rectangle(
-                                                        height=1,
-                                                        style={
-                                                            "background_color": int(
-                                                                STATUS_PANEL_BORDER_COLOR_HEX
+                                                        self._labels[
+                                                            str(
+                                                                getattr(spec, "key", "")
                                                             )
-                                                        },
+                                                        ] = v
+                                                        ui.Spacer(width=content_pad)
+                                                if draw_sep:
+                                                    # 가로선: Spacer 없이 고정 너비 Rectangle 3개
+                                                    # (서브픽셀 늘어남/안티앨리어싱으로 두께가 달라 보이는 것 방지)
+                                                    mid_w = max(
+                                                        1, int(inner_w) - (sep_inset * 2)
                                                     )
+                                                    with ui.HStack(
+                                                        height=sep_h,
+                                                        width=inner_w,
+                                                        spacing=0,
+                                                    ):
+                                                        ui.Rectangle(
+                                                            width=sep_inset,
+                                                            height=sep_h,
+                                                            style={
+                                                                "background_color": int(
+                                                                    STATUS_PANEL_ROW_BG_HEX
+                                                                )
+                                                            },
+                                                        )
+                                                        ui.Rectangle(
+                                                            width=mid_w,
+                                                            height=sep_h,
+                                                            style={
+                                                                "background_color": int(
+                                                                    STATUS_PANEL_ROW_SEP_COLOR_HEX
+                                                                )
+                                                            },
+                                                        )
+                                                        ui.Rectangle(
+                                                            width=sep_inset,
+                                                            height=sep_h,
+                                                            style={
+                                                                "background_color": int(
+                                                                    STATUS_PANEL_ROW_BG_HEX
+                                                                )
+                                                            },
+                                                        )
 
                                             rows = list(STATUS_PANEL_ROWS or [])
                                             for i, spec in enumerate(rows):
-                                                _row(spec, draw_sep=(i != len(rows) - 1))
+                                                _row(
+                                                    spec,
+                                                    draw_sep=(i != len(rows) - 1),
+                                                )
                             ui.Spacer(width=10)
         except Exception as exc:
             print(
