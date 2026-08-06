@@ -24,11 +24,98 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 
 _PRINT_PREFIX = "[LAM/Extract]"
+
+# Open/자동 Extract 배치에서 인스턴스마다 stage.Flatten() 을 반복하지 않기 위한 캐시.
+# 동작(CopySpec·스캔·attach)은 동일 — Flatten 결과 layer 만 재사용.
+_flatten_cache_depth: int = 0
+_flatten_cache_stage_id: Optional[int] = None
+_flatten_cache_layer: Optional[Any] = None
+
+
+def clear_master_flatten_cache() -> None:
+    """Flatten 캐시 강제 해제 (Master 재오픈·스테이지 교체 시)."""
+    global _flatten_cache_depth, _flatten_cache_stage_id, _flatten_cache_layer
+    _flatten_cache_depth = 0
+    _flatten_cache_stage_id = None
+    _flatten_cache_layer = None
+
+
+def begin_master_flatten_cache(stage: Any) -> None:
+    """동일 stage 에 대한 Extract 배치 시작 — Flatten 은 첫 호출에서만 수행."""
+    global _flatten_cache_depth, _flatten_cache_stage_id, _flatten_cache_layer
+    if stage is None:
+        return
+    sid = id(stage)
+    if _flatten_cache_depth <= 0:
+        _flatten_cache_stage_id = sid
+        _flatten_cache_layer = None
+        _flatten_cache_depth = 1
+        return
+    # 중첩 begin: stage 가 바뀌면 캐시 무효 후 새 키
+    if _flatten_cache_stage_id != sid:
+        _flatten_cache_stage_id = sid
+        _flatten_cache_layer = None
+    _flatten_cache_depth += 1
+
+
+def end_master_flatten_cache() -> None:
+    """Extract 배치 종료 — depth 0 에서 layer 참조 해제."""
+    global _flatten_cache_depth, _flatten_cache_stage_id, _flatten_cache_layer
+    if _flatten_cache_depth <= 0:
+        return
+    _flatten_cache_depth -= 1
+    if _flatten_cache_depth <= 0:
+        _flatten_cache_depth = 0
+        _flatten_cache_stage_id = None
+        _flatten_cache_layer = None
+
+
+@contextmanager
+def master_flatten_cache(stage: Any) -> Iterator[None]:
+    """``with master_flatten_cache(stage):`` — 배치 Extract 동안 Flatten 1회."""
+    begin_master_flatten_cache(stage)
+    try:
+        yield
+    finally:
+        end_master_flatten_cache()
+
+
+def _resolve_flattened_master_layer(stage: Any) -> Any:
+    """``stage.Flatten()`` — 캐시 active 이면 동일 stage 결과를 재사용."""
+    global _flatten_cache_layer
+    if stage is None:
+        return None
+    sid = id(stage)
+    if (
+        _flatten_cache_depth > 0
+        and _flatten_cache_stage_id == sid
+        and _flatten_cache_layer is not None
+    ):
+        print(
+            f"{_PRINT_PREFIX} Flatten cache HIT stage_id={sid}",
+            flush=True,
+        )
+        return _flatten_cache_layer
+
+    flat = stage.Flatten()
+    if (
+        _flatten_cache_depth > 0
+        and _flatten_cache_stage_id == sid
+        and flat is not None
+    ):
+        _flatten_cache_layer = flat
+        print(
+            f"{_PRINT_PREFIX} Flatten cache STORE stage_id={sid} "
+            f"(reuse for remaining extracts in batch)",
+            flush=True,
+        )
+    return flat
 
 
 @dataclass
@@ -572,8 +659,9 @@ def extract_subtree_to_anonymous_layer(
         result.discovered_asset_path = ""
 
     # 1) 모든 composition 을 평가한 단일 layer 로 flatten.
+    #    배치 Extract(자동 로드 등)에서는 master_flatten_cache 로 1회만 Flatten.
     try:
-        flat = stage.Flatten()
+        flat = _resolve_flattened_master_layer(stage)
     except Exception as exc:
         result.error = f"stage.Flatten() 실패: {exc}"
         result.elapsed_sec = time.perf_counter() - t0
@@ -758,8 +846,12 @@ def dump_layer_to_usda_text(layer: Any, *, header_lines: Optional[list] = None) 
 
 __all__ = [
     "ExtractResult",
+    "begin_master_flatten_cache",
+    "clear_master_flatten_cache",
+    "end_master_flatten_cache",
     "extract_subtree_to_anonymous_layer",
     "dump_layer_to_usda_text",
+    "master_flatten_cache",
     "scan_layer_timesample_stats",
     "normalize_asset_uri_to_path",
     "discover_drag_drop_asset_root_prim",

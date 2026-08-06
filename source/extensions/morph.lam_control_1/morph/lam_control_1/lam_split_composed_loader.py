@@ -911,6 +911,7 @@ def hydrate_split_screen_composed_stage(
                     f"{_PRINT_PREFIX} screen{si} sync metadata failed: {exc}",
                     flush=True,
                 )
+        extract_pps: List[str] = []
         for inst in registry.all_instances():
             pp = str(getattr(inst, "prim_path", "") or "").strip()
             if not pp:
@@ -924,8 +925,29 @@ def hydrate_split_screen_composed_stage(
                     )
             if ok_rep:
                 replicated += 1
-            elif _extract_one(evaluator, pp, log_tag=f"split-extract-{si}"):
-                extracted += 1
+            else:
+                extract_pps.append(pp)
+        if extract_pps:
+            try:
+                from .lam_extract_from_master import master_flatten_cache
+
+                stage = master.get_stage()
+            except Exception:
+                master_flatten_cache = None  # type: ignore
+                stage = None
+            if callable(master_flatten_cache) and stage is not None:
+                with master_flatten_cache(stage):
+                    for pp in extract_pps:
+                        if _extract_one(
+                            evaluator, pp, log_tag=f"split-extract-{si}"
+                        ):
+                            extracted += 1
+            else:
+                for pp in extract_pps:
+                    if _extract_one(
+                        evaluator, pp, log_tag=f"split-extract-{si}"
+                    ):
+                        extracted += 1
 
     if (not independent_aux) and main_instances and main_rt is not None and main_rt.master is not None:
         _sync_main_mirror_state_before_replicate(main_rt)
@@ -936,6 +958,7 @@ def hydrate_split_screen_composed_stage(
             f"instances={len(main_instances)} inst_sublayers={sublayers}",
             flush=True,
         )
+        extract_fail: List[str] = []
         for inst in main_instances:
             pp = str(getattr(inst, "prim_path", "") or "").strip()
             if not pp:
@@ -943,10 +966,30 @@ def hydrate_split_screen_composed_stage(
             _replicate_inst_sublayer(main_rt.master, master, pp)
             ok_rep = _attach_from_main_baked(evaluator, main_rt.evaluator, inst)
             if not ok_rep:
-                if _extract_one(evaluator, pp, log_tag=f"split-extract-{si}"):
-                    extracted += 1
+                extract_fail.append(pp)
             else:
                 replicated += 1
+        if extract_fail:
+            try:
+                from .lam_extract_from_master import master_flatten_cache
+
+                _st = master.get_stage()
+            except Exception:
+                master_flatten_cache = None  # type: ignore
+                _st = None
+            if callable(master_flatten_cache) and _st is not None:
+                with master_flatten_cache(_st):
+                    for pp in extract_fail:
+                        if _extract_one(
+                            evaluator, pp, log_tag=f"split-extract-{si}"
+                        ):
+                            extracted += 1
+            else:
+                for pp in extract_fail:
+                    if _extract_one(
+                        evaluator, pp, log_tag=f"split-extract-{si}"
+                    ):
+                        extracted += 1
     elif not independent_aux:
         try:
             added = CompositionDiscovery(master, registry).discover()
@@ -956,10 +999,32 @@ def hydrate_split_screen_composed_stage(
             )
         except Exception as exc:
             print(f"{_PRINT_PREFIX} screen{si} discover failed: {exc}", flush=True)
-        for inst in registry.all_instances():
-            pp = str(getattr(inst, "prim_path", "") or "").strip()
-            if pp and _extract_one(evaluator, pp, log_tag=f"split-extract-{si}"):
-                extracted += 1
+        extract_pps2 = [
+            str(getattr(inst, "prim_path", "") or "").strip()
+            for inst in registry.all_instances()
+            if str(getattr(inst, "prim_path", "") or "").strip()
+        ]
+        if extract_pps2:
+            try:
+                from .lam_extract_from_master import master_flatten_cache
+
+                _st2 = master.get_stage()
+            except Exception:
+                master_flatten_cache = None  # type: ignore
+                _st2 = None
+            if callable(master_flatten_cache) and _st2 is not None:
+                with master_flatten_cache(_st2):
+                    for pp in extract_pps2:
+                        if _extract_one(
+                            evaluator, pp, log_tag=f"split-extract-{si}"
+                        ):
+                            extracted += 1
+            else:
+                for pp in extract_pps2:
+                    if _extract_one(
+                        evaluator, pp, log_tag=f"split-extract-{si}"
+                    ):
+                        extracted += 1
 
     aux_wn = f"LAM_SimSplit_{max(1, int(si) - 1)}"
     wrote = _activate_aux_split_display(
@@ -971,14 +1036,35 @@ def hydrate_split_screen_composed_stage(
 
     aux_inst_count = len(list(registry.all_instances()))
     if main_rt is not None and wrote < aux_inst_count:
+        retry_pps: List[str] = []
         for inst in registry.all_instances():
             pp = str(getattr(inst, "prim_path", "") or "").strip()
             if not pp:
                 continue
             if not independent_aux and main_instances and main_rt.master is not None:
                 _replicate_inst_sublayer(main_rt.master, master, pp)
-            if _extract_one(evaluator, pp, log_tag=f"split-extract-retry-{si}"):
-                extracted += 1
+            retry_pps.append(pp)
+        if retry_pps:
+            try:
+                from .lam_extract_from_master import master_flatten_cache
+
+                _st3 = master.get_stage()
+            except Exception:
+                master_flatten_cache = None  # type: ignore
+                _st3 = None
+            if callable(master_flatten_cache) and _st3 is not None:
+                with master_flatten_cache(_st3):
+                    for pp in retry_pps:
+                        if _extract_one(
+                            evaluator, pp, log_tag=f"split-extract-retry-{si}"
+                        ):
+                            extracted += 1
+            else:
+                for pp in retry_pps:
+                    if _extract_one(
+                        evaluator, pp, log_tag=f"split-extract-retry-{si}"
+                    ):
+                        extracted += 1
         wrote = _activate_aux_split_display(
             evaluator,
             main_rt.evaluator,
