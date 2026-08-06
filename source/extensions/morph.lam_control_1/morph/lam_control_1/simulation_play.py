@@ -468,12 +468,12 @@ def _csv_playback_config_tag() -> str:
         )
 
         mode = csv_playback_plan_mode()
-        # atm_end_foup=1: 투어 끝 AtmArm → FOUP place 합성 SSOT (Buffer 전용 강제 규칙 폐지)
-        tag = f"{tag}|plan={mode}|atm_end_foup=1"
+        # atm_end_foup=2: FOUP(웨이퍼)별 AtmArm-last place + 사이 타 ATM defer
+        tag = f"{tag}|plan={mode}|atm_end_foup=2"
         if occupancy_scheduler_enabled():
             tag = f"{tag}|occ_order_swap=2|occ=1"
     except Exception:
-        tag = f"{tag}|occ_order_swap=2|atm_end_foup=1"
+        tag = f"{tag}|occ_order_swap=2|atm_end_foup=2"
     return tag
 
 
@@ -2627,6 +2627,20 @@ def _wafer_id_from_schedule_title(title: str) -> Optional[Tuple[str, int]]:
     return None
 
 
+def _wafer_id_from_schedule_entry(ent: Any) -> Optional[Tuple[str, int]]:
+    """스케줄 엔트리의 lot/cassette (FOUP별 웨이퍼 식별). title 파싱은 fallback."""
+    if ent is None:
+        return None
+    lid = str(getattr(ent, "lot_id", "") or "").strip()
+    try:
+        cas = int(getattr(ent, "cassette_slot", 0) or 0)
+    except Exception:
+        cas = 0
+    if lid and cas >= 0:
+        return (lid, cas)
+    return _wafer_id_from_schedule_title(str(getattr(ent, "title_ko", "") or ""))
+
+
 def _slot_number_hint_from_title(title: str) -> Optional[int]:
     """title_ko 에서 airlockN_M / 슬롯 힌트."""
     am = re.search(r"airlock\d+_(\d+)", title or "", flags=re.IGNORECASE)
@@ -2823,6 +2837,7 @@ def _collect_occ_action_nodes(
         en: str,
         title: str,
         cat: str,
+        wafer: Optional[Tuple[str, int]] = None,
     ) -> None:
         meta = _resolve_action_slot_and_kind(
             event_name=en, title_ko=title, category=cat
@@ -2830,12 +2845,13 @@ def _collect_occ_action_nodes(
         if meta is None:
             return
         slot, po, arm = meta
+        wid = wafer if wafer is not None else _wafer_id_from_schedule_title(title)
         nodes.append(
             _OccActionNode(
                 slot=str(slot),
                 kind=po,
                 arm=str(arm or ""),
-                wafer=_wafer_id_from_schedule_title(title),
+                wafer=wid,
                 t=float(t),
                 ord=int(ord_v),
                 sched_i=si,
@@ -2868,6 +2884,7 @@ def _collect_occ_action_nodes(
                 en=en,
                 title=title,
                 cat=cat,
+                wafer=_wafer_id_from_schedule_entry(sch),
             )
     else:
         for si, e in enumerate(schedule):
@@ -2882,6 +2899,7 @@ def _collect_occ_action_nodes(
                 en=str(e.event_name or ""),
                 title=str(e.title_ko or ""),
                 cat=cat,
+                wafer=_wafer_id_from_schedule_entry(e),
             )
     nodes.sort(key=lambda n: (float(n.t), int(n.ord), n.sched_i if n.sched_i >= 0 else n.block_i))
     return nodes
@@ -3090,18 +3108,57 @@ def _occ_node_action_duration_sec(
     return float(ATM_ARM_SERIAL_FALLBACK_DUR_SEC)
 
 
+def _occ_node_wafer_id(
+    n: "_OccActionNode",
+    schedule: List[CsvPlaybackScheduleEntry],
+) -> Optional[Tuple[str, int]]:
+    if n.wafer is not None:
+        return n.wafer
+    if 0 <= int(n.sched_i) < len(schedule):
+        return _wafer_id_from_schedule_entry(schedule[int(n.sched_i)])
+    return None
+
+
+def _atm_arm_last_hold_start_sec(
+    dwells: Optional[Sequence["DwellRecord"]],
+    wafer: Optional[Tuple[str, int]],
+) -> Optional[float]:
+    """해당 FOUP 웨이퍼 투어가 AtmArm-last 이면 그 AtmArm dwell ``start_sec``.
+
+    FOUP place 보호 구간의 하한 — 같은 구간에 끼는 **다른 FOUP/웨이퍼 ATM** 만
+    place 이후로 미룬다 (전체 ATM 후퇴 아님).
+    """
+    if not dwells or wafer is None:
+        return None
+    lot_id, cassette_slot = wafer
+    for (lid, cas), tour in _group_dwell_tours(list(dwells)):
+        if str(lid) != str(lot_id) or int(cas) != int(cassette_slot):
+            continue
+        if not tour:
+            return None
+        last = tour[-1]
+        if str(getattr(last, "slot_key", "") or "") != LOGICAL_SLOT_ATM_ARM:
+            return None
+        try:
+            return float(last.start_sec)
+        except Exception:
+            return None
+    return None
+
+
 def _apply_atm_foup_place_gap_serial(
     schedule: List[CsvPlaybackScheduleEntry],
     blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
     dwells: Optional[Sequence["DwellRecord"]] = None,
 ) -> Tuple[List[CsvPlaybackScheduleEntry], Optional[List[CsvTimedPlaybackBlock]]]:
-    """AtmArm-last FOUP place 와 그 ``start~place`` 사이 ATM 동작을 place 직후로 미룸.
+    """FOUP(웨이퍼)별 AtmArm-last FOUP place 사이 타 ATM → place 직후 미룸.
 
-    - FOUP place 자체·해당 wafer 의 place 이전 ATM 동작은 그대로 둔다.
-    - 사이(다른 wafer ATM 등)만 place 완료 시각 직후로 **시간을 옮겨** 이어 재생 (삭제 없음).
+    - 판정 단위: ``(lot_id, cassette_slot)`` (= FOUP 매핑된 웨이퍼). FOUP 끼리 독립.
+    - FOUP place 자체·해당 wafer 의 place 이전 ATM 은 유지.
+    - 보호 구간: AtmArm-last dwell 시작(또는 직전 같은 wafer ATM) ~ place 시작.
+      그 사이 **다른 wafer ATM** 만 place 완료 직후로 시간 이동 (삭제 없음).
     - ``aligner_fix`` 포함 전 plan 모드에서 적용.
     """
-    _ = dwells
     if not schedule:
         return schedule, blocks
 
@@ -3128,19 +3185,30 @@ def _apply_atm_foup_place_gap_serial(
         )
         moved = False
         for pn in place_nodes:
-            wafer_p = pn.wafer
+            wafer_p = _occ_node_wafer_id(pn, schedule)
             t_place = float(pn.t)
-            # 같은 wafer 의 place 직전 마지막 ATM → window lo (없으면 place 직전 전 구간)
-            t_lo: Optional[float] = None
+            # 같은 wafer 의 place 직전 마지막 ATM 액션
+            t_lo_action: Optional[float] = None
             for n in atm_nodes:
                 if int(n.sched_i) == int(pn.sched_i) and int(n.block_i) == int(
                     pn.block_i
                 ):
                     continue
-                if wafer_p is not None and n.wafer == wafer_p and float(n.t) < t_place - 1e-12:
-                    if t_lo is None or float(n.t) > float(t_lo):
-                        t_lo = float(n.t)
-            if t_lo is None:
+                wid_n = _occ_node_wafer_id(n, schedule)
+                if (
+                    wafer_p is not None
+                    and wid_n == wafer_p
+                    and float(n.t) < t_place - 1e-12
+                ):
+                    if t_lo_action is None or float(n.t) > float(t_lo_action):
+                        t_lo_action = float(n.t)
+            # AtmArm-last dwell 시작 (FOUP별 독립 보호 하한)
+            t_hold = _atm_arm_last_hold_start_sec(dwells, wafer_p)
+            if t_hold is not None:
+                t_lo = float(t_hold)
+            elif t_lo_action is not None:
+                t_lo = float(t_lo_action)
+            else:
                 t_lo = t_place - 1.0e9
 
             between: List[_OccActionNode] = []
@@ -3152,8 +3220,9 @@ def _apply_atm_foup_place_gap_serial(
                 tn = float(n.t)
                 if not (float(t_lo) + 1e-12 < tn < t_place - 1e-12):
                     continue
-                # 같은 wafer 가 place 직전까지의 자기 ATM 동작은 유지
-                if wafer_p is not None and n.wafer == wafer_p:
+                wid_n = _occ_node_wafer_id(n, schedule)
+                # 같은 FOUP 웨이퍼의 place 직전 자기 ATM 은 유지
+                if wafer_p is not None and wid_n == wafer_p:
                     continue
                 between.append(n)
             if not between:
@@ -3175,14 +3244,13 @@ def _apply_atm_foup_place_gap_serial(
                     try:
                         print(
                             f"{_PRINT_PREFIX} [atm-foup-place-serial] "
-                            f"defer ATM {n.kind}@{n.slot!r} wafer={n.wafer} "
+                            f"defer ATM {n.kind}@{n.slot!r} wafer={_occ_node_wafer_id(n, schedule)} "
                             f"t={old_t:.3f}→{new_t:.3f}s "
                             f"(after foup place wafer={wafer_p} @{t_place:.3f}s)",
                             flush=True,
                         )
                     except Exception:
                         pass
-                    # place 직후·서로 직렬 — pick 계열 sort 유지
                     new_ord = int(n.ord)
                     _commit_action_node_time(
                         schedule, blocks, n, new_t, new_ord=new_ord
@@ -3513,19 +3581,27 @@ def build_csv_playback_plan(
                     progress.tick(1)
 
             if last.slot_key == LOGICAL_SLOT_ATM_ARM:
-                # SSOT: 투어 끝 AtmArm → FOUP place (이전 공정 직후 = last.end_sec)
+                # SSOT (FOUP별 독립): 해당 웨이퍼 투어 끝 AtmArm → 그 FOUP place 강제.
+                # steps 비어도 place 엔트리는 넣는다. 사이 타 FOUP ATM 은 gap-serial 이 미룸.
                 try:
                     place_st = build_foup_pick_place_steps(
                         foup_index=foup_n,
                         cassette_slot=cassette_slot,
                         pick_or_place="place",
                     )
-                    if not place_st:
-                        _lam_sim_log_build(
-                            "csv_tour",
-                            f"FOUP place steps empty — entry still inserted "
-                            f"(foup{foup_n} slot={cassette_slot} lot={lot_id!r})",
-                        )
+                except Exception as exc:
+                    place_st = []
+                    _lam_sim_log_build(
+                        "csv_tour",
+                        f"FOUP place steps build fail (entry forced): {exc}",
+                    )
+                if not place_st:
+                    _lam_sim_log_build(
+                        "csv_tour",
+                        f"FOUP place steps empty — entry still inserted "
+                        f"(foup{foup_n} slot={cassette_slot} lot={lot_id!r})",
+                    )
+                try:
                     ent = _place_schedule_entry(
                         time_sec=last.end_sec,
                         foup_index=foup_n,
@@ -3542,7 +3618,7 @@ def build_csv_playback_plan(
                         )
                     )
                 except Exception as exc:
-                    _lam_sim_log_build("csv_tour", f"FOUP place skip: {exc}")
+                    _lam_sim_log_build("csv_tour", f"FOUP place entry skip: {exc}")
                 if progress is not None:
                     progress.tick(1)
     finally:
