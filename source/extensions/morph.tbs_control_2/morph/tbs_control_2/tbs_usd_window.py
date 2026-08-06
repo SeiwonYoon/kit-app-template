@@ -603,6 +603,12 @@ class TbsUsdWindow:
         self._log(f"{prefix}Open Master {'OK' if ok else 'FAIL'}: {path}")
         if ok:
             try:
+                from .tbs_extract_from_master import clear_master_flatten_cache
+
+                clear_master_flatten_cache()
+            except Exception:
+                pass
+            try:
                 self._master.set_root_layer_edit_target()
             except Exception:
                 pass
@@ -664,6 +670,34 @@ class TbsUsdWindow:
         self._log(
             f"{log_prefix} — 등록 인스턴스 {len(instances)}개에 대해 Extract 자동 실행..."
         )
+        stage = None
+        try:
+            stage = self._master.get_stage()
+        except Exception:
+            stage = None
+        try:
+            from .tbs_extract_from_master import (
+                clear_master_flatten_cache,
+                master_flatten_cache,
+            )
+        except Exception:
+            clear_master_flatten_cache = None  # type: ignore
+            master_flatten_cache = None  # type: ignore
+
+        if callable(master_flatten_cache) and stage is not None:
+            with master_flatten_cache(stage):
+                for inst in instances:
+                    self._run_extract_for_instance(
+                        inst.prim_path,
+                        log_prefix=log_prefix,
+                    )
+            return
+
+        if callable(clear_master_flatten_cache):
+            try:
+                clear_master_flatten_cache()
+            except Exception:
+                pass
         for inst in instances:
             self._run_extract_for_instance(
                 inst.prim_path,
