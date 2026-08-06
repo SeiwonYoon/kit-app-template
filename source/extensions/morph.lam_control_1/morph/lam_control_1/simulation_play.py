@@ -8080,9 +8080,15 @@ class LamSimulationCsvPlayWindow:
             applied["prim_hide"] = bool(prim_hide)
 
         # 배속은 공정만보기 전환 이전에 적용 (proc_only ON 시 1x 강제 정책 존중).
+        # 시작 전·파싱 중에도 UI에 저장 → Federation 자동재생이 UI 값을 읽는다.
         if speed is not None and self._speed_model is not None:
-            self._speed_model.set_value(float(speed))
-            applied["speed"] = float(speed)
+            sp = float(max(0.1, min(20.0, float(speed))))
+            self._speed_model.set_value(sp)
+            applied["speed"] = sp
+            try:
+                self._apply_speed_ui_change()
+            except Exception:
+                pass
 
         # proc_only 는 pause/resume 을 유발하므로 다른 설정 반영 후 마지막에 전환.
         if proc_only is not None and self._process_only_model is not None:
