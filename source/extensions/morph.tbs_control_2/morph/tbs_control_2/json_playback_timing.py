@@ -228,6 +228,10 @@ def playback_port_sync_sim_time(
     재생 sim 축 occ 마일스톤 — ``SimTimelinePlayer.sim_now`` truncate 와 동일.
 
     JSON 러너는 ``t0 + json_lead`` 에 시작; renewal 은 그 이후 JSON 내 offset.
+
+    ``anim > proc`` 이면 wall 의 ``eff_sp = anim/proc`` 과 같게 offset 을 sim 축으로
+    압축한다 (``off_sim = off * proc/anim``). 1배속 offset 을 그대로 더하면
+    sync ≥ proc_end 가 되어 포트가 JSON/공정 종료에야 갱신되는 것처럼 보인다.
     """
     t0 = float(t0)
     proc = max(0.0, float(proc_sec))
@@ -238,8 +242,19 @@ def playback_port_sync_sim_time(
         proc = anim
     lead = json_lead_sec(proc, anim)
     if has_renewal:
-        off = 0.0 if renewal_offset_sec is None else float(renewal_offset_sec)
-        return float(t0) + float(lead) + max(0.0, off)
+        off = 0.0 if renewal_offset_sec is None else max(0.0, float(renewal_offset_sec))
+        # wall: renewal_wall = run_start + off/eff_sp, eff_sp≈anim/proc (anim>proc)
+        # sim: JSON 창 길이 = proc-lead → off 를 그 비로 압축
+        span = max(0.0, float(proc) - float(lead))
+        if anim > 1e-9 and float(anim) > float(span) + 1e-9 and span > 1e-9:
+            off_sim = float(off) * (float(span) / float(anim))
+        else:
+            off_sim = float(off)
+        sync = float(t0) + float(lead) + float(off_sim)
+        # 공정 창을 넘기지 않음 (JSON-end 로 오인되는 pe clamp 회피)
+        if proc > 1e-9:
+            sync = min(float(sync), float(t0) + float(proc) - 1e-4)
+        return float(max(float(t0) + float(lead), sync))
     if proc > 1e-9:
         tail = float(anim) if anim > 1e-9 else float(proc)
         if anim > 1e-9:

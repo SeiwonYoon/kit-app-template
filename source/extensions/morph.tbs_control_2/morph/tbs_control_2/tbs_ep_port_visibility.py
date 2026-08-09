@@ -354,6 +354,81 @@ def apply_ep_port_layout_for_context(
     )
 
 
+def schedule_apply_ep_port_layout_for_context(
+    ext: Any,
+    context_name: str,
+    screen_1based: int,
+    *,
+    delay_frames: int = 4,
+    max_attempts: int = 60,
+    reason: str = "",
+) -> None:
+    """보조 컨텍스트 stage 가 늦게 열릴 때 EP/EBS show·hide 재시도."""
+    cn = str(context_name or "").strip()
+    if not cn:
+        return
+    # 즉시 1회 시도
+    try:
+        if apply_ep_port_layout_for_context(
+            ext, cn, int(screen_1based), reason=reason
+        ):
+            return
+    except Exception:
+        pass
+    frames_until = [max(0, int(delay_frames))]
+    attempts_left = [max(1, int(max_attempts))]
+    sub_holder: list = [None]
+
+    def _stop() -> None:
+        sub = sub_holder[0]
+        if sub is None:
+            return
+        try:
+            sub.unsubscribe()
+        except Exception:
+            pass
+        sub_holder[0] = None
+
+    def _tick(_e=None) -> None:
+        if frames_until[0] > 0:
+            frames_until[0] -= 1
+            return
+        stage = _get_stage(cn)
+        if stage is not None:
+            try:
+                ep_count = ep_count_from_combo_idx(
+                    ep_count_idx_for_screen(ext, int(screen_1based))
+                )
+                ebs_on = ebs_enabled_for_screen(ext, int(screen_1based))
+                apply_ep_port_layout_on_stage(
+                    stage,
+                    ep_count,
+                    scope_key=_scope_key_for_context_name(cn),
+                    ebs_enabled=bool(ebs_on),
+                    reason=reason or f"split_screen{int(screen_1based)}_sched",
+                )
+            except Exception:
+                pass
+            _stop()
+            return
+        attempts_left[0] -= 1
+        if attempts_left[0] <= 0:
+            _stop()
+            return
+        frames_until[0] = 2
+
+    try:
+        import omni.kit.app
+
+        sub_holder[0] = (
+            omni.kit.app.get_app()
+            .get_update_event_stream()
+            .create_subscription_to_pop(_tick, name="tbs.ep_layout_ctx")
+        )
+    except Exception:
+        pass
+
+
 def _stop_retry_subscription() -> None:
     global _apply_retry_sub
     if _apply_retry_sub is None:
@@ -502,6 +577,7 @@ __all__ = [
     "apply_ep_port_layout_for_context",
     "apply_ep_port_layout_on_stage",
     "schedule_apply_ep_port_layout",
+    "schedule_apply_ep_port_layout_for_context",
     "on_sim_ep_count_combo_changed",
     "on_sim_ebs_enabled_changed",
     "teardown_ep_port_visibility",

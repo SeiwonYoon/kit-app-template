@@ -432,9 +432,13 @@ class TBSSimulationEngine:
         self._process_time_priority = bool(getattr(self._init_cfg, "process_time_priority", False))
         # sim_control_defaults.SIM_PARALLEL_NONCONFLICTING_MOVES — False 면 완전 직렬(기존 동일).
         self._parallel_nonconflicting_moves = bool(_SIM_PARALLEL_MOVES)
-        # True 모드 전용: 동시 기동 수 제한(BP→EP 1건, OHT 경로=회수|투입 1건).
-        self._bp_to_ep_inflight = False
+        # True 모드 2레일: A=ARRIVED/REMOVED(_oht_path_inflight), B=MOVE(_move_rail_inflight).
+        # _bp_to_ep_inflight 는 하위 호환 alias (B 레일과 동일).
         self._oht_path_inflight = False
+        self._a_rail_ep: str = ""
+        self._move_rail_inflight = False
+        self._b_rail_ep: str = ""
+        self._bp_to_ep_inflight = False
         self._interrupt_anim_cb: Optional[Callable[[], None]] = None
         self._faulty_ports_supplier: Optional[Callable[[], Set[str]]] = None
         self._idle_sec: Dict[str, float] = {}
@@ -838,6 +842,68 @@ class TBSSimulationEngine:
         except Exception:
             self._serial_wakeup = None
 
+    def _parallel_enabled(self) -> bool:
+        return bool(getattr(self, "_parallel_nonconflicting_moves", False))
+
+    def _grant_chain_pickup_ticket_if_needed(self) -> None:
+        """회수대기 EP 가 남았는데 티켓=0 이면 chain 1장.
+
+        첫 REMOVED 는 간격 타이머 티켓을 쓰지만, 이미 awaiting 인 다음 EP 는
+        타이머(50~70s)를 다시 기다리지 않고 연속 REMOVED 한다.
+        """
+        if int(getattr(self, "_pickup_tickets", 0) or 0) > 0:
+            return
+        if self._find_ep_awaiting_pickup() is None:
+            return
+        self._pickup_tickets = 1
+        try:
+            self._log("회수티켓 chain+1 | awaiting backlog (연속 REMOVED)")
+        except Exception:
+            pass
+
+    def _parallel_schedule_wave(self, *, reason: str = "") -> bool:
+        """병렬 SSOT: REMOVED→B→OHT wave 1회 + 오케스트레이터 kick.
+
+        FOUP 종료·티켓 타이머·A/B 레일 free 등 모든 경로가 여기만 호출한다.
+        """
+        if not self._parallel_enabled():
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
+            return False
+        started = False
+        try:
+            started = bool(self._start_parallel_nonconflicting_wave())
+        except Exception:
+            started = False
+        try:
+            self._kick_serial_flow()
+        except Exception:
+            pass
+        if reason and started:
+            try:
+                self._log(f"[wave] started reason={reason}")
+            except Exception:
+                pass
+        return started
+
+    def _on_a_rail_freed(self) -> None:
+        """A레일(REMOVED/ARRIVED) 종료 → chain 티켓 + wave 재평가."""
+        if not self._parallel_enabled():
+            return
+        try:
+            self._grant_chain_pickup_ticket_if_needed()
+        except Exception:
+            pass
+        self._parallel_schedule_wave(reason="a_rail_freed")
+
+    def _on_b_rail_freed(self) -> None:
+        """B레일(MOVE) 종료 → wave 재평가 (BP→EP 또는 INOUT→BP / REMOVED∥…)."""
+        if not self._parallel_enabled():
+            return
+        self._parallel_schedule_wave(reason="b_rail_freed")
+
     def _lock_port(self, port: str) -> None:
         """포트를 '작업 중'으로 잠가 다음 공정 선택에서 제외."""
         p = str(port or "").strip().upper()
@@ -883,6 +949,9 @@ class TBSSimulationEngine:
         self._locked_ports.clear()
         self._bp_to_ep_inflight = False
         self._oht_path_inflight = False
+        self._move_rail_inflight = False
+        self._a_rail_ep = ""
+        self._b_rail_ep = ""
         self._status_log_policy.reset()
         self._total_lots = 0
         self._pickup_tickets = 0
@@ -945,6 +1014,9 @@ class TBSSimulationEngine:
         self._locked_ports.clear()
         self._bp_to_ep_inflight = False
         self._oht_path_inflight = False
+        self._move_rail_inflight = False
+        self._a_rail_ep = ""
+        self._b_rail_ep = ""
         self._status_log_policy.reset()
         self._log(
             f"[SIM] 중지 | completed={len(self.completed_lots)}/{self._total_lots} "
@@ -1046,6 +1118,14 @@ class TBSSimulationEngine:
                 return
             self._pickup_tickets += 1
             self._log(f"회수티켓+1 | 누적={self._pickup_tickets}")
+            # 회수대기 EP 가 있으면 티켓으로 wave (REMOVED∥INOUT→BP 등)
+            try:
+                self._parallel_schedule_wave(reason="pickup_ticket")
+            except Exception:
+                try:
+                    self._kick_serial_flow()
+                except Exception:
+                    pass
 
     def tick(self, sim_delta_sec: float) -> None:
         """UI 프레임 등에서 호출: wall-clock 델타를 sim 예산으로 쌓아 env.step()으로 sim time을 진행한다."""
@@ -1172,12 +1252,14 @@ class TBSSimulationEngine:
 
         ``SIM_PARALLEL_NONCONFLICTING_MOVES``:
         - False(기본): 위를 ``yield process`` 로 완전 직렬.
-        - True: 1·2·4 중 비충돌 쌍은 완료 대기 없이 동시 기동(``_start_parallel_nonconflicting_wave``).
-          IN/OUT→BP 는 wave 가 할 일 없을 때만 직렬 실행.
+        - True: 2레일 — A(ARRIVED/REMOVED) ∥ B(MOVE_*). A/B 각자 직렬,
+          동일 EPn 목표면 동시 불가, B는 점유 전제 필수.
+          B 우선순위: 빈 EP+BP LOT 이면 BP→EP → 그다음 INOUT→BP.
+          기동 순서: REMOVED → B(MOVE) → OHT(버퍼 가능 빈 EP 는 직접투입 보류).
         """
         yield self.env.timeout(0.1)
         parallel = bool(getattr(self, "_parallel_nonconflicting_moves", False))
-        mode_txt = "병렬(비충돌)" if parallel else "직렬"
+        mode_txt = "병렬(2레일)" if parallel else "직렬"
         self._log(f"[시작] OHT 추가 LOT 목표={self._max_oht_lots} | 오케스트레이터={mode_txt}")
 
         while self._running and len(self.completed_lots) < self._total_lots:
@@ -1185,13 +1267,10 @@ class TBSSimulationEngine:
 
             if parallel:
                 started = self._start_parallel_nonconflicting_wave()
-                if started:
-                    # 기동만 하고 완료는 기다리지 않음 — 짧은 tick 후 상태 재평가
+                a_busy = bool(getattr(self, "_oht_path_inflight", False))
+                b_busy = bool(getattr(self, "_move_rail_inflight", False))
+                if started or a_busy or b_busy:
                     yield self.env.timeout(0.05)
-                    continue
-                # wave 할 일 없음 → IN/OUT 적재분을 버퍼로 (직렬 1건)
-                did = yield from self._step_bp1_to_buffer()
-                if did:
                     continue
                 if len(self.completed_lots) >= self._total_lots:
                     break
@@ -1228,6 +1307,186 @@ class TBSSimulationEngine:
             )
             self._log_final_summary()
 
+    def _ep_target_token(self, *ports: str) -> str:
+        try:
+            from .sim_parallel_rails import ep_token_from_text
+        except Exception:
+            return ""
+        for p in ports:
+            tok = ep_token_from_text(str(p or ""))
+            if tok:
+                return tok
+        return ""
+
+    def _a_b_ep_conflict(self, other_ep: str) -> bool:
+        try:
+            from .sim_parallel_rails import ep_targets_conflict
+        except Exception:
+            return False
+        return bool(
+            ep_targets_conflict(str(getattr(self, "_a_rail_ep", "") or ""), str(other_ep or ""))
+            or ep_targets_conflict(str(getattr(self, "_b_rail_ep", "") or ""), str(other_ep or ""))
+        )
+
+    def _start_parallel_nonconflicting_wave(self) -> bool:
+        """2레일 비충돌 기동. A(ARRIVED/REMOVED)와 B(MOVE)를 각각 최대 1건.
+
+        - A끼리·B끼리는 동시 기동하지 않음.
+        - A∥B 는 끝 EPn 목표가 다를 때만.
+        - 기동 순서: **REMOVED → B(MOVE) → OHT ARRIVED**
+          (빈 EP 를 OHT 가 가로채기 전에 BP→EP 가 잡게)
+        - B: 빈 EP+BP LOT 있으면 **BP→EP 우선**, 그다음 INOUT→BP.
+        """
+        started = False
+        # 1) 회수(REMOVED)만 먼저 — OHT 투입은 B 보다 뒤
+        if not bool(getattr(self, "_oht_path_inflight", False)):
+            if self._try_start_pickup_nofollow():
+                started = True
+        # 2) 버퍼/INOUT MOVE — 빈 EP 보충을 OHT 직접투입보다 앞당김
+        if self._try_start_b_rail_nofollow():
+            started = True
+        # 3) OHT→EP/INOUT (버퍼가 채울 빈 EP 는 직접투입 보류)
+        if not bool(getattr(self, "_oht_path_inflight", False)):
+            if self._try_start_oht_input_nofollow():
+                started = True
+        return started
+
+    def _try_start_a_rail_nofollow(self) -> bool:
+        """A레일: REMOVED 우선, 없으면 OHT→EP/INOUT(ARRIVED).
+
+        주의: ``_start_parallel_nonconflicting_wave`` 는 REMOVED 와 OHT 를
+        분리 호출한다. 본 함수는 직렬·레거시 호출용으로 유지.
+        """
+        if bool(getattr(self, "_oht_path_inflight", False)):
+            return False
+        if self._try_start_pickup_nofollow():
+            return True
+        return bool(self._try_start_oht_input_nofollow())
+
+    def _try_start_b_rail_nofollow(self) -> bool:
+        """B레일: MOVE 1건.
+
+        우선순위:
+        1) **지금** 빈 EP + BP LOT + A EP 비충돌 → BP→EP
+        2) 그 외 INOUT FULL + 빈 BP → INOUT→BP
+           (REMOVED 중 soon-empty EP 만으로는 INOUT→BP 를 막지 않음)
+        """
+        if bool(getattr(self, "_move_rail_inflight", False)):
+            return False
+        if self._try_start_buffer_to_ep_nofollow():
+            return True
+        if self._try_start_inout_to_bp_nofollow():
+            return True
+        return False
+
+    def _try_start_buffer_to_ep_nofollow(self) -> bool:
+        """BP→EP 를 기동만 하고 완료는 기다리지 않음 (B레일)."""
+        if not self._can_start_buffer_to_ep_now():
+            return False
+        ep = self._find_empty_ep()
+        bp = self._find_oldest_bp()
+        if not ep or not bp:
+            return False
+        lot = self.ports.get(bp)
+        if lot is None:
+            return False
+        ep_tok = self._ep_target_token(ep)
+        self._move_rail_inflight = True
+        self._bp_to_ep_inflight = True
+        self._b_rail_ep = ep_tok
+        self._dispatching_to_ep[ep] = True
+        self._lock_port(bp)
+        self._lock_port(ep)
+        self.env.process(self._move_bp_to_ep_parallel(bp, ep, lot))
+        return True
+
+    def _move_bp_to_ep_parallel(self, bp_port: str, ep_port: str, lot: Lot):
+        """병렬 모드용 BP→EP 래퍼 — B레일 정리 후 wave SSOT."""
+        try:
+            yield self.env.process(self._move_bp_to_ep(bp_port, ep_port, lot))
+        finally:
+            self._dispatching_to_ep[ep_port] = False
+            self._unlock_port(ep_port)
+            self._unlock_port(bp_port)
+            self._move_rail_inflight = False
+            self._bp_to_ep_inflight = False
+            self._b_rail_ep = ""
+            try:
+                self._on_b_rail_freed()
+            except Exception:
+                pass
+
+    def _can_start_buffer_to_ep_now(self) -> bool:
+        """BP→EP 를 **지금** 기동할 수 있으면 True (빈 EP + BP LOT + A레일 EP 비충돌)."""
+        if not self._ebs_enabled:
+            return False
+        if bool(getattr(self, "_move_rail_inflight", False)):
+            return False
+        ep = self._find_empty_ep()
+        bp = self._find_oldest_bp()
+        if not ep or not bp or self.ports.get(bp) is None:
+            return False
+        ep_tok = self._ep_target_token(ep)
+        try:
+            from .sim_parallel_rails import ep_targets_conflict
+
+            if ep_targets_conflict(str(getattr(self, "_a_rail_ep", "") or ""), ep_tok):
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _should_defer_inout_to_bp(self) -> bool:
+        """BP→EP 를 **지금** 기동할 수 있을 때만 INOUT→BP 보류.
+
+        규칙 (A∥B):
+        - 빈 EP + BP LOT + A와 EP 비충돌 → B는 BP→EP 우선 (INOUT→BP 보류)
+        - REMOVED 중 동일 EP 만 곧 비는 경우 → BP→EP 는 EP 충돌로 불가
+          → INOUT→빈BP 를 보류하면 B 공회전 = REMOVED∥INOUT→BP 위반
+          → 이 경우 보류하지 않음 (INOUT→BP 기동)
+        """
+        return bool(self._can_start_buffer_to_ep_now())
+
+    def _try_start_inout_to_bp_nofollow(self) -> bool:
+        """INOUT→BP (B레일). INOUT FULL·빈 BP·잠금/적재중 가드."""
+        if not self._ebs_enabled:
+            return False
+        if bool(getattr(self, "_move_rail_inflight", False)):
+            return False
+        if bool(getattr(self, "_oht_loading_bp1", False)):
+            return False
+        if self._is_port_locked(INOUT_PORT):
+            return False
+        if self.ports.get(INOUT_PORT) is None:
+            return False
+        if not self._find_oldest_empty_buffer():
+            return False
+        # BP→EP 를 지금 시작할 수 있으면만 보류 — REMOVED 중 soon-empty 만으로는 보류 금지
+        if self._should_defer_inout_to_bp():
+            return False
+        self._move_rail_inflight = True
+        self._bp_to_ep_inflight = True
+        self._b_rail_ep = ""
+        self.env.process(self._move_inout_to_bp_parallel())
+        return True
+
+    def _move_inout_to_bp_parallel(self):
+        """병렬 INOUT→BP 래퍼 — `_move_bp1_to_buffer` 가 점유·잠금 담당."""
+        try:
+            if self.ports.get(INOUT_PORT) is None:
+                return
+            if not self._find_oldest_empty_buffer():
+                return
+            yield self.env.process(self._move_bp1_to_buffer())
+        finally:
+            self._move_rail_inflight = False
+            self._bp_to_ep_inflight = False
+            self._b_rail_ep = ""
+            try:
+                self._on_b_rail_freed()
+            except Exception:
+                pass
+
     def _step_bp1_to_buffer(self):
         """IN/OUT 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True.
 
@@ -1235,7 +1494,6 @@ class TBSSimulationEngine:
         """
         if not self._ebs_enabled:
             return False
-        # OHT→INOUT 이동 중에는 IN/OUT 미안착 — 재진입 방지
         if bool(getattr(self, "_oht_loading_bp1", False)):
             return False
         if self._is_port_locked(INOUT_PORT):
@@ -1246,9 +1504,10 @@ class TBSSimulationEngine:
         return False
 
     def _step_pickup_to_oht(self):
-        """
-        2) 회수 티켓 처리: 가능한 EP를 FIFO로 회수한다.
-        한 번이라도 회수를 수행하면 True를 반환(루프를 즉시 상단으로 돌려 상태를 재평가).
+        """2) 회수 티켓 처리: 가능한 EP를 FIFO로 회수한다.
+
+        연속 awaiting EP 가 있으면 pickup 종료마다 chain 티켓으로 이어서 회수
+        (간격 타이머 공백 없이 REMOVED→REMOVED).
         """
         did_pickup = False
         while self._pickup_tickets > 0 and len(self.completed_lots) < self._total_lots:
@@ -1258,14 +1517,19 @@ class TBSSimulationEngine:
             self._pickup_tickets -= 1
             did_pickup = True
             yield self.env.process(self._execute_pickup(ep_pick))
+            try:
+                self._grant_chain_pickup_ticket_if_needed()
+            except Exception:
+                pass
             if len(self.completed_lots) >= self._total_lots:
                 break
         return did_pickup
 
     def _step_oht_input(self):
         """3) OHT 투입: direct(빈 EP) 우선, 아니면 IN/OUT 경유. 1건 실행하면 True."""
-        # READYTOLOAD(생성/준비) 공정확인을 통과하지 않은 LOT은 아직 투입 공정으로 가져가지 않는다.
-        if self._oht_input_queue and not bool(getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)):
+        if self._oht_input_queue and not bool(
+            getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)
+        ):
             return False
 
         if self._oht_input_queue and self._can_load_to_ep_direct():
@@ -1297,120 +1561,6 @@ class TBSSimulationEngine:
                 return True
         return False
 
-    def _start_parallel_nonconflicting_wave(self) -> bool:
-        """비충돌 공정을 완료 대기 없이 기동. 하나라도 기동하면 True.
-
-        - BP→EP 는 회수/OHT 와 동시 가능(EP·포트 잠금으로 충돌 방지).
-        - 회수와 OHT 투입은 동일 OHT 경로라 동시 기동하지 않음(회수 우선).
-        """
-        started = False
-        if self._try_start_buffer_to_ep_nofollow():
-            started = True
-        # 회수 우선 — 성공하면 같은 wave 에서 OHT 투입은 하지 않음
-        if self._try_start_pickup_nofollow():
-            started = True
-        elif self._try_start_oht_input_nofollow():
-            started = True
-        return started
-
-    def _try_start_buffer_to_ep_nofollow(self) -> bool:
-        """BP→EP 를 기동만 하고 완료는 기다리지 않음."""
-        if not self._ebs_enabled:
-            return False
-        if bool(getattr(self, "_bp_to_ep_inflight", False)):
-            return False
-        ep = self._find_empty_ep()
-        bp = self._find_oldest_bp()
-        if not ep or not bp:
-            return False
-        lot = self.ports.get(bp)
-        if lot is None:
-            return False
-        self._bp_to_ep_inflight = True
-        self._dispatching_to_ep[ep] = True
-        self._lock_port(bp)
-        self._lock_port(ep)
-        self.env.process(self._move_bp_to_ep_parallel(bp, ep, lot))
-        return True
-
-    def _move_bp_to_ep_parallel(self, bp_port: str, ep_port: str, lot: Lot):
-        """병렬 모드용 BP→EP 래퍼 — 예약/잠금 정리."""
-        try:
-            yield self.env.process(self._move_bp_to_ep(bp_port, ep_port, lot))
-        finally:
-            self._dispatching_to_ep[ep_port] = False
-            self._unlock_port(ep_port)
-            self._unlock_port(bp_port)
-            self._bp_to_ep_inflight = False
-
-    def _try_start_pickup_nofollow(self) -> bool:
-        """회수 1건을 기동만 하고 완료는 기다리지 않음."""
-        if bool(getattr(self, "_oht_path_inflight", False)):
-            return False
-        if self._pickup_tickets <= 0 or len(self.completed_lots) >= self._total_lots:
-            return False
-        ep_pick = self._find_ep_awaiting_pickup()
-        if not ep_pick:
-            return False
-        self._pickup_tickets -= 1
-        self._oht_path_inflight = True
-        self._lock_port(ep_pick)
-        self.env.process(self._execute_pickup_parallel(ep_pick))
-        return True
-
-    def _execute_pickup_parallel(self, ep_port: str):
-        """병렬 모드용 회수 래퍼 — EP 잠금·OHT 경로 점유 정리."""
-        try:
-            yield self.env.process(self._execute_pickup(ep_port))
-        finally:
-            self._unlock_port(ep_port)
-            self._oht_path_inflight = False
-
-    def _try_start_oht_input_nofollow(self) -> bool:
-        """OHT→EP 또는 OHT→INOUT 을 기동만 하고 완료는 기다리지 않음."""
-        if bool(getattr(self, "_oht_path_inflight", False)):
-            return False
-        if self._oht_input_queue and not bool(
-            getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)
-        ):
-            return False
-
-        if self._oht_input_queue and self._can_load_to_ep_direct():
-            ep_target = self._find_empty_ep()
-            if ep_target:
-                lot = self._oht_input_queue.pop(0)
-                self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
-                self._oht_path_inflight = True
-                self._dispatching_to_ep[ep_target] = True
-                self._lock_port(ep_target)
-                self.env.process(self._load_lot_to_ep_direct_parallel(lot, ep_target))
-                return True
-
-        if self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1():
-            lot = self._oht_input_queue.pop(0)
-            self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
-            self._oht_path_inflight = True
-            self.env.process(self._load_lot_to_inout_parallel(lot))
-            return True
-
-        return False
-
-    def _load_lot_to_ep_direct_parallel(self, lot: Lot, ep_port: str):
-        """병렬 모드용 OHT→EP 래퍼."""
-        try:
-            yield self.env.process(self._load_lot_to_ep_direct(lot, ep_port))
-        finally:
-            self._dispatching_to_ep[ep_port] = False
-            self._unlock_port(ep_port)
-            self._oht_path_inflight = False
-
-    def _load_lot_to_inout_parallel(self, lot: Lot):
-        """병렬 모드용 OHT→INOUT 래퍼."""
-        try:
-            yield self.env.process(self._load_lot_to_inout(lot))
-        finally:
-            self._oht_path_inflight = False
-
     def _step_idle_wait(self):
         """4) 할 일 없을 때: WAIT 로그(디듀프) + 짧은 sleep."""
         now = float(self.env.now) if self.env is not None else 0.0
@@ -1425,7 +1575,6 @@ class TBSSimulationEngine:
                 self._log(
                     f"[대기] q={len(self._oht_input_queue)} | 티={self._pickup_tickets} | {self._ports_snapshot()}"
                 )
-        # READYTOLOAD 확인 직후 즉시 다음 공정(ARRIVED)을 우선 시도할 수 있도록 wakeup 이벤트를 함께 기다린다.
         try:
             if self.env is not None and getattr(self, "_serial_wakeup", None) is not None:
                 yield simpy.AnyOf(self.env, [self.env.timeout(0.2), self._serial_wakeup])  # type: ignore
@@ -1433,6 +1582,129 @@ class TBSSimulationEngine:
         except Exception:
             pass
         yield self.env.timeout(0.2)
+
+    def _try_start_pickup_nofollow(self) -> bool:
+        """회수 1건을 기동만 하고 완료는 기다리지 않음 (A레일)."""
+        if bool(getattr(self, "_oht_path_inflight", False)):
+            return False
+        if self._pickup_tickets <= 0 or len(self.completed_lots) >= self._total_lots:
+            return False
+        ep_pick = self._find_ep_awaiting_pickup()
+        if not ep_pick:
+            return False
+        ep_tok = self._ep_target_token(ep_pick)
+        try:
+            from .sim_parallel_rails import ep_targets_conflict
+        except Exception:
+            ep_targets_conflict = None  # type: ignore
+        if ep_targets_conflict is not None and ep_targets_conflict(
+            str(getattr(self, "_b_rail_ep", "") or ""), ep_tok
+        ):
+            return False
+        self._pickup_tickets -= 1
+        self._oht_path_inflight = True
+        self._a_rail_ep = ep_tok
+        self._lock_port(ep_pick)
+        self.env.process(self._execute_pickup_parallel(ep_pick))
+        return True
+
+    def _execute_pickup_parallel(self, ep_port: str):
+        """병렬 모드용 회수 래퍼 — A레일 정리 후 wave SSOT."""
+        try:
+            yield self.env.process(self._execute_pickup(ep_port))
+        finally:
+            self._unlock_port(ep_port)
+            self._oht_path_inflight = False
+            self._a_rail_ep = ""
+            try:
+                self._on_a_rail_freed()
+            except Exception:
+                pass
+
+    def _buffer_can_feed_empty_ep(self, ep_port: Optional[str] = None) -> bool:
+        """EBS ON · 빈 EP + oldest BP 에 LOT 있으면 True (OHT 직접투입 보류 조건)."""
+        if not bool(getattr(self, "_ebs_enabled", False)):
+            return False
+        ep = str(ep_port or "").strip().upper() or self._find_empty_ep()
+        if not ep:
+            return False
+        bp = self._find_oldest_bp()
+        if not bp:
+            return False
+        return self.ports.get(bp) is not None
+
+    def _try_start_oht_input_nofollow(self) -> bool:
+        """OHT→EP 또는 OHT→INOUT 을 기동만 (A레일).
+
+        빈 EP 를 BP LOT 이 채울 수 있으면 OHT→EP 직접투입을 하지 않고
+        (가능하면) OHT→INOUT 만 시도한다 — MOVE BP→EP 가 EP 를 가져야 함.
+        """
+        if bool(getattr(self, "_oht_path_inflight", False)):
+            return False
+        if self._oht_input_queue and not bool(
+            getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)
+        ):
+            return False
+
+        if self._oht_input_queue and self._can_load_to_ep_direct():
+            ep_target = self._find_empty_ep()
+            # 버퍼가 채울 빈 EP 는 OHT 직접투입 금지 (BP→EP 우선)
+            if ep_target and self._buffer_can_feed_empty_ep(ep_target):
+                ep_target = None
+            if ep_target:
+                ep_tok = self._ep_target_token(ep_target)
+                try:
+                    from .sim_parallel_rails import ep_targets_conflict
+                except Exception:
+                    ep_targets_conflict = None  # type: ignore
+                if ep_targets_conflict is not None and ep_targets_conflict(
+                    str(getattr(self, "_b_rail_ep", "") or ""), ep_tok
+                ):
+                    return False
+                lot = self._oht_input_queue.pop(0)
+                self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
+                self._oht_path_inflight = True
+                self._a_rail_ep = ep_tok
+                self._dispatching_to_ep[ep_target] = True
+                self._lock_port(ep_target)
+                self.env.process(self._load_lot_to_ep_direct_parallel(lot, ep_target))
+                return True
+
+        if self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1():
+            lot = self._oht_input_queue.pop(0)
+            self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
+            self._oht_path_inflight = True
+            self._a_rail_ep = ""
+            self.env.process(self._load_lot_to_inout_parallel(lot))
+            return True
+
+        return False
+
+    def _load_lot_to_ep_direct_parallel(self, lot: Lot, ep_port: str):
+        """병렬 모드용 OHT→EP 래퍼."""
+        try:
+            yield self.env.process(self._load_lot_to_ep_direct(lot, ep_port))
+        finally:
+            self._dispatching_to_ep[ep_port] = False
+            self._unlock_port(ep_port)
+            self._oht_path_inflight = False
+            self._a_rail_ep = ""
+            try:
+                self._on_a_rail_freed()
+            except Exception:
+                pass
+
+    def _load_lot_to_inout_parallel(self, lot: Lot):
+        """병렬 모드용 OHT→INOUT 래퍼."""
+        try:
+            yield self.env.process(self._load_lot_to_inout(lot))
+        finally:
+            self._oht_path_inflight = False
+            self._a_rail_ep = ""
+            try:
+                self._on_a_rail_freed()
+            except Exception:
+                pass
 
     def _load_lots_to_bp1_loop(self):
         """OHT 대기열에서 LOT을 꺼내 BP1에 순차 투입하는 프로세스(구버전 입력 루프)."""
@@ -2006,6 +2278,14 @@ class TBSSimulationEngine:
                 self._ep_ready_since[ep_port] = float(self.env.now)
             except Exception:
                 pass
+            # 병렬 SSOT: awaiting 등록 후 wave 1곳 (REMOVED·INOUT→BP 등)
+            try:
+                self._parallel_schedule_wave(reason="foup_end")
+            except Exception:
+                try:
+                    self._kick_serial_flow()
+                except Exception:
+                    pass
 
     def _execute_pickup(self, ep_port: str):
         """회수: READYTOUNLOAD 게이트→이벤트, REMOVED 게이트→이벤트→공정+애니 대기→포트 비움·completed."""
@@ -2384,6 +2664,17 @@ class TBSSimulationEngine:
             payload["foup_proc_active_ep"] = str(getattr(self, "_foup_proc_active_ep", "") or "").strip().upper()
         except Exception:
             payload["foup_proc_active_ep"] = ""
+        # 병렬 2레일: 재생·UI 가 주(OHT)/보조(MOVE) 를 가르도록 태그
+        if bool(getattr(self, "_parallel_nonconflicting_moves", False)):
+            try:
+                from .sim_parallel_rails import classify_sim_rail
+
+                seq_u = str(payload.get("seq") or payload.get("event") or "").strip()
+                rail = classify_sim_rail(seq_u)
+                if rail:
+                    payload["sim_rail"] = rail
+            except Exception:
+                pass
         if self._on_event:
             try:
                 merged = dict(payload or {})
@@ -2449,6 +2740,18 @@ class TBSSimulationEngine:
             payload["foup_proc_active_ep"] = str(getattr(self, "_foup_proc_active_ep", "") or "").strip().upper()
         except Exception:
             payload["foup_proc_active_ep"] = ""
+        if bool(getattr(self, "_parallel_nonconflicting_moves", False)):
+            try:
+                from .sim_parallel_rails import classify_sim_rail
+
+                seq_u = str(
+                    payload.get("event_seq") or payload.get("seq") or payload.get("event") or ""
+                ).strip()
+                rail = classify_sim_rail(seq_u)
+                if rail:
+                    payload["sim_rail"] = rail
+            except Exception:
+                pass
         if self._on_progress:
             try:
                 merged = dict(payload or {})

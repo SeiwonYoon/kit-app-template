@@ -231,12 +231,16 @@ def renewal_full_panel_occ_for_step(
     *,
     base_occ: Optional[Dict[str, str]] = None,
     panel_ports: Optional[List[str]] = None,
+    ignore_baked_pairs: bool = False,
 ) -> Optional[Dict[str, str]]:
     """
     renewal step 의 **전체 패널** occ — base(이전 milestone) + step SSOT.
 
     ``ports_occ_panel_renewal`` 이 비어 있거나 fallback predict 가 빈 panel 기준이면
     EP1 등 이전 포트가 사라지거나 INOUT/BP 갱신이 plan 에 안 들어가는 문제를 막는다.
+
+    ``ignore_baked_pairs=True`` (병렬 bake): schedule 1차 패스의 잘못된
+    ``ports_occ_panel_renewal`` 을 무시하고 base+predict 로만 재계산한다.
     """
     ports = [str(p).strip().upper() for p in (panel_ports or _DEFAULT_PANEL_PORTS) if str(p).strip()]
     if not ports:
@@ -248,17 +252,28 @@ def renewal_full_panel_occ_for_step(
             if ku in out:
                 out[ku] = str(v or "")
 
-    pairs = renewal_port_occ_pairs_for_step(step, panel_ports=ports)
-    if pairs:
-        for k, v in pairs:
-            ku = str(k).strip().upper()
-            if ku in out:
-                out[ku] = str(v or "")
-        return dict(out)
+    if not ignore_baked_pairs:
+        pairs = renewal_port_occ_pairs_for_step(step, panel_ports=ports)
+        if pairs:
+            for k, v in pairs:
+                ku = str(k).strip().upper()
+                if ku in out:
+                    out[ku] = str(v or "")
+            return dict(out)
 
     p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
     ep = step.event_payload if isinstance(step.event_payload, dict) else {}
     src = _post_anim_src_from_progress_and_event(p, ep)
+    # basename 보강(file) — parallel MOVE_REQ 오염 방지
+    try:
+        bn = str(getattr(step, "json_basename", "") or "").strip()
+        if bn and not src.get("file"):
+            src["file"] = bn
+        jp = str(getattr(step, "json_path", "") or "").strip()
+        if jp and not src.get("path"):
+            src["path"] = jp
+    except Exception:
+        pass
     pred = predict_ports_occupancy_after_anim(dict(out), src)
     for k, v in (pred or {}).items():
         ku = str(k).strip().upper()

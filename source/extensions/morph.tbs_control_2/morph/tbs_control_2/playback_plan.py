@@ -181,8 +181,172 @@ def _collect_engine_port_occ_changes(
     return out
 
 
+def _step_playback_sync_t(
+    step: PlaybackScheduledStep,
+    *,
+    is_renewal: bool,
+) -> Optional[float]:
+    """step 의 포트 갱신 sim 시각 — renewal 이면 offset 재계산, 아니면 JSON-end/proc_end."""
+    from .playback_renewal_ports import (
+        renewal_playback_port_sync_for_step,
+        step_json_has_renewal_marker,
+    )
+
+    if is_renewal or step_json_has_renewal_marker(step):
+        sync_t = renewal_playback_port_sync_for_step(step)
+        if sync_t is not None:
+            return float(sync_t)
+        # offset/proc 재계산 실패 시에도 JSON-end 로 밀지 말고 lead+offset 으로 보정
+        try:
+            from .json_playback_timing import json_lead_sec, resolve_playback_proc_anim
+
+            t0s = float(step.t_event or 0.0)
+            p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
+            try:
+                t0s = float(str(p.get("event_start_sim_time") or t0s))
+            except Exception:
+                pass
+            proc_pb, anim_pb = resolve_playback_proc_anim(
+                float(step.proc_sec or 0.0),
+                float(step.anim_sec or 0.0),
+                json_est_sec=float(step.json_est_sec or 0.0),
+            )
+            lead = float(json_lead_sec(float(proc_pb), float(anim_pb)))
+            off = 0.0
+            try:
+                if step.renewal_offset_sec is not None and float(step.renewal_offset_sec) > 1e-9:
+                    off = float(step.renewal_offset_sec)
+            except Exception:
+                off = 0.0
+            run_start = step.t_json_run_start_sim
+            if run_start is not None and float(run_start) > 1e-9:
+                return float(run_start) + float(off)
+            return float(t0s) + float(lead) + float(off)
+        except Exception:
+            return None
+
+    sync_t = step.t_playback_port_sync
+    if sync_t is not None:
+        return float(sync_t)
+    if step.t_playback_json_end is not None:
+        return float(step.t_playback_json_end)
+    try:
+        return float(step.t_proc_end)
+    except Exception:
+        return None
+
+
+def _collect_schedule_port_occ_points_parallel(
+    schedule: PlaybackSchedule,
+    *,
+    initial_occ: Optional[Mapping[str, str]] = None,
+) -> List[Tuple[float, int, Dict[str, str]]]:
+    """
+    병렬 모드 전용: sync_t 시각 순으로 running+predict 재 bake.
+
+    schedule 1차 패스(시작 순)의 ``ports_occ_panel*`` 는 A∥B overlapping 에
+    오염될 수 있으므로 무시하고, 이미 반영된 sync 만 누적한 ``running`` 위에서
+    각 JSON 의 post-anim predict 를 다시 적용한다.
+    """
+    from .control_sim_prerun_playback import (
+        _post_anim_src_from_progress_and_event,
+        predict_ports_occupancy_after_anim,
+    )
+    from .playback_renewal_ports import (
+        renewal_full_panel_occ_for_step,
+        step_json_has_renewal_marker,
+    )
+
+    panel_ports = ["INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"]
+    running: Dict[str, str] = {p: "" for p in panel_ports}
+    if isinstance(initial_occ, Mapping):
+        for k, v in initial_occ.items():
+            ku = str(k).strip().upper()
+            if ku in running:
+                running[ku] = str(v or "")
+
+    candidates: List[Tuple[float, int, PlaybackScheduledStep, bool]] = []
+    for step in schedule.steps or ():
+        if not isinstance(step, PlaybackScheduledStep):
+            continue
+        kind = str(step.kind or "").strip().lower()
+        if kind in ("occ_refresh", "foup", "foup_process", "event_only"):
+            continue
+        if kind != "json_step":
+            continue
+        is_renewal = bool(step.has_renewal) or step_json_has_renewal_marker(step)
+        # non-renewal: 포트 갱신 대상이 아니면 스킵
+        if not is_renewal:
+            panel_pairs = step.ports_occ_panel if step.ports_occ_panel else step.ports_occ_after
+            ev_u = str(
+                (step.progress_payload or {}).get("event_seq")
+                or (step.event_payload or {}).get("seq")
+                or step.event_seq
+                or ""
+            ).strip().upper()
+            if not panel_pairs and ev_u not in _ANIM_PORT_UPDATE_SEQS:
+                continue
+        sync_t = _step_playback_sync_t(step, is_renewal=is_renewal)
+        if sync_t is None:
+            continue
+        try:
+            t_ev = float(step.t_event or 0.0)
+        except Exception:
+            t_ev = 0.0
+        sync_f = max(float(sync_t), float(t_ev))
+        order = (50000 if is_renewal else 10000) + int(step.index)
+        candidates.append((sync_f, order, step, is_renewal))
+
+    candidates.sort(key=lambda x: (float(x[0]), int(x[1])))
+
+    out: List[Tuple[float, int, Dict[str, str]]] = []
+    last_sync_t = -1.0
+    for sync_f0, order, step, is_renewal in candidates:
+        sync_f = float(sync_f0)
+        # renewal 은 이전 MOVE json-end 시각으로 끌어올리지 않음 (ARRIVED→JSON-end 착시)
+        if (not is_renewal) and sync_f + 1e-9 < float(last_sync_t):
+            sync_f = float(last_sync_t) + 1e-4
+
+        if is_renewal:
+            occ_r = renewal_full_panel_occ_for_step(
+                step,
+                base_occ=dict(running),
+                panel_ports=panel_ports,
+                ignore_baked_pairs=True,
+            )
+        else:
+            p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
+            ep = step.event_payload if isinstance(step.event_payload, dict) else {}
+            src = _post_anim_src_from_progress_and_event(p, ep)
+            try:
+                bn = str(getattr(step, "json_basename", "") or "").strip()
+                if bn and not src.get("file"):
+                    src["file"] = bn
+                jp = str(getattr(step, "json_path", "") or "").strip()
+                if jp and not src.get("path"):
+                    src["path"] = jp
+            except Exception:
+                pass
+            pred = predict_ports_occupancy_after_anim(dict(running), src) or {}
+            occ_r = {k: str(running.get(k, "") or "") for k in panel_ports}
+            for k, v in (pred or {}).items():
+                ku = str(k).strip().upper()
+                if ku in occ_r:
+                    occ_r[ku] = str(v or "")
+
+        if not occ_r:
+            continue
+        out.append((sync_f, int(order), dict(occ_r)))
+        last_sync_t = float(sync_f)
+        for k in panel_ports:
+            running[k] = str(occ_r.get(k, "") or "")
+    return out
+
+
 def _collect_schedule_port_occ_points(
     schedule: PlaybackSchedule,
+    *,
+    initial_occ: Optional[Mapping[str, str]] = None,
 ) -> List[Tuple[float, int, Dict[str, str]]]:
     """
     스케줄 step panel occ → occ_full 마일스톤.
@@ -191,7 +355,20 @@ def _collect_schedule_port_occ_points(
     - 그 외 anim JSON: 공정 종료 1회.
     - FOUP/event_only: 포트 점유 변경 없음 → 마일스톤 미생성.
     - sync_t 는 이벤트 순서·t_event 대비 역행하지 않게 clamp (미래 LOT 조기 표시 방지).
+
+    병렬(``SIM_PARALLEL_NONCONFLICTING_MOVES``): sync_t 순 · running+predict 재 bake
+    (시작 순에 오염된 ports_occ_panel* 무시). 직렬은 기존 경로 유지.
     """
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled
+
+        if parallel_moves_enabled():
+            return _collect_schedule_port_occ_points_parallel(
+                schedule, initial_occ=initial_occ
+            )
+    except Exception:
+        pass
+
     from .playback_renewal_ports import (
         renewal_full_panel_occ_for_step,
         renewal_playback_port_sync_for_step,
@@ -201,6 +378,11 @@ def _collect_schedule_port_occ_points(
 
     panel_ports = ["INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"]
     running: Dict[str, str] = {p: "" for p in panel_ports}
+    if isinstance(initial_occ, Mapping):
+        for k, v in initial_occ.items():
+            ku = str(k).strip().upper()
+            if ku in running:
+                running[ku] = str(v or "")
 
     out: List[Tuple[float, int, Dict[str, str]]] = []
     last_sync_t = -1.0
@@ -214,37 +396,7 @@ def _collect_schedule_port_occ_points(
 
         is_renewal_json = bool(step.has_renewal) or step_json_has_renewal_marker(step)
         if is_renewal_json:
-            sync_t = renewal_playback_port_sync_for_step(step)
-            if sync_t is None:
-                # offset/proc 재계산 실패 시에도 JSON-end 로 밀지 말고 lead+offset 으로 보정
-                try:
-                    from .json_playback_timing import json_lead_sec, resolve_playback_proc_anim
-
-                    t0s = float(step.t_event or 0.0)
-                    p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
-                    try:
-                        t0s = float(str(p.get("event_start_sim_time") or t0s))
-                    except Exception:
-                        pass
-                    proc_pb, anim_pb = resolve_playback_proc_anim(
-                        float(step.proc_sec or 0.0),
-                        float(step.anim_sec or 0.0),
-                        json_est_sec=float(step.json_est_sec or 0.0),
-                    )
-                    lead = float(json_lead_sec(float(proc_pb), float(anim_pb)))
-                    off = 0.0
-                    try:
-                        if step.renewal_offset_sec is not None and float(step.renewal_offset_sec) > 1e-9:
-                            off = float(step.renewal_offset_sec)
-                    except Exception:
-                        off = 0.0
-                    run_start = step.t_json_run_start_sim
-                    if run_start is not None and float(run_start) > 1e-9:
-                        sync_t = float(run_start) + float(off)
-                    else:
-                        sync_t = float(t0s) + float(lead) + float(off)
-                except Exception:
-                    sync_t = None
+            sync_t = _step_playback_sync_t(step, is_renewal=True)
             if sync_t is None:
                 if step.ports_occ_panel_renewal or step.ports_occ_after:
                     occ_r_fb = renewal_full_panel_occ_for_step(
@@ -403,7 +555,7 @@ def build_playback_ui_milestones(
 
     init = dict(initial_occ or {})
     engine_changes = _collect_engine_port_occ_changes(sorted_items, keys, schedule=schedule)
-    schedule_points = _collect_schedule_port_occ_points(schedule)
+    schedule_points = _collect_schedule_port_occ_points(schedule, initial_occ=init)
     occ_full = _merge_occ_timeline_to_full_milestones(
         port_keys=keys,
         initial_occ=init,

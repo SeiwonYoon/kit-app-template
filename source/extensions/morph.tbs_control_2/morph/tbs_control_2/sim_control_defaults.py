@@ -151,19 +151,18 @@ SIM_PRERUN_EXPORT_JSON: bool = True
 SIM_BAR_PREVIEW_DEFAULT: bool = True
 
 # ---------------------------------------------------------------------------
-# 시뮬 오케스트레이터: 비충돌 공정 병렬 기동 (simulation_engine._run_serial_flow)
+# 시뮬 오케스트레이터: 2레일 병렬 (simulation_engine._run_serial_flow)
 # ---------------------------------------------------------------------------
-# False(기본): 기존과 100% 동일 — 매 단계를 ``yield self.env.process(...)`` 로
-#   끝날 때까지 대기한 뒤 다음 우선순위를 본다(완전 직렬).
-# True: 기기가 겹치지 않으면 앞 공정 완료를 기다리지 않고 다음을 즉시 기동.
-#   허용 쌍(오케스트레이터가 yield 대기하지 않음):
-#   · BP→EP ‖ EP→OHT 회수 — 대상 EP 가 서로 다름(빈 EP vs 회수대기 EP)
-#   · BP→EP ‖ OHT→EP / OHT→INOUT — OHT→EP 는 서로 다른 빈 EP 일 때만
-#     (OHT→INOUT: BP→EP 로 비는 중인 버퍼가 있으면 빈 슬롯 조건 완화 — 동시 기동 허용)
-#   비허용: 회수 ‖ OHT 투입(동일 OHT 경로) — 한쪽이 끝날 때까지 다른 쪽 기동 안 함.
-#   INOUT→BP 는 True/False 모두 직렬(완료 대기) 유지.
-# ※ 병렬(True)은 포트/2화면/점유 버그 안정화 후 재검증. 실무·기본은 False.
-SIM_PARALLEL_NONCONFLICTING_MOVES: bool = False
+# False(기본): 기존과 100% 동일 — 완전 직렬 (실무 기본).
+# True: A레일(ARRIVED/REMOVED) 1 + B레일(MOVE_*) 1.
+#   · A끼리·B끼리 직렬, A∥B 만 허용(다른 인스턴스).
+#   · JSON/포트 끝 EPn 이 같으면 A∥B 금지.
+#   · B: 지금 기동 가능하면 BP→EP 우선, 아니면 INOUT→BP (REMOVED soon-empty 로 보류 금지).
+#   · Wave: REMOVED → B → OHT. A/B free·FOUP end·티켓 은 ``_parallel_schedule_wave`` SSOT.
+#   · 회수: 간격 타이머 티켓 유지. awaiting backlog 시 REMOVED 종료 후 chain 티켓으로 연속 회수.
+#   · 버퍼가 채울 빈 EP 에는 OHT→EP 직접투입 보류.
+#   · FOUP 등은 기존처럼 독립. EBS OFF 는 MOVE 가 거의 없어 사실상 직렬.
+SIM_PARALLEL_NONCONFLICTING_MOVES: bool = True
 
 __all__ = [
     "SimControlDefaults",

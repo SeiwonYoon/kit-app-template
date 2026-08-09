@@ -1,8 +1,12 @@
-"""프리런 재생 — JSON eff_sp + 타임라인 event emit 게이트 (1·2화면 공통)."""
+"""프리런 재생 — JSON eff_sp + 타임라인 event emit 게이트 (1·2화면 공통).
+
+직렬: 화면당 wall/proc/runner 1개 (기존).
+병렬(``SIM_PARALLEL_NONCONFLICTING_MOVES``): 레일 ``oht``|``move`` 별 게이트 → A∥B emit 가능.
+"""
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 
 def compute_json_effective_speed(user_sp: float, proc_sec: float, est_total: float) -> float:
@@ -38,13 +42,56 @@ def _json_busy_map(ext: Any) -> dict:
     return by
 
 
-def set_json_wall_busy(ext: Any, screen: int, busy: bool) -> None:
-    """JSON 한 건이 시작~완료(포트 반영) 될 때까지 True — 타임라인 다음 event 차단."""
-    _json_busy_map(ext)[str(max(1, int(screen)))] = bool(busy)
+def _gate_key(screen: int, rail: Optional[str] = None) -> str:
+    scr = max(1, int(screen))
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
+
+        if parallel_moves_enabled() and rail:
+            return rail_queue_key(scr, str(rail))
+    except Exception:
+        pass
+    return str(scr)
 
 
-def is_json_wall_busy(ext: Any, screen: int) -> bool:
-    return bool(_json_busy_map(ext).get(str(max(1, int(screen))), False))
+def set_json_wall_busy(
+    ext: Any, screen: int, busy: bool, rail: Optional[str] = None
+) -> None:
+    """JSON 한 건이 시작~완료될 때까지 True — 타임라인 다음 event 차단."""
+    scr = max(1, int(screen))
+    by = _json_busy_map(ext)
+    # 병렬에서 rail 없이 False → 해당 화면 모든 레일·레거시 키 해제
+    if (not busy) and (rail is None):
+        try:
+            from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
+
+            if parallel_moves_enabled():
+                by[str(scr)] = False
+                by[rail_queue_key(scr, "oht")] = False
+                by[rail_queue_key(scr, "move")] = False
+                return
+        except Exception:
+            pass
+    by[_gate_key(scr, rail)] = bool(busy)
+
+
+def is_json_wall_busy(ext: Any, screen: int, rail: Optional[str] = None) -> bool:
+    by = _json_busy_map(ext)
+    scr = max(1, int(screen))
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
+
+        if parallel_moves_enabled():
+            if rail:
+                return bool(by.get(rail_queue_key(scr, str(rail)), False))
+            return (
+                bool(by.get(rail_queue_key(scr, "oht"), False))
+                or bool(by.get(rail_queue_key(scr, "move"), False))
+                or bool(by.get(str(scr), False))
+            )
+    except Exception:
+        pass
+    return bool(by.get(str(scr), False))
 
 
 def _proc_gate_map(ext: Any) -> dict:
@@ -58,32 +105,31 @@ def _proc_gate_map(ext: Any) -> dict:
     return by
 
 
-def set_proc_gate_end(ext: Any, screen: int, t_proc_end: float) -> None:
-    """
-    직전 gated 이벤트의 공정 종료 sim 시각.
-
-    JSON wall 이 먼저 풀려도 ``sim_now < t_proc_end`` 이면 다음 gated emit 금지
-    (진행률이 아직 해당 ARRIVED/MOVE 인데 다음 포트 공정이 먼저 나가는 것 방지).
-    """
+def set_proc_gate_end(
+    ext: Any, screen: int, t_proc_end: float, rail: Optional[str] = None
+) -> None:
+    """직전 gated 이벤트의 공정 종료 sim 시각 (레일별 가능)."""
     try:
         te = float(t_proc_end)
     except Exception:
         return
     if te <= 1e-9:
         return
-    _proc_gate_map(ext)[str(max(1, int(screen)))] = float(te)
+    _proc_gate_map(ext)[_gate_key(screen, rail)] = float(te)
 
 
-def clear_proc_gate_end(ext: Any, screen: int) -> None:
+def clear_proc_gate_end(ext: Any, screen: int, rail: Optional[str] = None) -> None:
     try:
-        _proc_gate_map(ext).pop(str(max(1, int(screen))), None)
+        _proc_gate_map(ext).pop(_gate_key(screen, rail), None)
     except Exception:
         pass
 
 
-def get_proc_gate_end(ext: Any, screen: int) -> Optional[float]:
+def get_proc_gate_end(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> Optional[float]:
     try:
-        v = _proc_gate_map(ext).get(str(max(1, int(screen))))
+        v = _proc_gate_map(ext).get(_gate_key(screen, rail))
         if v is None:
             return None
         return float(v)
@@ -103,9 +149,11 @@ def _sim_now_for_gate(ext: Any, screen: int) -> float:
     return 0.0
 
 
-def is_proc_wait_blocking(ext: Any, screen: int) -> bool:
+def is_proc_wait_blocking(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> bool:
     """``sim_now`` 가 직전 gated 이벤트 공정 종료 이전이면 True."""
-    pe = get_proc_gate_end(ext, int(screen))
+    pe = get_proc_gate_end(ext, int(screen), rail=rail)
     if pe is None:
         return False
     try:
@@ -130,8 +178,34 @@ def _runner_for_screen(ext: Any, screen: int) -> Any:
     return None
 
 
-def is_screen_runner_busy(ext: Any, screen: int) -> bool:
+def is_screen_runner_busy(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> bool:
     """SequenceRunner 가 LAM/drain/legacy tick 중이면 True."""
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
+
+        if parallel_moves_enabled():
+            runners = getattr(ext, "_sim_runners_by_screen_rail", None)
+            if isinstance(runners, dict):
+                if rail:
+                    rr = runners.get(rail_queue_key(max(1, int(screen)), str(rail)))
+                    if rr is not None:
+                        return bool(getattr(rr, "is_running", lambda: False)())
+                    return False
+                # rail 미지정: 해당 화면 어느 레일이든 busy 이면 True
+                scr = max(1, int(screen))
+                for rk in (
+                    rail_queue_key(scr, "oht"),
+                    rail_queue_key(scr, "move"),
+                ):
+                    rr = runners.get(rk)
+                    if rr is not None and bool(
+                        getattr(rr, "is_running", lambda: False)()
+                    ):
+                        return True
+    except Exception:
+        pass
     rr = _runner_for_screen(ext, screen)
     if rr is None:
         return False
@@ -183,51 +257,249 @@ def is_screen_channel_motion_busy(ext: Any, screen: int) -> bool:
         return False
 
 
-def try_release_json_wall_when_idle(ext: Any, screen: int) -> bool:
+def _json_hold_reason_active_or_queued(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> bool:
+    """lead 대기·실행중 active 또는 멀티 큐 대기면 wall 유지."""
+    scr = max(1, int(screen))
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(active_by, dict):
+            from .sim_parallel_rails import (
+                anim_state_key,
+                parallel_moves_enabled,
+                screen_from_state_key,
+            )
+
+            keys = []
+            if parallel_moves_enabled():
+                if rail:
+                    keys.append(anim_state_key(scr, str(rail)))
+                else:
+                    keys.extend(
+                        [
+                            anim_state_key(scr, "oht"),
+                            anim_state_key(scr, "move"),
+                            str(scr),
+                        ]
+                    )
+            else:
+                keys.append(str(scr))
+            for k in keys:
+                act = active_by.get(k)
+                if not isinstance(act, dict) or not act:
+                    continue
+                try:
+                    if screen_from_state_key(k) != scr and str(
+                        act.get("tbs_sim_screen") or ""
+                    ).strip() not in ("", str(scr)):
+                        continue
+                except Exception:
+                    pass
+                # lead 또는 시퀀스 시작됨 → wall 유지
+                if bool(act.get("_json_pending_sim_start")) or bool(
+                    act.get("_json_sequence_started")
+                ):
+                    return True
+                # active 슬롯이 비어있지 않으면 유지(보수)
+                return True
+    except Exception:
+        pass
+    try:
+        by = getattr(ext, "_sim_playback_json_jobs_by_screen", None)
+        q = by.get(str(scr)) if isinstance(by, dict) else None
+        if q is None:
+            return False
+        if not rail:
+            return len(q) > 0
+        from .sim_parallel_rails import rail_from_job_or_payload
+
+        for job in list(q):
+            if not isinstance(job, dict):
+                continue
+            if str(rail_from_job_or_payload(job) or "").lower() == str(rail).lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def try_release_json_wall_when_idle(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> bool:
     """
     runner·motion 모두 idle 이면 ``json_wall_busy`` 해제.
 
     Returns: 해제 후(또는 원래 idle) True — 여전히 busy 면 False.
     """
     scr = max(1, int(screen))
-    if not is_json_wall_busy(ext, scr):
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled
+
+        par = bool(parallel_moves_enabled())
+    except Exception:
+        par = False
+
+    # 병렬 + rail 미지정: 레일별로 각각 해제 시도
+    if par and rail is None:
+        ok_oht = try_release_json_wall_when_idle(ext, scr, rail="oht")
+        ok_move = try_release_json_wall_when_idle(ext, scr, rail="move")
+        # 레거시 키
+        if bool(_json_busy_map(ext).get(str(scr), False)):
+            if (not is_screen_runner_busy(ext, scr)) and (
+                not _json_hold_reason_active_or_queued(ext, scr)
+            ):
+                _json_busy_map(ext)[str(scr)] = False
+        return bool(ok_oht and ok_move)
+
+    if not is_json_wall_busy(ext, scr, rail=rail):
         return True
-    if is_screen_runner_busy(ext, scr):
+    if _json_hold_reason_active_or_queued(ext, scr, rail=rail):
         return False
-    if is_screen_channel_motion_busy(ext, scr):
+    if is_screen_runner_busy(ext, scr, rail=rail):
         return False
-    set_json_wall_busy(ext, scr, False)
+    try:
+        # 병렬: 인스턴스가 다르므로 channel motion 전면 busy 로 wall 유지하지 않음
+        if not par:
+            if is_screen_channel_motion_busy(ext, scr):
+                return False
+    except Exception:
+        if is_screen_channel_motion_busy(ext, scr):
+            return False
+    set_json_wall_busy(ext, scr, False, rail=rail)
+    try:
+        from .control_sim_playback_plan import clear_parallel_rail_port_hold
+
+        clear_parallel_rail_port_hold(ext, scr, rail=rail)
+    except Exception:
+        pass
+    try:
+        from .control_sim_playback_plan import refresh_playback_display_at_sim
+
+        refresh_playback_display_at_sim(ext, scr, force=True)
+    except Exception:
+        pass
     return True
 
 
-def can_emit_timeline_event(ext: Any, screen: int) -> bool:
+def can_emit_timeline_event(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> bool:
     """
     타임라인 ``kind=event`` emit 허용.
 
-    - ``json_wall_busy`` / runner / motion busy → 금지
+    - ``json_wall_busy`` / runner / (직렬만) motion busy → 금지
     - **proc_wait**: 직전 gated 이벤트 ``t_proc_end`` 전 → 금지
-      (JSON 만 먼저 끝나 wall 이 풀려도 공정 진행 중 다음 ARRIVED/MOVE 차단)
-
-    progress/log/FOUP(non-gated)·sim_now 는 SimTimelinePlayer 가 계속 처리한다.
+    - 병렬: ``rail`` 단위 게이트로 A∥B 동시 emit
+    - 동일 EPn 은 ``rail_ep_conflict_blocks_emit`` / ``make_playback_event_gate`` 에서 추가 차단
     """
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return True
     scr = max(1, int(screen))
-    if is_json_wall_busy(ext, scr):
+    if is_json_wall_busy(ext, scr, rail=rail):
         return False
-    if is_proc_wait_blocking(ext, scr):
+    if is_proc_wait_blocking(ext, scr, rail=rail):
         return False
-    if is_screen_runner_busy(ext, scr):
+    if is_screen_runner_busy(ext, scr, rail=rail):
         return False
-    if is_screen_channel_motion_busy(ext, scr):
-        return False
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled
+
+        if not parallel_moves_enabled():
+            if is_screen_channel_motion_busy(ext, scr):
+                return False
+    except Exception:
+        if is_screen_channel_motion_busy(ext, scr):
+            return False
     return True
+
+
+def is_rail_json_occupying(ext: Any, screen: int, rail: str) -> bool:
+    """병렬 레일이 JSON wall·lead·runner 로 점유 중이면 True (채널 stop 억제용)."""
+    r = str(rail or "").strip().lower()
+    if r not in ("oht", "move"):
+        return False
+    scr = max(1, int(screen))
+    if is_json_wall_busy(ext, scr, rail=r):
+        return True
+    if is_screen_runner_busy(ext, scr, rail=r):
+        return True
+    try:
+        from .sim_parallel_rails import anim_state_key
+
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(active_by, dict):
+            act = active_by.get(anim_state_key(scr, r))
+            if isinstance(act, dict) and act:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def rail_ep_conflict_blocks_emit(
+    ext: Any,
+    screen: int,
+    rail: str,
+    payload: Optional[Dict[str, Any]],
+) -> bool:
+    """병렬: 타 레일 JSON 이 같은 EPn 점유면 True (emit 보류)."""
+    try:
+        from .sim_parallel_rails import (
+            anim_state_key,
+            ep_target_from_payload,
+            ep_targets_conflict,
+            parallel_moves_enabled,
+            twin_rail,
+        )
+
+        if not parallel_moves_enabled():
+            return False
+        r = str(rail or "").strip().lower()
+        twin = twin_rail(r)
+        if not twin:
+            return False
+        my_ep = ep_target_from_payload(payload if isinstance(payload, dict) else {})
+        if not my_ep:
+            return False
+        if not is_rail_json_occupying(ext, int(screen), twin):
+            return False
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        other = None
+        if isinstance(active_by, dict):
+            other = active_by.get(anim_state_key(int(screen), twin))
+        if not isinstance(other, dict) or not other:
+            # wall 만 남고 active 가 비었으면 EP 를 알 수 없어 보수적으로 차단하지 않음
+            # (타 레일 runner busy 는 occupying 에 포함되나 EP 미상이면 A∥B 허용)
+            return False
+        other_ep = ep_target_from_payload(other)
+        return bool(ep_targets_conflict(my_ep, other_ep))
+    except Exception:
+        return False
+
+
+def make_playback_event_gate(ext: Any):
+    """``(screen, rail=None, payload=None)`` — 병렬 레일·동일 EP 가드 포함."""
+
+    def _gate(scr, rail=None, payload=None):  # noqa: ANN001
+        if not can_emit_timeline_event(ext, int(scr), rail=rail):
+            return False
+        if rail and isinstance(payload, dict):
+            if rail_ep_conflict_blocks_emit(ext, int(scr), str(rail), payload):
+                return False
+        return True
+
+    return _gate
 
 
 def clear_playback_gate_state(ext: Any) -> None:
     try:
         ext._sim_json_wall_busy_by_screen = {}
         ext._sim_playback_proc_gate_by_screen = {}
+    except Exception:
+        pass
+    try:
+        ext._sim_playback_parallel_port_hold_by_rail = {}
     except Exception:
         pass
     try:
@@ -251,9 +523,12 @@ __all__ = [
     "get_proc_gate_end",
     "is_json_wall_busy",
     "is_proc_wait_blocking",
+    "is_rail_json_occupying",
     "is_screen_channel_motion_busy",
     "is_screen_runner_busy",
     "json_wall_duration_sec",
+    "make_playback_event_gate",
+    "rail_ep_conflict_blocks_emit",
     "set_json_wall_busy",
     "set_proc_gate_end",
     "try_release_json_wall_when_idle",

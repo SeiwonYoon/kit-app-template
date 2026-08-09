@@ -403,6 +403,15 @@ def build_playback_schedule(
     idx = 0
     step_i = 0
     sp1 = max(0.1, float(user_sp))
+    # 병렬: 시작 순으로 predict 를 panel_occ 에 누적하면 A∥B overlapping 이 오염됨.
+    # step 필드용 predict 는 하되, panel_occ 전진은 하지 않음 → ui_milestones 가
+    # sync_t 순 재 bake (playback_plan._collect_schedule_port_occ_points_parallel).
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled
+
+        _parallel_bake = bool(parallel_moves_enabled())
+    except Exception:
+        _parallel_bake = False
 
     while idx < len(items):
         it = items[idx]
@@ -625,8 +634,11 @@ def build_playback_schedule(
                             {**panel_at_step_start, **pred_full},
                             panel_ports,
                         )
-                    for k, v in ports_after:
-                        panel_occ[str(k)] = str(v or "")
+                    # 직렬만: 다음 step 의 panel_at_step_start 용으로 predict 누적.
+                    # 병렬은 overlapping 오염 방지를 위해 panel_occ 를 여기서 전진시키지 않음.
+                    if not _parallel_bake:
+                        for k, v in ports_after:
+                            panel_occ[str(k)] = str(v or "")
             except Exception:
                 t_playback_sync = None
                 t_playback_json_end = None
@@ -674,7 +686,7 @@ def build_playback_schedule(
                     t_playback_sync = float(t_json_end if t_json_end > t0 else proc_end)
                     if not ports_after:
                         pred = predict_ports_occupancy_after_anim(
-                            dict(panel_occ),
+                            dict(panel_at_step_start if _parallel_bake else panel_occ),
                             _post_anim_src_from_progress_and_event(progress_p, event_p),
                         )
                         ports_after = tuple(
@@ -682,8 +694,9 @@ def build_playback_schedule(
                             for k, v in (pred or {}).items()
                             if str(k).strip()
                         )
-                        for k, v in ports_after:
-                            panel_occ[str(k)] = str(v or "")
+                        if not _parallel_bake:
+                            for k, v in ports_after:
+                                panel_occ[str(k)] = str(v or "")
                 except Exception:
                     pass
 
@@ -694,6 +707,10 @@ def build_playback_schedule(
             # FOUP 는 포트 점유 미변경 — panel milestone 용 ports_occ_panel 비움
             if step_kind in (_STEP_KIND_FOUP, _STEP_KIND_FOUP_PROC):
                 ports_panel = ()
+            elif _parallel_bake:
+                # 병렬: 시작순 panel_occ 는 오염/고착 → step 필드에 넣지 않음.
+                # ui_milestones 가 sync_t 순 재 bake (SSOT).
+                ports_panel = ()
             else:
                 ports_panel = tuple(
                     (str(k).strip().upper(), str(panel_occ.get(k, "") or ""))
@@ -701,6 +718,11 @@ def build_playback_schedule(
                 )
         else:
             ports_panel = ()
+            if _parallel_bake:
+                # renewal pair 도 1차 predict(오염 base) 를 쓰지 않음 — collect 가 재계산
+                ports_panel_renewal = ()
+                ports_after = ()
+                ports_panel_json_end = ()
 
         t_json_run_start_sim = float(t0) + float(lead)
 
@@ -738,7 +760,9 @@ def build_playback_schedule(
             panel_ports=panel_ports,
         )
 
-        if ports_after:
+        # 직렬: JSON ports_after 를 누적해 다음 step base 로 씀.
+        # 병렬: ui_milestones 가 sync_t 순 재 bake 하므로 여기서 누적하지 않음.
+        if ports_after and not _parallel_bake:
             for k, v in ports_after:
                 ku = str(k).strip().upper()
                 if ku:
@@ -795,11 +819,18 @@ def build_playback_schedule(
                     panel_ports=panel_ports,
                 )
                 ports_panel = ()
-                if ports_after:
+                if ports_after and not _parallel_bake:
                     for k, v in ports_after:
                         ku = str(k).strip().upper()
                         if ku:
                             panel_occ[ku] = str(v or "")
+
+        # 병렬: apply/late_renewal 이 다시 채운 오염 panel pair 를 비움 (sync_t 재 bake SSOT)
+        if _parallel_bake and step_kind == _STEP_KIND_JSON:
+            ports_panel = ()
+            ports_panel_renewal = ()
+            ports_after = ()
+            ports_panel_json_end = ()
 
         steps.append(
             PlaybackScheduledStep(

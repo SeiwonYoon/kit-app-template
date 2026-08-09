@@ -68,33 +68,33 @@ class EpPortLayout:
 
 
 EP2_PORT_LAYOUT = EpPortLayout(
-    hide_prims=("/World/aaa_1", "/wafer_01/_05", "/wafer_01/_08"),
-    show_prims=("/World/aaa", "/wafer_01/_01", "/wafer_01/_02", "/wafer_01/_03", "/wafer_01/_04", "/wafer_01/_06", "/wafer_01/_07"),
+    hide_prims=("/port3", "/wafer_01/_05", "/wafer_01/_08"),
+    show_prims=("/port2", "/wafer_01/_01", "/wafer_01/_02", "/wafer_01/_03", "/wafer_01/_04", "/wafer_01/_06", "/wafer_01/_07"),
 )
 
 EP3_PORT_LAYOUT = EpPortLayout(
-    hide_prims=("/World/aaa",),
-    show_prims=("/World/aaa_1", "/wafer_01/_05", "/wafer_01/_08", "/wafer_01/_01", "/wafer_01/_02", "/wafer_01/_03", "/wafer_01/_04", "/wafer_01/_06", "/wafer_01/_07"),
+    hide_prims=("/port2",),
+    show_prims=("/port3", "/wafer_01/_05", "/wafer_01/_08", "/wafer_01/_01", "/wafer_01/_02", "/wafer_01/_03", "/wafer_01/_04", "/wafer_01/_06", "/wafer_01/_07"),
 )
 
 # EBS 적용 ON/OFF 시 추가 show/hide (EP2/3_PORT_LAYOUT 적용 후 이어서 적용)
 EBS2_SHOW_LAYOUT = EpPortLayout(
     hide_prims=(),
-    show_prims=(),
+    show_prims=("/ebsonoff"),
 )
 
 EBS2_HIDE_LAYOUT = EpPortLayout(
-    hide_prims=(),
+    hide_prims=("/ebsonoff"),
     show_prims=(),
 )
 
 EBS3_SHOW_LAYOUT = EpPortLayout(
     hide_prims=(),
-    show_prims=(),
+    show_prims=("/ebsonoff"),
 )
 
 EBS3_HIDE_LAYOUT = EpPortLayout(
-    hide_prims=(),
+    hide_prims=("/ebsonoff"),
     show_prims=(),
 )
 

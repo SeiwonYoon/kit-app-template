@@ -999,6 +999,22 @@ def build_ep_bar_from_playback_schedule(
         except Exception:
             milestones = []
     if not milestones:
+        # 병렬: 시작순 timeline_replay fallback 은 포트 bake 와 어긋남 → schedule 재 bake 시도
+        try:
+            from .sim_parallel_rails import parallel_moves_enabled
+            from .playback_plan import build_playback_ui_milestones, milestones_to_finalize_tuples
+
+            if parallel_moves_enabled() and schedule is not None:
+                panel_ports = ["INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3"]
+                rebuilt = build_playback_ui_milestones(
+                    schedule,
+                    tuple(items or ()),
+                    port_keys=panel_ports,
+                )
+                milestones = milestones_to_finalize_tuples(rebuilt)
+        except Exception:
+            milestones = []
+    if not milestones:
         return build_ep_bar_from_timeline_replay(
             items,
             final_sim_time=float(final_sim_time),

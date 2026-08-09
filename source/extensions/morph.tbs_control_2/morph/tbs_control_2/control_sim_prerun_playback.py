@@ -343,14 +343,96 @@ def _canonical_sim_port_key(port: str) -> str:
     return o
 
 
+def _anim_basename_from_src(src: Mapping[str, Any]) -> str:
+    for k in ("file", "path", "linked_anim_json", "json_basename"):
+        v = str((src or {}).get(k) or "").strip().replace("\\", "/")
+        if v:
+            return v.rsplit("/", 1)[-1]
+    return ""
+
+
+def repair_anim_src_ports(src: Dict[str, Any]) -> Dict[str, Any]:
+    """JSON 파일명으로 from/to 보강 — BP→EP 가 INOUT 으로 잘못 찍히는 잔상 방지.
+
+    예: ``move_bp1_ep1.json`` + to=INOUT(오염) → BP1→EP1 복구.
+    """
+    import re
+
+    out = dict(src or {})
+    ev = _normalize_anim_event_seq(
+        _s_val(out.get("event") or out.get("event_seq") or out.get("seq"))
+    )
+    bn = _anim_basename_from_src(out).lower()
+    if not bn:
+        return out
+
+    m_bp_ep = re.search(r"move_(bp[1-4])_(ep[1-3])", bn)
+    if m_bp_ep and ev in ("", "MOVE", "MOVE_REQ", "MOVE_TRANSFERING"):
+        # MOVE_REQ / move_bp*_ep* 는 파일명이 SSOT (병렬 시 to 오염 대응)
+        if ev in ("", "MOVE", "MOVE_REQ") or "move_bp" in bn:
+            out["from_port_id"] = str(m_bp_ep.group(1)).upper()
+            out["to_port_id"] = str(m_bp_ep.group(2)).upper()
+            if not ev:
+                out["event"] = "MOVE_REQ"
+
+    m_inout_bp = re.search(r"move_inout_(bp[1-4])", bn)
+    if m_inout_bp and ev in ("", "MOVE_TRANSFERING", "MOVE"):
+        out["from_port_id"] = "INOUT"
+        out["to_port_id"] = str(m_inout_bp.group(1)).upper()
+        if not ev:
+            out["event"] = "MOVE_TRANSFERING"
+
+    if "arrived_inout" in bn and ev in ("", "ARRIVED"):
+        out["port_id"] = "INOUT"
+        out["to_port_id"] = out.get("to_port_id") or "INOUT"
+        out["from_port_id"] = out.get("from_port_id") or "OHT"
+        if not ev:
+            out["event"] = "ARRIVED"
+
+    m_arr_ep = re.search(r"arrived_(ep[1-3])", bn)
+    if m_arr_ep and ev in ("", "ARRIVED"):
+        ep = str(m_arr_ep.group(1)).upper()
+        out["port_id"] = ep
+        out["to_port_id"] = ep
+        out["from_port_id"] = out.get("from_port_id") or "OHT"
+        if not ev:
+            out["event"] = "ARRIVED"
+
+    # MOVE_REQ 가 to=INOUT 이면 파일명으로 강제 교정
+    to_now = _canonical_sim_port_key(_s_val(out.get("to_port_id")))
+    if m_bp_ep and (ev in ("MOVE_REQ", "MOVE") or "move_bp" in bn) and to_now in ("", "INOUT"):
+        out["from_port_id"] = str(m_bp_ep.group(1)).upper()
+        out["to_port_id"] = str(m_bp_ep.group(2)).upper()
+    return out
+
+
+def _clear_lot_elsewhere(occ: Dict[str, Any], lot_id: str, keep: Tuple[str, ...]) -> None:
+    """같은 LOT 이 keep 외 포트에 남아 있으면 비움 (BP→EP 후 INOUT 잔상 등)."""
+    lid = str(lot_id or "").strip()
+    if not lid:
+        return
+    keep_u = {str(k).strip().upper() for k in (keep or ()) if str(k).strip()}
+    for k in list(occ.keys()):
+        ku = str(k).strip().upper()
+        if ku in keep_u:
+            continue
+        if str(occ.get(k) or "").strip() == lid:
+            occ[k] = ""
+
+
 def _post_anim_src_from_progress(p: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "event": _normalize_anim_event_seq(_s_val(p.get("event_seq") or p.get("sequence_name"))),
-        "lot_id": _s_val(p.get("lot_id")),
-        "from_port_id": _s_val(p.get("from_port_id")),
-        "to_port_id": _s_val(p.get("to_port_id")),
-        "port_id": _s_val(p.get("port_id") or p.get("event_port_id")),
-    }
+    return repair_anim_src_ports(
+        {
+            "event": _normalize_anim_event_seq(_s_val(p.get("event_seq") or p.get("sequence_name"))),
+            "lot_id": _s_val(p.get("lot_id")),
+            "from_port_id": _s_val(p.get("from_port_id")),
+            "to_port_id": _s_val(p.get("to_port_id")),
+            "port_id": _s_val(p.get("port_id") or p.get("event_port_id")),
+            "file": _s_val(p.get("linked_anim_json") or p.get("file") or p.get("path")),
+            "linked_anim_json": _s_val(p.get("linked_anim_json")),
+            "path": _s_val(p.get("path")),
+        }
+    )
 
 
 def _post_anim_src_from_progress_and_event(
@@ -368,26 +450,37 @@ def _post_anim_src_from_progress_and_event(
         for key in ("lot_id", "from_port_id", "to_port_id", "port_id", "event_port_id"):
             if not _s_val(src.get(key)) and _s_val(ev.get(key)):
                 src[key] = _s_val(ev.get(key))
-    return src
+        for key in ("file", "path", "linked_anim_json"):
+            if not _s_val(src.get(key)) and _s_val(ev.get(key)):
+                src[key] = _s_val(ev.get(key))
+    return repair_anim_src_ports(src)
 
 
 def predict_ports_occupancy_after_anim(occ_base: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]:
     """JSON(이동·안착·회수) 종료 직후 기대되는 ports_occupancy."""
     occ_pred = dict(occ_base or {})
-    ev = _normalize_anim_event_seq(_s_val(src.get("event") or src.get("event_seq") or src.get("seq")))
-    lot_id = _s_val(src.get("lot_id"))
-    fr = _canonical_sim_port_key(_s_val(src.get("from_port_id")))
-    to = _canonical_sim_port_key(_s_val(src.get("to_port_id")))
-    port = _canonical_sim_port_key(_s_val(src.get("port_id") or src.get("event_port_id")))
+    src_f = repair_anim_src_ports(dict(src or {}))
+    ev = _normalize_anim_event_seq(
+        _s_val(src_f.get("event") or src_f.get("event_seq") or src_f.get("seq"))
+    )
+    lot_id = _s_val(src_f.get("lot_id"))
+    fr = _canonical_sim_port_key(_s_val(src_f.get("from_port_id")))
+    to = _canonical_sim_port_key(_s_val(src_f.get("to_port_id")))
+    port = _canonical_sim_port_key(_s_val(src_f.get("port_id") or src_f.get("event_port_id")))
     if ev in ("MOVE_TRANSFERING", "MOVE_REQ", "MOVE"):
         if fr:
             occ_pred[fr] = ""
         if to and lot_id:
             occ_pred[to] = lot_id
+        # BP→EP: 같은 LOT 이 INOUT 에 남아 있으면 잔상 제거
+        if fr.startswith("BP") and to.startswith("EP") and lot_id:
+            _clear_lot_elsewhere(occ_pred, lot_id, keep=(to,))
     elif ev == "ARRIVED":
         dest = port or to
         if dest and lot_id:
             occ_pred[dest] = lot_id
+            # 주의: INOUT ARRIVED 에서 같은 lot 을 BP 에서 지우면
+            # (lot_id 오염 시) BP→INOUT 점프처럼 보인다. ARRIVED 는 dest 만 채움.
     elif ev == "REMOVED":
         if port:
             occ_pred[port] = ""
@@ -1021,15 +1114,26 @@ class SimTimelinePlayer:
     def _event_needs_json_gate(payload: Any) -> bool:
         """JSON 시퀀스를 dispatch 하는 이벤트만 emit 게이트(러너 busy)를 받는다.
 
-        FOUP_PROCESS_START/END·PORT_OCC_REFRESH 는 SequenceRunner 를 거치지 않는
-        독립 동작이므로 게이트와 무관하게 자기 sim 시각에 바로 내보낸다.
+        FOUP_PROCESS_START/END·PORT_OCC_REFRESH·READYTOLOAD/UNLOAD 는
+        SequenceRunner 를 거치지 않으므로 게이트와 무관하게 자기 sim 시각에 내보낸다.
+        READY* 를 gated 로 두면 oht wall 이 잡혀 MOVE 중 REMOVED 가 막힐 수 있다.
         """
         if not isinstance(payload, dict):
             return True
         seq = str(payload.get("seq") or payload.get("event") or "").strip().upper()
         if not seq:
             return False
-        return seq not in ("PORT_OCC_REFRESH", "FOUP_PROCESS_START", "FOUP_PROCESS_END")
+        if seq in (
+            "PORT_OCC_REFRESH",
+            "FOUP_PROCESS_START",
+            "FOUP_PROCESS_END",
+            "READYTOLOAD",
+            "READYTOUNLOAD",
+            "EAPEIS_PORT_READYTOLOAD",
+            "EAPEIS_PORT_READYTOUNLOAD",
+        ):
+            return False
+        return True
 
     def _safe_emit(self, item: Any, scr: int) -> None:
         try:
@@ -1037,11 +1141,16 @@ class SimTimelinePlayer:
         except Exception:
             pass
 
-    def _gate_open(self, scr: int) -> bool:
+    def _gate_open(self, scr: int, payload: Any = None) -> bool:
         if self._event_emit_allowed is None:
             return True
         try:
-            return bool(self._event_emit_allowed(int(scr)))
+            return bool(self._event_emit_allowed(int(scr), payload=payload))  # type: ignore[call-arg]
+        except TypeError:
+            try:
+                return bool(self._event_emit_allowed(int(scr)))
+            except Exception:
+                return False
         except Exception:
             return False
 
@@ -1049,11 +1158,32 @@ class SimTimelinePlayer:
         """``sim_now`` 이하 타임라인 항목 emit (프레임당 상한).
 
         gated 이벤트(JSON dispatch)가 러너 busy 로 막히면 커서를 고정하되, 그 뒤의
-        non-gated 이벤트(FOUP_PROCESS_*/PORT_OCC_REFRESH)는 먼저 내보낸다. 이렇게 하면
-        2화면에서 한쪽 JSON 이 길어져도 FOUP 공정이 제 sim 시각에 시작된다.
+        non-gated 이벤트(FOUP_PROCESS_*/PORT_OCC_REFRESH)는 **같은 t 이하** 만 허용.
+
+        병렬 모드: oht/move 레일별로 gated emit 1개까지 동일 tick 허용 (A∥B).
+        **금지:** gate 로 막힌 gated 보다 **뒤 인덱스** 의 다른 레일 gated
+        (ARRIVED INOUT 미emit 인데 MOVE INOUT→BP 선행) · 앞선 FOUP 로 EP 공정 꼬임.
         """
         emitted = 0
         max_n = max(1, int(max_emits))
+        try:
+            from .sim_parallel_rails import classify_sim_rail, parallel_moves_enabled
+
+            parallel = bool(parallel_moves_enabled())
+        except Exception:
+            classify_sim_rail = None  # type: ignore
+            parallel = False
+
+        def _skip_same_t_progress(items_local, j0: int, t0: float) -> int:
+            jj = int(j0)
+            while (
+                jj < len(items_local)
+                and str(items_local[jj].kind) == "progress"
+                and abs(float(items_local[jj].t) - float(t0)) <= 1e-9
+            ):
+                jj += 1
+            return jj
+
         for scr, res in self._results.items():
             t_sim = self.sim_now(scr)
             with self._lock:
@@ -1063,14 +1193,16 @@ class SimTimelinePlayer:
                     skipped = set()
                     self._skipped_by_screen[scr] = skipped
             items = res.items
+            gated_emitted_rails: set = set()
             event_emitted_this_tick = False
             cursor_frozen = False
+            freeze_at: Optional[int] = None
+            freeze_t: Optional[float] = None
             j = i
             while j < len(items) and float(items[j].t) <= float(t_sim) + 1e-9 and emitted < max_n:
                 it = items[j]
-                # 앞서 out-of-order 로 이미 내보낸 항목 — 커서만 따라잡는다.
                 if j in skipped:
-                    if not cursor_frozen:
+                    if not cursor_frozen and freeze_at is None:
                         skipped.discard(j)
                         i = j + 1
                     j += 1
@@ -1078,37 +1210,108 @@ class SimTimelinePlayer:
                 kind = str(it.kind)
                 if kind == "event":
                     needs_gate = self._event_needs_json_gate(it.payload)
+                    rail = None
+                    if parallel and classify_sim_rail is not None and isinstance(it.payload, dict):
+                        rail = classify_sim_rail(
+                            str(it.payload.get("sim_rail") or it.payload.get("seq") or it.payload.get("event") or "")
+                        )
+                        if rail is None and needs_gate:
+                            rail = "oht"
                     if needs_gate:
-                        # 앞의 gated 이벤트가 아직 안 나갔으면 뒤 gated 이벤트도 보류(JSON 순서 보존).
-                        if cursor_frozen or event_emitted_this_tick:
-                            break
-                        if not self._gate_open(int(scr)):
-                            # 이 gated 이벤트는 보류 — 커서 고정, 뒤의 non-gated 만 계속 탐색.
-                            cursor_frozen = True
-                            j += 1
-                            continue
+                        if not (parallel and rail):
+                            # 직렬: 미emit gated 뒤 인덱스 gated 선행 금지
+                            if freeze_at is not None and j > int(freeze_at):
+                                break
+                        if parallel and rail:
+                            rail_blocked = False
+                            if rail in gated_emitted_rails:
+                                rail_blocked = True
+                            elif not self._gate_open_rail(int(scr), rail, it.payload):
+                                rail_blocked = True
+                            if rail_blocked:
+                                # 이 레일만 보류 — 다른 레일 gated(REMOVED∥MOVE) 는 계속 스캔
+                                if freeze_at is None:
+                                    freeze_at = j
+                                    try:
+                                        freeze_t = float(it.t)
+                                    except Exception:
+                                        freeze_t = None
+                                cursor_frozen = True
+                                j = _skip_same_t_progress(items, j + 1, float(it.t))
+                                continue
+                            # 같은 레일의 앞선 freeze 이면 중단(후순위 같은 레일 A/B 직렬)
+                            if freeze_at is not None and j > int(freeze_at):
+                                try:
+                                    fr_it = items[int(freeze_at)]
+                                    fr_rail = None
+                                    if classify_sim_rail is not None and isinstance(
+                                        fr_it.payload, dict
+                                    ):
+                                        fr_rail = classify_sim_rail(
+                                            str(
+                                                fr_it.payload.get("sim_rail")
+                                                or fr_it.payload.get("seq")
+                                                or ""
+                                            )
+                                        )
+                                except Exception:
+                                    fr_rail = None
+                                if fr_rail and str(fr_rail) == str(rail):
+                                    break
+                        else:
+                            if cursor_frozen or event_emitted_this_tick:
+                                break
+                            if not self._gate_open(int(scr), it.payload):
+                                cursor_frozen = True
+                                if freeze_at is None:
+                                    freeze_at = j
+                                    try:
+                                        freeze_t = float(it.t)
+                                    except Exception:
+                                        freeze_t = None
+                                j = _skip_same_t_progress(items, j + 1, float(it.t))
+                                continue
+                        evt_idx = j
+                        evt_t = float(it.t)
                         self._safe_emit(it, int(scr))
                         emitted += 1
-                        event_emitted_this_tick = True
-                        i = j + 1
+                        if parallel and rail:
+                            gated_emitted_rails.add(rail)
+                        else:
+                            event_emitted_this_tick = True
                         j += 1
-                        # 동일 sim_time progress(공정 단계) 동반 emit — 연계 JSON 표시 어긋남 방지
                         if (
                             j < len(items)
                             and str(items[j].kind) == "progress"
-                            and abs(float(items[j].t) - float(it.t)) <= 1e-9
+                            and abs(float(items[j].t) - evt_t) <= 1e-9
                             and emitted < max_n
                             and j not in skipped
                         ):
                             self._safe_emit(items[j], int(scr))
                             emitted += 1
-                            i = j + 1
                             j += 1
-                        break
-                    # non-gated 이벤트: 게이트 무시하고 자기 sim 시각에 바로 emit
+                        i = j
+                        if not parallel:
+                            break
+                        continue
+                    # non-gated 이벤트 (FOUP_*/READY*/PORT_OCC_REFRESH)
+                    # freeze 중이면 막힌 gated 시각을 넘는 FOUP 로 EP 공정 UI 가 꼬이지 않게 차단
+                    if freeze_at is not None and freeze_t is not None:
+                        try:
+                            if float(it.t) > float(freeze_t) + 1e-9:
+                                break
+                        except Exception:
+                            break
+                        if j > int(freeze_at):
+                            # 같은 t 의 FOUP 만 허용 (뒷 인덱스·뒷 공정 금지)
+                            try:
+                                if abs(float(it.t) - float(freeze_t)) > 1e-9:
+                                    break
+                            except Exception:
+                                break
                     self._safe_emit(it, int(scr))
                     emitted += 1
-                    if cursor_frozen:
+                    if cursor_frozen or freeze_at is not None:
                         skipped.add(j)
                     else:
                         i = j + 1
@@ -1123,23 +1326,82 @@ class SimTimelinePlayer:
                     ):
                         self._safe_emit(items[j], int(scr))
                         emitted += 1
-                        if cursor_frozen:
+                        if cursor_frozen or freeze_at is not None:
                             skipped.add(j)
                         else:
                             i = j + 1
                         j += 1
                     continue
                 # log / progress
+                if freeze_at is not None and freeze_t is not None:
+                    try:
+                        if float(it.t) > float(freeze_t) + 1e-9:
+                            break
+                    except Exception:
+                        break
+                    if j > int(freeze_at) and kind == "progress":
+                        # 막힌 gated 자신의 progress 는 이미 스킵됨.
+                        # 이후 progress 는 시계만 올리는 착시를 내므로 중단.
+                        break
                 self._safe_emit(it, int(scr))
                 emitted += 1
-                if cursor_frozen:
+                if cursor_frozen or freeze_at is not None:
                     skipped.add(j)
                 else:
                     i = j + 1
                 j += 1
             with self._lock:
-                self._cursor_by_screen[scr] = int(i)
+                if freeze_at is not None:
+                    self._cursor_by_screen[scr] = int(freeze_at)
+                else:
+                    self._cursor_by_screen[scr] = int(i)
+            # frontier: 미emit gated 시각을 시계/plan 캡으로 노출
+            try:
+                hold_by = getattr(self, "_emit_hold_t_by_screen", None)
+                if not isinstance(hold_by, dict):
+                    hold_by = {}
+                    self._emit_hold_t_by_screen = hold_by
+                if freeze_at is not None and freeze_t is not None:
+                    hold_by[int(scr)] = float(freeze_t)
+                else:
+                    hold_by.pop(int(scr), None)
+            except Exception:
+                pass
         return int(emitted)
+
+    def pending_gated_emit_hold_t(self, screen: int) -> Optional[float]:
+        """미emit gated 로 커서 freeze 된 이벤트의 sim t (없으면 None)."""
+        try:
+            hold_by = getattr(self, "_emit_hold_t_by_screen", None)
+            if not isinstance(hold_by, dict):
+                return None
+            v = hold_by.get(int(screen))
+            if v is None:
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    def _gate_open_rail(self, scr: int, rail: str, payload: Any = None) -> bool:
+        if self._event_emit_allowed is None:
+            return True
+        try:
+            # (screen, rail=..., payload=...) — 실패 시 단계적으로 축소
+            return bool(
+                self._event_emit_allowed(int(scr), rail=str(rail), payload=payload)  # type: ignore[call-arg]
+            )
+        except TypeError:
+            try:
+                return bool(self._event_emit_allowed(int(scr), rail=str(rail)))  # type: ignore[call-arg]
+            except TypeError:
+                try:
+                    return bool(self._event_emit_allowed(int(scr)))
+                except Exception:
+                    return False
+            except Exception:
+                return False
+        except Exception:
+            return False
 
     def tick(self) -> None:
         """레거시 — ``advance_sim_clock`` + ``emit_due_items``."""

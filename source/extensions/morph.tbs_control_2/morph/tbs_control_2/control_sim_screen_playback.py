@@ -59,18 +59,9 @@ class ScreenPlaybackSession:
         if not self.is_playing():
             return
         self.player.advance_sim_clock()
-        # 공정 경계 SSOT: json_wall busy 중 sim_now 가 현재 gated 이벤트
-        # 공정 종료를 넘지 않게 한다 (emit·plan lookup 과 동일 frontier).
-        if ext is None:
-            return
-        try:
-            from .control_sim_playback_plan import playback_process_frontier_sim
-
-            fr = playback_process_frontier_sim(ext, int(self.screen))
-            if fr is not None:
-                self.player.clamp_sim_now_max(int(self.screen), float(fr))
-        except Exception:
-            pass
+        # 표시/재생 sim_now 는 frontier 로 붙잡지 않음 — 멈추다 점프하는 체감 방지.
+        # emit·JSON wall 게이트는 can_emit / wall busy 가 담당. 포트는 plan(sim_now).
+        del ext
 
     def emit_due_and_sync(
         self,
@@ -98,13 +89,8 @@ class ScreenPlaybackSession:
         if not self.is_playing():
             return
         scr = int(self.screen)
-        # 포트·FOUP·진행률 공통: frontier 적용된 단일 sim 축
-        try:
-            from .control_sim_playback_plan import apply_playback_frontier
-
-            tnow = float(apply_playback_frontier(ext, scr, float(self.sim_now())))
-        except Exception:
-            tnow = self.sim_now()
+        # 공정시간·진행률: frontier clamp 없이 단조 증가하는 raw sim_now
+        tnow = float(self.sim_now())
         prog_iv = _HB_PROG_INTERVAL if prog_hb_interval is None else float(prog_hb_interval)
 
         if (now_wall - self.hb_ep_wall) >= _HB_EP_INTERVAL:
@@ -170,7 +156,9 @@ class SimPlaybackRuntime:
         gate_fn: Optional[GateFn] = None,
     ) -> SimPlaybackRuntime:
         if gate_fn is None:
-            gate_fn = lambda scr: can_emit_timeline_event(ext, int(scr))
+            from .control_sim_playback_gate import make_playback_event_gate
+
+            gate_fn = make_playback_event_gate(ext)
 
         try:
             clear_playback_gate_state(ext)
@@ -261,11 +249,23 @@ class SimPlaybackRuntime:
                 _try_release_all_playback_json_walls,
             )
 
-            _try_release_all_playback_json_walls(ext)
-            _poll_playback_sim_aligned_json_starts(ext)
-            if multi:
-                _drain_playback_json_job_queues(ext)
+            try:
+                _try_release_all_playback_json_walls(ext)
+            except Exception:
+                pass
+            try:
                 _poll_playback_sim_aligned_json_starts(ext)
+            except Exception:
+                pass
+            if multi:
+                try:
+                    _drain_playback_json_job_queues(ext)
+                except Exception:
+                    pass
+                try:
+                    _poll_playback_sim_aligned_json_starts(ext)
+                except Exception:
+                    pass
         except Exception:
             pass
         now_wall = time.perf_counter()
@@ -417,7 +417,9 @@ def add_playback_sessions_after_prerun(
             return rt0
         return bootstrap_playback_after_prerun(ext, {}, emit_fn, speed_fn, gate_fn)
     if gate_fn is None:
-        gate_fn = lambda scr: can_emit_timeline_event(ext, int(scr))
+        from .control_sim_playback_gate import make_playback_event_gate
+
+        gate_fn = make_playback_event_gate(ext)
     try:
         from .control_sim_playback_plan import ensure_playback_plans_for_results, refresh_playback_display_at_sim
 
