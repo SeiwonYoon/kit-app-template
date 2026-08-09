@@ -136,10 +136,21 @@ def build_default_module_nm_to_slot_key() -> Dict[str, str]:
         "TransferChamber-EndEffector1": ee_l,
         "TransferChamber-EndEffector2": ee_r,
     }
-    for i in (1, 2):
-        m[f"AirLock1-iSlot{i}"] = f"airlock1_{i}"
-        m[f"AirLock2-iSlot{i}"] = f"airlock2_{i}"
-        m[f"AirLock2-oSlot{i}"] = f"airlock2_{i}"
+    # for i in (1, 2):
+    #     m[f"AirLock1-iSlot{i}"] = f"airlock1_{i}"
+    #     m[f"AirLock2-iSlot{i}"] = f"airlock2_{i}"
+    #     m[f"AirLock2-oSlot{i}"] = f"airlock2_{i}"
+
+    m["AirLock1-iSlot1"] = "airlock1_1"
+    m["AirLock1-iSlot2"] = "airlock1_2"
+    m["AirLock1-oSlot1"] = "airlock1_2"
+    m["AirLock1-oSlot2"] = "airlock1_1"
+
+    m["AirLock2-iSlot1"] = "airlock2_1"
+    m["AirLock2-iSlot2"] = "airlock2_2"
+    m["AirLock2-oSlot1"] = "airlock2_2"
+    m["AirLock2-oSlot2"] = "airlock2_1"
+
     for i in range(1, 8):
         m[f"CoolStationAL1PML{i}"] = f"cooling_{i}"
     for i in range(1, 26):
