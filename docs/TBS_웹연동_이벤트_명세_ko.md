@@ -140,6 +140,7 @@
 - `configs[0]`은 case 0(화면1), `configs[1]`은 case 1(화면2) 설정이다.
 - 각 원소는 `settings_snapshot`과 같은 flat object이며 원소 내부에 `case`를 넣지 않는다.
 - 주요 설정에는 LOT 수, 생성·이동·공정 시간 범위, 초기 적재, 고장 포트, EP 개수 및 EBS 적용 여부 등이 포함된다.
+- OHT 이동시간: `oht_bp1_min/max` = **OHT→EP**, `oht_inout_min/max` = **OHT→INOUT**(EBS ON). `oht_inout_*`가 없으면 Kit는 `oht_bp1_*`로 폴백하고 제어창 INOUT UI도 EP 값으로 맞춘다.
 - `fab_id`, `model_id`, `eqp_id`는 응답의 `sim` 객체에 echo 된다.
 
 ### 응답 — `V2T_response_start_simulation`
@@ -169,6 +170,12 @@
             "ep1_empty_pct": 40.1,
             "ep2_empty_pct": 35.2,
             "ep3_empty_pct": 42.0
+          },
+          "lot_counts": {
+            "all_ep": 6,
+            "ep1": 3,
+            "ep2": 2,
+            "ep3": 1
           }
         }
       },
@@ -183,6 +190,11 @@
             "all_ep_empty_pct": 28.5,
             "ep1_empty_pct": 37.2,
             "ep2_empty_pct": 33.8
+          },
+          "lot_counts": {
+            "all_ep": 4,
+            "ep1": 2,
+            "ep2": 2
           }
         }
       }
@@ -198,6 +210,9 @@
 - 같은 시간의 행이 여러 개면 같은 `t`가 배열에 중복될 수 있다.
 - 타임테이블 행 object/string 및 별도 chunk는 시작 응답에서 보내지 않는다.
 - `bar_graph.empty_pct`에는 전체 시뮬레이션 시간 대비 막대별 empty 비율(%)이 포함된다.
+- `bar_graph.lot_counts`에는 막대별 lot 처리 수가 포함된다.
+  - `all_ep`: 해당 case 설정 LOT 수 (`lot_count`) + 초기 적재 포트 수 (`init_*`)
+  - `ep1`/`ep2`/`ep3`: 해당 EP 포트를 거쳐 처리된 고유 lot 수 (`FOUP_PROCESS_START` 기준)
 - 실패하면 `code: 1`이며 `data.results`는 빈 object 두 칸(`[{}, {}]`)이다.
 
 ### 동작
@@ -207,6 +222,38 @@
 3. 프리런 완료를 비동기로 기다린다.
 4. 웹 전송용 slim 결과를 만들고 `timetable_rows`를 `t` 배열로 변환한다.
 5. 개별 타임테이블 행 object는 case별로 보관해 이후 시간별 조회에 사용한다.
+
+---
+
+## 3.1 시뮬레이션 재시작
+
+### 요청 — `T2V_request_restart_simulation`
+
+```json
+{}
+```
+
+- payload는 비워도 된다.
+- **시작(`start_simulation`)과 다르다.** 설정을 다시 받지 않고, Kit에 보관된 **직전 프리런 결과로 재생만 다시 시작**한다.
+- 한 번도 시작하지 않았거나 리셋으로 프리런이 지워진 상태면 실패한다.
+
+### 응답 — `V2T_response_restart_simulation`
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {}
+}
+```
+
+- 성공 시 `data`는 비운다. 웹은 `start_simulation` 때 받은 프리런/`bar_graph` 등을 그대로 사용한다.
+- 실패 시 `code: 1`, `data: {}`.
+
+### 동작
+
+1. Kit UI 「재시작」과 동일 경로로, 보관된 프리런 번들을 복원한다.
+2. 재프리런·재fetch 없이 재생을 t=0부터 다시 시작한다.
 
 ---
 
@@ -389,6 +436,8 @@
 | → V2T | `V2T_response_ebs_enable` | — | `case`, `ebs_enable` |
 | T2V → | `T2V_request_start_simulation` | `configs[2]` | — |
 | → V2T | `V2T_response_start_simulation` | — | `results[2]` |
+| T2V → | `T2V_request_restart_simulation` | (없음) | — |
+| → V2T | `V2T_response_restart_simulation` | — | `{}` (데이터 재전송 없음) |
 | T2V → | `T2V_request_control_simulation` | `action`, `speed` | — |
 | → V2T | `V2T_response_control_simulation` | — | `active`, `speed` |
 | T2V → | `T2V_request_seek_simulation` | `case`, `t` | — |

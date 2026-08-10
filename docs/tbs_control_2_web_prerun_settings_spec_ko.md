@@ -124,7 +124,7 @@
 | 구분 | 필드 예 |
 |------|---------|
 | 요약 | `ep_count_idx`, `ebs_enabled`, `lot_count` |
-| 간격 | `spawn_min/max`, `pue_min/max`, `oht_bp1_*`, `bp1_bp_*`, `bp_ep_*`, `ep_oht_*`, `foup_proc_*` |
+| 간격 | `spawn_min/max`, `pue_min/max`, `oht_bp1_*`(OHT→EP), `oht_inout_*`(OHT→INOUT, 없으면 `oht_bp1_*` 폴백), `bp1_bp_*`, `bp_ep_*`, `ep_oht_*`, `foup_proc_*` |
 | 초기 적재 | `init_inout`, `init_bp1`~`init_bp4`, `init_ep1`~`init_ep3` |
 | 고장 | `fault_inout`, `fault_bp1`~`fault_bp4`, `fault_ep1`~`fault_ep3` |
 

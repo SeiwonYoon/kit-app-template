@@ -357,10 +357,10 @@ session TransferContent 실험 fix만 `TBS_P0B_FIX=1`.
 
 ## 13) GPT에게 전달할 한 줄 요약
 
-> ViewportWidget 2분할에서 화면2(aux) Hydra/RTX는 정상이다.  
-> 초기에는 LightRig 복제(`Sdf.CopySpec`)가 FindSpec 실패로 copied=0 → fallback DomeLight(intensity=300)만 적용되어 톤이 달랐다.  
-> 이후 **main session layer에서 LightRig 복제에는 성공**했으나, fallback이 제거되지 않아 **두 조명이 겹쳐** 화면2가 계속 밝게 보였다.  
-> 현재 수정은 authoring layer 전수에서 fallback 강제 삭제(+비활성)다. **검증 중.**
+> ViewportWidget 2분할(화면1 default ctx / 화면2 `morph_tbs_split_aux_1`)에서 Hydra·RTX·camera는 동일하지만  
+> **UsdLux만 다름**: main=`/OmniKit_Viewport_LightRig` (Dome intensity 1.0), aux는 대개 `/World/TBS_DefaultDomeLight`(300) → 우측 밝음.  
+> `Sdf.CopySpec`으로 LightRig를 aux에 넣는 시도는 **비결정적**(어떤 런은 session 복제 성공+fallback 잔류로 밝음 유지, 어떤 런은 root 껍데만 복사 후 fallback 제거로 **검정 실루엣**, 지금은 again `copied=0`+fallback → 밝음).  
+> **per-UsdContext Embedded ViewportWidget에 Kit Default LightRig를 공식적으로 생성/복제하는 API**가 필요하다.
 
 ---
 
@@ -407,81 +407,167 @@ READY 시점 로그에서 반복 확인:
 원인: `Sdf.FindSpec(session)` / `Sdf.FindSpec(root)`만으로는 스펙을 못 잡는 경우가 있었고,
 `GetUsedLayers()` + `GetPrimAtPath` / `rootPrims` 스캔(`_layer_has_spec`)으로 탐색을 강화함.
 
-### 14.3 복제 성공 로그 (2026-07-09 00:17경)
+### 14.3 복제 성공 로그 (2026-07-09 00:17경) — 그러나 시각은 여전히 밝음
 
 ```
-[TBS/p0b-rig-clone] src_layer='anon:000003916C281D00'   # = main session layer
+[TBS/p0b-rig-clone] src_layer='anon:...'   # main session
 [TBS/p0b-rig-clone] copied=1 ok=True
-  main_lux=['.../DomeLight', '.../DistantLight']
-  aux_before=['/World/TBS_DefaultDomeLight']
   aux_after=['/World/TBS_DefaultDomeLight',
              '/OmniKit_Viewport_LightRig/Lights/DomeLight',
              '/OmniKit_Viewport_LightRig/Lights/DistantLight']
-[TBS/p0b-rig-clone] finalize_call result=1
 ```
 
-**의미:**
+LightRig는 들어왔지만 **fallback(intensity=300)이 남아 이중 조명** → 우측 계속 밝음.
 
-- LightRig 복제 자체는 **성공** (main session → aux session).
-- 그런데 `aux_after`에 **fallback DomeLight가 그대로 남음**.
-- → LightRig(intensity≈1) + fallback(intensity=300) **이중 조명** → 화면2 톤이 계속 밝음.
-- 사용자 체감: “하나도 안 변함” (스크린샷도 동일 패턴: 좌 어두운 톤 / 우 밝은 회색 + Default 라벨).
+### 14.4 `RemovePrim` no-op → fallback 강제 제거 시도
 
-### 14.4 왜 `RemovePrim`이 안 먹혔나
+session-only RemovePrim은 authoring layer가 root/다른 layer일 때 no-op.
+`_remove_aux_fallback_dome_light()`로 used-layers 전수 삭제 + SetActive(False).
 
-기존 코드는 aux **session EditContext**에서만:
-
-```python
-aux_stage.RemovePrim("/World/TBS_DefaultDomeLight")
-```
-
-을 시도함. fallback은 대개 `_ensure_aux_stage_default_lighting()`이
-**Define한 authoring layer(often root 또는 다른 used layer)** 에 남아,
-session-only RemovePrim이 composed stage에서 no-op처럼 보임.
-
-호출 순서도 문제:
-
-1. aux settle 후 `_ensure_aux_stage_default_lighting()` → fallback 추가 (early, Widget #2 전)
-2. early `_sync_aux_stage_lighting_from_main()` → copied=0 (시점에 LightRig authoring을 못 찾음)
-3. READY 후 clone 성공
-4. fallback은 제거되지 않음 → 겹침
-
-### 14.5 현재 코드 수정 (검증 대기)
-
-`sim_multi_view_widget.py`에 `_remove_aux_fallback_dome_light()` 추가:
-
-1. `stage.GetUsedLayers()` (+ session/root) 전수에서 spec 소유 레이어를 찾아 `layer.RemovePrim`
-2. session EditContext `stage.RemovePrim` 추가 시도
-3. 그래도 composed에 남으면 `prim.SetActive(False)` (Hydra 비표시)
-4. clone 성공 판정: `has_rig=True` **그리고** `has_fallback=False` (active 기준)
-
-성공 시 기대 로그:
+### 14.5 회귀 A: 검정 실루엣 (00:25)
 
 ```
-[TBS/p0b-rig-clone] remove_fallback label='after-rig-clone' removed=True gone=True
-[TBS/p0b-rig-clone] copied=1 ok=True has_rig=True has_fallback=False
-  aux_after=['/OmniKit_Viewport_LightRig/Lights/DomeLight',
-             '/OmniKit_Viewport_LightRig/Lights/DistantLight']
-# /World/TBS_DefaultDomeLight 가 active 목록에 없어야 함
+src_layer='.../master_1.usd'   # root 이름만 (빈 LightRig 껍데)
+remove_fallback gone=True
+aux_after=[]                   # Lux 0 → 객체 검정
 ```
 
-시각 성공 기준: 화면2 배경/장비가 화면1과 동일 톤(밝은 회색/washed-out 해소).
+### 14.6 회귀 B: 다시 밝음 (00:31, 현재)
 
-### 14.6 아직 남는 리스크 / 다음 확인 항목
+안전장치로 “복사 실패 시 fallback 유지”를 넣자:
 
-fallback 제거 후에도 톤이 남으면 2차 SSOT 후보:
+```
+src_layer='.../master_1.usd'
+keep_fallback: LightRig copy did not produce Lux (copied=0 aux_mid=['/World/TBS_DefaultDomeLight'])
+copied=0 ok=False has_rig=False has_fallback=True
+aux_after=['/World/TBS_DefaultDomeLight']   # intensity=300 → 우측 밝음
+```
 
-1. aux **root**에 이름만 있는 `/OmniKit_Viewport_LightRig` vs session에 실제 Lux 내용 — 구성/override 충돌
-2. Kit viewport “Default” lighting 모드 / environment profile (toolbar Default)이 embedded tile에만 따로 적용
-3. carb `/rtx` 전역은 동일해도 **per-RenderProduct** 쪽 설정 차이
-4. early에 fallback을 **아예 만들지 않기** (LightRig clone을 settle 직후·#2 생성 전으로 앞당기기) — 근본 흐름 정리
+즉 **검정(무조명) ↔ 밝음(fallback 300)** 사이에서만 오가고,
+**main과 동일한 LightRig-only 상태**에는 안정적으로 도달하지 못함.
 
-### 14.7 관련 코드 위치 (추가)
+### 14.7 사용자 관찰 (중요)
+
+- **앱 재로드 순간**에 좌·우 톤이 **잠깐 동일**해 보인 적이 있음 → Kit이 어떤 시점에 LightRig/환경을 맞췄다가, finalize/fallback/클론 경로가 다시 어긋남.
+- 껐다 켜면: 우측 객체 검정 → (이번 keep_fallback 수정 후) 다시 밝음.
+
+→ Sdf.CopySpec 타이밍/레이어 선택에 의존하는 현재 접근은 **비결정적**이며, 근본 fix라기보다 레이스에 가깝다.
+
+### 14.8 시도·실패 타임라인 (GPT용 압축)
+
+| # | 시도 | 로그 결과 | 시각 |
+|---|------|-----------|------|
+| 1 | early `_sync_aux_stage_lighting_from_main` (session/root FindSpec) | copied=0 → fallback Dome 300 추가 | 우측 밝음 |
+| 2 | layer-stack + ancestor CopySpec | 여전히 early copied=0 | 우측 밝음 |
+| 3 | ViewportAPI visual profile 복사 | hydra/mode 동일, 톤 무변화 | 우측 밝음 |
+| 4 | post-READY `CopySpec` LightRig (session 잡힘) | copied=1, **fallback 잔류** | 우측 밝음(이중조명) |
+| 5 | fallback 강제 제거 | 어떤 런은 root 껍데만 복사 + Lux 0 | **검정 실루엣** |
+| 6 | 복사 실패 시 fallback 유지 | copied=0, has_fallback=True | **다시 밝음** |
+| — | (재로드 순간) | — | **잠깐 좌우 동일** (재현 불안정) |
+
+### 14.9 현재 막힌 기술적 사실 (확정)
+
+1. **Hydra/RP/카메라/스테이지 분리는 OK** — 톤 문제의 직접 원인은 UsdLux 불일치.
+2. main의 LightRig 실제 Lux는 **Traverse로 보이지만**, `Sdf.CopySpec` 소스로 쓸 authoring layer가 **런마다 session anon vs root 파일로 갈림**.
+3. root의 `/OmniKit_Viewport_LightRig`는 **이름만 있고 child Lux가 비어 있는 껍데**인 경우가 있음 → 그걸 복사해도 aux Lux=0.
+4. early에 넣는 `/World/TBS_DefaultDomeLight` (300)는 검정 방지용이지만, main LightRig(1.0)와 **픽셀 동일 톤을 만들 수 없음**.
+5. `get_active_viewport()`는 항상 **native #0**. embedded 타일은 active가 되지 않음.
+6. `omni.kit.viewport.lights` 모듈 **없음**. utility에도 LightRig inject API 없음(introspect).
+
+### 14.10 ChatGPT에 추가로 물을 것 (최신)
+
+**Q8.** 서로 다른 `usd_context_name`의 embedded `ViewportWidget`에 Kit Default Viewport LightRig(`/OmniKit_Viewport_LightRig`)를 **공식 API로 생성**하는 방법이 있는가? (`Sdf.CopySpec` 없이)
+
+**Q9.** LightRig가 session anonymous layer에만 실내용이 author되고 root에는 empty shell만 있는 패턴이 known인가? 다른 context로 복제할 때 **권장 패턴**은?
+
+**Q10.** early fallback DomeLight(300)를 쓰지 않고도 aux stage를 암전 없이 띄우려면, Kit이 제공하는 **per-context default lighting** 설정/초기화가 있는가?
+
+**Q11.** 사용자 제약을 지키며(Viewport 탭 1개 + HStack ViewportWidget 2개) 톤을 동일하게 하려면, LightRig 복제 대신 **Render Settings / Environment / Viewport lighting mode(Default)** 를 어떤 키·API로 tile별 동기화해야 하는가?
+
+**성공 정의:** aux traverse 결과 = main과 동일하게  
+`['/OmniKit_Viewport_LightRig/Lights/DomeLight', '.../DistantLight']` only (Dome intensity≈1.0),  
+`/World/TBS_DefaultDomeLight` **없음**, 시각적으로 좌·우 톤 일치.
+
+### 14.11 관련 코드 위치
 
 | 항목 | 파일 | 함수 |
 |------|------|------|
 | LightRig post-READY clone | `sim_multi_view_widget.py` | `_clone_default_light_rig_from_main_to_aux()` |
 | fallback 강제 제거 | `sim_multi_view_widget.py` | `_remove_aux_fallback_dome_light()` |
+| early sync / fallback 추가 | `sim_multi_view_widget.py` | `_sync_aux_stage_lighting_from_main()`, `_ensure_aux_stage_default_lighting()` |
 | clone 호출 | `sim_multi_view_widget.py` | `finalize_widget_split_startup()` |
-| P0-B 진단 (기본 ON) | `sim_viewport_p0b_diag.py` | `p0b_diag_enabled()`, `run_p0b_diagnostics()` |
+| P0-B 진단 (기본 ON) | `sim_viewport_p0b_diag.py` | `run_p0b_diagnostics()` 등 |
+
+---
+
+## 15. Ordered Investigation (추측 패치 금지 — 로그로 Q1–Q5 확정)
+
+### 15.1 배경 재확인
+
+- Master USD 동일 / Hydra·RP·카메라 OK.
+- 우측 wash-out ≈ `/World/TBS_DefaultDomeLight` (intensity=300).
+- LightRig `copied=1` 후에도 톤 불일치 → **Clone만으로 설명이 안 됨**.
+- reload 직후 좌우가 잠깐 같아 보였다가 finalize/fallback/clone 이후 갈라짐 → **레이스 / 우리 코드가 Kit init을 깨는지** 검증 필요.
+
+### 15.2 구현된 진단 (패치 없음, 관측만)
+
+| Prefix | 내용 |
+|--------|------|
+| `[TBS/p0b-ord]` | `_connect_widget_tile_aux_stage` / `_sync_*` / `_ensure_*` / `_clone_*` / `_sync_aux_tile_render_*` / `finalize_*` 호출 순서 + frame/ts/main_lux/aux_lux/API id/RP |
+| `[TBS/p0b-frame]` | connect 직후부터 최대 120프레임 lux·bg·ambient·grid·hdr·mode·carb tone keys; `FIRST_LUX_DIFF` |
+| `[TBS/p0b-who]` | `Define` 직전 stack + aux stage `Usd.Notice.ObjectsChanged` (fallback 생성 주체) |
+| `[TBS/p0b-rs]` | RenderSettings / Environment 관련 prim·attr dump |
+
+### 15.3 실험용 환경 변수 (기능 off만, intensity 튜닝 금지)
+
+| Env | 효과 |
+|-----|------|
+| `TBS_P0B_DIAG=1` | 진단 ON (기본 OFF) |
+| `TBS_P0B_FRAME_TRACK=1` | 120프레임 추적 (`TBS_P0B_DIAG=1` 필요) |
+
+**권장 실행 순서**
+
+1. **Baseline (기본)** — env 없음. ord / frame / who / rs 수집 → Q1–Q4.
+2. **실험 4** — `TBS_P0B_DISABLE_FALLBACK=1` only. aux_lux가 비는지 / Kit이 LightRig를 만드는지.
+3. **실험 5** — `TBS_P0B_DISABLE_FALLBACK=1` + `TBS_P0B_DISABLE_CLONE=1`. reload 순간에 `main_lux==aux_lux` 프레임이 실제로 있는지, 우리 코드 없이 톤이 유지되는지 → **Q5**.
+
+### 15.4 로그로만 답할 질문
+
+- **Q1** WHO/WHEN: `[TBS/p0b-who] CREATE` vs `NOTICE`
+- **Q2** reload 직후 same_lux 프레임 존재?: `[TBS/p0b-frame] same_lux=True`
+- **Q3** 최초 분기 프레임: `FIRST_LUX_DIFF`
+- **Q4** 그 프레임에서 바뀐 것: lux vs rs vs api-diff vs carb
+- **Q5** fallback/clone이 Kit init을 깨는지: 실험 4/5 vs baseline 비교
+
+### 15.5 금지 (유지)
+
+원인 추측 패치 / intensity 튜닝 / CopySpec 강화 / master_2·Hydra·카메라 가설.
+
+---
+
+## 16. Baseline 로그로 Q1–Q5 확정 (2026-07-08 run)
+
+### 16.1 답
+
+| Q | 답 (로그) |
+|---|-----------|
+| **Q1** WHO/WHEN fallback? | **우리 코드.** `frame=98` `[TBS/p0b-who] CREATE` stack: `finalize → _connect_widget_tile_aux_stage → _ensure_aux_stage_default_lighting` → `UsdLux.DomeLight.Define(/World/TBS_DefaultDomeLight)` intensity=300. Kit이 아님. |
+| **Q2** reload 순간 main==aux? | 이 run에서는 **early에 same_lux 프레임 없음.** Widget #2 생성 전·후 내내 `main=LightRig` vs `aux=[]` 또는 `aux=[TBS_DefaultDomeLight]`. (`[TBS/p0b-frame]`는 `IApp.create_task` 없어 schedule_fail → 미수집; 이후 asyncio로 수정) |
+| **Q3** 톤 분기 최초 프레임? | Lux 분기 = **frame 98** (`exit_created_fallback`, aux에 300 Dome 등장). 시각 wash-out는 그 직후 Widget #2 bind부터. |
+| **Q4** 그 프레임에서 변한 것? | **UsdLux만.** RenderSettings/API hydra/mode 동일(rtx/RTPT). ViewportAPI tone 필드는 의미 있는 차이 거의 없음(`fps`/`id`/`rp`/`ctx`만). |
+| **Q5** 우리 fallback/clone이 Kit init을 깨뜨리나? | **fallback이 wash-out의 직접 원인(확정).** clone은 `src_layer=master_1.usd`(empty shell) → `copied=0` → fallback 유지 → 우측 밝음. Kit LightRig init을 “깨서” 밝아진 게 아니라 **우리가 300 Dome을 넣은 것**. |
+
+### 16.2 적용한 수정 (로그 기반, intensity 튜닝 아님)
+
+1. **fallback 기본 OFF** — `TBS_P0B_ALLOW_FALLBACK=1` 일 때만 intensity=300 Dome 생성.
+2. **LightRig clone** — root USD shell을 last-resort로 쓰지 않음; session 우선; CopySpec 실패 시 **composed stage 속성으로** Dome(1.0)+Distant 재작성 (`composed_author`).
+3. **clone 실패 시 fallback 재주입 금지.**
+4. **120프레임 트래커** — `asyncio.ensure_future` (Kit `IApp`에 `create_task` 없음).
+
+### 16.3 reload 후 기대 로그
+
+- `enter_no_fallback` / `exit_sync_only` (fallback CREATE 없음)
+- `[TBS/p0b-rig-clone] composed_author n=2` 또는 session CopySpec 성공
+- `aux_lux` ≈ `['/.../DomeLight', '/.../DistantLight']`, `TBS_DefaultDomeLight` 없음
+- 좌·우 톤 일치 (성공 정의 §14.10)
 

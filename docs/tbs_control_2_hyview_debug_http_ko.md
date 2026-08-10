@@ -13,12 +13,10 @@
 | **HTTP 디버그** | 브라우저가 `http://127.0.0.1:8721` 로 T2V/V2T 를 주고받음 (WebRTC 대신) |
 | **Handler** | 실무와 **동일** — `ebs_handler` → `tbs_sim_bridge` → `control_window` |
 
-시뮬 시작 시 V2T는 **2종류**로 옵니다.
-
-1. **`V2T_response_start_simulation`** — bar_graph, sim 등 (타임라인 행은 **빈 배열**)
-2. **`V2T_response_simulation_timeline`** — timetable_rows 를 **20행씩** 잘라서 여러 번 (chunk)
-
-chunk 크기는 `ebs_handler.py` 상단 `_TIMELINE_CHUNK_ROWS = 20` 에서 변경.
+시뮬 시작 시 V2T 는 **`V2T_response_start_simulation` 1번**으로 옵니다.
+`timeline.timetable_rows` 는 **t 숫자 배열**(예: `[9.96, 19.59, 27.21, ...]`)이며,
+개별 행 object 는 웹이 **`T2V_request_time_table`** 로 시간별 조회합니다.
+(구 `V2T_response_simulation_timeline` chunk 방식은 폐기.)
 
 ---
 
@@ -99,32 +97,53 @@ npm run dev
 2. **「시뮬 시작」** 클릭
 3. **기다림** — 프리런은 **수십 초~수 분** 걸릴 수 있음 (정상)
 
-**응답 순서 (성공 시):**
+**응답 (성공 시):**
 
 ```
-① V2T_response_start_simulation
-     data.results[0].timeline.timetable_rows  →  []  (비어 있음)
-     data.results[1].timeline.timetable_rows  →  []
-
-② V2T_response_simulation_timeline  offset=0, end=false
-     data.timelines[0].timetable_rows  →  최대 20행 (string)
-     data.timelines[1].timetable_rows  →  최대 20행 (string)
-
-③ V2T_response_simulation_timeline  offset=1, end=false
-     ...
-
-④ V2T_response_simulation_timeline  offset=N, end=true  ← 마지막
+V2T_response_start_simulation
+     data.results[0].timeline.timetable_rows  →  [9.96, 19.59, 27.21, ...]  (t 배열)
+     data.results[1].timeline.timetable_rows  →  [5.74, 13.02, ...]
+     data.results[n].bar_graph.empty_pct      →  {all_ep_empty_pct, ep1_empty_pct, ...}
 ```
 
-**예시 (화면1=45행, 화면2=30행, chunk=20):**
+**개별 행 조회** — `T2V_request_time_table`:
 
-| offset | end | 화면1 행 수 | 화면2 행 수 |
-|--------|-----|------------|------------|
-| 0 | false | 20 | 20 |
-| 1 | false | 20 | 10 |
-| 2 | **true** | 5 | **0 (빈 배열)** |
+```json
+{ "event_type": "T2V_request_time_table", "payload": { "case": 0, "time": 9.96 } }
+```
 
-한쪽이 먼저 끝나도 **빈 배열 `[]` 로 계속 보냅니다.**
+성공 응답 `V2T_response_time_table`:
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "time": 9.96,
+    "case": 0,
+    "time_table": { "t": 9.96, "event": "ARRIVED", "lot_id": "LOT_001", "all_ep_empty_pct": 12.5 }
+  }
+}
+```
+
+- `time_table` 은 **object 그대로** (string 아님)
+- 같은 `t` 에 행이 여러 개면 `FOUP_PROCESS_START` / `FOUP_PROCESS_END` 가 **아닌** 행 우선
+- `all_ep_empty_pct`: 해당 행 `t` 까지 진행 시간 대비 ALL_EP empty 누적 %
+
+**진행시간 동기화** — `T2V_request_time_sync` (웹 시계가 틀어졌을 때):
+
+```json
+{ "event_type": "T2V_request_time_sync", "payload": {} }
+```
+
+성공 응답 `V2T_response_time_sync`:
+
+```json
+{ "code": 0, "message": "success", "data": { "time": 6.09 } }
+```
+
+- Kit 화면1 현재 시뮬레이션 진행 시각(초)을 반환
+- 웹은 이 값으로 로컬 진행 시계를 맞춘다
 
 ---
 
@@ -149,6 +168,15 @@ npm run dev
 - `row_index`: 선택된 타임테이블 행
 
 이벤트명·필드 rename 시 `hyview_event_contract.py` 를 먼저 수정.
+
+**Restart** (직전 프리런으로 재생만 다시) — payload 비움, 응답 `data` 도 비움:
+
+```json
+{ "event_type": "T2V_request_restart_simulation", "payload": {} }
+```
+
+성공: `V2T_response_restart_simulation` → `{ "code": 0, "message": "success", "data": {} }`  
+(웹은 start 때 받은 데이터를 그대로 사용)
 
 ---
 
@@ -205,16 +233,15 @@ while ($true) {
   foreach ($ev in $r.events) {
     Write-Host "----" $ev.event_type "seq=" $ev.seq "----"
     if ($ev.event_type -eq "V2T_response_start_simulation") {
-      $n0 = $ev.payload.data.results[0].timeline.timetable_rows.Count
-      $n1 = $ev.payload.data.results[1].timeline.timetable_rows.Count
-      Write-Host "  start_simulation: timetable_rows count =" $n0 "," $n1 "(둘 다 0이어야 함)"
+      $rows0 = $ev.payload.data.results[0].timeline.timetable_rows
+      $rows1 = $ev.payload.data.results[1].timeline.timetable_rows
+      Write-Host "  start_simulation: t 배열 개수 =" $rows0.Count "," $rows1.Count
+      Write-Host "  첫 t 값 =" ($rows0 | Select-Object -First 3)
       Write-Host "  fab_id[0] =" $ev.payload.data.results[0].sim.fab_id
     }
-    if ($ev.event_type -eq "V2T_response_simulation_timeline") {
+    if ($ev.event_type -eq "V2T_response_time_table") {
       $d = $ev.payload.data
-      $c0 = $d.timelines[0].timetable_rows.Count
-      $c1 = $d.timelines[1].timetable_rows.Count
-      Write-Host "  timeline chunk offset=" $d.offset " end=" $d.end " rows=" $c0 "," $c1
+      Write-Host "  time_table: case=" $d.case " time=" $d.time " event=" $d.time_table.event
     }
   }
   if ($r.latest_seq -gt $since) { $since = $r.latest_seq }
@@ -224,9 +251,9 @@ while ($true) {
 
 **기대 결과:**
 
-- `start_simulation` 1번 — `timetable_rows` 개수 **0, 0**
-- `simulation_timeline` 여러 번 — `offset` 0→1→… 마지막 `end=True`
+- `start_simulation` 1번 — `timetable_rows` 는 **t 숫자 배열** (행 개수만큼)
 - `fab_id` 가 요청 configs 와 동일하게 echo
+- 이후 `T2V_request_time_table` 로 t 값 하나를 보내면 해당 행 object 응답
 
 `Ctrl+C` 로 중단.
 
