@@ -17,7 +17,7 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
 【핵심 데이터 구조】
 - Lot: lot_id/foup_id/sequence (EP 안착 시 곧바로 회수 대기 가능; EP 상 별도 가공 시간 없음).
 - SimulationTimingConfig:
-  · OHT→IN/OUT 경유 또는 OHT→EP 직접 투입 이동 시간(oht_to_bp1_*)
+  · OHT→EP 직접 투입(oht_to_bp1_*) · OHT→IN/OUT 안착(oht_to_inout_*)
   · LOT 생성 간격(lot_spawn_interval_*): 타이머마다 대기열에 LOT 추가
   · 회수 이벤트 간격(pickup_event_interval_*): READYTOUNLOAD 실행 “티켓” 누적
   · IN/OUT→버퍼(BP), BP→EP, EP→OHT(회수 이동) 랜덤 범위
@@ -135,6 +135,8 @@ class SimulationTimingConfig:
     """
     oht_to_bp1_min: float = _SIM_DEF.oht_to_bp1_min
     oht_to_bp1_max: float = _SIM_DEF.oht_to_bp1_max
+    oht_to_inout_min: float = _SIM_DEF.oht_to_inout_min
+    oht_to_inout_max: float = _SIM_DEF.oht_to_inout_max
     bp1_to_bp_min: float = _SIM_DEF.bp1_to_bp_min
     bp1_to_bp_max: float = _SIM_DEF.bp1_to_bp_max
     bp_to_ep_min: float = _SIM_DEF.bp_to_ep_min
@@ -157,8 +159,13 @@ class SimulationTimingConfig:
         return (max(0.01, lo), max(0.01, hi))
 
     def rand_oht_to_bp1(self) -> float:
-        """OHT→BP1(또는 OHT→EP 직접 투입에 쓰이는 동일 분포) 이동 시간(초) 난수."""
+        """OHT→EP 직접 투입 이동 시간(초) 난수 (스냅샷 키 ``oht_bp1_*``)."""
         lo, hi = self._norm(self.oht_to_bp1_min, self.oht_to_bp1_max)
+        return random.uniform(lo, hi)
+
+    def rand_oht_to_inout(self) -> float:
+        """OHT→IN/OUT 안착 이동 시간(초) 난수 (스냅샷 키 ``oht_inout_*``)."""
+        lo, hi = self._norm(self.oht_to_inout_min, self.oht_to_inout_max)
         return random.uniform(lo, hi)
 
     def rand_bp1_to_bp(self) -> float:
@@ -479,8 +486,11 @@ class TBSSimulationEngine:
             return max(0.01, (lo + hi) * 0.5)
 
         try:
+            avg_oht_ep = _avg(self._timing.oht_to_bp1_min, self._timing.oht_to_bp1_max)
+            avg_oht_inout = _avg(self._timing.oht_to_inout_min, self._timing.oht_to_inout_max)
+            avg_oht_in = (avg_oht_ep + avg_oht_inout) * 0.5 if bool(self._ebs_enabled) else avg_oht_ep
             avg_move = (
-                _avg(self._timing.oht_to_bp1_min, self._timing.oht_to_bp1_max)
+                avg_oht_in
                 + _avg(self._timing.bp1_to_bp_min, self._timing.bp1_to_bp_max)
                 + _avg(self._timing.bp_to_ep_min, self._timing.bp_to_ep_max)
                 + _avg(self._timing.ep_to_oht_min, self._timing.ep_to_oht_max)
@@ -512,7 +522,15 @@ class TBSSimulationEngine:
             self._rng = random.Random()
         except Exception:
             self._rng = None
-        self._pre_pool: Dict[str, List[float]] = {"spawn": [], "pickup": [], "oht_to_bp1": [], "bp1_to_bp": [], "bp_to_ep": [], "ep_to_oht": []}
+        self._pre_pool: Dict[str, List[float]] = {
+            "spawn": [],
+            "pickup": [],
+            "oht_to_bp1": [],
+            "oht_to_inout": [],
+            "bp1_to_bp": [],
+            "bp_to_ep": [],
+            "ep_to_oht": [],
+        }
         self._pre_idx: Dict[str, int] = {k: 0 for k in self._pre_pool.keys()}
         self._presample_fill()
 
@@ -544,6 +562,7 @@ class TBSSimulationEngine:
         _fill("spawn", spawn_n, self._timing.lot_spawn_interval_min, self._timing.lot_spawn_interval_max)
         _fill("pickup", pickup_n, self._timing.pickup_event_interval_min, self._timing.pickup_event_interval_max)
         _fill("oht_to_bp1", move_n, self._timing.oht_to_bp1_min, self._timing.oht_to_bp1_max)
+        _fill("oht_to_inout", move_n, self._timing.oht_to_inout_min, self._timing.oht_to_inout_max)
         _fill("bp1_to_bp", move_n, self._timing.bp1_to_bp_min, self._timing.bp1_to_bp_max)
         _fill("bp_to_ep", move_n, self._timing.bp_to_ep_min, self._timing.bp_to_ep_max)
         _fill("ep_to_oht", move_n, self._timing.ep_to_oht_min, self._timing.ep_to_oht_max)
@@ -556,8 +575,17 @@ class TBSSimulationEngine:
         n_spawn = max(0, int(self._max_oht_lots))
         n_lots = max(1, int(self._max_oht_lots) + int(init_full))
         spawn_sum = sum(self._pre_pool["spawn"][:n_spawn]) if n_spawn > 0 else 0.0
-        # direct input 기준으로 OHT->EP는 oht_to_bp1 분포를 사용
-        in_sum = sum(self._pre_pool["oht_to_bp1"][:n_spawn]) if n_spawn > 0 else 0.0
+        # OHT 투입 추정: EBS ON 이면 EP/INOUT 풀 평균, OFF 면 EP(oht_to_bp1)만
+        if n_spawn > 0:
+            if bool(getattr(self, "_ebs_enabled", True)):
+                in_sum = 0.5 * (
+                    sum(self._pre_pool["oht_to_bp1"][:n_spawn])
+                    + sum(self._pre_pool["oht_to_inout"][:n_spawn])
+                )
+            else:
+                in_sum = sum(self._pre_pool["oht_to_bp1"][:n_spawn])
+        else:
+            in_sum = 0.0
         out_sum = sum(self._pre_pool["ep_to_oht"][:n_lots]) if n_lots > 0 else 0.0
         pickup_sum = sum(self._pre_pool["pickup"][:n_lots]) if n_lots > 0 else 0.0
         self._sim_total_est_sec = max(10.0, float(spawn_sum + in_sum + out_sum + pickup_sum))
@@ -614,6 +642,9 @@ class TBSSimulationEngine:
             return self._presampled(key, fallback_fn), None
         if key == "oht_to_bp1":
             return float(entry.oht_ep_sec), "fix_oht_ep"
+        if key == "oht_to_inout":
+            # fix 공정시간은 OHT→EP / EP→OHT 만 — INOUT 은 min~max 난수
+            return self._presampled(key, fallback_fn), None
         if key == "ep_to_oht":
             return float(entry.ep_oht_sec), "fix_ep_oht"
         return self._presampled(key, fallback_fn), None
@@ -1855,7 +1886,9 @@ class TBSSimulationEngine:
         """
         self._oht_loading_bp1 = True
         try:
-            oht_time, fix_key = self._presampled_lot_move("oht_to_bp1", lot, self._timing.rand_oht_to_bp1)
+            oht_time, fix_key = self._presampled_lot_move(
+                "oht_to_inout", lot, self._timing.rand_oht_to_inout
+            )
             lot_disp = self._lot_display_id(lot)
             # 각 공정 확인(on_gate): UI 확인 팝업과 동기화되는 블로킹 게이트
             anim_wait = self._request_gate({

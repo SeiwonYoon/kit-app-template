@@ -39,6 +39,8 @@ _FLOAT_FIELDS: Tuple[str, ...] = (
     "pickup_max",
     "oht_bp1_min",
     "oht_bp1_max",
+    "oht_inout_min",
+    "oht_inout_max",
     "bp1_bp_min",
     "bp1_bp_max",
     "bp_ep_min",
@@ -62,6 +64,8 @@ _FIELD_TO_SUFFIX: Dict[str, str] = {
     "pue_max": "pickup_evt_max",
     "oht_bp1_min": "oht_bp1_min",
     "oht_bp1_max": "oht_bp1_max",
+    "oht_inout_min": "oht_inout_min",
+    "oht_inout_max": "oht_inout_max",
     "bp1_bp_min": "bp1_bp_min",
     "bp1_bp_max": "bp1_bp_max",
     "bp_ep_min": "bp_ep_min",
@@ -116,6 +120,8 @@ def init_ebs_case_b_models(ext: Any) -> None:
     ext._ebs_b_pickup_evt_max_model = ui.SimpleFloatModel(float(_SIM_DEF.pickup_max))
     ext._ebs_b_oht_bp1_min_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_min))
     ext._ebs_b_oht_bp1_max_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_max))
+    ext._ebs_b_oht_inout_min_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_inout_min))
+    ext._ebs_b_oht_inout_max_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_inout_max))
     ext._ebs_b_bp1_bp_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_min))
     ext._ebs_b_bp1_bp_max_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_max))
     ext._ebs_b_bp_ep_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp_to_ep_min))
@@ -128,6 +134,7 @@ def init_ebs_case_b_models(ext: Any) -> None:
     ext._ebs_b_ep_count_combo = None
     ext._ebs_b_ep_count_combos: List[Any] = []
     ext._ebs_b_ebs_enabled_model = ui.SimpleBoolModel(True)
+    ext._ebs_b_timing_oht_inout_rows: List[Any] = []
     for name in _BOOL_FIELDS:
         setattr(ext, _model_attr(CASE_B, name), ui.SimpleBoolModel(False))
     try:
@@ -266,6 +273,8 @@ def capture_case_sim_settings(ext: Any, case_id: int) -> Dict[str, Any]:
     for key in (
         "oht_bp1_min",
         "oht_bp1_max",
+        "oht_inout_min",
+        "oht_inout_max",
         "bp1_bp_min",
         "bp1_bp_max",
         "bp_ep_min",
@@ -347,6 +356,50 @@ def apply_case_sim_settings(ext: Any, case_id: int, snap: Dict[str, Any]) -> Non
             m = get_case_model(ext, cid, key)
             if m is not None and key in snap:
                 m.set_value(float(snap[key]))
+        except Exception:
+            pass
+    # OHT→INOUT: 웹에 oht_inout_* 없고 oht_bp1_* 가 오면 EP 값으로 UI까지 강제 맞춤
+    # (ebs_enabled 단독 apply 등 타이밍 키가 없는 호출에서는 건드리지 않음)
+    has_inout = ("oht_inout_min" in snap) or ("oht_inout_max" in snap)
+    has_ep = ("oht_bp1_min" in snap) or ("oht_bp1_max" in snap)
+    if has_inout:
+        try:
+            ep_min = float(snap.get("oht_bp1_min", _SIM_DEF.oht_to_bp1_min))
+            ep_max = float(snap.get("oht_bp1_max", _SIM_DEF.oht_to_bp1_max))
+        except Exception:
+            ep_min, ep_max = float(_SIM_DEF.oht_to_bp1_min), float(_SIM_DEF.oht_to_bp1_max)
+        try:
+            m = get_case_model(ext, cid, "oht_inout_min")
+            if m is not None and "oht_inout_min" in snap:
+                m.set_value(float(snap["oht_inout_min"]))
+            elif m is not None and has_ep:
+                m.set_value(ep_min)
+        except Exception:
+            pass
+        try:
+            m = get_case_model(ext, cid, "oht_inout_max")
+            if m is not None and "oht_inout_max" in snap:
+                m.set_value(float(snap["oht_inout_max"]))
+            elif m is not None and has_ep:
+                m.set_value(ep_max)
+        except Exception:
+            pass
+    elif has_ep:
+        try:
+            ep_min = float(snap.get("oht_bp1_min", _SIM_DEF.oht_to_bp1_min))
+            ep_max = float(snap.get("oht_bp1_max", _SIM_DEF.oht_to_bp1_max))
+        except Exception:
+            ep_min, ep_max = float(_SIM_DEF.oht_to_bp1_min), float(_SIM_DEF.oht_to_bp1_max)
+        try:
+            m = get_case_model(ext, cid, "oht_inout_min")
+            if m is not None:
+                m.set_value(ep_min)
+        except Exception:
+            pass
+        try:
+            m = get_case_model(ext, cid, "oht_inout_max")
+            if m is not None:
+                m.set_value(ep_max)
         except Exception:
             pass
     for key in _BOOL_FIELDS:

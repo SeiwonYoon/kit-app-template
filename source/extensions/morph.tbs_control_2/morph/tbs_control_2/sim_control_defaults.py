@@ -31,9 +31,13 @@ class SimControlDefaults:
     # START 시 +값, END 시 -값, 포트 위치 복원 시 plateau = baseline + 이 값.
     foup_proc_y_lift: float = 30.0
 
-    # OHT → IN/OUT·EP 직접 투입
+    # OHT → EP 직접 투입 (레거시 키명 oht_to_bp1 / 스냅샷 oht_bp1_*)
     oht_to_bp1_min: float = 5.0
     oht_to_bp1_max: float = 10.0
+
+    # OHT → IN/OUT 안착 (웹·스냅샷: oht_inout_* ; 없으면 oht_bp1_* 폴백)
+    oht_to_inout_min: float = 5.0
+    oht_to_inout_max: float = 10.0
 
     # IN/OUT → BP(버퍼)
     bp1_to_bp_min: float = 30.0

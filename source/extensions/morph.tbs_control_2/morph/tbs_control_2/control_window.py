@@ -2295,9 +2295,19 @@ def _timing_and_init_from_snapshot(ext: Any, snap: Dict[str, Any]) -> Tuple[Simu
         except Exception:
             return default
 
+    oht_ep_min = _f_snap("oht_bp1_min", float(_SIM_DEF.oht_to_bp1_min))
+    oht_ep_max = _f_snap("oht_bp1_max", float(_SIM_DEF.oht_to_bp1_max))
+    # 웹에 oht_inout_* 없으면 EP와 동일 폴백 (UI apply 쪽에서도 동일 강제)
+    if ("oht_inout_min" in snap) or ("oht_inout_max" in snap):
+        oht_inout_min = _f_snap("oht_inout_min", oht_ep_min)
+        oht_inout_max = _f_snap("oht_inout_max", oht_ep_max)
+    else:
+        oht_inout_min, oht_inout_max = oht_ep_min, oht_ep_max
     timing = SimulationTimingConfig(
-        oht_to_bp1_min=_f_snap("oht_bp1_min", float(_SIM_DEF.oht_to_bp1_min)),
-        oht_to_bp1_max=_f_snap("oht_bp1_max", float(_SIM_DEF.oht_to_bp1_max)),
+        oht_to_bp1_min=oht_ep_min,
+        oht_to_bp1_max=oht_ep_max,
+        oht_to_inout_min=oht_inout_min,
+        oht_to_inout_max=oht_inout_max,
         bp1_to_bp_min=_f_snap("bp1_bp_min", float(_SIM_DEF.bp1_to_bp_min)),
         bp1_to_bp_max=_f_snap("bp1_bp_max", float(_SIM_DEF.bp1_to_bp_max)),
         bp_to_ep_min=_f_snap("bp_ep_min", float(_SIM_DEF.bp_to_ep_min)),
@@ -4094,6 +4104,8 @@ def build_control_window(ext: Any) -> None:
             getattr(ext, "_sim_pickup_evt_max_model", None),
             getattr(ext, "_sim_oht_bp1_min_model", None),
             getattr(ext, "_sim_oht_bp1_max_model", None),
+            getattr(ext, "_sim_oht_inout_min_model", None),
+            getattr(ext, "_sim_oht_inout_max_model", None),
             getattr(ext, "_sim_bp1_bp_min_model", None),
             getattr(ext, "_sim_bp1_bp_max_model", None),
             getattr(ext, "_sim_bp_ep_min_model", None),
@@ -15035,6 +15047,7 @@ def _sync_ebs_control_visibility_for_case(ext: Any, case_id: int) -> None:
         block = getattr(ext, "_sim_timing_inout_bp_block", None)
         bp_ep_row = getattr(ext, "_sim_timing_bp_ep_row", None)
         lbl = getattr(ext, "_sim_oht_timing_label", None)
+        oht_inout_rows = list(getattr(ext, "_sim_timing_oht_inout_rows", None) or [])
         compact_rows = list(getattr(ext, "_sim_timing_ebs_compact_rows", None) or [])
     else:
         bp4_init = set(getattr(ext, "_ebs_b_init_bp4_rows", None) or [])
@@ -15044,6 +15057,7 @@ def _sync_ebs_control_visibility_for_case(ext: Any, case_id: int) -> None:
         block = getattr(ext, "_ebs_b_timing_inout_bp_block", None)
         bp_ep_row = getattr(ext, "_ebs_b_timing_bp_ep_row", None)
         lbl = getattr(ext, "_ebs_b_oht_timing_label", None)
+        oht_inout_rows = list(getattr(ext, "_ebs_b_timing_oht_inout_rows", None) or [])
         compact_rows = []
     for row in init_rows:
         try:
@@ -15067,7 +15081,12 @@ def _sync_ebs_control_visibility_for_case(ext: Any, case_id: int) -> None:
             pass
     if lbl is not None:
         try:
-            lbl.text = "OHT→IN/OUT/EP" if ebs_on else "OHT→EP"
+            lbl.text = "OHT→EP"
+        except Exception:
+            pass
+    for row in oht_inout_rows:
+        try:
+            row.visible = ebs_on
         except Exception:
             pass
     for row in compact_rows:
@@ -15210,7 +15229,12 @@ def _sync_ebs_control_visibility(ext: Any) -> None:
     lbl = getattr(ext, "_sim_oht_timing_label", None)
     if lbl is not None:
         try:
-            lbl.text = "OHT→IN/OUT/EP" if ebs_on else "OHT→EP"
+            lbl.text = "OHT→EP"
+        except Exception:
+            pass
+    for row in list(getattr(ext, "_sim_timing_oht_inout_rows", None) or []):
+        try:
+            row.visible = ebs_on
         except Exception:
             pass
     for row in list(getattr(ext, "_sim_timing_ebs_compact_rows", None) or []):

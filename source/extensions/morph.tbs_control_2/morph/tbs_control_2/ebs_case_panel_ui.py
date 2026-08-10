@@ -230,12 +230,30 @@ def build_ebs_case_window_panel(ext: Any, case_id: int, *, cb_style: Any) -> Non
 
             with ui.HStack(spacing=8, height=28):
                 if cid == CASE_A:
-                    ext._sim_oht_timing_label = ui.Label("OHT→IN/OUT/EP", width=100)
+                    ext._sim_oht_timing_label = ui.Label("OHT→EP", width=100)
                 else:
-                    ext._ebs_b_oht_timing_label = ui.Label("OHT→IN/OUT/EP", width=100)
+                    ext._ebs_b_oht_timing_label = ui.Label("OHT→EP", width=100)
                 ui.FloatField(model=_m("oht_bp1_min"), width=70)
                 ui.Label("~", width=10)
                 ui.FloatField(model=_m("oht_bp1_max"), width=70)
+                ui.Label("EP→OHT", width=60)
+                ui.FloatField(model=_m("ep_oht_min"), width=55)
+                ui.Label("~", width=10)
+                ui.FloatField(model=_m("ep_oht_max"), width=55)
+            oht_inout_row = ui.HStack(spacing=8, height=28)
+            if cid == CASE_A:
+                if not hasattr(ext, "_sim_timing_oht_inout_rows") or ext._sim_timing_oht_inout_rows is None:
+                    ext._sim_timing_oht_inout_rows = []
+                ext._sim_timing_oht_inout_rows.append(oht_inout_row)
+            else:
+                if not hasattr(ext, "_ebs_b_timing_oht_inout_rows") or ext._ebs_b_timing_oht_inout_rows is None:
+                    ext._ebs_b_timing_oht_inout_rows = []
+                ext._ebs_b_timing_oht_inout_rows.append(oht_inout_row)
+            with oht_inout_row:
+                ui.Label("OHT→IN/OUT", width=100)
+                ui.FloatField(model=_m("oht_inout_min"), width=70)
+                ui.Label("~", width=10)
+                ui.FloatField(model=_m("oht_inout_max"), width=70)
                 inout_bp_block = ui.HStack(spacing=8, height=28)
                 if cid == CASE_A:
                     ext._sim_timing_inout_bp_block = inout_bp_block
@@ -252,14 +270,10 @@ def build_ebs_case_window_panel(ext: Any, case_id: int, *, cb_style: Any) -> Non
             else:
                 ext._ebs_b_timing_bp_ep_row = bp_ep_row
             with bp_ep_row:
-                ui.Label("BP->EP", width=80)
+                ui.Label("BP→EP", width=80)
                 ui.FloatField(model=_m("bp_ep_min"), width=70)
                 ui.Label("~", width=10)
                 ui.FloatField(model=_m("bp_ep_max"), width=70)
-                ui.Label("EP->OHT", width=60)
-                ui.FloatField(model=_m("ep_oht_min"), width=55)
-                ui.Label("~", width=10)
-                ui.FloatField(model=_m("ep_oht_max"), width=55)
 
             with ui.HStack(spacing=8, height=28):
                 ui.CheckBox(

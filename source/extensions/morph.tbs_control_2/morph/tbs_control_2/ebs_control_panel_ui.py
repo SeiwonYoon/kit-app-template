@@ -200,6 +200,8 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_process_time_priority_model = ui.SimpleBoolModel(False)
     ext._sim_oht_bp1_min_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_min))
     ext._sim_oht_bp1_max_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_bp1_max))
+    ext._sim_oht_inout_min_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_inout_min))
+    ext._sim_oht_inout_max_model = ui.SimpleFloatModel(float(_SIM_DEF.oht_to_inout_max))
     ext._sim_bp1_bp_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_min))
     ext._sim_bp1_bp_max_model = ui.SimpleFloatModel(float(_SIM_DEF.bp1_to_bp_max))
     ext._sim_bp_ep_min_model = ui.SimpleFloatModel(float(_SIM_DEF.bp_to_ep_min))
@@ -220,6 +222,7 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_timing_inout_bp_block = None
     ext._sim_timing_bp_ep_row = None
     ext._sim_oht_timing_label = None
+    ext._sim_timing_oht_inout_rows: List[Any] = []
     ext._sim_timing_ebs_compact_rows: List[Any] = []
     try:
 
@@ -621,12 +624,13 @@ def _build_ebs_control_panel_compact(
         with ui.VStack(spacing=3):
             for lbl, mn, mx in (
                 ("OHT→EP", ext._sim_oht_bp1_min_model, ext._sim_oht_bp1_max_model),
+                ("OHT→IN/OUT", ext._sim_oht_inout_min_model, ext._sim_oht_inout_max_model),
                 ("IN→BP", ext._sim_bp1_bp_min_model, ext._sim_bp1_bp_max_model),
                 ("BP→EP", ext._sim_bp_ep_min_model, ext._sim_bp_ep_max_model),
                 ("EP→OHT", ext._sim_ep_oht_min_model, ext._sim_ep_oht_max_model),
             ):
                 row = ui.HStack(spacing=4, height=26)
-                if lbl in ("IN→BP", "BP→EP"):
+                if lbl in ("OHT→IN/OUT", "IN→BP", "BP→EP"):
                     ext._sim_timing_ebs_compact_rows.append(row)
                 with row:
                     ui.Label(lbl, width=lw)
