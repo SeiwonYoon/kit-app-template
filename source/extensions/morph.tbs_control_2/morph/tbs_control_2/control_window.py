@@ -13495,14 +13495,28 @@ def _reset_sim_motion_before_json_run(
     *,
     runner_obj: Any = None,
 ) -> None:
-    """시뮬 중 **새 JSON** 직전 — 해당 화면만 애니 중지·TBS_OFFSET 초기화( evaluator replay 는 유지)."""
+    """시뮬 중 **새 JSON** 직전 — 해당 화면만 애니 중지·TBS_OFFSET 초기화( evaluator replay 는 유지).
+
+    병렬: runner 가 ``_sim_runners_by_screen_rail`` 에만 있어 restore 기본 수집이
+    비는 경우가 있다. 이 레일 runner 의 ``_lam_last_steps`` 를 extra 에 합쳐
+    직전 공정 end-pose 가 다음 JSON 시작 위치로 남지 않게 한다.
+    """
     try:
         scr_i = int(str((job or {}).get("tbs_sim_screen", "1") or "1").strip() or "1")
     except Exception:
         scr_i = 1
     scr_i = max(1, scr_i)
     ctx = _usd_context_name_for_sim_screen(ext, scr_i)
-    extra = (job or {}).get("parsed") if isinstance((job or {}).get("parsed"), list) else []
+    extra_raw = (job or {}).get("parsed") if isinstance((job or {}).get("parsed"), list) else []
+    extra: List[Dict[str, Any]] = list(extra_raw) if extra_raw else []
+    # 동일 레일 직전 JSON 경로도 초기화 대상에 포함 (병렬 rail store 미수집 보정)
+    if runner_obj is not None:
+        try:
+            prev = getattr(runner_obj, "_lam_last_steps", None) or []
+            if isinstance(prev, list) and prev:
+                extra.extend(list(prev))
+        except Exception:
+            pass
     runner_was_running = False
     if runner_obj is not None:
         try:
@@ -13737,6 +13751,37 @@ def _restore_sim_prim_motion_to_initial(
                     _reset_tbs_offset_ops_for_paths(reset_paths, usd_context_name=usd_context_name)
                 finally:
                     pop_usd_context_name(prev_ctx)
+
+        # motion_only(JSON 직전): mapping invalidate 없이, 리셋 대상 prim 만
+        # range_start 로 스냅 — 병렬 도입 후 end-pose 에서 다음 공정이 시작되던 회귀 보정.
+        if motion_only and paths:
+            try:
+                from .tbs_lam_sequence_editor import _range_start_seconds_for_instance
+                from .tbs_split_composed_loader import get_split_runtime_for_usd_context
+
+                path_set = {str(p).strip() for p in paths if str(p).strip().startswith("/")}
+                rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
+                reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
+                ev = rt_ctx.evaluator if rt_ctx is not None else getattr(ext, "_tbs_evaluator", None)
+                if reg is not None and hasattr(reg, "all_instances") and path_set:
+                    for inst in reg.all_instances():
+                        pp = str(getattr(inst, "prim_path", "") or "").strip()
+                        if pp not in path_set:
+                            continue
+                        try:
+                            inst.virtual_time = _range_start_seconds_for_instance(inst)
+                            inst.state = "stopped"
+                        except Exception:
+                            pass
+                        if ev is not None:
+                            fn_now = getattr(ev, "evaluate_instance_now", None)
+                            if callable(fn_now):
+                                try:
+                                    fn_now(pp)
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
 
         if not motion_only:
             try:

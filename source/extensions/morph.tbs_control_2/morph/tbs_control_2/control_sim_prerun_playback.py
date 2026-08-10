@@ -1454,6 +1454,44 @@ def prerun_engine_to_timeline(
     except Exception:
         pass
 
+    # start() 는 프리런 수집 콜백 부착 **전**에 이미 호출된다(noop on_event).
+    # 그때 보낸 초기 적재 PORT_OCC_REFRESH 는 타임라인에 없어 t=0 plan/패널이 비게 된다.
+    # 수집 직전에 점유가 남아 있으면 refresh 를 1회 재emit 한다.
+    try:
+        ports_map = getattr(engine, "ports", None)
+        all_ports = list(getattr(engine, "_all_ports", None) or ())
+        has_occ = False
+        if isinstance(ports_map, dict) and all_ports:
+            for pk in all_ports:
+                if ports_map.get(pk) is not None:
+                    has_occ = True
+                    break
+        if has_occ and hasattr(engine, "_emit_port_occ_refresh"):
+            engine._emit_port_occ_refresh("초기 적재 포트 표시(프리런 수집 재동기화)")
+        elif has_occ:
+            # fallback: 콜백만 붙어 있으면 수동 스냅샷 아이템
+            occ: Dict[str, str] = {}
+            for pk in all_ports:
+                lot = ports_map.get(pk) if isinstance(ports_map, dict) else None
+                occ[str(pk)] = str(getattr(lot, "lot_id", "") or "") if lot is not None else ""
+            try:
+                t_now = float(getattr(getattr(engine, "env", None), "now", 0.0) or 0.0)
+            except Exception:
+                t_now = 0.0
+            items.append(
+                SimTimelineItem(
+                    t=float(t_now),
+                    kind="event",
+                    payload={
+                        "seq": "PORT_OCC_REFRESH",
+                        "sim_time": f"{float(t_now):.2f}",
+                        "ports_occupancy": dict(occ),
+                    },
+                )
+            )
+    except Exception:
+        pass
+
     # 프리런 동안 콘솔 print 끄기(기본). on_log 수집은 유지되어 재생 로그 패널은 그대로.
     # LOT 수·공정시간이 크면 줄 단위 print(flush) 가 시작을 크게 지연시키므로,
     # sim_control_defaults.SIM_PRERUN_CONSOLE_LOG 가 False 면 프리런 구간만 콘솔을 끈다.
