@@ -379,7 +379,50 @@ def _initial_bar_occ_at_t0(
     sorted_items: Tuple[SimTimelineItem, ...],
     ports: List[str],
 ) -> Dict[str, str]:
+    """
+    재생·막대 plan 의 t=0 포트 점유.
+
+    초기 적재는 ARRIVED 없이 ``PORT_OCC_REFRESH``(t≈0) 로만 올린다.
+    재생 중에는 그 refresh 이벤트가 무시되므로, 여기 값이 prim/패널 SSOT 가 된다.
+
+    병렬 모드에서 t=0 에 MOVE 등이 바로 RUNNING 이면 예전 early-return(전부 EMPTY)
+    이 refresh 점유를 덮어 지웠다 — refresh 이벤트를 그 가드보다 먼저 반영한다.
+    """
     out = {p: "" for p in ports}
+
+    def _fill_from_occ(po: Any) -> bool:
+        if not isinstance(po, dict) or not po:
+            return False
+        filled = False
+        for port in ports:
+            # INOUT / IN/OUT 등 키 정규화
+            ku = _canonical_sim_port_key(port) or str(port).strip().upper()
+            v = str(po.get(ku, "") or po.get(port, "") or "").strip()
+            if not v and ku == "INOUT":
+                v = str(po.get("IN/OUT", "") or "").strip()
+            if v:
+                out[port] = v
+                filled = True
+        return filled
+
+    for it in sorted_items or ():
+        try:
+            t = float(getattr(it, "t", 0.0) or 0.0)
+        except Exception:
+            t = 0.0
+        if t > 1e-3:
+            break
+        if str(it.kind or "").strip().lower() != "event":
+            continue
+        p = dict(it.payload) if isinstance(it.payload, dict) else {}
+        ev = _normalize_anim_event_seq(
+            _s_val(p.get("event_seq") or p.get("sequence_name") or p.get("seq"))
+        )
+        if ev != "PORT_OCC_REFRESH":
+            continue
+        if _fill_from_occ(p.get("ports_occupancy")):
+            return out
+
     for it in sorted_items or ():
         try:
             t = float(getattr(it, "t", 0.0) or 0.0)
@@ -408,10 +451,7 @@ def _initial_bar_occ_at_t0(
         po = p.get("ports_occupancy")
         if not isinstance(po, dict) or not po:
             continue
-        for port in ports:
-            v = str(po.get(port, "") or "").strip()
-            if v:
-                out[port] = v
+        _fill_from_occ(po)
         break
     return out
 
