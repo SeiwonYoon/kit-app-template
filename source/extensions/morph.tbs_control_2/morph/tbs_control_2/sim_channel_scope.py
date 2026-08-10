@@ -57,6 +57,48 @@ def stop_channel_animations(
             pass
 
 
+def stop_channel_animations_for_paths(
+    usd_context_name: Optional[str],
+    prim_paths: List[str],
+    *,
+    diag_reason: str = "",
+) -> None:
+    """지정 prim 만 MOVE/ROTATE 중지 — 병렬 타 레일 JSON 보호용."""
+    paths = [str(p or "").strip() for p in (prim_paths or []) if str(p or "").strip().startswith("/")]
+    if not paths:
+        return
+    try:
+        from . import sim_multi_diag as _mdiag
+
+        _mdiag.log_channel_stop(
+            ctx=usd_context_name,
+            reason=str(diag_reason or "stop_channel_animations_for_paths"),
+            preserve_foup=False,
+        )
+    except Exception:
+        pass
+    try:
+        from . import tbs_lam_rotate_animation as lam_rx
+        from . import tbs_lam_translate_animation as lam_tx
+        from . import translate_animation as leg_tx
+
+        for pp in paths:
+            try:
+                lam_tx.stop_prim_translate_animation(pp, usd_context_name)
+            except Exception:
+                pass
+            try:
+                lam_rx.stop_prim_rotate_animation(pp, usd_context_name)
+            except Exception:
+                pass
+            try:
+                leg_tx.stop_prim_translate_animation(pp, usd_context_name)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _legacy_translate_busy(usd_context_name: Optional[str]) -> bool:
     try:
         from .translate_animation import is_translate_animation_running_for_context
@@ -315,6 +357,7 @@ def drain_channel_motion_complete(
 
 __all__ = [
     "stop_channel_animations",
+    "stop_channel_animations_for_paths",
     "is_channel_motion_busy",
     "probe_channel_motion_busy_on_main",
     "wait_channel_motion_idle",

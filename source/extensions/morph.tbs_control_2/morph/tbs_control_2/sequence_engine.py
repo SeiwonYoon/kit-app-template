@@ -57,6 +57,28 @@ class SequenceRunner(_LegacySequenceRunner):
         self._lam_last_steps: List[Dict[str, Any]] = []
         self._last_usd_context_name: Optional[str] = None
         self._on_renewal_step: Optional[Callable[[int, dict], None]] = None
+        self._sim_rail: str = ""
+        self._diag_ext: Any = None
+        self._diag_screen: int = 1
+
+    def _peer_rail_busy(self) -> bool:
+        """병렬 타 레일이 살아 있으면 True — 채널 전체 stop 억제."""
+        try:
+            from .control_sim_playback_gate import is_twin_rail_occupying
+            from .sim_parallel_rails import parallel_moves_enabled
+
+            if not parallel_moves_enabled():
+                return False
+            rail = str(getattr(self, "_sim_rail", "") or "").strip().lower()
+            if rail not in ("oht", "move"):
+                return False
+            ext = getattr(self, "_diag_ext", None)
+            if ext is None:
+                return False
+            scr = int(getattr(self, "_diag_screen", 1) or 1)
+            return bool(is_twin_rail_occupying(ext, scr, rail))
+        except Exception:
+            return False
 
     @property
     def on_renewal_step(self) -> Optional[Callable[[int, dict], None]]:
@@ -77,6 +99,15 @@ class SequenceRunner(_LegacySequenceRunner):
             return True
         if self._lam_thread is not None and self._lam_thread.is_alive():
             return True
+        # 병렬 레일 runner: 타 레일 채널 motion 을 자기 busy 로 보지 않음
+        try:
+            from .sim_parallel_rails import parallel_moves_enabled
+
+            rail = str(getattr(self, "_sim_rail", "") or "").strip().lower()
+            if parallel_moves_enabled() and rail in ("oht", "move"):
+                return super().is_running()
+        except Exception:
+            pass
         ctx = self._last_usd_context_name
         if self._lam_runner is not None:
             ctx = getattr(self._lam_runner, "_usd_context_name", ctx)
@@ -92,7 +123,12 @@ class SequenceRunner(_LegacySequenceRunner):
     def _halt_lam_runner(self) -> None:
         if self._lam_runner is not None:
             try:
-                self._lam_runner.stop()
+                self._lam_runner.stop(cancel_all_move_rotate=not self._peer_rail_busy())
+            except TypeError:
+                try:
+                    self._lam_runner.stop()
+                except Exception:
+                    pass
             except Exception:
                 pass
         self._lam_running = False
@@ -100,9 +136,10 @@ class SequenceRunner(_LegacySequenceRunner):
 
     def pause(self, *, cancel_all_move_rotate: bool = True) -> None:
         """애니만 중단 — prim 위치는 유지 (시뮬 **정지**)."""
+        cancel = bool(cancel_all_move_rotate) and (not self._peer_rail_busy())
         if self._lam_runner is not None:
             try:
-                self._lam_runner.stop(cancel_all_move_rotate=cancel_all_move_rotate)
+                self._lam_runner.stop(cancel_all_move_rotate=cancel)
             except Exception:
                 pass
         self._lam_running = False
@@ -139,6 +176,7 @@ class SequenceRunner(_LegacySequenceRunner):
 
         ctx_nm = str(usd_context_name or "").strip() or None
         self._last_usd_context_name = ctx_nm
+        peer_busy = self._peer_rail_busy()
 
         if self._lam_thread is not None and self._lam_thread.is_alive():
             try:
@@ -155,7 +193,7 @@ class SequenceRunner(_LegacySequenceRunner):
                         )
                     except Exception:
                         pass
-                    self._lam_runner.stop(cancel_all_move_rotate=True)
+                    self._lam_runner.stop(cancel_all_move_rotate=not peer_busy)
                 try:
                     self._lam_thread.join(timeout=10.0)
                 except Exception:
@@ -173,12 +211,20 @@ class SequenceRunner(_LegacySequenceRunner):
             usd_context_name=ctx_nm,
         )
         self._lam_runner._diag_ext = getattr(self, "_diag_ext", None)  # type: ignore[attr-defined]
+        try:
+            self._lam_runner._diag_screen = int(getattr(self, "_diag_screen", 1) or 1)  # type: ignore[attr-defined]
+            self._lam_runner._sim_rail = str(getattr(self, "_sim_rail", "") or "")  # type: ignore[attr-defined]
+        except Exception:
+            pass
         self._lam_running = True
         cb = self.on_sequence_completed
         sp = max(0.01, float(speed_scale or 1.0))
 
         def _bg() -> None:
             try:
+                # 이번 JSON steps 의 prim 만 TBS_OFFSET 0 (peer 경로 미포함).
+                # 병렬에서도 True — pre_json 과 이중으로 자기 JSON 만 초기화해
+                # OHT/MOVE 시작 위치 누락을 막는다. 채널 전체 stop 은 하지 않음.
                 self._lam_runner.run(
                     normalized,
                     speed_scale=sp,
@@ -191,18 +237,37 @@ class SequenceRunner(_LegacySequenceRunner):
                 # LAM 스텝 종료 — 잔류 MOVE/TIMESAMPLES 정리 후 완료 콜백.
                 self._lam_running = False
                 try:
-                    from .sim_channel_scope import drain_channel_motion_complete, stop_channel_animations
+                    from .sim_channel_scope import (
+                        drain_channel_motion_complete,
+                        stop_channel_animations,
+                        stop_channel_animations_for_paths,
+                    )
+                    from .tbs_lam_sequence_engine import _collect_prim_paths_for_reset
+                    from .sim_parallel_rails import parallel_moves_enabled
 
-                    stop_channel_animations(
-                        self._last_usd_context_name,
-                        diag_reason="lam_run_end",
+                    rail = str(getattr(self, "_sim_rail", "") or "").strip().lower()
+                    scoped = bool(
+                        parallel_moves_enabled() and rail in ("oht", "move")
                     )
-                    drain_channel_motion_complete(
-                        self._last_usd_context_name,
-                        self._tbs_registry,
-                        max_sec=4.0,
-                        stable_ticks=2,
-                    )
+                    peer_now = self._peer_rail_busy()
+                    if scoped or peer_now:
+                        # 병렬 레일: 이번 JSON prim 만 정리 (채널 전체 stop/drain 금지)
+                        stop_channel_animations_for_paths(
+                            self._last_usd_context_name,
+                            _collect_prim_paths_for_reset(list(self._lam_last_steps or [])),
+                            diag_reason="lam_run_end_peer_preserve",
+                        )
+                    else:
+                        stop_channel_animations(
+                            self._last_usd_context_name,
+                            diag_reason="lam_run_end",
+                        )
+                        drain_channel_motion_complete(
+                            self._last_usd_context_name,
+                            self._tbs_registry,
+                            max_sec=4.0,
+                            stable_ticks=2,
+                        )
                 except Exception:
                     pass
                 if callable(cb):
@@ -218,7 +283,6 @@ class SequenceRunner(_LegacySequenceRunner):
                 self._lam_thread.join()
             except Exception:
                 pass
-
 
 __all__ = [
     "SequenceRunner",

@@ -382,7 +382,11 @@ def _reset_tbs_offset_ops_for_paths(
     *,
     usd_context_name: Optional[str] = None,
 ) -> None:
-    """애니메이션 중지 후 `TBS_OFFSET` Translate/Rotate 를 0 으로."""
+    """지정 prim 의 애니메이션 중지 후 `TBS_OFFSET` Translate/Rotate 를 0 으로.
+
+    **지정 paths 만** 건드린다 — 채널/월드 피봇 전역 stop 을 하지 않아
+    병렬 peer JSON 위치를 건드리지 않는다.
+    """
     from . import tbs_lam_translate_animation as _ltx
     from . import tbs_lam_rotate_animation as _lrx
     from .tbs_usd_stage_context import get_current_usd_context_name
@@ -393,10 +397,6 @@ def _reset_tbs_offset_ops_for_paths(
         else get_current_usd_context_name()
     )
 
-    try:
-        _lrx.stop_world_pivot_rotate_animation()
-    except Exception:
-        pass
     for p in paths:
         try:
             _ltx.stop_prim_translate_animation(p, ctx)
@@ -472,6 +472,41 @@ class TbsLamSequenceRunner:
         self._start_from_current: bool = False
         self._start_from_current_paths: List[str] = []
         self._start_snapshot: Dict[str, Dict[str, Any]] = {}
+        # 병렬 레일 보호용 (SequenceRunner 가 채움)
+        self._sim_rail: str = ""
+        self._diag_ext: Any = None
+        self._diag_screen: int = 1
+
+    def _peer_rail_busy(self) -> bool:
+        """병렬 타 레일 JSON 이 같은 화면에서 돌면 True — 채널 전체 wait/stop 억제."""
+        try:
+            from .control_sim_playback_gate import is_twin_rail_occupying
+            from .sim_parallel_rails import parallel_moves_enabled
+
+            if not parallel_moves_enabled():
+                return False
+            rail = str(getattr(self, "_sim_rail", "") or "").strip().lower()
+            if rail not in ("oht", "move"):
+                return False
+            ext = getattr(self, "_diag_ext", None)
+            if ext is None:
+                return False
+            scr = int(getattr(self, "_diag_screen", 1) or 1)
+            return bool(is_twin_rail_occupying(ext, scr, rail))
+        except Exception:
+            return False
+
+    def _parallel_rail_scoped(self) -> bool:
+        """병렬 ON + oht/move 레일 runner — motion wait 를 자기 prim 으로만 한정."""
+        try:
+            from .sim_parallel_rails import parallel_moves_enabled
+
+            if not parallel_moves_enabled():
+                return False
+            rail = str(getattr(self, "_sim_rail", "") or "").strip().lower()
+            return rail in ("oht", "move")
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------ public
 
@@ -487,7 +522,9 @@ class TbsLamSequenceRunner:
                 MOVE/ROTATE 를 건드리지 않기 위함).
         """
         self._stop_flag.set()
-        if cancel_all_move_rotate:
+        # 타 레일 병렬 중에는 전달값과 무관하게 채널 전체 stop 금지
+        do_cancel = bool(cancel_all_move_rotate) and (not self._peer_rail_busy())
+        if do_cancel:
             try:
                 from . import tbs_lam_rotate_animation as _lrx
                 from . import tbs_lam_translate_animation as _ltx
@@ -614,8 +651,9 @@ class TbsLamSequenceRunner:
 
             # JSON 전체 종료 직전 — 그룹별 wait 가 BG/main 레이스로 빠졌을 수 있는
             # TIMESAMPLES replay·legacy FOUP translate 잔류를 한 번 더 drain 한다.
+            # 병렬 타 레일 진행 중에는 채널 전체 drain 금지(상대 JSON 이 끝날 때까지
+            # 자기 시퀀스가 멈춰 보이는 간섭의 주원인).
             if steps and not self._stop_flag.is_set():
-                drain_sec = 30.0
                 try:
                     sp_final = _playback_speed_scale(float(max(0.01, speed_scale or 1.0)))
                     last = max(0, len(steps) - 1)
@@ -623,7 +661,6 @@ class TbsLamSequenceRunner:
                         steps, 0, last
                     )
                     extra = self._estimate_group_motion_extra_timeout(steps, 0, last, sp_final)
-                    drain_sec = max(15.0, float(extra))
                     self._wait_for_motion_complete(
                         all_tx,
                         all_rot,
@@ -632,17 +669,26 @@ class TbsLamSequenceRunner:
                     )
                 except Exception:
                     pass
-                try:
-                    from .sim_channel_scope import drain_channel_motion_complete
+                if not self._parallel_rail_scoped():
+                    drain_sec = 30.0
+                    try:
+                        sp_final = _playback_speed_scale(float(max(0.01, speed_scale or 1.0)))
+                        last = max(0, len(steps) - 1)
+                        extra = self._estimate_group_motion_extra_timeout(steps, 0, last, sp_final)
+                        drain_sec = max(15.0, float(extra))
+                    except Exception:
+                        drain_sec = 30.0
+                    try:
+                        from .sim_channel_scope import drain_channel_motion_complete
 
-                    drain_channel_motion_complete(
-                        self._usd_context_name,
-                        self._registry,
-                        max_sec=drain_sec,
-                        stable_ticks=4,
-                    )
-                except Exception:
-                    pass
+                        drain_channel_motion_complete(
+                            self._usd_context_name,
+                            self._registry,
+                            max_sec=drain_sec,
+                            stable_ticks=4,
+                        )
+                    except Exception:
+                        pass
 
             try:
                 from . import sim_multi_diag as _mdiag
@@ -852,9 +898,14 @@ class TbsLamSequenceRunner:
     ) -> None:
         """추정 duration 대기 후에도 anim/replay 가 살아 있으면 완료까지 폴링.
 
-        inst.state·애니 dict 는 main thread 에서만 갱신되므로, idle 판정은 main 에서 수행한다.
+        ``morph.lam_control_1`` VTM∥ATM 과 동일 — **자기 그룹 prim 만** BG 에서 직접 폴링.
+        ``probe_channel_motion_busy_on_main``(매 틱 ``dispatch_main_wait``) 는 사용하지 않는다.
+        wait 타임아웃 시 busy 기본 True 가 peer/자기 스탭을 한 줄로 직렬화하는 원인이었다.
         """
+        scoped = self._parallel_rail_scoped()
         if not translate_paths and not rotate_paths and not replay_prims:
+            if scoped:
+                return
             try:
                 from .sim_channel_scope import wait_channel_motion_idle
 
@@ -871,7 +922,6 @@ class TbsLamSequenceRunner:
 
         deadline = time.monotonic() + max(0.5, float(max_extra_sec))
         poll = 0.033
-        ctx_nm = self._usd_context_name
         timeout_extensions = 0
         max_timeout_extensions = 4
 
@@ -883,22 +933,10 @@ class TbsLamSequenceRunner:
             except Exception:
                 pass
 
-            busy = True
-            try:
-                from .sim_channel_scope import probe_channel_motion_busy_on_main
-
-                busy = probe_channel_motion_busy_on_main(
-                    ctx_nm,
-                    self._registry,
-                    translate_paths=translate_paths,
-                    rotate_paths=rotate_paths,
-                    replay_prims=replay_prims,
-                    check_all_channel=True,
-                )
-            except Exception:
-                busy = self._any_motion_busy_fallback(
-                    translate_paths, rotate_paths, replay_prims
-                )
+            # LAM 식: main round-trip 없이 anim dict / instance.state 직접 조회
+            busy = self._any_motion_busy_fallback(
+                translate_paths, rotate_paths, replay_prims
+            )
 
             if not busy:
                 return
@@ -1429,18 +1467,14 @@ class TbsLamSequenceRunner:
                     _seq_log(f"{_PRINT_PREFIX} (main) MOVE failed prim={p}: {exc}", flush=True)
 
         _seq_log(f"{_PRINT_PREFIX} _start_move idx={idx} dispatching to main thread", flush=True)
-        dispatch_timeout = max(30.0, float(duration) * 3.0 + 10.0)
-        if not _dispatch_main_wait(_do_in_main, timeout=dispatch_timeout):
-            _seq_log(
-                f"{_PRINT_PREFIX} step[{idx}] MOVE dispatch TIMEOUT after {dispatch_timeout:.1f}s",
-                flush=True,
-            )
-        else:
-            _seq_log(
-                f"{_PRINT_PREFIX} step[{idx}] MOVE started prim={paths} "
-                f"from_initial={from_initial} dur={duration}",
-                flush=True,
-            )
+        # LAM VTM∥ATM 과 동일: fire-and-forget. wait 하면 메인 FIFO + busy 폴링과
+        # 경합하여 peer JSON 스탭이 끝날 때까지 자기 스탭이 멈춘 것처럼 직렬화된다.
+        _dispatch_main(_do_in_main)
+        _seq_log(
+            f"{_PRINT_PREFIX} step[{idx}] MOVE dispatched prim={paths} "
+            f"from_initial={from_initial} dur={duration}",
+            flush=True,
+        )
         return duration
 
     # --------------------------------------------------------------- ROTATE
@@ -1550,12 +1584,8 @@ class TbsLamSequenceRunner:
             f"prim={paths} r=({rx},{ry},{rz}) from_initial={from_initial} dur={duration}",
             flush=True,
         )
-        dispatch_timeout = max(30.0, float(duration) * 3.0 + 10.0)
-        if not _dispatch_main_wait(_do_in_main, timeout=dispatch_timeout):
-            _seq_log(
-                f"{_PRINT_PREFIX} step[{idx}] ROTATE dispatch TIMEOUT after {dispatch_timeout:.1f}s",
-                flush=True,
-            )
+        # LAM 과 동일: kickoff fire-and-forget (peer 레일 스텝 직렬화 방지)
+        _dispatch_main(_do_in_main)
         return duration
 
     # -------------------------------------------------------- SET_PRIM_VISIBILITY

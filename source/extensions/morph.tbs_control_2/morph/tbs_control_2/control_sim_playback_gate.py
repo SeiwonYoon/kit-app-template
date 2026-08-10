@@ -437,6 +437,21 @@ def is_rail_json_occupying(ext: Any, screen: int, rail: str) -> bool:
     return False
 
 
+def is_twin_rail_occupying(ext: Any, screen: int, rail: Optional[str]) -> bool:
+    """병렬 ON 이고 상대 레일이 JSON 점유 중이면 True."""
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, twin_rail
+
+        if not parallel_moves_enabled():
+            return False
+        twin = twin_rail(str(rail or ""))
+        if not twin:
+            return False
+        return bool(is_rail_json_occupying(ext, int(screen), twin))
+    except Exception:
+        return False
+
+
 def rail_ep_conflict_blocks_emit(
     ext: Any,
     screen: int,
@@ -526,6 +541,7 @@ __all__ = [
     "is_rail_json_occupying",
     "is_screen_channel_motion_busy",
     "is_screen_runner_busy",
+    "is_twin_rail_occupying",
     "json_wall_duration_sec",
     "make_playback_event_gate",
     "rail_ep_conflict_blocks_emit",

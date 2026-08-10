@@ -309,6 +309,7 @@ from .control_sim_playback_gate import (
     compute_json_effective_speed,
     is_rail_json_occupying,
     is_screen_runner_busy,
+    is_twin_rail_occupying,
     json_wall_duration_sec,
     make_playback_event_gate,
     rail_ep_conflict_blocks_emit,
@@ -1111,6 +1112,8 @@ def _execute_mapped_sequence_stub(
                 if runner_obj is not None:
                     runner_obj._diag_ext = ext  # type: ignore[attr-defined]
                     runner_obj._diag_screen = scr_i  # type: ignore[attr-defined]
+                    if _job_rail:
+                        runner_obj._sim_rail = str(_job_rail)  # type: ignore[attr-defined]
             except Exception:
                 pass
             try:
@@ -1156,6 +1159,16 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 if runner_obj is None:
                     runner_obj = getattr(ext, "_sim_runner", None)
+
+            # 신규 생성 runner 에도 레일 태그 필수 (위에서 None 이었으면 미설정됨)
+            try:
+                if runner_obj is not None:
+                    runner_obj._diag_ext = ext  # type: ignore[attr-defined]
+                    runner_obj._diag_screen = scr_i  # type: ignore[attr-defined]
+                    if _job_rail:
+                        runner_obj._sim_rail = str(_job_rail)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
             try:
                 pause_map = getattr(ext, "_sim_tick_pause_events_by_screen", None)
@@ -1342,24 +1355,15 @@ def _execute_mapped_sequence_stub(
                     _queue_post_anim_port_apply(ext, int(scr_i), src_done)
 
                 # 다음 JSON/ANIM_DONE 직전 — TIMESAMPLES·legacy translate 잔류 drain (BG thread).
-                # 병렬: 타 레일이 같은 USD ctx에서 돌면 채널 전체 stop 금지(간섭).
+                # 병렬 레일: 채널 전체 drain/stop 금지(상대 JSON wait/간섭).
                 try:
                     from .sim_channel_scope import drain_channel_motion_complete, stop_channel_animations
                     from .tbs_split_composed_loader import get_split_runtime_for_screen
-                    from .sim_parallel_rails import parallel_moves_enabled, twin_rail
-                    from .control_sim_playback_gate import is_screen_runner_busy
+                    from .sim_parallel_rails import parallel_moves_enabled
 
-                    _skip_chan_halt = False
-                    try:
-                        if parallel_moves_enabled() and _job_rail:
-                            _twin = twin_rail(str(_job_rail))
-                            if _twin and (
-                                is_rail_json_occupying(ext, int(scr_i), _twin)
-                                or is_screen_runner_busy(ext, int(scr_i), rail=_twin)
-                            ):
-                                _skip_chan_halt = True
-                    except Exception:
-                        _skip_chan_halt = False
+                    _skip_chan_halt = bool(
+                        parallel_moves_enabled() and str(_job_rail or "").strip()
+                    )
                     if not _skip_chan_halt:
                         _ctx_done = _usd_context_name_for_sim_screen(ext, scr_i)
                         _rt_done = get_split_runtime_for_screen(ext, scr_i)
@@ -10432,12 +10436,15 @@ def _halt_screen_json_anim(
     except Exception:
         reg = None
 
+    peer_alive = bool(is_twin_rail_occupying(ext, scr, rail_l)) if rail_l else False
+
     def _halt_one_runner(rr: Any) -> None:
         if rr is None:
             return
         try:
             if bool(getattr(rr, "is_running", lambda: False)()):
-                rr.pause(cancel_all_move_rotate=True)
+                # 타 레일 병렬 중이면 채널 전체 translate/rotate stop 금지
+                rr.pause(cancel_all_move_rotate=not peer_alive)
         except Exception:
             pass
         th = getattr(rr, "_lam_thread", None)
@@ -10486,7 +10493,7 @@ def _halt_screen_json_anim(
             _halt_one_runner(rr)
         except Exception:
             pass
-    if other_rail_alive:
+    if other_rail_alive or peer_alive:
         return
     try:
         from .sim_channel_scope import drain_channel_motion_complete, stop_channel_animations
@@ -10497,7 +10504,6 @@ def _halt_screen_json_anim(
         )
     except Exception:
         pass
-
 
 def _enqueue_anim_screen_job(
     ext: Any,
@@ -13507,11 +13513,13 @@ def _reset_sim_motion_before_json_run(
     *,
     runner_obj: Any = None,
 ) -> None:
-    """시뮬 중 **새 JSON** 직전 — 해당 화면만 애니 중지·TBS_OFFSET 초기화( evaluator replay 는 유지).
+    """시뮬 중 **새 JSON** 직전 — **이 JSON의 prim 만** 애니 중지·TBS_OFFSET 초기화.
 
-    병렬: runner 가 ``_sim_runners_by_screen_rail`` 에만 있어 restore 기본 수집이
-    비는 경우가 있다. 이 레일 runner 의 ``_lam_last_steps`` 를 extra 에 합쳐
-    직전 공정 end-pose 가 다음 JSON 시작 위치로 남지 않게 한다.
+    규칙
+    - OHT / MOVE 모두: 이번 ``job.parsed`` prim 은 **항상** 위치 초기화.
+    - 동일 레일 직전 JSON end-pose 정리용으로 해당 runner ``_lam_last_steps`` 도 포함.
+    - 병렬: peer 레일 runner / 채널 전체 / 타 화면 runner 경로는 **절대 넣지 않음**.
+    - peer 와 공유 prim 이어도 **이번 JSON 시작 prim 은 초기화** (자기 JSON 정상 시작 우선).
     """
     try:
         scr_i = int(str((job or {}).get("tbs_sim_screen", "1") or "1").strip() or "1")
@@ -13519,9 +13527,25 @@ def _reset_sim_motion_before_json_run(
         scr_i = 1
     scr_i = max(1, scr_i)
     ctx = _usd_context_name_for_sim_screen(ext, scr_i)
+    job_rail = None
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, rail_from_job_or_payload
+
+        if parallel_moves_enabled():
+            job_rail = rail_from_job_or_payload(job)
+    except Exception:
+        job_rail = None
+    parallel_rail = bool(job_rail and str(job_rail).lower() in ("oht", "move"))
+    peer_alive = bool(is_twin_rail_occupying(ext, scr_i, job_rail)) if job_rail else False
+    # 채널 전체 stop 만 peer 보호. 자기 JSON path 리셋은 항상 수행.
+    preserve_channel = bool(parallel_rail or peer_alive)
+
+    extra: List[Dict[str, Any]] = []
+    # 1) 이번 JSON — 무조건 포함
     extra_raw = (job or {}).get("parsed") if isinstance((job or {}).get("parsed"), list) else []
-    extra: List[Dict[str, Any]] = list(extra_raw) if extra_raw else []
-    # 동일 레일 직전 JSON 경로도 초기화 대상에 포함 (병렬 rail store 미수집 보정)
+    if extra_raw:
+        extra.extend(list(extra_raw))
+    # 2) 동일 레일 직전 end-pose 정리 (peer 레일 steps 아님)
     if runner_obj is not None:
         try:
             prev = getattr(runner_obj, "_lam_last_steps", None) or []
@@ -13529,6 +13553,7 @@ def _reset_sim_motion_before_json_run(
                 extra.extend(list(prev))
         except Exception:
             pass
+
     runner_was_running = False
     if runner_obj is not None:
         try:
@@ -13538,7 +13563,7 @@ def _reset_sim_motion_before_json_run(
     if runner_obj is not None:
         try:
             if runner_was_running:
-                runner_obj.pause(cancel_all_move_rotate=True)
+                runner_obj.pause(cancel_all_move_rotate=not preserve_channel)
                 th = getattr(runner_obj, "_lam_thread", None)
                 if th is not None and getattr(th, "is_alive", lambda: False)():
                     try:
@@ -13548,7 +13573,7 @@ def _reset_sim_motion_before_json_run(
         except Exception:
             try:
                 if getattr(runner_obj, "is_running", lambda: False)():
-                    runner_obj.pause(cancel_all_move_rotate=True)
+                    runner_obj.pause(cancel_all_move_rotate=not preserve_channel)
             except Exception:
                 pass
     try:
@@ -13574,6 +13599,12 @@ def _reset_sim_motion_before_json_run(
         foup_proc_active_ep=active_ep,
         motion_only=True,
         include_registry_paths=False,
+        preserve_peer_channel=preserve_channel,
+        # 병렬: 자기 JSON(+동일 레일 직전)만. peer runner/_sim_runner 경로 미포함
+        extra_steps_only=bool(parallel_rail),
+        # peer path 로 자기 JSON prim 을 빼지 않음 (위치초기화 누락 회귀 방지)
+        peer_exclude_screen=0,
+        peer_exclude_rail="",
     )
 
 
@@ -13597,12 +13628,19 @@ def _restore_sim_prim_motion_to_initial(
     foup_proc_active_ep: str = "",
     motion_only: bool = False,
     include_registry_paths: bool = True,
+    preserve_peer_channel: bool = False,
+    extra_steps_only: bool = False,
+    peer_exclude_screen: int = 0,
+    peer_exclude_rail: str = "",
 ) -> None:
     """시뮬 **시작·리셋** 및 **JSON 전환** 시 MOVE·ROTATE·FOUP·USD_TIMELINE prim 을 초기 자세로.
 
     포트 LOT 숨김/보임(visibility)은 건드리지 않는다 — transform·TBS_OFFSET·인스턴스 replay 만 복원.
     ``preserve_foup_offsets=True`` 이면 FOUP 공정 플래그를 지우지 않고 EP plateau 를 유지한다.
     ``motion_only=True`` 이면 JSON 직전용 — evaluator invalidate/replay 해제는 생략한다.
+    ``preserve_peer_channel=True`` 이면 병렬 타 레일 보호 — 채널 전체 stop/scheduler.stop_all 생략,
+    이번 JSON prim 만 중지·리셋한다.
+    ``extra_steps_only=True`` 이면 path 목록을 ``extra_steps`` 만으로 한정(다른 runner last_steps 제외).
     """
     paths_seen: set[str] = set()
     paths: List[str] = []
@@ -13625,57 +13663,88 @@ def _restore_sim_prim_motion_to_initial(
     try:
         from .tbs_lam_sequence_engine import _collect_prim_paths_for_reset
 
-        runners = getattr(ext, "_sim_runners_by_screen", None)
-        scr_filter: Optional[int] = None
-        if usd_context_name is not None:
-            try:
-                cn = str(usd_context_name or "").strip()
-                names = list(getattr(ext, "_sim_multi_context_names", []) or [])
-                for i, nm in enumerate(names):
-                    if str(nm or "").strip() == cn:
-                        scr_filter = i + 2
-                        break
-            except Exception:
-                scr_filter = None
-        if isinstance(runners, dict):
-            if scr_filter is not None:
-                r = runners.get(str(scr_filter))
-                if r is not None:
-                    for p in _collect_prim_paths_for_reset(
-                        getattr(r, "_lam_last_steps", None) or []
-                    ):
-                        _add(p)
-            else:
-                for r in runners.values():
+        if extra_steps_only:
+            # 병렬 JSON 시작: 이번 job(+동일 레일 직전) steps 의 prim 만.
+            # ``_sim_runner`` / 화면 runner last_steps 를 넣으면 peer JSON 위치가 같이 리셋된다.
+            if extra_steps:
+                for p in _collect_prim_paths_for_reset(extra_steps):
+                    _add(p)
+        else:
+            runners = getattr(ext, "_sim_runners_by_screen", None)
+            scr_filter: Optional[int] = None
+            if usd_context_name is not None:
+                try:
+                    cn = str(usd_context_name or "").strip()
+                    names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+                    for i, nm in enumerate(names):
+                        if str(nm or "").strip() == cn:
+                            scr_filter = i + 2
+                            break
+                except Exception:
+                    scr_filter = None
+            if isinstance(runners, dict):
+                if scr_filter is not None:
+                    r = runners.get(str(scr_filter))
                     if r is not None:
                         for p in _collect_prim_paths_for_reset(
                             getattr(r, "_lam_last_steps", None) or []
                         ):
                             _add(p)
-        if scr_filter is None or scr_filter == 1:
-            r0 = getattr(ext, "_sim_runner", None)
-            if r0 is not None:
-                for p in _collect_prim_paths_for_reset(
-                    getattr(r0, "_lam_last_steps", None) or []
-                ):
+                else:
+                    for r in runners.values():
+                        if r is not None:
+                            for p in _collect_prim_paths_for_reset(
+                                getattr(r, "_lam_last_steps", None) or []
+                            ):
+                                _add(p)
+            if scr_filter is None or scr_filter == 1:
+                r0 = getattr(ext, "_sim_runner", None)
+                if r0 is not None:
+                    for p in _collect_prim_paths_for_reset(
+                        getattr(r0, "_lam_last_steps", None) or []
+                    ):
+                        _add(p)
+            if extra_steps:
+                for p in _collect_prim_paths_for_reset(extra_steps):
                     _add(p)
-        if extra_steps:
-            for p in _collect_prim_paths_for_reset(extra_steps):
-                _add(p)
     except Exception:
         pass
+
+    # peer 레일이 쓰는 prim 은 리셋 대상에서 제외 (공유 prim 충돌 시 peer 유지 우선)
+    if preserve_peer_channel and int(peer_exclude_screen or 0) > 0:
+        try:
+            from .sim_parallel_rails import rail_queue_key, twin_rail
+            from .tbs_lam_sequence_engine import _collect_prim_paths_for_reset
+
+            twin = twin_rail(str(peer_exclude_rail or ""))
+            if twin:
+                peer_paths: set[str] = set()
+                runners_rail = getattr(ext, "_sim_runners_by_screen_rail", None)
+                if isinstance(runners_rail, dict):
+                    tr = runners_rail.get(
+                        rail_queue_key(int(peer_exclude_screen), twin)
+                    )
+                    if tr is not None:
+                        for p in _collect_prim_paths_for_reset(
+                            getattr(tr, "_lam_last_steps", None) or []
+                        ):
+                            peer_paths.add(str(p).strip())
+                if peer_paths:
+                    paths[:] = [p for p in paths if p not in peer_paths]
+        except Exception:
+            pass
 
     try:
         from .tbs_split_composed_loader import get_split_runtime_for_usd_context
 
-        if include_registry_paths:
+        if include_registry_paths and (not extra_steps_only):
             rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
             reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
             if reg is not None and hasattr(reg, "all_instances"):
                 for inst in reg.all_instances():
                     _add(str(getattr(inst, "prim_path", "") or ""))
     except Exception:
-        if include_registry_paths:
+        if include_registry_paths and (not extra_steps_only):
             try:
                 reg = getattr(ext, "_tbs_registry", None)
                 if reg is not None and hasattr(reg, "all_instances"):
@@ -13686,30 +13755,42 @@ def _restore_sim_prim_motion_to_initial(
 
     def _do_on_main() -> None:
         # USD write / stage 접근은 반드시 main thread 에서만 수행한다.
-        try:
-            from .sim_channel_scope import stop_channel_animations
-
-            stop_channel_animations(
-                usd_context_name,
-                preserve_foup_port_lot_prims=bool(preserve_foup_offsets),
-                diag_reason=f"restore_motion motion_only={motion_only}",
-            )
-        except Exception:
-            if not preserve_foup_offsets:
-                try:
-                    from . import tbs_lam_rotate_animation as _lrx
-                    from . import tbs_lam_translate_animation as _ltx
-
-                    _ltx.stop_all_translate_animations()
-                    _lrx.stop_all_rotate_animations()
-                except Exception:
-                    pass
+        if preserve_peer_channel:
             try:
-                stop_all_translate_animations(preserve_foup_port_lot_prims=bool(preserve_foup_offsets))
-                stop_all_rotate_animations()
-                stop_all_curve_animations()
+                from .sim_channel_scope import stop_channel_animations_for_paths
+
+                stop_channel_animations_for_paths(
+                    usd_context_name,
+                    paths,
+                    diag_reason=f"restore_motion peer_preserve motion_only={motion_only}",
+                )
             except Exception:
                 pass
+        else:
+            try:
+                from .sim_channel_scope import stop_channel_animations
+
+                stop_channel_animations(
+                    usd_context_name,
+                    preserve_foup_port_lot_prims=bool(preserve_foup_offsets),
+                    diag_reason=f"restore_motion motion_only={motion_only}",
+                )
+            except Exception:
+                if not preserve_foup_offsets:
+                    try:
+                        from . import tbs_lam_rotate_animation as _lrx
+                        from . import tbs_lam_translate_animation as _ltx
+
+                        _ltx.stop_all_translate_animations()
+                        _lrx.stop_all_rotate_animations()
+                    except Exception:
+                        pass
+                try:
+                    stop_all_translate_animations(preserve_foup_port_lot_prims=bool(preserve_foup_offsets))
+                    stop_all_rotate_animations()
+                    stop_all_curve_animations()
+                except Exception:
+                    pass
         try:
             from . import port_lot_visibility as _plv
 
@@ -13724,27 +13805,28 @@ def _restore_sim_prim_motion_to_initial(
                 )
         except Exception:
             pass
-        try:
-            from .tbs_split_composed_loader import get_split_runtime_for_usd_context
+        if not preserve_peer_channel:
+            try:
+                from .tbs_split_composed_loader import get_split_runtime_for_usd_context
 
-            rt_sch = get_split_runtime_for_usd_context(ext, usd_context_name)
-            sch = rt_sch.scheduler if rt_sch is not None else getattr(ext, "_tbs_scheduler", None)
-            stop_fn = getattr(sch, "stop_all", None) if sch is not None else None
-            if callable(stop_fn):
-                try:
-                    from . import sim_multi_diag as _mdiag
+                rt_sch = get_split_runtime_for_usd_context(ext, usd_context_name)
+                sch = rt_sch.scheduler if rt_sch is not None else getattr(ext, "_tbs_scheduler", None)
+                stop_fn = getattr(sch, "stop_all", None) if sch is not None else None
+                if callable(stop_fn):
+                    try:
+                        from . import sim_multi_diag as _mdiag
 
-                    _mdiag.log_scheduler_stop(
-                        ctx=usd_context_name,
-                        scheduler=sch,
-                        motion_only=bool(motion_only),
-                        reason="restore_motion",
-                    )
-                except Exception:
-                    pass
-                stop_fn()
-        except Exception:
-            pass
+                        _mdiag.log_scheduler_stop(
+                            ctx=usd_context_name,
+                            scheduler=sch,
+                            motion_only=bool(motion_only),
+                            reason="restore_motion",
+                        )
+                    except Exception:
+                        pass
+                    stop_fn()
+            except Exception:
+                pass
         if paths:
             from . import port_lot_visibility as _plv_paths
             from .tbs_lam_sequence_engine import _reset_tbs_offset_ops_for_paths
@@ -13830,11 +13912,13 @@ def _restore_sim_prim_motion_to_initial(
             except Exception:
                 pass
 
-        try:
-            usd_animation_control.stop_usd_animation(usd_context_name)
-            usd_animation_control.reset_timeline_to_zero(usd_context_name)
-        except Exception:
-            pass
+        # 병렬 타 레일 보호: 공유 USD timeline stop/seek 금지
+        if not preserve_peer_channel:
+            try:
+                usd_animation_control.stop_usd_animation(usd_context_name)
+                usd_animation_control.reset_timeline_to_zero(usd_context_name)
+            except Exception:
+                pass
 
     try:
         if threading.current_thread() is threading.main_thread():
