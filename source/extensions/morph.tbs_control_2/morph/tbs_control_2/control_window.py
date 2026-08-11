@@ -13114,6 +13114,36 @@ def on_sim_start_clicked(ext: Any) -> None:
                 pass
             engines[i] = eng
 
+        # 동시 실행(웹 2start / HUD「두 화면 동시」등 partial 아님): 화면1 프리런 난수 풀을
+        # 기준으로, 공정별 설정 구간(min~max)이 같은 키만 다른 화면에 동일 적용.
+        if (not partial_startup) and n_ch >= 2:
+            primary = engines[0] if engines else None
+            if primary is not None:
+                for i_sync in range(1, n_ch):
+                    peer = engines[i_sync] if i_sync < len(engines) else None
+                    if peer is None:
+                        continue
+                    try:
+                        adopted = list(peer.adopt_matching_presamples(primary) or [])
+                    except Exception as _sync_exc:
+                        adopted = []
+                        try:
+                            _append_sim_log(
+                                ext,
+                                f"[SIM] 동시실행 랜덤 동기 실패 screen={i_sync + 1}: {_sync_exc}",
+                            )
+                        except Exception:
+                            pass
+                    if adopted:
+                        try:
+                            _append_sim_log(
+                                ext,
+                                f"[SIM] 동시실행 프리런 랜덤 동기 "
+                                f"screen{i_sync + 1}←1 keys={','.join(adopted)}",
+                            )
+                        except Exception:
+                            pass
+
         # 멀티: start() 전에 화면별 총 예상 시간을 넣어 두어 첫 타임라인 갱신이 30초 스케일에 묶이지 않게 한다.
         try:
             by_pre = getattr(ext, "_sim_last_total_est_by_screen", None)

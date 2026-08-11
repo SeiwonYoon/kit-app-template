@@ -530,9 +530,113 @@ class TBSSimulationEngine:
             "bp1_to_bp": [],
             "bp_to_ep": [],
             "ep_to_oht": [],
+            "foup_process": [],
         }
         self._pre_idx: Dict[str, int] = {k: 0 for k in self._pre_pool.keys()}
         self._presample_fill()
+
+    # 멀티 화면 동시 시작 시 구간(min/max) 일치 여부를 보고 공유할 사전샘플 키.
+    # (key → SimulationTimingConfig 의 min/max 속성명)
+    _PRESAMPLE_TIMING_ATTRS: Dict[str, Tuple[str, str]] = {
+        "spawn": ("lot_spawn_interval_min", "lot_spawn_interval_max"),
+        "pickup": ("pickup_event_interval_min", "pickup_event_interval_max"),
+        "oht_to_bp1": ("oht_to_bp1_min", "oht_to_bp1_max"),
+        "oht_to_inout": ("oht_to_inout_min", "oht_to_inout_max"),
+        "bp1_to_bp": ("bp1_to_bp_min", "bp1_to_bp_max"),
+        "bp_to_ep": ("bp_to_ep_min", "bp_to_ep_max"),
+        "ep_to_oht": ("ep_to_oht_min", "ep_to_oht_max"),
+        "foup_process": ("foup_process_min", "foup_process_max"),
+    }
+
+    @staticmethod
+    def _timing_range_equal(a: SimulationTimingConfig, b: SimulationTimingConfig, amin: str, amax: str) -> bool:
+        """두 타이밍 설정의 동일 구간(min/max)이 같은지 (정규화 후 비교)."""
+        try:
+            lo1, hi1 = SimulationTimingConfig._norm(
+                float(getattr(a, amin, 0.0) or 0.0),
+                float(getattr(a, amax, 0.0) or 0.0),
+            )
+            lo2, hi2 = SimulationTimingConfig._norm(
+                float(getattr(b, amin, 0.0) or 0.0),
+                float(getattr(b, amax, 0.0) or 0.0),
+            )
+        except Exception:
+            return False
+        return abs(lo1 - lo2) <= 1e-9 and abs(hi1 - hi2) <= 1e-9
+
+    def adopt_matching_presamples(self, donor: "TBSSimulationEngine") -> List[str]:
+        """donor 와 min/max 가 같은 공정 구간의 사전샘플 풀을 복사한다.
+
+        멀티 화면 **동시 시작** 전용. 구간이 다른 키는 각자 뽑은 값을 유지한다.
+        소비 인덱스는 0 부터 다시 맞춘다.
+        """
+        adopted: List[str] = []
+        if donor is None or donor is self:
+            return adopted
+        donor_pool = getattr(donor, "_pre_pool", None)
+        if not isinstance(donor_pool, dict):
+            return adopted
+        src_timing = getattr(donor, "_timing", None)
+        dst_timing = getattr(self, "_timing", None)
+        if src_timing is None or dst_timing is None:
+            return adopted
+        for key, (amin, amax) in self._PRESAMPLE_TIMING_ATTRS.items():
+            if not self._timing_range_equal(src_timing, dst_timing, amin, amax):
+                continue
+            src_arr = donor_pool.get(key)
+            if not isinstance(src_arr, list) or not src_arr:
+                continue
+            self._pre_pool[key] = [float(x) for x in src_arr]
+            self._pre_idx[key] = 0
+            adopted.append(key)
+        if adopted and getattr(donor, "_rng", None) is not None:
+            try:
+                # refill(_presample_fill) 시에도 동일 스트림이 이어지도록 RNG 상태 동기화
+                if self._rng is None:
+                    self._rng = random.Random()
+                self._rng.setstate(donor._rng.getstate())
+            except Exception:
+                pass
+        if adopted:
+            try:
+                # 공유로 풀이 바뀐 뒤, 화면2 자신의 LOT 수 기준으로 총예상 재계산
+                if any(
+                    k in adopted
+                    for k in (
+                        "spawn",
+                        "oht_to_bp1",
+                        "oht_to_inout",
+                        "ep_to_oht",
+                        "pickup",
+                    )
+                ):
+                    self._recompute_sim_total_est_from_pool()
+            except Exception:
+                pass
+        return adopted
+
+    def _recompute_sim_total_est_from_pool(self) -> None:
+        """현재 ``_pre_pool`` 앞부분 합으로 ``_sim_total_est_sec`` 재계산."""
+        try:
+            init_full = len(list(getattr(self._init_cfg, "initial_full_ports", None) or []))
+        except Exception:
+            init_full = 0
+        n_spawn = max(0, int(self._max_oht_lots))
+        n_lots = max(1, int(self._max_oht_lots) + int(init_full))
+        spawn_sum = sum(self._pre_pool["spawn"][:n_spawn]) if n_spawn > 0 else 0.0
+        if n_spawn > 0:
+            if bool(getattr(self, "_ebs_enabled", True)):
+                in_sum = 0.5 * (
+                    sum(self._pre_pool["oht_to_bp1"][:n_spawn])
+                    + sum(self._pre_pool["oht_to_inout"][:n_spawn])
+                )
+            else:
+                in_sum = sum(self._pre_pool["oht_to_bp1"][:n_spawn])
+        else:
+            in_sum = 0.0
+        out_sum = sum(self._pre_pool["ep_to_oht"][:n_lots]) if n_lots > 0 else 0.0
+        pickup_sum = sum(self._pre_pool["pickup"][:n_lots]) if n_lots > 0 else 0.0
+        self._sim_total_est_sec = max(10.0, float(spawn_sum + in_sum + out_sum + pickup_sum))
 
     def _presample_fill(self) -> None:
         """사전 샘플링 풀을 충분히 채운다."""
@@ -540,6 +644,7 @@ class TBSSimulationEngine:
         spawn_n = max(16, int(self._max_oht_lots) + 8)
         pickup_n = max(32, int(self._max_oht_lots) * 4 + 16)
         move_n = max(64, int(self._max_oht_lots) * 4 + 32)
+        foup_n = max(32, int(self._max_oht_lots) * 2 + 16)
 
         def _fill(key: str, n: int, a: float, b: float) -> None:
             try:
@@ -566,29 +671,14 @@ class TBSSimulationEngine:
         _fill("bp1_to_bp", move_n, self._timing.bp1_to_bp_min, self._timing.bp1_to_bp_max)
         _fill("bp_to_ep", move_n, self._timing.bp_to_ep_min, self._timing.bp_to_ep_max)
         _fill("ep_to_oht", move_n, self._timing.ep_to_oht_min, self._timing.ep_to_oht_max)
+        _fill(
+            "foup_process",
+            foup_n,
+            self._timing.foup_process_min,
+            self._timing.foup_process_max,
+        )
 
-        # 사전 샘플 기반 총 예상 시간(시작 시점 계산) — “랜덤 구간이 반영된 고정 값”
-        try:
-            init_full = len(list(getattr(self._init_cfg, "initial_full_ports", None) or []))
-        except Exception:
-            init_full = 0
-        n_spawn = max(0, int(self._max_oht_lots))
-        n_lots = max(1, int(self._max_oht_lots) + int(init_full))
-        spawn_sum = sum(self._pre_pool["spawn"][:n_spawn]) if n_spawn > 0 else 0.0
-        # OHT 투입 추정: EBS ON 이면 EP/INOUT 풀 평균, OFF 면 EP(oht_to_bp1)만
-        if n_spawn > 0:
-            if bool(getattr(self, "_ebs_enabled", True)):
-                in_sum = 0.5 * (
-                    sum(self._pre_pool["oht_to_bp1"][:n_spawn])
-                    + sum(self._pre_pool["oht_to_inout"][:n_spawn])
-                )
-            else:
-                in_sum = sum(self._pre_pool["oht_to_bp1"][:n_spawn])
-        else:
-            in_sum = 0.0
-        out_sum = sum(self._pre_pool["ep_to_oht"][:n_lots]) if n_lots > 0 else 0.0
-        pickup_sum = sum(self._pre_pool["pickup"][:n_lots]) if n_lots > 0 else 0.0
-        self._sim_total_est_sec = max(10.0, float(spawn_sum + in_sum + out_sum + pickup_sum))
+        self._recompute_sim_total_est_from_pool()
 
     def _presampled(self, key: str, fallback_fn) -> float:
         """사전 샘플 풀에서 1개를 순차 소비. 부족하면 refill."""
@@ -2202,9 +2292,11 @@ class TBSSimulationEngine:
             self._ep_awaiting_pickup[ep_port] = True
             self._ep_ready_since[ep_port] = float(self.env.now)
             return
-        # 공정 시간 샘플
+        # 공정 시간 샘플 — 사전샘플 풀 소비(동시실행 시 화면 간 동일 구간 공유용)
         try:
-            proc_time = float(self._timing.rand_foup_process_time())
+            proc_time = float(
+                self._presampled("foup_process", self._timing.rand_foup_process_time)
+            )
         except Exception:
             proc_time = 30.0
         proc_time = max(0.1, proc_time)
