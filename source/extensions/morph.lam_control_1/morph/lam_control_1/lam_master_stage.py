@@ -73,7 +73,7 @@ class MasterStage:
     def is_anonymous(self) -> bool:
         return self._anonymous
 
-    def ensure_context(self) -> bool:
+    def ensure_context(self, *, apply_fps: bool = True) -> bool:
         """LAM 컨텍스트(현재는 default `""`)가 존재하도록 보장. stage 가 없으면 새로 생성.
 
         REQ-007 결정 A' 이후 본 메서드는:
@@ -83,6 +83,7 @@ class MasterStage:
         - **stage 가 새로 만들어졌든 기존 것이든 LAM 의 FPS 30 고정 정책을 stage 와
           `omni.timeline` 의 target framerate 양쪽에 강제 적용**한다(사용자 요구
           2026-05-11: 하단 타임라인 창 fps=60 → 30).
+          ``open_master`` 직전에는 ``apply_fps=False`` 로 두어 open 후 1회만 sync.
         """
         try:
             import omni.usd as ou  # type: ignore
@@ -123,7 +124,8 @@ class MasterStage:
                 print(f"{_PRINT_PREFIX} new_stage failed: {exc}", flush=True)
                 return False
 
-        self.force_fixed_fps_30()
+        if apply_fps:
+            self.force_fixed_fps_30()
         return True
 
     def open_master(self, path: str) -> bool:
@@ -148,7 +150,8 @@ class MasterStage:
             print(f"{_PRINT_PREFIX} omni.usd not available: {exc}", flush=True)
             return False
 
-        if not self.ensure_context():
+        # open 직전 fps_sync 는 생략 — open_stage 완료 후 1회만 적용(로드 로그·작업 중복 방지).
+        if not self.ensure_context(apply_fps=False):
             return False
 
         ctx = ou.get_context(self._context_name)

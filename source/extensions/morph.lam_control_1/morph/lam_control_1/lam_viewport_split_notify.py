@@ -51,7 +51,9 @@ def notify_lam_composed_usd_ready_for_split(ext: Any, usd_path: str = "") -> Non
         try:
             import omni.kit.app as kit_app
 
-            await kit_app.get_app().next_update_async()
+            # Master open + Discover/Extract 직후 한두 프레임으로는 부족할 수 있음
+            for _ in range(4):
+                await kit_app.get_app().next_update_async()
         except Exception:
             return
         try:

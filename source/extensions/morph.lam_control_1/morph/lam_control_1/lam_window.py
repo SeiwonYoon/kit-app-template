@@ -564,11 +564,13 @@ class LamWindow:
         self._sync_aux_kit_window_visibility()
         self._sync_csv_viewport_hud()
         self._sync_wafer_foup_viewport_labels_only()
-        schedule_play_prim_hide_sync_after_stage_ready(delay_frames=48)
-        try:
-            schedule_startup_viewport_focus_after_stage_ready(delay_frames=48)
-        except Exception:
-            pass
+        # 자동 로드 시 Open Master 직후 스케줄만 사용(show 시점 stage 미준비 중복 방지).
+        if not load_automatically:
+            schedule_play_prim_hide_sync_after_stage_ready(delay_frames=48)
+            try:
+                schedule_startup_viewport_focus_after_stage_ready(delay_frames=48)
+            except Exception:
+                pass
 
     def _sync_wafer_foup_viewport_labels_only(self, *, delay_frames: int = 12) -> None:
         """화면1 Viewport 3D 라벨 SceneView 마운트/해제 (화면2 는 건드리지 않음).

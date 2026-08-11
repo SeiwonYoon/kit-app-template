@@ -586,6 +586,92 @@ def _discover_asset_path_from_master(stage: Any, root_prim_path: str) -> str:
     return ""
 
 
+def _try_fast_omnigraph_need_bake_without_flatten(
+    stage: Any,
+    root_prim_path: str,
+    *,
+    tag_hint: str = "",
+    t0: float,
+) -> Optional[ExtractResult]:
+    """composed stage 에서 OmniGraph 전용(timeSamples 0)이면 Flatten 없이 NEED-BAKE 결과.
+
+    timeSamples 가 하나라도 보이면 None → 기존 Flatten Extract 경로 유지(기능 동일).
+    """
+    try:
+        from pxr import Usd  # type: ignore
+    except Exception:
+        return None
+    if stage is None or not root_prim_path:
+        return None
+    try:
+        root_prim = stage.GetPrimAtPath(root_prim_path)
+    except Exception:
+        return None
+    if root_prim is None or not root_prim.IsValid():
+        return None
+
+    try:
+        from .lam_asset_diagnostics import _is_omnigraph_prim
+        from .lam_types import ASSET_KIND_OMNIGRAPH
+    except Exception:
+        return None
+
+    n_omni = 0
+    n_ts = 0
+    try:
+        prims = list(Usd.PrimRange(root_prim))
+    except Exception:
+        prims = [root_prim]
+    for prim in prims:
+        try:
+            type_name = str(prim.GetTypeName() or "")
+        except Exception:
+            type_name = ""
+        if _is_omnigraph_prim(type_name):
+            n_omni += 1
+        try:
+            for attr in prim.GetAttributes():
+                try:
+                    if int(attr.GetNumTimeSamples() or 0) > 0:
+                        n_ts += 1
+                        break
+                except Exception:
+                    continue
+            if n_ts > 0:
+                break
+        except Exception:
+            continue
+
+    if n_omni <= 0 or n_ts > 0:
+        return None
+
+    result = ExtractResult(
+        root_prim_path=root_prim_path,
+        asset_label=tag_hint or root_prim_path,
+        ok=False,
+        kind=ASSET_KIND_OMNIGRAPH,
+        n_omnigraph_prims=int(n_omni),
+        n_attrs_with_timesamples=0,
+        error=(
+            "이 자산은 OmniGraph 만 갖고 있어 timeSamples 가 없습니다. "
+            "인스턴스 행의 [Bake] 버튼을 사용해 in-memory timeSamples 로 변환하세요."
+        ),
+    )
+    try:
+        result.discovered_asset_path = _discover_asset_path_from_master(
+            stage, root_prim_path
+        )
+    except Exception:
+        result.discovered_asset_path = ""
+    result.elapsed_sec = time.perf_counter() - t0
+    print(
+        f"{_PRINT_PREFIX} extract NEED-BAKE-OR-EMPTY {result.to_log_line()} "
+        f"reason={result.error!r} (skip Flatten: OmniGraph-only peek)",
+        flush=True,
+    )
+    return result
+
+
 def extract_subtree_to_anonymous_layer(
     stage: Any,
     root_prim_path: str,
@@ -657,6 +743,16 @@ def extract_subtree_to_anonymous_layer(
         result.discovered_asset_path = _discover_asset_path_from_master(stage, root_prim_path)
     except Exception:
         result.discovered_asset_path = ""
+
+    # OmniGraph 전용(timeSamples 없음)이면 전체 Flatten 없이 NEED-BAKE 결과만 반환.
+    # 최종 상태(kind/source_asset/Bake 안내)는 Flatten Extract 실패 시와 동일.
+    fast_og = _try_fast_omnigraph_need_bake_without_flatten(
+        stage, root_prim_path, tag_hint=tag_hint, t0=t0
+    )
+    if fast_og is not None:
+        if not fast_og.discovered_asset_path and result.discovered_asset_path:
+            fast_og.discovered_asset_path = result.discovered_asset_path
+        return fast_og
 
     # 1) 모든 composition 을 평가한 단일 layer 로 flatten.
     #    배치 Extract(자동 로드 등)에서는 master_flatten_cache 로 1회만 Flatten.

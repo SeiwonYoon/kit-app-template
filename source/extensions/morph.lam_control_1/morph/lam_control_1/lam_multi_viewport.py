@@ -1901,6 +1901,8 @@ def schedule_deferred_aux_usd_load_after_master(ext: Any) -> None:
         try:
             for _ in range(_STARTUP_AUX_LOAD_SETTLE_FRAMES):
                 await kit_app.get_app().next_update_async()
+            # 화면1 Master open_stage 가 완전히 끝난 뒤에만 화면2 open
+            await _wait_default_usd_context_idle(max_frames=240)
             try:
                 n = channel_count_for_split(int(getattr(ext, "_sim_viewport_split_count", 1) or 1))
             except Exception:
@@ -2111,8 +2113,56 @@ def _make_aux_shell_stage_path(ext: Any, token: int, ti: int) -> Tuple[Optional[
     return path, ""
 
 
+async def _wait_default_usd_context_idle(*, max_frames: int = 180) -> None:
+    """default(화면1) USD 컨텍스트가 open/close 중이 아닐 때까지 대기.
+
+    보조 타일 open 과의 ``Stage opening or closing already in progress`` 경합을 줄인다.
+    최종 로드 결과는 동일하고, 실패·재시도만 줄인다.
+    """
+    try:
+        import omni.usd as ou  # type: ignore
+    except Exception:
+        return
+    for _ in range(max(1, int(max_frames))):
+        busy = False
+        try:
+            ctx = ou.get_context("")
+        except Exception:
+            ctx = None
+        if ctx is not None:
+            for fn_name in (
+                "is_stage_loading",
+                "stage_loading",
+                "is_loading",
+                "is_opening",
+                "is_closing",
+            ):
+                fn = getattr(ctx, fn_name, None)
+                if not callable(fn):
+                    continue
+                try:
+                    if bool(fn()):
+                        busy = True
+                        break
+                except Exception:
+                    continue
+        if not busy:
+            # 한 프레임 더 안정화 후 반환
+            try:
+                await kit_app.get_app().next_update_async()
+            except Exception:
+                pass
+            return
+        try:
+            await kit_app.get_app().next_update_async()
+        except Exception:
+            return
+
+
 async def _ctx_open_stage_path(ctx: Any, root: str, sess_path: Optional[str]) -> Tuple[bool, str]:
     """보조 컨텍스트에서 ``root`` 스테이지를 연다. ``sess_path`` 가 있으면 session layer 와 함께."""
+    # 화면1 default 컨텍스트 open/close 중이면 보조 open 경합 → 대기 후 재시도
+    await _wait_default_usd_context_idle(max_frames=180)
     sess_uri = Path(sess_path).as_uri() if sess_path else None
 
     oa = getattr(ctx, "open_stage_async", None)

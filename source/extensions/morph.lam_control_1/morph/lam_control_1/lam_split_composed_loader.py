@@ -912,6 +912,7 @@ def hydrate_split_screen_composed_stage(
                     flush=True,
                 )
         extract_pps: List[str] = []
+        skipped_known = 0
         for inst in registry.all_instances():
             pp = str(getattr(inst, "prim_path", "") or "").strip()
             if not pp:
@@ -925,9 +926,26 @@ def hydrate_split_screen_composed_stage(
                     )
             if ok_rep:
                 replicated += 1
-            else:
-                extract_pps.append(pp)
+                continue
+            # 화면1 메타가 OmniGraph/STATIC 이면 Extract(Flatten) 결과는 NEED-BAKE/빈 결과 —
+            # 동일 상태로 두고 Flatten 을 반복하지 않는다.
+            kind = str(getattr(inst, "asset_kind", "") or "").strip().upper()
+            if kind in ("OMNIGRAPH", "STATIC"):
+                skipped_known += 1
+                continue
+            extract_pps.append(pp)
+        if skipped_known:
+            print(
+                f"{_PRINT_PREFIX} screen{si} dual-path Extract 스킵 "
+                f"(screen1 kind OMNIGRAPH/STATIC) count={skipped_known}",
+                flush=True,
+            )
         if extract_pps:
+            print(
+                f"{_PRINT_PREFIX} screen{si} dual-path Extract 필요 "
+                f"count={len(extract_pps)} (bake attach 실패분만)",
+                flush=True,
+            )
             try:
                 from .lam_extract_from_master import master_flatten_cache
 
@@ -948,6 +966,12 @@ def hydrate_split_screen_composed_stage(
                         evaluator, pp, log_tag=f"split-extract-{si}"
                     ):
                         extracted += 1
+        else:
+            print(
+                f"{_PRINT_PREFIX} screen{si} dual-path Extract 스킵 "
+                f"(bake attach 전부 성공 replicated={replicated})",
+                flush=True,
+            )
 
     if (not independent_aux) and main_instances and main_rt is not None and main_rt.master is not None:
         _sync_main_mirror_state_before_replicate(main_rt)
@@ -1034,17 +1058,55 @@ def hydrate_split_screen_composed_stage(
         ext=ext,
     )
 
+    # wrote==0 이어도 runtime 이 이미 attach 된 경우(OmniGraph NEED-BAKE 등)는
+    # 전 인스턴스 Flatten Extract 를 다시 돌리지 않는다 — 미준비 prim 만 재시도.
     aux_inst_count = len(list(registry.all_instances()))
     if main_rt is not None and wrote < aux_inst_count:
         retry_pps: List[str] = []
+        rt_map = getattr(evaluator, "_runtime_by_path", None)
+        if not isinstance(rt_map, dict):
+            rt_map = {}
         for inst in registry.all_instances():
             pp = str(getattr(inst, "prim_path", "") or "").strip()
             if not pp:
                 continue
+            rt = rt_map.get(pp)
+            ready = False
+            try:
+                ready = bool(rt is not None and getattr(rt, "is_ready", False))
+            except Exception:
+                ready = rt is not None
+            if ready:
+                continue
             if not independent_aux and main_instances and main_rt.master is not None:
                 _replicate_inst_sublayer(main_rt.master, master, pp)
-            retry_pps.append(pp)
+            # bake attach 한 번 더 시도 후, 여전히 미준비면 Extract
+            ok_rep = False
+            if main_rt is not None:
+                main_inst = None
+                try:
+                    main_inst = main_rt.registry.get_by_prim_path(pp)
+                except Exception:
+                    main_inst = None
+                if main_inst is None:
+                    for mi in main_instances:
+                        if str(getattr(mi, "prim_path", "") or "").strip() == pp:
+                            main_inst = mi
+                            break
+                if main_inst is not None:
+                    ok_rep = _attach_from_main_baked(
+                        evaluator, main_rt.evaluator, main_inst
+                    )
+                    if ok_rep:
+                        replicated += 1
+            if not ok_rep:
+                retry_pps.append(pp)
         if retry_pps:
+            print(
+                f"{_PRINT_PREFIX} screen{si} activate 후 미준비만 Extract "
+                f"count={len(retry_pps)} (전수 Flatten 재시도 금지)",
+                flush=True,
+            )
             try:
                 from .lam_extract_from_master import master_flatten_cache
 
@@ -1065,6 +1127,12 @@ def hydrate_split_screen_composed_stage(
                         evaluator, pp, log_tag=f"split-extract-retry-{si}"
                     ):
                         extracted += 1
+        elif wrote < aux_inst_count:
+            print(
+                f"{_PRINT_PREFIX} screen{si} Extract 재시도 스킵 "
+                f"(runtime ready, mirror_writes={wrote}/{aux_inst_count})",
+                flush=True,
+            )
         wrote = _activate_aux_split_display(
             evaluator,
             main_rt.evaluator,
@@ -1124,17 +1192,7 @@ async def hydrate_split_screen_composed_stage_async(
 
         for _ in range(2 if fast_visual else 4):
             await kit_app.get_app().next_update_async()
-        if rt is not None:
-            try:
-                si = max(2, int(screen_1based))
-            except Exception:
-                si = 2
-            _activate_aux_split_display(
-                rt.evaluator,
-                None,
-                aux_win_name=f"LAM_SimSplit_{max(1, si - 1)}",
-                ext=ext,
-            )
+        # activate 는 hydrate 내부 + finalize 에서 수행 — 여기서 중복 호출하지 않음
         try:
             win = getattr(ext, "_lam_window", None)
             if win is not None:
