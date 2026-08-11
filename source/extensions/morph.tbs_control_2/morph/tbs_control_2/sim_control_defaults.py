@@ -90,6 +90,14 @@ SHOW_VIEWPORT_SNAPSHOT_HUD: bool = False
 # False → 화면 1개로 시작.
 START_WITH_DUAL_SCREEN: bool = True
 
+# 앱 시작 시(듀얼 로드 후) 실제로 표시할 화면. 최소 하나는 반드시 True.
+# 둘 다 True  → Dock 50:50
+# 화면1만 True → 화면1 100%, 화면2 숨김
+# 화면2만 True → 화면1 숨김, 화면2 100%
+# 숨겨진 화면의 USD/context 는 유지되며 웹·체크박스로 다시 표시 가능.
+STARTUP_SHOW_SCREEN_1: bool = True
+STARTUP_SHOW_SCREEN_2: bool = True
+
 # 뷰포트 분할 UI·적용 상한 (1 또는 2만 사용).
 MAX_VIEWPORT_SPLIT_COUNT: int = 2
 
@@ -137,6 +145,15 @@ def default_viewport_split_count() -> int:
     """앱 시작 시 ``ext._sim_viewport_split_count`` / HUD 분할 체크 초기값."""
     return 2 if bool(START_WITH_DUAL_SCREEN) else 1
 
+
+def default_visible_screens() -> tuple[bool, bool]:
+    """듀얼 로드 후 초기 표시 (화면1, 화면2). 최소 하나 True."""
+    s1 = bool(STARTUP_SHOW_SCREEN_1)
+    s2 = bool(STARTUP_SHOW_SCREEN_2)
+    if not s1 and not s2:
+        s1 = True
+    return s1, s2
+
 # 프리런(시작 직후, 실제 재생 전 전체 시뮬을 빠르게 돌리는 단계) 동안 엔진 로그를 콘솔에
 # print 할지 여부. LOT 수·공정시간이 크면 로그 줄 수가 폭증해 콘솔 출력(flush)만으로도
 # 시작이 크게 지연된다.
@@ -176,6 +193,8 @@ __all__ = [
     "SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT",
     "SHOW_VIEWPORT_SNAPSHOT_HUD",
     "START_WITH_DUAL_SCREEN",
+    "STARTUP_SHOW_SCREEN_1",
+    "STARTUP_SHOW_SCREEN_2",
     "MAX_VIEWPORT_SPLIT_COUNT",
     "USE_VIEWPORT_WIDGET_SPLIT",
     "VIEWPORT_RP_DIAG_ENABLED",
@@ -190,6 +209,7 @@ __all__ = [
     "STREAMING_ALLOW_DYNAMIC_RESIZE",
     "LOCK_VIEWPORT_SPLIT_USER_RESIZE",
     "default_viewport_split_count",
+    "default_visible_screens",
     "SIM_PRERUN_CONSOLE_LOG",
     "SIM_PRERUN_EXPORT_JSON",
     "SIM_BAR_PREVIEW_DEFAULT",

@@ -163,3 +163,22 @@ export async function requestSeekSimulation(caseIndex: number, t: number): Promi
     t: Number(t),
   });
 }
+
+/** T2V — 화면1·2 Dock 표시 (start 와 독립). show1/show2 또는 screens:[1|2] */
+export async function requestScreenVisibility(opts: {
+  show1?: boolean;
+  show2?: boolean;
+  screens?: number[];
+  caseIndex?: number;
+}): Promise<void> {
+  const payload: Record<string, unknown> = {};
+  if (opts.screens !== undefined) {
+    payload.screens = opts.screens;
+  } else if (opts.caseIndex !== undefined) {
+    payload.case = opts.caseIndex;
+  } else {
+    payload.show_1 = Boolean(opts.show1);
+    payload.show_2 = Boolean(opts.show2);
+  }
+  await sendT2V("T2V_request_screen_visibility", payload);
+}

@@ -131,6 +131,12 @@ def _maybe_start_with_dual_screen(ext: Any) -> None:
 
             sim_multi_view.apply_sim_viewport_split_layout(ext, 2)
             print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN: 2분할 자동 적용", flush=True)
+            try:
+                from .tbs_screen_visibility import apply_startup_screen_visibility
+
+                apply_startup_screen_visibility(ext)
+            except Exception:
+                pass
         except Exception as exc:
             print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN apply failed: {exc}", flush=True)
             return
@@ -167,6 +173,12 @@ def _trigger_master_autoload_after_dual_layout(ext: Any) -> None:
         ext._tbs_defer_master_autoload_until_dual_layout = False
     except Exception:
         pass
+    try:
+        from .tbs_screen_visibility import apply_startup_screen_visibility
+
+        apply_startup_screen_visibility(ext)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} startup screen visibility failed: {exc}", flush=True)
     try:
         print(f"{_PRINT_PREFIX} START_WITH_DUAL_SCREEN: 화면1 Master USD 로드 시작", flush=True)
     except Exception:
@@ -375,6 +387,12 @@ class Extension(omni.ext.IExt):
         self._tbs_scheduler = PlaybackScheduler(registry=self._tbs_registry, evaluator=self._tbs_evaluator)
 
         build_control_window(self)
+        try:
+            from .tbs_screen_visibility import init_screen_visibility_models
+
+            init_screen_visibility_models(self)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} screen visibility models init failed: {exc}", flush=True)
         try:
             from .tbs_viewport_control_hud import attach_tbs_viewport_control_hud
 

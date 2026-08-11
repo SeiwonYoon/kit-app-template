@@ -305,3 +305,9 @@ def build_ebs_case_window_panel(ext: Any, case_id: int, *, cb_style: Any) -> Non
                     width=0,
                     style={"color": 0xFF9AA4B2, "font_size": 11},
                 )
+            try:
+                from .tbs_screen_visibility import mount_screen_visibility_checkboxes
+
+                mount_screen_visibility_checkboxes(ext, ui, row_height=26)
+            except Exception:
+                pass

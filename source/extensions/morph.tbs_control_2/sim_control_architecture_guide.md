@@ -51,7 +51,8 @@ ui.Button("시작", width=72, clicked_fn=lambda: on_sim_start_clicked(ext))
 
 | UI 라벨 | ext 변수 | 스냅샷 dict 키 |
 |---------|----------|----------------|
-| OHT→IN/OUT/EP min~max | `_sim_oht_bp1_min/max_model` | `oht_bp1_min`, `oht_bp1_max` |
+| OHT→EP min~max | `_sim_oht_bp1_min/max_model` | `oht_bp1_min`, `oht_bp1_max` |
+| OHT→IN/OUT min~max | `_sim_oht_inout_min/max_model` | `oht_inout_min`, `oht_inout_max` (없으면 `oht_bp1_*` 폴백) |
 | IN/OUT→BP | `_sim_bp1_bp_min/max_model` | `bp1_bp_min`, `bp1_bp_max` |
 | BP→EP | `_sim_bp_ep_min/max_model` | `bp_ep_min`, `bp_ep_max` |
 | EP→OHT | `_sim_ep_oht_min/max_model` | `ep_oht_min`, `ep_oht_max` |

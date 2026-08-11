@@ -20,6 +20,7 @@ T2V_REQUEST_CONTROL_SIMULATION = "T2V_request_control_simulation"
 T2V_REQUEST_SEEK_SIMULATION = "T2V_request_seek_simulation"
 T2V_REQUEST_TIME_TABLE = "T2V_request_time_table"
 T2V_REQUEST_TIME_SYNC = "T2V_request_time_sync"
+T2V_REQUEST_SCREEN_VISIBILITY = "T2V_request_screen_visibility"
 
 # ---------------------------------------------------------------------------
 # V2T (Kit → web)
@@ -32,6 +33,7 @@ V2T_RESPONSE_CONTROL_SIMULATION = "V2T_response_control_simulation"
 V2T_RESPONSE_SEEK_SIMULATION = "V2T_response_seek_simulation"
 V2T_RESPONSE_TIME_TABLE = "V2T_response_time_table"
 V2T_RESPONSE_TIME_SYNC = "V2T_response_time_sync"
+V2T_RESPONSE_SCREEN_VISIBILITY = "V2T_response_screen_visibility"
 
 # ---------------------------------------------------------------------------
 # Payload / response data keys
@@ -56,6 +58,7 @@ ALL_V2T_EVENT_TYPES: Tuple[str, ...] = (
     V2T_RESPONSE_SEEK_SIMULATION,
     V2T_RESPONSE_TIME_TABLE,
     V2T_RESPONSE_TIME_SYNC,
+    V2T_RESPONSE_SCREEN_VISIBILITY,
 )
 
 __all__ = [
@@ -73,6 +76,7 @@ __all__ = [
     "T2V_REQUEST_EBS_ENABLE",
     "T2V_REQUEST_EQP_CHANGE",
     "T2V_REQUEST_RESTART_SIMULATION",
+    "T2V_REQUEST_SCREEN_VISIBILITY",
     "T2V_REQUEST_SEEK_SIMULATION",
     "T2V_REQUEST_START_SIMULATION",
     "T2V_REQUEST_TIME_SYNC",
@@ -81,6 +85,7 @@ __all__ = [
     "V2T_RESPONSE_EBS_ENABLE",
     "V2T_RESPONSE_EQP_CHANGE",
     "V2T_RESPONSE_RESTART_SIMULATION",
+    "V2T_RESPONSE_SCREEN_VISIBILITY",
     "V2T_RESPONSE_SEEK_SIMULATION",
     "V2T_RESPONSE_START_SIMULATION",
     "V2T_RESPONSE_TIME_SYNC",

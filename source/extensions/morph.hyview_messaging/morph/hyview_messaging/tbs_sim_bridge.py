@@ -744,5 +744,69 @@ def handle_time_sync(
     _schedule_hyview_main_work("time_sync", _work, dispatch)
 
 
+def handle_screen_visibility(
+    payload: Any,
+    *,
+    dispatch: Callable[[Dict[str, Any]], None],
+) -> None:
+    """T2V_request_screen_visibility — 화면1·2 Dock 표시 전환 (start 와 독립).
+
+    요청::
+        ``{"show_1": true, "show_2": false}``
+        또는 ``{"screens": [1]}`` / ``{"screens": [1, 2]}``
+        또는 ``{"case": 0}`` (해당 case 화면만)
+
+    응답 data::
+        ``{"show_1": bool, "show_2": bool}``
+    """
+    from typing import Tuple as _Tuple
+
+    pl = _event_payload_to_dict(payload)
+
+    def _parse_flags() -> _Tuple[bool, bool]:
+        if "show_1" in pl or "show_2" in pl:
+            return bool(pl.get("show_1", False)), bool(pl.get("show_2", False))
+        raw = pl.get("screens")
+        if isinstance(raw, (list, tuple)):
+            wanted = set()
+            for x in raw:
+                try:
+                    wanted.add(int(x))
+                except Exception:
+                    continue
+            return (1 in wanted), (2 in wanted)
+        if "case" in pl:
+            try:
+                ci = int(pl.get("case", 0))
+            except Exception:
+                ci = 0
+            return (ci == 0), (ci == 1)
+        return True, True
+
+    show_1, show_2 = _parse_flags()
+    if not show_1 and not show_2:
+        show_1 = True
+
+    def _work() -> Dict[str, Any]:
+        from morph.tbs_control_2.tbs_screen_visibility import (
+            request_screen_visibility,
+            visible_screens,
+        )
+
+        ext = require_tbs_extension_instance()
+        # Dock 전환은 async — 모델은 즉시 갱신되고 레이아웃은 다음 틱에 적용.
+        request_screen_visibility(ext, show_1, show_2)
+        s1, s2 = visible_screens(ext)
+        return _ok({"show_1": bool(s1), "show_2": bool(s2)})
+
+    _schedule_hyview_main_work(
+        "screen_visibility",
+        _work,
+        dispatch,
+        show_1=show_1,
+        show_2=show_2,
+    )
+
+
 def payload_from_event(event: Any) -> Dict[str, Any]:
     return _event_payload_to_dict(getattr(event, "payload", None))

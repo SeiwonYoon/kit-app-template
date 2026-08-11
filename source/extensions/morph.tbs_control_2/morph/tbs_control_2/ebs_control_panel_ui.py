@@ -655,6 +655,12 @@ def _build_ebs_control_panel_compact(
                 style={"color": 0xFF7EB8DA, "font_size": 11},
             )
         try:
+            from .tbs_screen_visibility import mount_screen_visibility_checkboxes
+
+            mount_screen_visibility_checkboxes(ext, ui, row_height=22)
+        except Exception:
+            pass
+        try:
             from .control_window import _sync_ebs_control_visibility
 
             _sync_ebs_control_visibility(ext)

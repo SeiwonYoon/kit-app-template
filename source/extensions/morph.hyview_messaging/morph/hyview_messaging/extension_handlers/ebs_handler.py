@@ -97,6 +97,7 @@ from ..tbs_sim_bridge import (
     handle_ebs_enable,
     handle_eqp_change,
     handle_restart_simulation,
+    handle_screen_visibility,
     handle_seek_simulation,
     handle_start_simulation,
     handle_time_sync,
@@ -107,10 +108,12 @@ from ..hyview_event_contract import (
     PAYLOAD_T,
     PAYLOAD_TIME,
     T2V_REQUEST_RESTART_SIMULATION,
+    T2V_REQUEST_SCREEN_VISIBILITY,
     T2V_REQUEST_SEEK_SIMULATION,
     T2V_REQUEST_TIME_SYNC,
     T2V_REQUEST_TIME_TABLE,
     V2T_RESPONSE_RESTART_SIMULATION,
+    V2T_RESPONSE_SCREEN_VISIBILITY,
     V2T_RESPONSE_SEEK_SIMULATION,
     V2T_RESPONSE_TIME_SYNC,
     V2T_RESPONSE_TIME_TABLE,
@@ -229,6 +232,8 @@ class EBSHandler(BaseHandler):
 
             V2T_RESPONSE_TIME_SYNC,
 
+            V2T_RESPONSE_SCREEN_VISIBILITY,
+
         ]
 
 
@@ -254,6 +259,8 @@ class EBSHandler(BaseHandler):
             T2V_REQUEST_TIME_TABLE: self._on_req_time_table,
 
             T2V_REQUEST_TIME_SYNC: self._on_req_time_sync,
+
+            T2V_REQUEST_SCREEN_VISIBILITY: self._on_req_screen_visibility,
 
         }
 
@@ -899,3 +906,62 @@ class EBSHandler(BaseHandler):
         handle_time_sync(event.payload if isinstance(event.payload, dict) else {}, dispatch=_on_bridge_done)
 
 
+
+    # ------------------------------------------------------------------
+
+    # T2V — 화면1·2 표시
+
+    # ------------------------------------------------------------------
+
+
+
+    def _on_req_screen_visibility(self, event: carb.events.IEvent) -> None:
+
+        """
+        T2V_request_screen_visibility — start 와 분리된 화면 보임 전용 API.
+
+        요청 예:
+          ``{"show_1": true, "show_2": false}``
+          ``{"screens": [1]}`` / ``{"screens": [1, 2]}``
+          ``{"case": 0}`` (화면1만)
+
+        응답 data: ``{"show_1": bool, "show_2": bool}``
+        """
+
+        print(f"[EBSHandler] _on_req_screen_visibility - {event.payload}")
+
+
+
+        def _on_bridge_done(bridge_res: Dict[str, Any]) -> None:
+
+            if int(bridge_res.get("code", 0)) != 0:
+
+                self._dispatch_v2t_err(
+
+                    V2T_RESPONSE_SCREEN_VISIBILITY,
+
+                    str(bridge_res.get("message", "failed")),
+
+                    {"show_1": False, "show_2": False},
+
+                )
+
+                return
+
+            res_data = bridge_res.get("data")
+
+            if not isinstance(res_data, dict):
+
+                res_data = {"show_1": True, "show_2": True}
+
+            self._dispatch_v2t_ok(V2T_RESPONSE_SCREEN_VISIBILITY, res_data)
+
+
+
+        handle_screen_visibility(
+
+            event.payload if isinstance(event.payload, dict) else {},
+
+            dispatch=_on_bridge_done,
+
+        )
