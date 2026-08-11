@@ -1572,7 +1572,9 @@ def build_prerun_export_document(
     timeline_summary = {
         "item_count": len(result.items or ()),
         "final_sim_time_sec": round(float(result.final_sim_time), 4),
-        "total_est_sec": round(float(result.total_est_sec or result.final_sim_time), 4),
+        # 모니터「총 공정시간」·막대 축과 동일 SSOT (final_sim_time).
+        # 예전엔 사전샘플 추정(total_est_sec)을 그대로 내보내 웹과 모니터가 불일치했다.
+        "total_est_sec": round(float(result.final_sim_time), 4),
     }
 
     duration_sec_totals: Dict[str, float] = {s: 0.0 for s in BAR_STATES}

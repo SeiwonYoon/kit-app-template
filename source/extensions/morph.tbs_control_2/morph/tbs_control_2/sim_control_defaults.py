@@ -166,7 +166,7 @@ SIM_BAR_PREVIEW_DEFAULT: bool = True
 #   · 회수: 간격 타이머 티켓 유지. awaiting backlog 시 REMOVED 종료 후 chain 티켓으로 연속 회수.
 #   · 버퍼가 채울 빈 EP 에는 OHT→EP 직접투입 보류.
 #   · FOUP 등은 기존처럼 독립. EBS OFF 는 MOVE 가 거의 없어 사실상 직렬.
-SIM_PARALLEL_NONCONFLICTING_MOVES: bool = True
+SIM_PARALLEL_NONCONFLICTING_MOVES: bool = False
 
 __all__ = [
     "SimControlDefaults",

@@ -20,7 +20,11 @@ class SimTimelineItem:
 
 @dataclass(frozen=True)
 class SimPreRunResult:
-    """프리런 결과(화면 1개)."""
+    """프리런 결과(화면 1개).
+
+    ``final_sim_time`` / ``total_est_sec`` 는 프리런 완료 후 동일 값(실제 env.now).
+    (시작 전 엔진 추정치와 혼동하지 말 것 — 웹·모니터 총 공정시간 SSOT.)
+    """
 
     screen: int
     final_sim_time: float
@@ -1539,10 +1543,14 @@ def prerun_engine_to_timeline(
         final_sim = float(getattr(engine.env, "now", 0.0) or 0.0) if getattr(engine, "env", None) is not None else 0.0
     except Exception:
         final_sim = 0.0
+    # SSOT: 프리런 완료 후 「총 공정시간」은 실제 env.now (= final_sim).
+    # 사전샘플 합(_sim_total_est_sec)은 시작 전 스케일용 추정치라 실제와 어긋날 수 있다.
+    # 모니터·막대·웹 export 가 서로 다른 값을 쓰지 않도록 동기화한다.
     try:
-        te = float(getattr(engine, "_sim_total_est_sec", 0.0) or 0.0)
+        engine._sim_total_est_sec = float(final_sim)  # type: ignore[attr-defined]
     except Exception:
-        te = 0.0
+        pass
+    te = float(final_sim)
 
     kind_prio = {"log": 0, "event": 1, "progress": 2}
     try:

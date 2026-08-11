@@ -506,9 +506,11 @@ class TBSSimulationEngine:
         except Exception:
             avg_spawn = 20.0
         # 보수적 추정: LOT당 이동 평균 + 회수 티켓 평균, 스폰 지연 일부 반영.
+        # 첫 LOT 는 즉시 생성이므로 spawn 간격은 (max_oht_lots - 1) 회.
         self._sim_total_est_sec = max(
             10.0,
-            (avg_move + avg_pickup) * max(1, total_lots_est) + avg_spawn * max(0, int(self._max_oht_lots)),
+            (avg_move + avg_pickup) * max(1, total_lots_est)
+            + avg_spawn * max(0, int(self._max_oht_lots) - 1),
         )
 
         # -----------------------------
@@ -623,7 +625,11 @@ class TBSSimulationEngine:
             init_full = 0
         n_spawn = max(0, int(self._max_oht_lots))
         n_lots = max(1, int(self._max_oht_lots) + int(init_full))
-        spawn_sum = sum(self._pre_pool["spawn"][:n_spawn]) if n_spawn > 0 else 0.0
+        # 첫 LOT 는 즉시 생성 → 스폰 간격은 (n_spawn - 1) 회만 반영
+        n_spawn_waits = max(0, n_spawn - 1)
+        spawn_sum = (
+            sum(self._pre_pool["spawn"][:n_spawn_waits]) if n_spawn_waits > 0 else 0.0
+        )
         if n_spawn > 0:
             if bool(getattr(self, "_ebs_enabled", True)):
                 in_sum = 0.5 * (
@@ -1145,13 +1151,21 @@ class TBSSimulationEngine:
         )
 
     def _lot_spawn_timer(self):
-        """설정 간격마다 LOT을 생성해 OHT 대기열에 쌓는다(타이머는 공정과 독립)."""
+        """설정 간격마다 LOT을 생성해 OHT 대기열에 쌓는다(타이머는 공정과 독립).
+
+        첫 LOT 는 설정 간격과 무관하게 즉시(0초) 생성하고,
+        2번째부터 ``lot_spawn_interval_min~max`` 사전샘플을 적용한다.
+        """
         yield self.env.timeout(0.05)
         while self._running:
             if self._oht_spawn_seq >= self._max_oht_lots:
                 self._next_spawn_at = None
                 return
-            dt = self._presampled("spawn", self._timing.rand_lot_spawn_interval)
+            # 첫 LOT: 생성간격 미적용(즉시). 이후만 spawn 풀 소비.
+            if int(self._oht_spawn_seq) <= 0:
+                dt = 0.0
+            else:
+                dt = self._presampled("spawn", self._timing.rand_lot_spawn_interval)
             try:
                 self._next_spawn_at = float(self.env.now) + float(dt)
             except Exception:
