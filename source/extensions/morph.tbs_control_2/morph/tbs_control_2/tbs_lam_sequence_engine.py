@@ -597,6 +597,83 @@ class TbsLamSequenceRunner:
                 except Exception as exc:
                     _seq_log(f"{_PRINT_PREFIX} reset TBS_OFFSET failed: {exc}", flush=True)
 
+                # TIMESAMPLES/USD_TIMELINE: TBS_OFFSET 만으로는 end-frame 자세가 남는다.
+                # 이번 JSON 의 인스턴스 playback prim 만 range_start 로 seek + 즉시 evaluate.
+                replay_paths: List[str] = []
+                seen_rp: set[str] = set()
+                for st in steps:
+                    if not st or not step_kind_is_instance_playback(
+                        str(st.get("type") or "")
+                    ):
+                        continue
+                    try:
+                        pp = (StepRef.from_dict(st.get("ref")).prim_path or "").strip()
+                    except Exception:
+                        pp = ""
+                    if pp.startswith("/") and pp not in seen_rp:
+                        seen_rp.add(pp)
+                        replay_paths.append(pp)
+                if replay_paths:
+
+                    def _seek_replay_instances_to_start(
+                        paths: List[str] = replay_paths,
+                    ) -> None:
+                        from .tbs_lam_sequence_editor import (
+                            _range_start_seconds_for_instance,
+                        )
+
+                        ev = getattr(self._scheduler, "_evaluator", None)
+                        for pp in paths:
+                            try:
+                                inst = self._registry.get_by_prim_path(pp)
+                            except Exception:
+                                inst = None
+                            if inst is None:
+                                continue
+                            try:
+                                inst.virtual_time = _range_start_seconds_for_instance(
+                                    inst
+                                )
+                                inst.state = "stopped"
+                            except Exception:
+                                continue
+                            if ev is None:
+                                continue
+                            # end-frame default 를 시작 프레임으로 덮어쓰려면
+                            # replay 활성 + mapping invalidate 가 필요하다.
+                            try:
+                                fn_begin = getattr(ev, "begin_replay_mode", None)
+                                if callable(fn_begin):
+                                    fn_begin(pp)
+                            except Exception:
+                                pass
+                            for fn_name in (
+                                "invalidate_mapping",
+                                "force_rebuild_attr_cache",
+                            ):
+                                fn = getattr(ev, fn_name, None)
+                                if callable(fn):
+                                    try:
+                                        fn(pp)
+                                    except Exception:
+                                        pass
+                            fn_now = getattr(ev, "evaluate_instance_now", None)
+                            if callable(fn_now):
+                                try:
+                                    fn_now(pp)
+                                except Exception:
+                                    pass
+
+                    try:
+                        _dispatch_main_wait(
+                            _seek_replay_instances_to_start, timeout=15.0
+                        )
+                    except Exception as exc:
+                        _seq_log(
+                            f"{_PRINT_PREFIX} reset TIMESAMPLES vt failed: {exc}",
+                            flush=True,
+                        )
+
             first = steps[0] or {}
             self._start_from_current = bool(first.get("_start_from_current", False))
             raw_paths = str(first.get("_start_from_current_paths", "") or "").strip()
@@ -1304,10 +1381,12 @@ class TbsLamSequenceRunner:
                     f"{_PRINT_PREFIX} step[{idx}] begin_replay_mode failed prim={replay_prim}: {exc}",
                     flush=True,
                 )
+            # 매 스텝·공정 재시작 시 항상 range_start 부터. reset=False 이면
+            # playing 잔류/end vt 에서「이어 실행」되어 끝 프레임에서 재생된다.
             start_ok_holder["ok"] = bool(
                 self._scheduler.start(
                     replay_prim,
-                    reset=reset_each_start,
+                    reset=True,
                     speed=combined_speed,
                     loop=loop,
                     range_mode=range_mode,

@@ -13637,7 +13637,9 @@ def _restore_sim_prim_motion_to_initial(
 
     포트 LOT 숨김/보임(visibility)은 건드리지 않는다 — transform·TBS_OFFSET·인스턴스 replay 만 복원.
     ``preserve_foup_offsets=True`` 이면 FOUP 공정 플래그를 지우지 않고 EP plateau 를 유지한다.
-    ``motion_only=True`` 이면 JSON 직전용 — evaluator invalidate/replay 해제는 생략한다.
+    ``motion_only=True`` 이면 JSON 직전용 — ``end_replay_mode`` 는 생략하되,
+    대상 TIMESAMPLES 인스턴스는 ``begin_replay`` + mapping invalidate + start-frame
+    evaluate 로 end-pose 잔류를 지운다.
     ``preserve_peer_channel=True`` 이면 병렬 타 레일 보호 — 채널 전체 stop/scheduler.stop_all 생략,
     이번 JSON prim 만 중지·리셋한다.
     ``extra_steps_only=True`` 이면 path 목록을 ``extra_steps`` 만으로 한정(다른 runner last_steps 제외).
@@ -13846,8 +13848,9 @@ def _restore_sim_prim_motion_to_initial(
                 finally:
                     pop_usd_context_name(prev_ctx)
 
-        # motion_only(JSON 직전): mapping invalidate 없이, 리셋 대상 prim 만
-        # range_start 로 스냅 — 병렬 도입 후 end-pose 에서 다음 공정이 시작되던 회귀 보정.
+        # motion_only(JSON 직전): 이번 JSON prim 만 range_start 로 스냅.
+        # invalidate/rebuild 없이 evaluate 만 하면 end-frame default 가 USD 에 남아
+        # 다음 공정이 끝 프레임에서 시작하는 회귀가 난다 (직렬·병렬 공통).
         if motion_only and paths:
             try:
                 from .tbs_lam_sequence_editor import _range_start_seconds_for_instance
@@ -13867,13 +13870,32 @@ def _restore_sim_prim_motion_to_initial(
                             inst.state = "stopped"
                         except Exception:
                             pass
-                        if ev is not None:
-                            fn_now = getattr(ev, "evaluate_instance_now", None)
-                            if callable(fn_now):
+                        if ev is None:
+                            continue
+                        # begin_replay 유지/재활성 — Option E 는 active prim 만 default write.
+                        # end_replay 는 호출하지 않는다(끝 자세 잠금 해제·마스터 타임코드 노출 방지).
+                        try:
+                            fn_begin = getattr(ev, "begin_replay_mode", None)
+                            if callable(fn_begin):
+                                fn_begin(pp)
+                        except Exception:
+                            pass
+                        for fn_name in (
+                            "invalidate_mapping",
+                            "force_rebuild_attr_cache",
+                        ):
+                            fn = getattr(ev, fn_name, None)
+                            if callable(fn):
                                 try:
-                                    fn_now(pp)
+                                    fn(pp)
                                 except Exception:
                                     pass
+                        fn_now = getattr(ev, "evaluate_instance_now", None)
+                        if callable(fn_now):
+                            try:
+                                fn_now(pp)
+                            except Exception:
+                                pass
             except Exception:
                 pass
 
