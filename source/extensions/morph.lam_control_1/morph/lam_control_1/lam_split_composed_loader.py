@@ -705,6 +705,193 @@ def _attach_from_main_baked(
         return False
 
 
+def _skip_extract_for_kind(inst: Any) -> bool:
+    """OmniGraph/STATIC 은 Flatten Extract 결과가 비거나 NEED-BAKE — 재시도해도 무의미."""
+    kind = str(getattr(inst, "asset_kind", "") or "").strip().upper()
+    return kind in ("OMNIGRAPH", "STATIC")
+
+
+def _extract_prim_paths(
+    evaluator: RuntimeEvaluator,
+    master: MasterStage,
+    prim_paths: List[str],
+    *,
+    log_tag: str,
+) -> int:
+    """실패·미준비 prim 만 Flatten Extract. 경로가 비면 0."""
+    pps = [str(p or "").strip() for p in prim_paths if str(p or "").strip()]
+    if not pps:
+        return 0
+    extracted = 0
+    try:
+        from .lam_extract_from_master import master_flatten_cache
+
+        stage = master.get_stage()
+    except Exception:
+        master_flatten_cache = None  # type: ignore
+        stage = None
+    if callable(master_flatten_cache) and stage is not None:
+        with master_flatten_cache(stage):
+            for pp in pps:
+                if _extract_one(evaluator, pp, log_tag=log_tag):
+                    extracted += 1
+    else:
+        for pp in pps:
+            if _extract_one(evaluator, pp, log_tag=log_tag):
+                extracted += 1
+    return extracted
+
+
+def _reuse_main_compose_onto_aux(
+    *,
+    main_rt: SplitScreenRuntime,
+    main_instances: List[AnimationInstance],
+    master: MasterStage,
+    registry: AnimationInstanceRegistry,
+    evaluator: RuntimeEvaluator,
+    screen_1based: int,
+) -> tuple[int, int, int]:
+    """화면1 Discover/Extract 결과를 보조 화면에 복제.
+
+    - registry deepcopy
+    - inst sublayer TransferContent
+    - offscreen baked layer attach
+    - attach 실패분만 Extract (OMNIGRAPH/STATIC 제외)
+
+    Returns:
+        (replicated, extracted, sublayers)
+    """
+    si = int(screen_1based)
+    _sync_main_mirror_state_before_replicate(main_rt)
+    _install_registry_copy(registry, main_instances)
+    sublayers = 0
+    if main_rt.master is not None:
+        sublayers = _replicate_all_inst_sublayers(main_rt.master, master)
+    print(
+        f"{_PRINT_PREFIX} screen{si} reuse screen1 compose: "
+        f"instances={len(main_instances)} inst_sublayers={sublayers} "
+        f"(Discover/Flatten 스킵)",
+        flush=True,
+    )
+    replicated = 0
+    extract_fail: List[str] = []
+    skipped_known = 0
+    for inst in main_instances:
+        pp = str(getattr(inst, "prim_path", "") or "").strip()
+        if not pp:
+            continue
+        if main_rt.master is not None:
+            _replicate_inst_sublayer(main_rt.master, master, pp)
+        ok_rep = _attach_from_main_baked(evaluator, main_rt.evaluator, inst)
+        if ok_rep:
+            replicated += 1
+            continue
+        if _skip_extract_for_kind(inst):
+            skipped_known += 1
+            continue
+        extract_fail.append(pp)
+    if skipped_known:
+        print(
+            f"{_PRINT_PREFIX} screen{si} Extract 스킵 "
+            f"(OMNIGRAPH/STATIC) count={skipped_known}",
+            flush=True,
+        )
+    extracted = 0
+    if extract_fail:
+        print(
+            f"{_PRINT_PREFIX} screen{si} reuse 실패분만 Extract "
+            f"count={len(extract_fail)}",
+            flush=True,
+        )
+        extracted = _extract_prim_paths(
+            evaluator,
+            master,
+            extract_fail,
+            log_tag=f"split-extract-{si}",
+        )
+    else:
+        print(
+            f"{_PRINT_PREFIX} screen{si} Extract 스킵 "
+            f"(screen1 bake attach 전부 성공 replicated={replicated})",
+            flush=True,
+        )
+    return replicated, extracted, sublayers
+
+
+def _discover_and_extract_on_aux(
+    *,
+    master: MasterStage,
+    registry: AnimationInstanceRegistry,
+    evaluator: RuntimeEvaluator,
+    screen_1based: int,
+    main_rt: Optional[SplitScreenRuntime] = None,
+) -> tuple[int, int]:
+    """화면1 결과가 없을 때만 — 보조 stage 에서 Discover+Extract."""
+    si = int(screen_1based)
+    replicated = 0
+    extracted = 0
+    try:
+        added = CompositionDiscovery(master, registry).discover()
+        print(
+            f"{_PRINT_PREFIX} screen{si} discover added={len(added)} "
+            f"(screen1 compose 없음 — 폴백)",
+            flush=True,
+        )
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} discover failed: {exc}", flush=True)
+    if main_rt is not None:
+        try:
+            n_meta = _sync_aux_registry_metadata_from_main(main_rt.registry, registry)
+            if n_meta:
+                print(
+                    f"{_PRINT_PREFIX} screen{si} sync metadata from screen1: "
+                    f"fields={n_meta}",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} screen{si} sync metadata failed: {exc}", flush=True)
+    extract_pps: List[str] = []
+    skipped_known = 0
+    for inst in registry.all_instances():
+        pp = str(getattr(inst, "prim_path", "") or "").strip()
+        if not pp:
+            continue
+        ok_rep = False
+        if main_rt is not None:
+            main_inst = main_rt.registry.get_by_prim_path(pp)
+            if main_inst is not None:
+                ok_rep = _attach_from_main_baked(
+                    evaluator, main_rt.evaluator, main_inst
+                )
+        if ok_rep:
+            replicated += 1
+            continue
+        if _skip_extract_for_kind(inst):
+            skipped_known += 1
+            continue
+        # 화면1에 동일 prim 이 있고 kind 가 OMNIGRAPH/STATIC 이면 스킵
+        if main_rt is not None:
+            main_inst = main_rt.registry.get_by_prim_path(pp)
+            if main_inst is not None and _skip_extract_for_kind(main_inst):
+                skipped_known += 1
+                continue
+        extract_pps.append(pp)
+    if skipped_known:
+        print(
+            f"{_PRINT_PREFIX} screen{si} Extract 스킵 "
+            f"(OMNIGRAPH/STATIC) count={skipped_known}",
+            flush=True,
+        )
+    if extract_pps:
+        extracted = _extract_prim_paths(
+            evaluator,
+            master,
+            extract_pps,
+            log_tag=f"split-extract-{si}",
+        )
+    return replicated, extracted
+
+
 def _refresh_aux_viewport_resolution(
     win_name: str, *, ext: Any = None, split_n: int = 0
 ) -> None:
@@ -839,7 +1026,13 @@ def hydrate_split_screen_composed_stage(
 ) -> Optional[SplitScreenRuntime]:
     """
     보조 USD 컨텍스트에 화면1과 동일한 합성 인스턴스·런타임을 구성한다.
+
+    전제: 화면별 ``open_stage`` 는 이미 끝난 상태.
+    Discover / Flatten / Extract 는 **화면1 결과가 있으면 재사용**하고,
+    없을 때만 보조 stage 에서 폴백 Discover+Extract 한다.
+    (``default_aux_load_usd_path`` 듀얼 경로도 동일 — 내용은 동일 복사본 전제)
     """
+    _ = fast_visual
     cn = str(ctx_name or "").strip()
     if not cn:
         return None
@@ -849,8 +1042,7 @@ def hydrate_split_screen_composed_stage(
         si = 2
 
     register_main_composed_runtime(ext)
-    independent_aux = split_dual_usd_paths_enabled(ext)
-    # 듀얼 경로에서도 화면1 registry·baked 런타임을 메타/attach 동기화에 사용한다.
+    dual_path = split_dual_usd_paths_enabled(ext)
     main_rt = get_split_runtime_for_screen(ext, 1)
 
     master = MasterStage(context_name=cn)
@@ -882,173 +1074,38 @@ def hydrate_split_screen_composed_stage(
     replicated = 0
     extracted = 0
     sublayers = 0
+    reused_main = False
 
-    if independent_aux:
-        main_instances = []
+    # 화면1 compose 결과가 있으면 Discover/Flatten 없이 복제·attach (듀얼 USD 포함).
+    if main_instances and main_rt is not None and main_rt.master is not None:
+        reused_main = True
+        if dual_path:
+            print(
+                f"{_PRINT_PREFIX} screen{si} dual-path: screen1 compose 재사용 "
+                f"(Discover/Flatten/Extract 스킵, attach 실패분만 폴백)",
+                flush=True,
+            )
+        replicated, extracted, sublayers = _reuse_main_compose_onto_aux(
+            main_rt=main_rt,
+            main_instances=main_instances,
+            master=master,
+            registry=registry,
+            evaluator=evaluator,
+            screen_1based=si,
+        )
+    else:
         print(
-            f"{_PRINT_PREFIX} screen{si} dual-path: 독립 Discover+Extract "
-            f"(화면1 메타·baked 동기화)",
+            f"{_PRINT_PREFIX} screen{si}: screen1 compose 없음 "
+            f"— Discover+Extract 폴백 dual={dual_path}",
             flush=True,
         )
-        try:
-            added = CompositionDiscovery(master, registry).discover()
-            print(
-                f"{_PRINT_PREFIX} screen{si} discover added={len(added)} (dual-path)",
-                flush=True,
-            )
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} screen{si} discover failed: {exc}", flush=True)
-        if main_rt is not None:
-            try:
-                n_meta = _sync_aux_registry_metadata_from_main(main_rt.registry, registry)
-                print(
-                    f"{_PRINT_PREFIX} screen{si} sync metadata from screen1: "
-                    f"fields={n_meta}",
-                    flush=True,
-                )
-            except Exception as exc:
-                print(
-                    f"{_PRINT_PREFIX} screen{si} sync metadata failed: {exc}",
-                    flush=True,
-                )
-        extract_pps: List[str] = []
-        skipped_known = 0
-        for inst in registry.all_instances():
-            pp = str(getattr(inst, "prim_path", "") or "").strip()
-            if not pp:
-                continue
-            ok_rep = False
-            if main_rt is not None:
-                main_inst = main_rt.registry.get_by_prim_path(pp)
-                if main_inst is not None:
-                    ok_rep = _attach_from_main_baked(
-                        evaluator, main_rt.evaluator, main_inst
-                    )
-            if ok_rep:
-                replicated += 1
-                continue
-            # 화면1 메타가 OmniGraph/STATIC 이면 Extract(Flatten) 결과는 NEED-BAKE/빈 결과 —
-            # 동일 상태로 두고 Flatten 을 반복하지 않는다.
-            kind = str(getattr(inst, "asset_kind", "") or "").strip().upper()
-            if kind in ("OMNIGRAPH", "STATIC"):
-                skipped_known += 1
-                continue
-            extract_pps.append(pp)
-        if skipped_known:
-            print(
-                f"{_PRINT_PREFIX} screen{si} dual-path Extract 스킵 "
-                f"(screen1 kind OMNIGRAPH/STATIC) count={skipped_known}",
-                flush=True,
-            )
-        if extract_pps:
-            print(
-                f"{_PRINT_PREFIX} screen{si} dual-path Extract 필요 "
-                f"count={len(extract_pps)} (bake attach 실패분만)",
-                flush=True,
-            )
-            try:
-                from .lam_extract_from_master import master_flatten_cache
-
-                stage = master.get_stage()
-            except Exception:
-                master_flatten_cache = None  # type: ignore
-                stage = None
-            if callable(master_flatten_cache) and stage is not None:
-                with master_flatten_cache(stage):
-                    for pp in extract_pps:
-                        if _extract_one(
-                            evaluator, pp, log_tag=f"split-extract-{si}"
-                        ):
-                            extracted += 1
-            else:
-                for pp in extract_pps:
-                    if _extract_one(
-                        evaluator, pp, log_tag=f"split-extract-{si}"
-                    ):
-                        extracted += 1
-        else:
-            print(
-                f"{_PRINT_PREFIX} screen{si} dual-path Extract 스킵 "
-                f"(bake attach 전부 성공 replicated={replicated})",
-                flush=True,
-            )
-
-    if (not independent_aux) and main_instances and main_rt is not None and main_rt.master is not None:
-        _sync_main_mirror_state_before_replicate(main_rt)
-        _install_registry_copy(registry, main_instances)
-        sublayers = _replicate_all_inst_sublayers(main_rt.master, master)
-        print(
-            f"{_PRINT_PREFIX} screen{si} replicate from main: "
-            f"instances={len(main_instances)} inst_sublayers={sublayers}",
-            flush=True,
+        replicated, extracted = _discover_and_extract_on_aux(
+            master=master,
+            registry=registry,
+            evaluator=evaluator,
+            screen_1based=si,
+            main_rt=main_rt,
         )
-        extract_fail: List[str] = []
-        for inst in main_instances:
-            pp = str(getattr(inst, "prim_path", "") or "").strip()
-            if not pp:
-                continue
-            _replicate_inst_sublayer(main_rt.master, master, pp)
-            ok_rep = _attach_from_main_baked(evaluator, main_rt.evaluator, inst)
-            if not ok_rep:
-                extract_fail.append(pp)
-            else:
-                replicated += 1
-        if extract_fail:
-            try:
-                from .lam_extract_from_master import master_flatten_cache
-
-                _st = master.get_stage()
-            except Exception:
-                master_flatten_cache = None  # type: ignore
-                _st = None
-            if callable(master_flatten_cache) and _st is not None:
-                with master_flatten_cache(_st):
-                    for pp in extract_fail:
-                        if _extract_one(
-                            evaluator, pp, log_tag=f"split-extract-{si}"
-                        ):
-                            extracted += 1
-            else:
-                for pp in extract_fail:
-                    if _extract_one(
-                        evaluator, pp, log_tag=f"split-extract-{si}"
-                    ):
-                        extracted += 1
-    elif not independent_aux:
-        try:
-            added = CompositionDiscovery(master, registry).discover()
-            print(
-                f"{_PRINT_PREFIX} screen{si} discover added={len(added)} (main instances 없음)",
-                flush=True,
-            )
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} screen{si} discover failed: {exc}", flush=True)
-        extract_pps2 = [
-            str(getattr(inst, "prim_path", "") or "").strip()
-            for inst in registry.all_instances()
-            if str(getattr(inst, "prim_path", "") or "").strip()
-        ]
-        if extract_pps2:
-            try:
-                from .lam_extract_from_master import master_flatten_cache
-
-                _st2 = master.get_stage()
-            except Exception:
-                master_flatten_cache = None  # type: ignore
-                _st2 = None
-            if callable(master_flatten_cache) and _st2 is not None:
-                with master_flatten_cache(_st2):
-                    for pp in extract_pps2:
-                        if _extract_one(
-                            evaluator, pp, log_tag=f"split-extract-{si}"
-                        ):
-                            extracted += 1
-            else:
-                for pp in extract_pps2:
-                    if _extract_one(
-                        evaluator, pp, log_tag=f"split-extract-{si}"
-                    ):
-                        extracted += 1
 
     aux_wn = f"LAM_SimSplit_{max(1, int(si) - 1)}"
     wrote = _activate_aux_split_display(
@@ -1078,27 +1135,29 @@ def hydrate_split_screen_composed_stage(
                 ready = rt is not None
             if ready:
                 continue
-            if not independent_aux and main_instances and main_rt.master is not None:
+            if _skip_extract_for_kind(inst):
+                continue
+            if main_rt.master is not None:
                 _replicate_inst_sublayer(main_rt.master, master, pp)
-            # bake attach 한 번 더 시도 후, 여전히 미준비면 Extract
             ok_rep = False
-            if main_rt is not None:
+            main_inst = None
+            try:
+                main_inst = main_rt.registry.get_by_prim_path(pp)
+            except Exception:
                 main_inst = None
-                try:
-                    main_inst = main_rt.registry.get_by_prim_path(pp)
-                except Exception:
-                    main_inst = None
-                if main_inst is None:
-                    for mi in main_instances:
-                        if str(getattr(mi, "prim_path", "") or "").strip() == pp:
-                            main_inst = mi
-                            break
-                if main_inst is not None:
-                    ok_rep = _attach_from_main_baked(
-                        evaluator, main_rt.evaluator, main_inst
-                    )
-                    if ok_rep:
-                        replicated += 1
+            if main_inst is None:
+                for mi in main_instances:
+                    if str(getattr(mi, "prim_path", "") or "").strip() == pp:
+                        main_inst = mi
+                        break
+            if main_inst is not None:
+                if _skip_extract_for_kind(main_inst):
+                    continue
+                ok_rep = _attach_from_main_baked(
+                    evaluator, main_rt.evaluator, main_inst
+                )
+                if ok_rep:
+                    replicated += 1
             if not ok_rep:
                 retry_pps.append(pp)
         if retry_pps:
@@ -1107,26 +1166,12 @@ def hydrate_split_screen_composed_stage(
                 f"count={len(retry_pps)} (전수 Flatten 재시도 금지)",
                 flush=True,
             )
-            try:
-                from .lam_extract_from_master import master_flatten_cache
-
-                _st3 = master.get_stage()
-            except Exception:
-                master_flatten_cache = None  # type: ignore
-                _st3 = None
-            if callable(master_flatten_cache) and _st3 is not None:
-                with master_flatten_cache(_st3):
-                    for pp in retry_pps:
-                        if _extract_one(
-                            evaluator, pp, log_tag=f"split-extract-retry-{si}"
-                        ):
-                            extracted += 1
-            else:
-                for pp in retry_pps:
-                    if _extract_one(
-                        evaluator, pp, log_tag=f"split-extract-retry-{si}"
-                    ):
-                        extracted += 1
+            extracted += _extract_prim_paths(
+                evaluator,
+                master,
+                retry_pps,
+                log_tag=f"split-extract-retry-{si}",
+            )
         elif wrote < aux_inst_count:
             print(
                 f"{_PRINT_PREFIX} screen{si} Extract 재시도 스킵 "
@@ -1142,6 +1187,7 @@ def hydrate_split_screen_composed_stage(
 
     print(
         f"{_PRINT_PREFIX} screen{si} ctx={cn} "
+        f"reused_main={reused_main} dual_path={dual_path} "
         f"replicated={replicated} extracted={extracted} sublayers={sublayers} "
         f"total={len(registry.all_instances())} mirror_writes={wrote}",
         flush=True,
