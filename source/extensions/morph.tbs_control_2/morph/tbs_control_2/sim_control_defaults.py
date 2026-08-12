@@ -174,7 +174,8 @@ SIM_BAR_PREVIEW_DEFAULT: bool = True
 # ---------------------------------------------------------------------------
 # 시뮬 오케스트레이터: 2레일 병렬 (simulation_engine._run_serial_flow)
 # ---------------------------------------------------------------------------
-# False(기본): 기존과 100% 동일 — 완전 직렬 (실무 기본).
+# False(기본): 완전 직렬 — ``_step_*`` 우선순위 순 1건씩 yield-until-complete.
+#   FOUP 공정만 EP 안착 후 백그라운드 process 로 JSON 과 병행.
 # True: A레일(ARRIVED/REMOVED) 1 + B레일(MOVE_*) 1.
 #   · A끼리·B끼리 직렬, A∥B 만 허용(다른 인스턴스).
 #   · JSON/포트 끝 EPn 이 같으면 A∥B 금지.

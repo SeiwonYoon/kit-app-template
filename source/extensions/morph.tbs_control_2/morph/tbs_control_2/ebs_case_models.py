@@ -286,9 +286,41 @@ def capture_case_sim_settings(ext: Any, case_id: int) -> Dict[str, Any]:
     ):
         try:
             m = get_case_model(ext, cid, key)
-            d[key] = float(m.get_value_as_float()) if m is not None else 1.0
+            if m is not None:
+                d[key] = float(m.get_value_as_float())
+            else:
+                # 모델 없으면 SSOT 기본값 (절대 1.0 폴백 금지 — FOUP 30~60 등이 깨짐)
+                _def_map = {
+                    "oht_bp1_min": _SIM_DEF.oht_to_bp1_min,
+                    "oht_bp1_max": _SIM_DEF.oht_to_bp1_max,
+                    "oht_inout_min": _SIM_DEF.oht_to_inout_min,
+                    "oht_inout_max": _SIM_DEF.oht_to_inout_max,
+                    "bp1_bp_min": _SIM_DEF.bp1_to_bp_min,
+                    "bp1_bp_max": _SIM_DEF.bp1_to_bp_max,
+                    "bp_ep_min": _SIM_DEF.bp_to_ep_min,
+                    "bp_ep_max": _SIM_DEF.bp_to_ep_max,
+                    "ep_oht_min": _SIM_DEF.ep_to_oht_min,
+                    "ep_oht_max": _SIM_DEF.ep_to_oht_max,
+                    "foup_proc_min": _SIM_DEF.foup_process_min,
+                    "foup_proc_max": _SIM_DEF.foup_process_max,
+                }
+                d[key] = float(_def_map.get(key, 0.1))
         except Exception:
-            d[key] = 1.0
+            _def_map = {
+                "oht_bp1_min": _SIM_DEF.oht_to_bp1_min,
+                "oht_bp1_max": _SIM_DEF.oht_to_bp1_max,
+                "oht_inout_min": _SIM_DEF.oht_to_inout_min,
+                "oht_inout_max": _SIM_DEF.oht_to_inout_max,
+                "bp1_bp_min": _SIM_DEF.bp1_to_bp_min,
+                "bp1_bp_max": _SIM_DEF.bp1_to_bp_max,
+                "bp_ep_min": _SIM_DEF.bp_to_ep_min,
+                "bp_ep_max": _SIM_DEF.bp_to_ep_max,
+                "ep_oht_min": _SIM_DEF.ep_to_oht_min,
+                "ep_oht_max": _SIM_DEF.ep_to_oht_max,
+                "foup_proc_min": _SIM_DEF.foup_process_min,
+                "foup_proc_max": _SIM_DEF.foup_process_max,
+            }
+            d[key] = float(_def_map.get(key, 0.1))
     for key in _BOOL_FIELDS:
         try:
             m = get_case_model(ext, cid, key)

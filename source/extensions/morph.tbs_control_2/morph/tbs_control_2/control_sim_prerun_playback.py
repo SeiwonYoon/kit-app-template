@@ -1144,6 +1144,53 @@ class SimTimelinePlayer:
             return False
         return True
 
+    @staticmethod
+    def _is_foup_timeline_payload(payload: Any) -> bool:
+        """FOUP 공정 이벤트/진행률 — JSON wall freeze 와 독립 진행."""
+        if not isinstance(payload, dict):
+            return False
+        seq = str(
+            payload.get("seq")
+            or payload.get("event")
+            or payload.get("event_seq")
+            or payload.get("sequence_name")
+            or ""
+        ).strip().upper()
+        return seq in ("FOUP_PROCESS", "FOUP_PROCESS_START", "FOUP_PROCESS_END")
+
+    @staticmethod
+    def _payload_ep_tokens(payload: Any) -> set:
+        """이벤트/progress 가 가리키는 EP 토큰 집합."""
+        out: set = set()
+        if not isinstance(payload, dict):
+            return out
+        for k in ("port_id", "port_hint", "from_port_id", "to_port_id", "from", "to"):
+            v = str(payload.get(k) or "").strip().upper()
+            if v.startswith("EP"):
+                out.add(v)
+        return out
+
+    def _foup_allowed_during_gate_freeze(
+        self, item: Any, *, freeze_t: Optional[float], frozen_payload: Any
+    ) -> bool:
+        """gated JSON 이 wall busy 로 막혀 있어도 FOUP 는 별도 진행.
+
+        - 막힌 gated 와 **다른 EP** 의 FOUP: t 와 무관하게 허용 (이미 EP 에 있는 공정).
+        - **동일 EP**: freeze_t 이하(또는 동일 t)만 — ARRIVED 미emit 인데 FOUP 선행 방지.
+        """
+        if not self._is_foup_timeline_payload(getattr(item, "payload", None)):
+            return False
+        foup_eps = self._payload_ep_tokens(getattr(item, "payload", None))
+        frozen_eps = self._payload_ep_tokens(frozen_payload)
+        if foup_eps and frozen_eps and foup_eps.isdisjoint(frozen_eps):
+            return True
+        if freeze_t is None:
+            return True
+        try:
+            return float(item.t) <= float(freeze_t) + 1e-9
+        except Exception:
+            return False
+
     def _safe_emit(self, item: Any, scr: int) -> None:
         try:
             self._emit(item.kind, item.payload, int(scr))
@@ -1167,11 +1214,13 @@ class SimTimelinePlayer:
         """``sim_now`` 이하 타임라인 항목 emit (프레임당 상한).
 
         gated 이벤트(JSON dispatch)가 러너 busy 로 막히면 커서를 고정하되, 그 뒤의
-        non-gated 이벤트(FOUP_PROCESS_*/PORT_OCC_REFRESH)는 **같은 t 이하** 만 허용.
+        non-gated 이벤트 중 **FOUP_PROCESS_*** 및 FOUP progress 는 다른 EP 이면
+        JSON wall 과 무관하게 자기 sim 시각에 내보낸다(이미 EP 에 있는 FOUP 공정).
+        PORT_OCC_REFRESH 등 그 외 non-gated 는 기존처럼 freeze_t 이하만.
 
         병렬 모드: oht/move 레일별로 gated emit 1개까지 동일 tick 허용 (A∥B).
         **금지:** gate 로 막힌 gated 보다 **뒤 인덱스** 의 다른 레일 gated
-        (ARRIVED INOUT 미emit 인데 MOVE INOUT→BP 선행) · 앞선 FOUP 로 EP 공정 꼬임.
+        (ARRIVED INOUT 미emit 인데 MOVE INOUT→BP 선행).
         """
         emitted = 0
         max_n = max(1, int(max_emits))
@@ -1207,6 +1256,7 @@ class SimTimelinePlayer:
             cursor_frozen = False
             freeze_at: Optional[int] = None
             freeze_t: Optional[float] = None
+            freeze_payload: Any = None
             j = i
             while j < len(items) and float(items[j].t) <= float(t_sim) + 1e-9 and emitted < max_n:
                 it = items[j]
@@ -1241,6 +1291,7 @@ class SimTimelinePlayer:
                                 # 이 레일만 보류 — 다른 레일 gated(REMOVED∥MOVE) 는 계속 스캔
                                 if freeze_at is None:
                                     freeze_at = j
+                                    freeze_payload = it.payload
                                     try:
                                         freeze_t = float(it.t)
                                     except Exception:
@@ -1274,6 +1325,7 @@ class SimTimelinePlayer:
                                 cursor_frozen = True
                                 if freeze_at is None:
                                     freeze_at = j
+                                    freeze_payload = it.payload
                                     try:
                                         freeze_t = float(it.t)
                                     except Exception:
@@ -1304,20 +1356,23 @@ class SimTimelinePlayer:
                             break
                         continue
                     # non-gated 이벤트 (FOUP_*/READY*/PORT_OCC_REFRESH)
-                    # freeze 중이면 막힌 gated 시각을 넘는 FOUP 로 EP 공정 UI 가 꼬이지 않게 차단
                     if freeze_at is not None and freeze_t is not None:
-                        try:
-                            if float(it.t) > float(freeze_t) + 1e-9:
-                                break
-                        except Exception:
-                            break
-                        if j > int(freeze_at):
-                            # 같은 t 의 FOUP 만 허용 (뒷 인덱스·뒷 공정 금지)
+                        allow_foup = self._foup_allowed_during_gate_freeze(
+                            it, freeze_t=freeze_t, frozen_payload=freeze_payload
+                        )
+                        if not allow_foup:
                             try:
-                                if abs(float(it.t) - float(freeze_t)) > 1e-9:
+                                if float(it.t) > float(freeze_t) + 1e-9:
                                     break
                             except Exception:
                                 break
+                            if j > int(freeze_at):
+                                # 같은 t 의 non-FOUP 만 허용
+                                try:
+                                    if abs(float(it.t) - float(freeze_t)) > 1e-9:
+                                        break
+                                except Exception:
+                                    break
                     self._safe_emit(it, int(scr))
                     emitted += 1
                     if cursor_frozen or freeze_at is not None:
@@ -1343,15 +1398,22 @@ class SimTimelinePlayer:
                     continue
                 # log / progress
                 if freeze_at is not None and freeze_t is not None:
-                    try:
-                        if float(it.t) > float(freeze_t) + 1e-9:
+                    allow_foup_prog = (
+                        kind == "progress"
+                        and self._foup_allowed_during_gate_freeze(
+                            it, freeze_t=freeze_t, frozen_payload=freeze_payload
+                        )
+                    )
+                    if not allow_foup_prog:
+                        try:
+                            if float(it.t) > float(freeze_t) + 1e-9:
+                                break
+                        except Exception:
                             break
-                    except Exception:
-                        break
-                    if j > int(freeze_at) and kind == "progress":
-                        # 막힌 gated 자신의 progress 는 이미 스킵됨.
-                        # 이후 progress 는 시계만 올리는 착시를 내므로 중단.
-                        break
+                        if j > int(freeze_at) and kind == "progress":
+                            # 막힌 gated 자신의 progress 는 이미 스킵됨.
+                            # 이후(비-FOUP) progress 는 시계만 올리는 착시를 내므로 중단.
+                            break
                 self._safe_emit(it, int(scr))
                 emitted += 1
                 if cursor_frozen or freeze_at is not None:

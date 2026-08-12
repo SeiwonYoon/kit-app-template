@@ -686,25 +686,62 @@ class TBSSimulationEngine:
 
         self._recompute_sim_total_est_from_pool()
 
+    def _presample_range_for_key(self, key: str) -> Tuple[float, float]:
+        """현재 timing 설정의 (lo, hi). 키 미지정이면 (0.01, 0.01)."""
+        attrs = self._PRESAMPLE_TIMING_ATTRS.get(str(key or ""))
+        if not attrs:
+            return (0.01, 0.01)
+        amin, amax = attrs
+        try:
+            return SimulationTimingConfig._norm(
+                float(getattr(self._timing, amin, 0.0) or 0.0),
+                float(getattr(self._timing, amax, 0.0) or 0.0),
+            )
+        except Exception:
+            return (0.01, 0.01)
+
+    def _clamp_presample_to_range(self, key: str, value: float) -> float:
+        """풀 값이 현재 min~max 밖이면 범위로 클램프 (잘못된 공유/잔류 풀 방어)."""
+        lo, hi = self._presample_range_for_key(key)
+        try:
+            v = float(value)
+        except Exception:
+            return float(lo)
+        if v < lo - 1e-9 or v > hi + 1e-9:
+            return float(lo) if hi <= lo + 1e-12 else float(max(lo, min(hi, v)))
+        return float(v)
+
     def _presampled(self, key: str, fallback_fn) -> float:
-        """사전 샘플 풀에서 1개를 순차 소비. 부족하면 refill."""
-        arr = self._pre_pool.get(key, [])
-        idx = int(self._pre_idx.get(key, 0) or 0)
-        if not isinstance(arr, list) or idx >= len(arr):
-            try:
-                self._presample_fill()
-            except Exception:
-                pass
-            arr = self._pre_pool.get(key, [])
+        """사전 샘플 풀에서 1개를 순차 소비. 부족하면 해당 키만 확장 refill."""
+        k = str(key or "")
+        arr = self._pre_pool.get(k, [])
+        idx = int(self._pre_idx.get(k, 0) or 0)
+        if not isinstance(arr, list):
+            arr = []
+            self._pre_pool[k] = arr
+        if idx >= len(arr):
+            # 풀이 이미 n개여도 인덱스가 끝이면 **추가 샘플**을 붙인다.
+            lo, hi = self._presample_range_for_key(k)
+            need = max(16, idx - len(arr) + 16)
+            for _ in range(need):
+                try:
+                    if self._rng is not None:
+                        arr.append(float(self._rng.uniform(lo, hi)))
+                    else:
+                        arr.append(float(random.uniform(lo, hi)))
+                except Exception:
+                    arr.append(float(lo))
+            self._pre_pool[k] = arr
         try:
             v = float(arr[idx])
-            self._pre_idx[key] = idx + 1
-            return v
+            self._pre_idx[k] = idx + 1
+            return self._clamp_presample_to_range(k, v)
         except Exception:
             try:
-                return float(fallback_fn())
+                return self._clamp_presample_to_range(k, float(fallback_fn()))
             except Exception:
-                return 0.01
+                lo, _hi = self._presample_range_for_key(k)
+                return float(lo)
 
     def _has_lot_fix(self) -> bool:
         return bool(self._lot_fix_rows)
@@ -1386,12 +1423,10 @@ class TBSSimulationEngine:
         - 5) 대기 로그 + 짧은 sleep
 
         ``SIM_PARALLEL_NONCONFLICTING_MOVES``:
-        - False(기본): nofollow wave — MOVE/ARRIVED/REMOVED 는 백그라운드 process,
-          FOUP(``_run_ep_foup_process``)와 동시에 다른 EP 공정 진행. A/B 레일 충돌 규칙 동일.
-        - True: 2레일 — A(ARRIVED/REMOVED) ∥ B(MOVE_*). A/B 각자 직렬,
-          동일 EPn 목표면 동시 불가, B는 점유 전제 필수.
-          B 우선순위: 빈 EP+BP LOT 이면 BP→EP → 그다음 INOUT→BP.
-          기동 순서: REMOVED → B(MOVE) → OHT(버퍼 가능 빈 EP 는 직접투입 보류).
+        - False(기본·직렬): ``_step_*`` 를 우선순위 순으로 **1건씩 yield-until-complete**.
+          FOUP(``_run_ep_foup_process``)만 EP 안착 시 백그라운드 process 로 JSON 과 병행.
+        - True(병렬): 2레일 nofollow wave — A(ARRIVED/REMOVED) ∥ B(MOVE_*).
+          동일 EPn 목표면 동시 불가. Wave: REMOVED → B → OHT.
         """
         yield self.env.timeout(0.1)
         parallel = bool(getattr(self, "_parallel_nonconflicting_moves", False))
@@ -1402,6 +1437,7 @@ class TBSSimulationEngine:
             self._log_heartbeat_if_due()
 
             if parallel:
+                # 병렬: A∥B nofollow wave (FOUP 는 EP 안착 시 별도 process)
                 started = self._start_parallel_nonconflicting_wave()
                 a_busy = bool(getattr(self, "_oht_path_inflight", False))
                 b_busy = bool(getattr(self, "_move_rail_inflight", False))
@@ -1413,17 +1449,37 @@ class TBSSimulationEngine:
                 yield from self._step_idle_wait()
                 continue
 
-            # --- False: nofollow wave — FOUP·다른 EP 가 동시에 진행되도록 yield-until-complete 제거 ---
-            started = self._start_parallel_nonconflicting_wave()
-            a_busy = bool(getattr(self, "_oht_path_inflight", False))
-            b_busy = bool(getattr(self, "_move_rail_inflight", False))
-            if started or a_busy or b_busy:
-                yield self.env.timeout(0.05)
+            # --- 직렬(False): 우선순위 순 1건씩 yield-until-complete ---
+            # FOUP(_run_ep_foup_process)는 EP 안착 시 백그라운드 process 로 별도 진행.
+            # (JSON ARRIVED/MOVE/REMOVED 와 동시 가능 — 전역 FOUP Resource capacity=1)
+            did = False
+            try:
+                did = bool((yield from self._step_buffer_to_ep()))
+            except Exception:
+                did = False
+            if did:
+                continue
+            try:
+                did = bool((yield from self._step_pickup_to_oht()))
+            except Exception:
+                did = False
+            if did:
+                continue
+            try:
+                did = bool((yield from self._step_bp1_to_buffer()))
+            except Exception:
+                did = False
+            if did:
+                continue
+            try:
+                did = bool((yield from self._step_oht_input()))
+            except Exception:
+                did = False
+            if did:
                 continue
             if len(self.completed_lots) >= self._total_lots:
                 break
             yield from self._step_idle_wait()
-            continue
 
         if self._running:
             self._running = False
