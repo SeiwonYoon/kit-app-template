@@ -1386,7 +1386,8 @@ class TBSSimulationEngine:
         - 5) 대기 로그 + 짧은 sleep
 
         ``SIM_PARALLEL_NONCONFLICTING_MOVES``:
-        - False(기본): 위를 ``yield process`` 로 완전 직렬.
+        - False(기본): nofollow wave — MOVE/ARRIVED/REMOVED 는 백그라운드 process,
+          FOUP(``_run_ep_foup_process``)와 동시에 다른 EP 공정 진행. A/B 레일 충돌 규칙 동일.
         - True: 2레일 — A(ARRIVED/REMOVED) ∥ B(MOVE_*). A/B 각자 직렬,
           동일 EPn 목표면 동시 불가, B는 점유 전제 필수.
           B 우선순위: 빈 EP+BP LOT 이면 BP→EP → 그다음 INOUT→BP.
@@ -1412,26 +1413,17 @@ class TBSSimulationEngine:
                 yield from self._step_idle_wait()
                 continue
 
-            # --- False: 완전 직렬 — BP→EP · 회수 우선, IN/OUT→BP 는 그 다음 ---
-            did = yield from self._step_buffer_to_ep()
-            if did:
-                continue
-
-            did = yield from self._step_pickup_to_oht()
-            if did:
+            # --- False: nofollow wave — FOUP·다른 EP 가 동시에 진행되도록 yield-until-complete 제거 ---
+            started = self._start_parallel_nonconflicting_wave()
+            a_busy = bool(getattr(self, "_oht_path_inflight", False))
+            b_busy = bool(getattr(self, "_move_rail_inflight", False))
+            if started or a_busy or b_busy:
+                yield self.env.timeout(0.05)
                 continue
             if len(self.completed_lots) >= self._total_lots:
                 break
-
-            did = yield from self._step_bp1_to_buffer()
-            if did:
-                continue
-
-            did = yield from self._step_oht_input()
-            if did:
-                continue
-
             yield from self._step_idle_wait()
+            continue
 
         if self._running:
             self._running = False

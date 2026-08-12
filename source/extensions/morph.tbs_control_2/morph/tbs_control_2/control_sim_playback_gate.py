@@ -296,13 +296,13 @@ def _json_hold_reason_active_or_queued(
                         continue
                 except Exception:
                     pass
-                # lead 또는 시퀀스 시작됨 → wall 유지
-                if bool(act.get("_json_pending_sim_start")) or bool(
+                # lead 대기 또는 JSON 시퀀스 실행 중 — wall 유지
+                if bool(act.get("_json_pending_sim_start")) and not bool(
                     act.get("_json_sequence_started")
                 ):
                     return True
-                # active 슬롯이 비어있지 않으면 유지(보수)
-                return True
+                if bool(act.get("_json_sequence_started")):
+                    return True
     except Exception:
         pass
     try:
@@ -359,8 +359,8 @@ def try_release_json_wall_when_idle(
     if is_screen_runner_busy(ext, scr, rail=rail):
         return False
     try:
-        # 병렬: 인스턴스가 다르므로 channel motion 전면 busy 로 wall 유지하지 않음
-        if not par:
+        # 재생: runner idle 이면 wall 해제 — FOUP translate 등 비-JSON motion 과 분리
+        if not bool(getattr(ext, "_sim_playback_started", False)):
             if is_screen_channel_motion_busy(ext, scr):
                 return False
     except Exception:

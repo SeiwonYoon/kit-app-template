@@ -1114,6 +1114,11 @@ class SimTimelinePlayer:
                 self._sim_now_by_screen[scr] = float(t_sim)
                 self._last_wall_by_screen[scr] = float(now_wall)
 
+    def apply_playback_sync(self, ext: Any, screen: int) -> None:
+        """레거시 no-op — sim_now 는 tick clamp 하지 않음 (FOUP·다중 공정 동시 진행)."""
+        del ext, screen
+        return
+
     @staticmethod
     def _event_needs_json_gate(payload: Any) -> bool:
         """JSON 시퀀스를 dispatch 하는 이벤트만 emit 게이트(러너 busy)를 받는다.

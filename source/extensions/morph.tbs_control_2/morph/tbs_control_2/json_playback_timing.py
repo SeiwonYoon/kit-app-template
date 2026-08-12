@@ -7,10 +7,9 @@ JSON 재생 sim 축 타이밍 — back-align · renewal 포트 동기 시각.
     - renewal: t_json_start + renewal_offset
     - 그 외: t_json_end = t0 + proc
 
-  **재생 (``playback_port_sync_sim_time``)** — ``SimTimelinePlayer.sim_now`` · 프리런 막대 truncate
-    - JSON 러너는 sim ``t0 + json_lead`` 에 시작 (``_poll_playback_sim_aligned_json_starts``)
-    - renewal: t0 + json_lead + renewal_offset (포트 ``on_renewal_step`` 와 동일 sim 위치)
-    - 그 외: t0 + json_lead + min(anim, proc − json_lead) (= t0 + proc when anim ≤ proc)
+  **재생 (``playback_sync_sim_t``)** — 진행률·plan lookup 표시 전용 (sim_now clamp 금지)
+    - JSON wall: wall ``est/eff_sp`` ↔ sim ``[t0,t0+proc]``
+    - sim_now: wall×user_sp 단조 전진 + emit/json_wall 게이트
 """
 
 from __future__ import annotations
@@ -377,6 +376,362 @@ def port_sync_sim_time_from_progress(
     return info.get("t_port_sync")
 
 
+def playback_foup_heartbeat_elapsed(
+    ext: Any,
+    screen: int,
+    payload: Dict[str, Any],
+    tnow: float,
+) -> float:
+    """
+    FOUP 공정 heartbeat elapsed — JSON frontier 와 무관하게 wall-clock 으로 부드럽게 증가.
+
+    sim_now 가 JSON wall·공정 경계에 묶이면 FOUP %·초가 멈췄다가 점프하는 문제를 막는다.
+    """
+    t0 = _f(payload.get("event_start_sim_time"), 0.0)
+    proc = _f(payload.get("proc_sec"), 0.0)
+    if proc <= 1e-9:
+        proc = _f(payload.get("total"), 0.0)
+    if proc <= 1e-9:
+        return 0.0
+
+    if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
+        return max(0.0, min(float(proc), float(tnow) - float(t0)))
+
+    import time as _time
+
+    wall_start = payload.get("_foup_phase_wall_start")
+    try:
+        ws = float(wall_start) if wall_start is not None else None
+    except Exception:
+        ws = None
+    if ws is None:
+        ws = float(_time.monotonic())
+
+    sp = 1.0
+    try:
+        from .control_sim_playback_speed import ensure_step_speed_locked
+
+        sp = max(0.1, float(ensure_step_speed_locked(ext, max(1, int(screen)))))
+    except Exception:
+        pass
+
+    el = max(0.0, min(float(proc), (float(_time.monotonic()) - float(ws)) * float(sp)))
+
+    # EP·phase 별 단조 증가 (heartbeat 역행 방지)
+    ep = str(payload.get("port_id") or "").strip().upper()
+    phase_id = str(payload.get("_foup_phase_id") or "").strip()
+    store = getattr(ext, "_playback_foup_el_mono", None)
+    if not isinstance(store, dict):
+        store = {}
+        ext._playback_foup_el_mono = store
+    mk = f"{max(1, int(screen))}|{ep}|{phase_id}"
+    prev = float(store.get(mk, 0.0) or 0.0)
+    el = max(prev, float(el))
+    el = min(float(proc), el)
+    store[mk] = float(el)
+    return float(el)
+
+
+def foup_phase_identity(payload: Dict[str, Any]) -> str:
+    """FOUP 단계(+Y/공정/-Y) 변경 감지 키."""
+    p = dict(payload or {})
+    return "|".join(
+        (
+            str(p.get("event_start_sim_time") or "").strip(),
+            str(p.get("proc_sec") or p.get("total") or "").strip(),
+            str(p.get("label") or "").strip(),
+            str(p.get("port_id") or "").strip(),
+        )
+    )
+
+
+def _wall_mapped_sim_for_active_job(
+    ext: Any,
+    screen: int,
+    active: Dict[str, Any],
+) -> Optional[float]:
+    """JSON wall active job — wall-clock → sim ``[t0, t0+proc]`` (back-align · eff_sp)."""
+    import time as _time
+
+    try:
+        t0_sim = _f(
+            active.get("_event_start_sim")
+            or active.get("event_start_sim_time")
+            or active.get("t")
+            or active.get("sim_time"),
+            0.0,
+        )
+        proc_raw = _f(active.get("proc_sec"), 0.0)
+        est_total = max(0.0, _f(active.get("anim_sec") or active.get("est_total"), 0.0))
+        proc_sec, anim_pb = resolve_playback_proc_anim(
+            proc_raw, est_total, json_est_sec=float(est_total)
+        )
+        if proc_sec <= 1e-9:
+            return None
+
+        json_lead = max(0.0, _f(active.get("json_lead_sec"), json_lead_sec(proc_sec, anim_pb)))
+        lead_wall = max(0.0, _f(active.get("_json_lead_wall_sec"), 0.0))
+        if lead_wall <= 1e-9 and json_lead > 1e-9:
+            try:
+                from .control_sim_playback_speed import ensure_step_speed_locked
+
+                user_sp = max(0.1, float(ensure_step_speed_locked(ext, max(1, int(screen)))))
+                lead_wall = float(json_lead) / float(user_sp)
+            except Exception:
+                lead_wall = float(json_lead)
+
+        started_wall = active.get("_started_wall")
+        if started_wall is None:
+            started_wall = active.get("_json_run_start_wall")
+        eff_sp = max(0.1, _f(active.get("_eff_sp"), 1.0))
+        if est_total <= 1e-9:
+            est_total = float(anim_pb)
+        if started_wall is None:
+            return None
+
+        t_cap = t0_sim + proc_sec
+        scr = max(1, int(screen))
+        playback = bool(getattr(ext, "_sim_playback_started", False))
+        seq_started = bool(active.get("_json_sequence_started"))
+        pending_sim = bool(active.get("_json_pending_sim_start")) and not seq_started
+
+        # 재생 back-align lead — sim_now SSOT (wall lead 와 어긋나면 포트·진행률이 튐)
+        if playback and (pending_sim or (json_lead > 1e-9 and not seq_started)):
+            try:
+                from .control_sim_multi_playback import get_sim_playback_player
+
+                pl = get_sim_playback_player(ext, scr)
+                if pl is not None:
+                    sim_now = float(pl.sim_now(scr))
+                    if pending_sim or sim_now + 1e-6 < t0_sim + json_lead:
+                        return min(t_cap, max(t0_sim, min(sim_now, t0_sim + json_lead)))
+            except Exception:
+                pass
+
+        now_wall = float(_time.monotonic())
+        sw = float(started_wall)
+
+        if json_lead > 1e-9 and not seq_started and lead_wall > 1e-9 and now_wall < sw + lead_wall:
+            user_sp = 1.0
+            try:
+                from .control_sim_playback_speed import ensure_step_speed_locked
+
+                user_sp = max(0.1, float(ensure_step_speed_locked(ext, scr)))
+            except Exception:
+                pass
+            wall_el = max(0.0, (now_wall - sw) * user_sp)
+            return min(t_cap, t0_sim + min(json_lead, wall_el))
+
+        json_run_wall = active.get("_json_run_start_wall")
+        if json_run_wall is not None:
+            json_run_wall = float(json_run_wall)
+        else:
+            json_run_wall = sw + lead_wall
+
+        json_wall_sec = (
+            est_total / eff_sp if est_total > 1e-9 else max(0.01, proc_sec - json_lead)
+        )
+        json_el = max(0.0, now_wall - float(json_run_wall))
+        json_frac = min(1.0, json_el / max(0.01, json_wall_sec))
+        sim_tail = max(0.0, proc_sec - json_lead)
+        return min(t_cap, max(t0_sim, t0_sim + json_lead + json_frac * sim_tail))
+    except Exception:
+        return None
+
+
+def playback_sync_sim_t(ext: Any, screen: int, raw_t: float) -> float:
+    """
+    진행률·plan lookup 보조 sim 시각 (표시 전용 — ``sim_now`` 는 clamp 하지 않음).
+
+    JSON wall active job: wall-clock → ``[t0,t0+proc]``. 그 외 plan frontier cap.
+    """
+    t_raw = float(raw_t)
+    if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
+        return t_raw
+
+    scr = max(1, int(screen))
+
+    try:
+        from .control_sim_playback_gate import is_json_wall_busy
+        from .control_sim_playback_plan import _active_gated_event_src
+        from .sim_parallel_rails import parallel_moves_enabled
+
+        parallel = bool(parallel_moves_enabled())
+        mapped: Optional[float] = None
+        if parallel:
+            for rail in ("oht", "move"):
+                if not is_json_wall_busy(ext, scr, rail=rail):
+                    continue
+                act = _active_gated_event_src(ext, scr, rail=rail)
+                if isinstance(act, dict) and act:
+                    m = _wall_mapped_sim_for_active_job(ext, scr, act)
+                    if m is not None:
+                        mapped = float(m) if mapped is None else min(mapped, float(m))
+        elif is_json_wall_busy(ext, scr):
+            act = _active_gated_event_src(ext, scr)
+            if isinstance(act, dict) and act:
+                m = _wall_mapped_sim_for_active_job(ext, scr, act)
+                if m is not None:
+                    mapped = float(m)
+        if mapped is not None:
+            t_raw = float(mapped)
+        elif is_json_wall_busy(ext, scr) or (
+            parallel and any(is_json_wall_busy(ext, scr, rail=r) for r in ("oht", "move"))
+        ):
+            try:
+                from .control_sim_playback_plan import _playback_gated_plan_cap_sim
+
+                cap = _playback_gated_plan_cap_sim(ext, scr)
+                if cap is not None and t_raw > float(cap) + 1e-9:
+                    t_raw = float(cap)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    try:
+        from .control_sim_playback_plan import playback_plan_frontier_sim
+
+        fr = playback_plan_frontier_sim(ext, scr)
+        if fr is not None and t_raw > float(fr) + 1e-9:
+            t_raw = float(fr)
+    except Exception:
+        pass
+    try:
+        from .control_sim_playback_plan import _playback_gated_plan_cap_sim
+
+        cap = _playback_gated_plan_cap_sim(ext, scr)
+        if cap is not None and t_raw > float(cap) + 1e-9:
+            t_raw = float(cap)
+    except Exception:
+        pass
+    return max(0.0, float(t_raw))
+
+
+def playback_progress_sim_t(
+    ext: Any,
+    screen: int,
+    tnow: float,
+    *,
+    t0: float = 0.0,
+    proc: float = 0.0,
+    active: Optional[Dict[str, Any]] = None,
+) -> float:
+    """
+    진행률 heartbeat 전용 sim 시각 — active JSON wall 의 wall-clock 매핑만.
+
+    plan frontier cap 은 적용하지 않는다 (타 레일 proc_gate 가 현재 줄 진행을
+    끊는 stutter 방지).
+    """
+    t_raw = float(tnow)
+    if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
+        return t_raw
+
+    scr = max(1, int(screen))
+    candidates: List[Dict[str, Any]] = []
+
+    if isinstance(active, dict) and active:
+        candidates.append(dict(active))
+
+    try:
+        from .control_sim_playback_gate import is_json_wall_busy
+        from .control_sim_playback_plan import _active_gated_event_src
+        from .sim_parallel_rails import parallel_moves_enabled
+
+        parallel = bool(parallel_moves_enabled())
+        if parallel:
+            for rail in ("move", "oht"):
+                if not is_json_wall_busy(ext, scr, rail=rail):
+                    continue
+                act_r = _active_gated_event_src(ext, scr, rail=rail)
+                if isinstance(act_r, dict) and act_r:
+                    candidates.append(dict(act_r))
+        elif is_json_wall_busy(ext, scr):
+            act_s = _active_gated_event_src(ext, scr)
+            if isinstance(act_s, dict) and act_s:
+                candidates.append(dict(act_s))
+    except Exception:
+        pass
+
+    if t0 > 1e-9 and candidates:
+        matched: List[Dict[str, Any]] = []
+        for act_c in candidates:
+            try:
+                at = _f(
+                    act_c.get("_event_start_sim")
+                    or act_c.get("event_start_sim_time")
+                    or act_c.get("t")
+                    or act_c.get("sim_time"),
+                    0.0,
+                )
+            except Exception:
+                at = 0.0
+            if at > 1e-9 and abs(float(at) - float(t0)) <= 0.35:
+                matched.append(act_c)
+        if matched:
+            candidates = matched
+
+    mapped: Optional[float] = None
+    for act_c in candidates:
+        m = _wall_mapped_sim_for_active_job(ext, scr, act_c)
+        if m is None:
+            continue
+        mapped = float(m) if mapped is None else min(mapped, float(m))
+
+    if mapped is not None:
+        if proc > 1e-9 and t0 > 1e-9:
+            mapped = min(float(mapped), float(t0) + float(proc))
+        return max(float(t0) if t0 > 1e-9 else 0.0, float(mapped))
+    return t_raw
+
+
+def playback_heartbeat_progress_sim_t(
+    ext: Any,
+    screen: int,
+    tnow: float,
+    *,
+    t0: float = 0.0,
+    proc: float = 0.0,
+    active: Optional[Dict[str, Any]] = None,
+) -> float:
+    """진행률 heartbeat — ``playback_progress_sim_t`` (frontier cap 없음)."""
+    return playback_progress_sim_t(
+        ext,
+        int(screen),
+        float(tnow),
+        t0=float(t0),
+        proc=float(proc),
+        active=active,
+    )
+
+
+def playback_heartbeat_monotonic_elapsed(
+    ext: Any,
+    screen: int,
+    step_id: int,
+    elapsed: float,
+    proc: float,
+) -> float:
+    """heartbeat 보간 elapsed 가 뒤로 가거나 proc 을 넘지 않게."""
+    el = max(0.0, min(float(proc), float(elapsed)))
+    if ext is None or proc <= 1e-9:
+        return el
+    store = getattr(ext, "_playback_prog_el_mono", None)
+    if not isinstance(store, dict):
+        store = {}
+        ext._playback_prog_el_mono = store
+    sk = str(max(1, int(screen)))
+    rec = store.get(sk)
+    sid = int(step_id)
+    if not isinstance(rec, dict) or int(rec.get("step_id", -1)) != sid:
+        rec = {"step_id": sid, "el": 0.0}
+    el2 = max(float(rec.get("el", 0.0)), el)
+    el2 = min(float(proc), el2)
+    rec["el"] = el2
+    store[sk] = rec
+    return el2
+
+
 def playback_port_sync_sim_time_from_progress(
     progress_p: Dict[str, Any],
     *,
@@ -413,6 +768,11 @@ __all__ = [
     "estimate_prefix_duration_sec",
     "json_end_sim_time_from_progress",
     "json_lead_sec",
+    "playback_foup_heartbeat_elapsed",
+    "playback_sync_sim_t",
+    "playback_progress_sim_t",
+    "playback_heartbeat_progress_sim_t",
+    "foup_phase_identity",
     "playback_port_sync_sim_time",
     "playback_port_sync_sim_time_from_progress",
     "port_sync_sim_time",

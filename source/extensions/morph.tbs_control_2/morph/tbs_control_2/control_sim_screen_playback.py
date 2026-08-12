@@ -59,8 +59,6 @@ class ScreenPlaybackSession:
         if not self.is_playing():
             return
         self.player.advance_sim_clock()
-        # 표시/재생 sim_now 는 frontier 로 붙잡지 않음 — 멈추다 점프하는 체감 방지.
-        # emit·JSON wall 게이트는 can_emit / wall busy 가 담당. 포트는 plan(sim_now).
         del ext
 
     def emit_due_and_sync(
@@ -250,10 +248,6 @@ class SimPlaybackRuntime:
             )
 
             try:
-                _try_release_all_playback_json_walls(ext)
-            except Exception:
-                pass
-            try:
                 _poll_playback_sim_aligned_json_starts(ext)
             except Exception:
                 pass
@@ -285,6 +279,12 @@ class SimPlaybackRuntime:
                 sync_engine_now=sync_engine_now,
                 ext=ext,
             )
+        try:
+            from .control_window import _try_release_all_playback_json_walls
+
+            _try_release_all_playback_json_walls(ext)
+        except Exception:
+            pass
         if not multi:
             now_wall = time.perf_counter()
             for sess in playing:

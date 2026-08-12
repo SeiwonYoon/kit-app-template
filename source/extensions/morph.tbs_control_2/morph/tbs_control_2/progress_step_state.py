@@ -594,7 +594,30 @@ def _refresh_secondary_move_step_progress(ext: Any, screen: int, tnow: float) ->
                     sec.event_seq = ev
         if proc <= 1e-9:
             return
-        el = max(0.0, min(float(proc), float(tnow) - float(t0)))
+        act = None
+        if isinstance(active_by, dict):
+            act = active_by.get(anim_state_key(int(screen), "move"))
+        t_prog = float(tnow)
+        try:
+            from .json_playback_timing import (
+                playback_heartbeat_monotonic_elapsed,
+                playback_heartbeat_progress_sim_t,
+            )
+
+            t_prog = playback_heartbeat_progress_sim_t(
+                ext,
+                int(screen),
+                float(tnow),
+                t0=float(t0),
+                proc=float(proc),
+                active=act if isinstance(act, dict) else None,
+            )
+            el = max(0.0, min(float(proc), float(t_prog) - float(t0)))
+            el = playback_heartbeat_monotonic_elapsed(
+                ext, int(screen), int(sec.step_id), el, float(proc)
+            )
+        except Exception:
+            el = max(0.0, min(float(proc), float(tnow) - float(t0)))
         pct = min(100.0, 100.0 * el / float(proc))
         sec.elapsed = f"{el:.1f}"
         sec.total = f"{float(proc):.1f}"
@@ -602,6 +625,153 @@ def _refresh_secondary_move_step_progress(ext: Any, screen: int, tnow: float) ->
         sec.sim_time = f"{float(tnow):.2f}"
     except Exception:
         pass
+
+
+def _progress_fields_from_active_json(
+    ext: Any,
+    screen: int,
+    act: Dict[str, Any],
+) -> Dict[str, str]:
+    """active JSON job → ProgressStepState 필드 (스케줄 progress_payload 우선)."""
+    src = dict(act or {})
+    fields = _payload_to_step_fields(
+        {
+            "event_seq": src.get("event") or src.get("event_seq") or src.get("seq"),
+            "linked_anim_json": _basename_json(
+                str(src.get("file") or src.get("path") or "")
+            ),
+            "label": src.get("action") or src.get("label") or "",
+            "detail": src.get("detail") or "",
+            "status": "RUNNING",
+            "proc_sec": src.get("proc_sec") or "",
+            "anim_sec": src.get("anim_sec") or src.get("est_total") or "",
+            "process_time_priority": src.get("process_time_priority") or "",
+            "event_start_sim_time": (
+                src.get("_event_start_sim")
+                or src.get("event_start_sim_time")
+                or src.get("t")
+                or src.get("sim_time")
+                or ""
+            ),
+        }
+    )
+    try:
+        from .control_sim_playback_plan import (
+            _find_gated_event_step,
+            get_stored_playback_schedule_for_screen,
+        )
+
+        sched = get_stored_playback_schedule_for_screen(ext, int(screen))
+        step = _find_gated_event_step(sched, src) if sched is not None else None
+        if step is not None:
+            p = getattr(step, "progress_payload", None)
+            if isinstance(p, dict) and p:
+                for k in (
+                    "label",
+                    "detail",
+                    "event_seq",
+                    "sequence_name",
+                    "linked_anim_json",
+                    "proc_sec",
+                    "anim_sec",
+                    "process_time_priority",
+                    "event_start_sim_time",
+                ):
+                    v = p.get(k)
+                    if v is None or str(v).strip() == "":
+                        continue
+                    if k == "sequence_name" and not fields.get("event_seq"):
+                        fields["event_seq"] = str(v).strip()
+                    elif k in fields:
+                        fields[k] = str(v).strip()
+                if not fields.get("linked_anim_json"):
+                    fields["linked_anim_json"] = _basename_json(
+                        str(getattr(step, "json_basename", "") or "")
+                    )
+    except Exception:
+        pass
+    if not str(fields.get("label") or "").strip():
+        ev = str(fields.get("event_seq") or "").strip().upper()
+        lot = str(src.get("lot_id") or "").strip()
+        fields["label"] = f"{ev} {lot}".strip() or ev or "진행 중"
+    if not str(fields.get("detail") or "").strip():
+        lot = str(src.get("lot_id") or "").strip()
+        fr = str(src.get("from_port_id") or "").strip()
+        to = str(src.get("to_port_id") or src.get("port_id") or "").strip()
+        proc = str(fields.get("proc_sec") or "").strip()
+        anim = str(fields.get("anim_sec") or "").strip()
+        parts = [x for x in (lot, f"{fr}->{to}".strip("->") if fr or to else "") if x]
+        tail = ""
+        if proc or anim:
+            tail = f" | 공정={proc or '-'}s 애니={anim or '-'}s"
+        fields["detail"] = "".join(parts) + tail if parts else tail.lstrip(" |")
+    return fields
+
+
+def sync_playback_progress_step_from_active_json(
+    ext: Any,
+    screen: int,
+    *,
+    use_secondary: bool = False,
+) -> bool:
+    """
+    재생 heartbeat — ProgressStepState 를 현재 JSON wall active job 과 동기화.
+
+    label·detail·status·proc·연계 JSON 이 이전 공정에 고착되는 문제 방지.
+    """
+    if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
+        return False
+    scr = max(1, int(screen))
+    try:
+        from .control_sim_playback_gate import is_json_wall_busy
+        from .control_sim_playback_plan import _active_gated_event_src
+        from .sim_parallel_rails import parallel_moves_enabled
+
+        parallel = bool(parallel_moves_enabled())
+        act: Optional[Dict[str, Any]] = None
+        if use_secondary and parallel:
+            if is_json_wall_busy(ext, scr, rail="move"):
+                act = _active_gated_event_src(ext, scr, rail="move")
+        elif parallel:
+            if is_json_wall_busy(ext, scr, rail="oht"):
+                act = _active_gated_event_src(ext, scr, rail="oht")
+            elif is_json_wall_busy(ext, scr, rail="move"):
+                use_secondary = True
+                act = _active_gated_event_src(ext, scr, rail="move")
+        elif is_json_wall_busy(ext, scr):
+            act = _active_gated_event_src(ext, scr)
+        if not isinstance(act, dict) or not act:
+            return False
+    except Exception:
+        return False
+
+    st = (
+        get_progress_step_secondary(ext, scr)
+        if use_secondary
+        else get_progress_step(ext, scr)
+    )
+    fields = _progress_fields_from_active_json(ext, scr, dict(act))
+    new_id = _step_identity_tuple(
+        ProgressStepState(
+            event_seq=fields["event_seq"],
+            linked_anim_json=fields["linked_anim_json"],
+            label=fields["label"],
+            event_start_sim_time=fields["event_start_sim_time"],
+        )
+    )
+    old_id = _step_identity_tuple(st)
+    if new_id != old_id:
+        st.step_id += 1
+    if fields["linked_anim_json"] and fields["linked_anim_json"] != st.linked_anim_json:
+        st.display_rev += 1
+    for k, v in fields.items():
+        setattr(st, k, v)
+    _merge_snapshot(st, dict(act))
+    if isinstance(st.payload_snapshot, dict):
+        for k, v in fields.items():
+            if v:
+                st.payload_snapshot[k] = v
+    return True
 
 
 def build_playback_tick_payload(
@@ -614,6 +784,19 @@ def build_playback_tick_payload(
 ) -> Dict[str, Any]:
     """프리런 재생 heartbeat — lp 복사 대신 ProgressStepState 기준 보간."""
     scr = max(1, int(screen))
+    try:
+        sync_playback_progress_step_from_active_json(ext, scr)
+        try:
+            from .sim_parallel_rails import parallel_moves_enabled
+
+            if parallel_moves_enabled():
+                sync_playback_progress_step_from_active_json(
+                    ext, scr, use_secondary=True
+                )
+        except Exception:
+            pass
+    except Exception:
+        pass
     st = get_progress_step(ext, scr)
     base = build_payload_from_step(ext, scr)
     if not isinstance(base, dict):
@@ -643,6 +826,15 @@ def build_playback_tick_payload(
     st.elapsed = str(p3.get("elapsed", st.elapsed))
     st.total = str(p3.get("total", st.total))
     st.percent = str(p3.get("percent", st.percent))
+    p3["label"] = st.label
+    p3["detail"] = st.detail
+    p3["status"] = st.status
+    p3["event_seq"] = st.event_seq
+    p3["linked_anim_json"] = st.linked_anim_json
+    p3["proc_sec"] = st.proc_sec
+    p3["anim_sec"] = st.anim_sec
+    p3["process_time_priority"] = st.process_time_priority
+    p3["event_start_sim_time"] = st.event_start_sim_time
     # 병렬 보조(MOVE) % — 직렬형 본문 + 하단에 JSON|%만
     try:
         from .sim_parallel_rails import parallel_moves_enabled
@@ -759,6 +951,7 @@ __all__ = [
     "bind_linked_anim_on_dispatch",
     "build_payload_from_step",
     "build_playback_tick_payload",
+    "sync_playback_progress_step_from_active_json",
     "clear_progress_step_secondary",
     "clear_progress_step_state",
     "format_progress_anim_footer",

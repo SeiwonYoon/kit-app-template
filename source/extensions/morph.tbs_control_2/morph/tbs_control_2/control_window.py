@@ -1478,8 +1478,8 @@ def _execute_mapped_sequence_stub(
                                 src_by.pop(str(scr_i), None)
                         except Exception:
                             pass
+                    _done_rail = None
                     try:
-                        _done_rail = None
                         from .sim_parallel_rails import (
                             parallel_moves_enabled,
                             rail_from_job_or_payload,
@@ -1737,6 +1737,7 @@ def _execute_mapped_sequence_stub(
                     if isinstance(by_src, dict) and isinstance(by_src.get(str(scr_i)), dict):
                         snap_live = dict(by_src[str(scr_i)])
                         snap_live["_json_run_start_wall"] = float(run_wall)
+                        snap_live["_json_sequence_started"] = True
                         snap_live["_json_end_wall"] = float(run_wall) + float(json_wall_sec)
                         if has_renewal and renewal_off is not None:
                             snap_live["_port_sync_wall"] = float(run_wall) + float(renewal_off) / max(
@@ -1745,23 +1746,24 @@ def _execute_mapped_sequence_stub(
                         by_src[str(scr_i)] = snap_live
                 except Exception:
                     pass
-                if _playback:
-                    try:
-                        _halt_screen_json_anim(
-                            ext, scr_i, join_sec=0.25, rail=_job_rail
-                        )
-                    except TypeError:
-                        try:
-                            _halt_screen_json_anim(ext, scr_i, join_sec=0.25)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-                # 위치·TBS_OFFSET·TIMESAMPLES — JSON **시작** 시점에 초기화 (back-align lead 이후).
+                # 위치·TBS_OFFSET·TIMESAMPLES — JSON **시작** 시점 (back-align lead 이후).
+                # halt 를 reset 앞에 두면 end-pose 가 남아 초기화가 무효화될 수 있다.
                 try:
                     _reset_sim_motion_before_json_run(ext, job, runner_obj=runner_obj)
                 except Exception as exc:
                     print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
+                if not _playback:
+                    try:
+                        _halt_screen_json_anim(
+                            ext, scr_i, join_sec=3.0, rail=_job_rail
+                        )
+                    except TypeError:
+                        try:
+                            _halt_screen_json_anim(ext, scr_i, join_sec=3.0)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                 try:
                     from . import sim_multi_diag as _mdiag
 
@@ -6613,6 +6615,13 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
         except Exception:
             _rail = None
         if needs_json_gate:
+            if bool(getattr(ext, "_sim_playback_started", False)):
+                try:
+                    from .control_sim_playback_plan import reset_playback_renewal_runtime
+
+                    reset_playback_renewal_runtime(ext, scr)
+                except Exception:
+                    pass
             try:
                 set_json_wall_busy(ext, scr, True, rail=_rail)
             except TypeError:
@@ -6847,37 +6856,57 @@ def _apply_playback_step_progress_from_sim(
             proc = float(str(p3.get("total") or "").strip() or "0")
         except Exception:
             proc = 0.0
+    p3_t0 = float(t0)
+    act: Optional[Dict[str, Any]] = None
     if ext is not None:
         try:
             active_by = getattr(ext, "_sim_anim_active_by_screen", None)
-            act = None
             if isinstance(active_by, dict):
                 try:
                     from .sim_parallel_rails import anim_state_key, parallel_moves_enabled
 
                     if parallel_moves_enabled():
                         for rk in (
+                            anim_state_key(int(screen), "move"),
                             anim_state_key(int(screen), "oht"),
                             str(int(screen)),
                         ):
                             cand = active_by.get(rk)
                             if isinstance(cand, dict) and cand:
-                                act = cand
-                                break
+                                try:
+                                    at = float(
+                                        str(
+                                            cand.get("_event_start_sim")
+                                            or cand.get("t")
+                                            or ""
+                                        ).strip()
+                                        or "0"
+                                    )
+                                except Exception:
+                                    at = 0.0
+                                if p3_t0 <= 1e-9 or (
+                                    at > 1e-9 and abs(float(at) - float(p3_t0)) <= 0.35
+                                ):
+                                    act = cand
+                                    break
                     else:
                         act = active_by.get(str(int(screen)))
                 except Exception:
                     act = active_by.get(str(int(screen)))
             if isinstance(act, dict):
                 try:
-                    at = float(str(act.get("t") or "").strip() or "0")
+                    at = float(
+                        str(act.get("_event_start_sim") or act.get("t") or "").strip() or "0"
+                    )
                 except Exception:
                     at = 0.0
                 try:
                     ap = float(str(act.get("proc_sec") or "").strip() or "0")
                 except Exception:
                     ap = 0.0
-                if at > 1e-9:
+                if at > 1e-9 and (
+                    p3_t0 <= 1e-9 or abs(float(at) - float(p3_t0)) <= 0.35
+                ):
                     t0 = at
                 if ap > 1e-9:
                     proc = ap
@@ -6885,14 +6914,45 @@ def _apply_playback_step_progress_from_sim(
             pass
     if proc <= 1e-9:
         return
-    el = max(0.0, min(float(proc), float(tnow) - float(t0)))
+    t_prog = float(tnow)
+    try:
+        from .json_playback_timing import (
+            playback_heartbeat_monotonic_elapsed,
+            playback_heartbeat_progress_sim_t,
+        )
+
+        t_prog = float(
+            playback_heartbeat_progress_sim_t(
+                ext,
+                int(screen),
+                float(tnow),
+                t0=float(t0),
+                proc=float(proc),
+                active=act if isinstance(act, dict) else None,
+            )
+        )
+        sid = 0
+        if ext is not None:
+            from .progress_step_state import get_progress_step
+
+            sid = int(get_progress_step(ext, int(screen)).step_id)
+        el = max(0.0, min(float(proc), float(t_prog) - float(t0)))
+        el = playback_heartbeat_monotonic_elapsed(ext, int(screen), sid, el, float(proc))
+    except Exception:
+        el = max(0.0, min(float(proc), float(tnow) - float(t0)))
     pct = min(100.0, 100.0 * el / float(proc))
     p3["elapsed"] = f"{el:.1f}"
     p3["total"] = f"{float(proc):.1f}"
     p3["percent"] = str(int(pct))
 
 
-def _apply_foup_playback_progress_from_sim(p3: Dict[str, Any], tnow: float) -> None:
+def _apply_foup_playback_progress_from_sim(
+    p3: Dict[str, Any],
+    tnow: float,
+    *,
+    ext: Any = None,
+    screen: int = 1,
+) -> None:
     """
     FOUP 공정 라벨 heartbeat 보간 — **FOUP 전용** ``event_start_sim_time``·``proc_sec`` 만 사용.
 
@@ -6917,7 +6977,12 @@ def _apply_foup_playback_progress_from_sim(p3: Dict[str, Any], tnow: float) -> N
             proc = 0.0
     if proc <= 1e-9:
         return
-    el = max(0.0, min(float(proc), float(tnow) - float(t0)))
+    try:
+        from .json_playback_timing import playback_foup_heartbeat_elapsed
+
+        el = playback_foup_heartbeat_elapsed(ext, int(screen), p3, float(tnow))
+    except Exception:
+        el = max(0.0, min(float(proc), float(tnow) - float(t0)))
     pct = min(100.0, 100.0 * el / float(proc))
     p3["elapsed"] = f"{el:.1f}"
     p3["total"] = f"{float(proc):.1f}"
@@ -6943,6 +7008,98 @@ def _build_playback_time_tick_payload(
     )
 
 
+def _playback_timeline_progress_matches_active_job(
+    ext: Any,
+    _screen: int,
+    payload: Dict[str, Any],
+    active: Dict[str, Any],
+) -> bool:
+    """타임라인 progress 가 현재 JSON wall active job 과 동일 이벤트인지."""
+    try:
+        pt0 = float(
+            str(payload.get("event_start_sim_time") or payload.get("t") or "0").strip() or "0"
+        )
+    except Exception:
+        pt0 = 0.0
+    try:
+        at0 = float(
+            str(
+                active.get("_event_start_sim")
+                or active.get("t")
+                or active.get("sim_time")
+                or "0"
+            ).strip()
+            or "0"
+        )
+    except Exception:
+        at0 = 0.0
+    if at0 > 1e-9 and abs(float(pt0) - float(at0)) > 0.35:
+        return False
+    pe = _normalize_anim_event_seq(
+        str(payload.get("event_seq") or payload.get("sequence_name") or "")
+    )
+    ae = _normalize_anim_event_seq(
+        str(active.get("event") or active.get("event_seq") or "")
+    )
+    if pe and ae and pe != ae:
+        move_family = {"MOVE", "MOVE_TRANSFERING", "MOVE_REQ"}
+        if not (pe in move_family and ae in move_family):
+            return False
+    try:
+        from pathlib import Path as _Path
+
+        pf = _Path(str(payload.get("linked_anim_json") or "")).name.lower()
+        af = _Path(str(active.get("file") or "")).name.lower()
+        if pf and af and pf != af:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _should_apply_playback_timeline_progress(
+    ext: Any,
+    screen: int,
+    payload: Dict[str, Any],
+) -> bool:
+    """
+    재생 중 타임라인 progress emit — JSON wall 이 켜진 레일에서는 active job 만 반영.
+
+    ``sim_now`` 선행으로 arrived_inout progress 가 arrived_ep2 JSON 중에 덮어쓰는 것을 막는다.
+    """
+    if not bool(getattr(ext, "_sim_playback_started", False)):
+        return True
+    ev_u = str(payload.get("event_seq") or payload.get("sequence_name") or "").strip().upper()
+    if ev_u == "FOUP_PROCESS":
+        return True
+    scr = max(1, int(screen))
+    try:
+        from .control_sim_playback_gate import is_json_wall_busy
+        from .sim_parallel_rails import classify_sim_rail, parallel_moves_enabled
+
+        parallel = bool(parallel_moves_enabled())
+        rail = str(payload.get("sim_rail") or "").strip().lower()
+        if parallel and not rail:
+            rail = str(classify_sim_rail(ev_u) or "").strip().lower()
+
+        if parallel and rail in ("oht", "move"):
+            if not is_json_wall_busy(ext, scr, rail=rail):
+                return True
+            active = _screen_active_json_job(ext, scr, rail=rail)
+            if not isinstance(active, dict) or not active:
+                return False
+            return _playback_timeline_progress_matches_active_job(ext, scr, payload, active)
+
+        if is_json_wall_busy(ext, scr):
+            active = _screen_active_json_job(ext, scr)
+            if not isinstance(active, dict) or not active:
+                return False
+            return _playback_timeline_progress_matches_active_job(ext, scr, payload, active)
+    except Exception:
+        return True
+    return True
+
+
 def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
     p = payload if isinstance(payload, dict) else {}
     scr_opt = _resolve_payload_sim_screen(ext, p)
@@ -6959,7 +7116,8 @@ def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
     playback_tick = _is_playback_time_tick_payload(p)
     if not playback_tick:
         try:
-            apply_engine_progress_payload(ext, scr, p)
+            if _should_apply_playback_timeline_progress(ext, scr, p):
+                apply_engine_progress_payload(ext, scr, p)
         except Exception:
             pass
     if not playback_tick:
@@ -8412,7 +8570,25 @@ def _remember_foup_playback_progress(ext: Any, screen: int, ep_id: str, payload:
     if not isinstance(slot, dict):
         slot = {}
         by[sk] = slot
-    slot[ep] = dict(payload or {})
+    new = dict(payload or {})
+    try:
+        import time as _time
+
+        from .json_playback_timing import foup_phase_identity
+
+        phase_id = foup_phase_identity(new)
+        prev = slot.get(ep)
+        if not isinstance(prev, dict) or str(prev.get("_foup_phase_id") or "") != phase_id:
+            new["_foup_phase_id"] = phase_id
+            new["_foup_phase_wall_start"] = float(_time.monotonic())
+        else:
+            new["_foup_phase_id"] = phase_id
+            ws = prev.get("_foup_phase_wall_start")
+            if ws is not None:
+                new["_foup_phase_wall_start"] = ws
+    except Exception:
+        pass
+    slot[ep] = new
 
 
 def _forget_foup_playback_progress(ext: Any, screen: int, ep_id: str) -> None:
@@ -8459,7 +8635,7 @@ def _refresh_foup_playback_heartbeat(ext: Any, screen: int, tnow: float) -> None
             continue
         p["status"] = "RUNNING"
         try:
-            _apply_foup_playback_progress_from_sim(p, float(tnow))
+            _apply_foup_playback_progress_from_sim(p, float(tnow), ext=ext, screen=scr)
         except Exception:
             pass
         _update_sim_progress(ext, p)
