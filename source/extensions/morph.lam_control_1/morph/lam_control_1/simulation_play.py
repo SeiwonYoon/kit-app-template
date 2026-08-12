@@ -5958,6 +5958,7 @@ def _run_csv_timed_playback_process_only(
     paused_in_json: bool = False,
     play_screen: int = 1,
     kit_ext: Any = None,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
 ) -> None:
     """공정만보기: CSV ``t`` 스케줄 유지, dwell·JSON 없는 빈 대기만 생략. 배속 1x."""
     si = max(1, int(play_screen or current_csv_play_screen()))
@@ -5999,6 +6000,7 @@ def _run_csv_timed_playback_process_only(
         apply_csv_play_initial_wafer_visibility_for_screen(
             int(play_screen or 1),
             kit_ext=kit_ext,
+            dwells=dwells,
         )
 
     resume = max(0.0, float(resume_from_csv_sec or 0.0))
@@ -6214,6 +6216,68 @@ def _run_csv_timed_playback_process_only(
         )
 
 
+@dataclass(frozen=True)
+class NonAtmFirstWaferInit:
+    """dwell 타임라인 — 웨이퍼(FOUP+slot)별 첫 위치가 ATM 팔이 아닐 때 Play 시작 SSOT."""
+
+    lot_id: str
+    cassette_slot: int
+    foup_index: int
+    slot_key: str
+    label: str
+
+    @property
+    def foup_slot_key(self) -> str:
+        return f"foup{int(self.foup_index)}_{int(self.cassette_slot)}"
+
+
+def collect_non_atm_first_wafer_inits(
+    dwells: Optional[Sequence["DwellRecord"]],
+) -> Tuple[NonAtmFirstWaferInit, ...]:
+    """
+    웨이퍼(``foup_index`` + ``cassette_slot``)별 시간순 첫 dwell — ATM 팔이 아니면 반환.
+
+    CSV / Federation / GET URL 모두 ``DwellRecord`` 로 통일된 뒤 이 함수만 사용한다.
+    """
+    if not dwells:
+        return ()
+    out: List[NonAtmFirstWaferInit] = []
+    tours: Dict[Tuple[int, int], List["DwellRecord"]] = {}
+    for d in dwells:
+        try:
+            wk = (max(1, min(3, int(d.foup_index))), int(d.cassette_slot))
+        except Exception:
+            continue
+        tours.setdefault(wk, []).append(d)
+    for key in tours:
+        tours[key].sort(key=lambda x: float(x.start_sec))
+    for (foup_i, cassette_slot), tour in sorted(
+        tours.items(), key=lambda kv: (kv[0][0], kv[0][1])
+    ):
+        if not tour:
+            continue
+        first = tour[0]
+        sk = str(getattr(first, "slot_key", "") or "").strip()
+        if not sk or sk == LOGICAL_SLOT_ATM_ARM:
+            continue
+        try:
+            label = f"{int(cassette_slot):02d}"
+        except Exception:
+            label = str(cassette_slot or "").strip()
+        if not label:
+            continue
+        out.append(
+            NonAtmFirstWaferInit(
+                lot_id=str(getattr(first, "lot_id", "") or "").strip(),
+                cassette_slot=int(cassette_slot),
+                foup_index=int(foup_i),
+                slot_key=sk,
+                label=str(label),
+            )
+        )
+    return tuple(out)
+
+
 # CSV Play 시작 시 1회만 보이게 할 FOUP 슬롯 (각 25).
 _CSV_PLAY_INITIAL_VISIBLE_FOUP_SLOT_KEYS = frozenset(
     f"foup{f}_{i}" for f in (1, 2, 3) for i in range(1, 26)
@@ -6254,15 +6318,13 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
     *,
     screen: int = 1,
     sync_label_tracker: bool = True,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
 ) -> Tuple[int, int]:
-    """FOUP1~3×25 show, 그 외 슬롯·팔 wafer hide (stage 에 존재하는 경로만).
+    """Play 시작/정지 — FOUP baseline + (dwell) ATM 팔 외 최초 위치 wafer show.
 
     Args:
-        sync_label_tracker: True(재생 시작) 시 FOUP baseline 라벨 복구.
-            False(정지 초기화) 시 트래커는 건드리지 않음 — 호출측에서 clear.
-
-    Returns:
-        (show_ok_count, hide_ok_count)
+        sync_label_tracker: True(재생 시작) 시 FOUP baseline + non-ATM-first 라벨·점유.
+        dwells: 파싱된 dwell — None 이면 FOUP-only baseline (기존과 동일).
     """
     from .lam_wafer_prim_paths import resolve_wafer_prim_path_on_stage
 
@@ -6270,6 +6332,10 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
     wafer_map = load_wafer_prim_by_slot_key()
     if not stage or not wafer_map:
         return (0, 0)
+
+    non_atm_first = collect_non_atm_first_wafer_inits(dwells)
+    show_slot_keys = {e.slot_key for e in non_atm_first}
+    hide_foup_keys = {e.foup_slot_key for e in non_atm_first}
 
     show_ok = 0
     hide_ok = 0
@@ -6280,12 +6346,26 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
         p = resolve_wafer_prim_path_on_stage(stage, slot_key, (raw or "").strip())
         if not p:
             continue
-        if slot_key in _CSV_PLAY_INITIAL_VISIBLE_FOUP_SLOT_KEYS:
+        sk = str(slot_key or "").strip()
+        if sk in show_slot_keys:
             if p in seen_show:
                 continue
             seen_show.add(p)
             if _set_wafer_prim_visible(stage, p, True):
                 show_ok += 1
+        elif sk in _CSV_PLAY_INITIAL_VISIBLE_FOUP_SLOT_KEYS:
+            if sk in hide_foup_keys:
+                if p in seen_hide:
+                    continue
+                seen_hide.add(p)
+                if _set_wafer_prim_visible(stage, p, False):
+                    hide_ok += 1
+            else:
+                if p in seen_show:
+                    continue
+                seen_show.add(p)
+                if _set_wafer_prim_visible(stage, p, True):
+                    show_ok += 1
         else:
             if p in seen_hide:
                 continue
@@ -6293,9 +6373,12 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
             if _set_wafer_prim_visible(stage, p, False):
                 hide_ok += 1
 
+    extra_note = ""
+    if non_atm_first:
+        extra_note = f" · non-ATM-first {len(non_atm_first)}"
     print(
         f"{_PRINT_PREFIX} CSV Play 웨이퍼 visibility: "
-        f"화면{si} FOUP show {show_ok} · 기타 hide {hide_ok}",
+        f"화면{si} show {show_ok} · hide {hide_ok}{extra_note}",
         flush=True,
     )
     if sync_label_tracker:
@@ -6306,15 +6389,25 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
             )
 
             tracker = get_wafer_label_tracker(si)
-            # UI 체크와 무관하게 tracking baseline 유지 (표시만 화면별 on/off).
             tracker.reset_foup_baseline(wafer_map, stage=stage)
+            if non_atm_first:
+                tracker.apply_non_atm_first_baseline(
+                    non_atm_first,
+                    wafer_map=wafer_map,
+                    stage=stage,
+                )
             notify_wafer_label_tracker_changed(si)
         except Exception:
             pass
         try:
-            from .lam_floorplan_occupancy import seed_floorplan_foup_baseline
+            from .lam_floorplan_occupancy import (
+                seed_floorplan_foup_baseline,
+                seed_non_atm_first_wafer_occupancy,
+            )
 
             seed_floorplan_foup_baseline(si)
+            if non_atm_first:
+                seed_non_atm_first_wafer_occupancy(si, non_atm_first)
             try:
                 from .lam_viewport_floorplan_panel import refresh_floorplan_panels_ui
 
@@ -6490,11 +6583,13 @@ def apply_csv_play_initial_wafer_visibility_for_screen(
     *,
     wait: bool = True,
     kit_ext: Any = None,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
 ) -> None:
     """화면별 Stage 에 wafer visibility 초기화."""
     from .lam_sequence_engine import _dispatch_main, _dispatch_main_wait, _stage
 
     si = max(1, int(screen))
+    dwells_use = list(dwells) if dwells else None
 
     def _do_in_main() -> None:
         st = None
@@ -6513,7 +6608,11 @@ def apply_csv_play_initial_wafer_visibility_for_screen(
                 flush=True,
             )
             return
-        apply_csv_play_initial_wafer_visibility_on_stage(st, screen=si)
+        apply_csv_play_initial_wafer_visibility_on_stage(
+            st,
+            screen=si,
+            dwells=dwells_use,
+        )
 
     if wait:
         if _dispatch_main_wait(_do_in_main, timeout=15.0):
@@ -6805,6 +6904,7 @@ def run_csv_timed_playback(
     paused_in_json: bool = False,
     play_screen: int = 1,
     kit_ext: Any = None,
+    dwells: Optional[Sequence["DwellRecord"]] = None,
 ) -> None:
     """CSV ``eqp_start_tm`` 스케줄 재생 (``speed_scale`` 배속).
 
@@ -6828,6 +6928,7 @@ def run_csv_timed_playback(
             paused_in_json=paused_in_json,
             play_screen=int(play_screen or 1),
             kit_ext=kit_ext,
+            dwells=dwells,
         )
         return
 
@@ -6883,6 +6984,7 @@ def run_csv_timed_playback(
         apply_csv_play_initial_wafer_visibility_for_screen(
             int(play_screen or 1),
             kit_ext=kit_ext,
+            dwells=dwells,
         )
 
     # -------------------------------------------------------------------------
@@ -7251,6 +7353,7 @@ def run_simulation_from_csv(
             paused_in_json=bool(paused_in_json),
             play_screen=si,
             kit_ext=kit_ext,
+            dwells=list(cached.dwells) if cached.dwells else None,
         )
     finally:
         set_csv_playback_compact_log(False)
@@ -10997,6 +11100,8 @@ __all__ = [
     "apply_csv_play_initial_wafer_visibility",
     "apply_csv_play_initial_wafer_visibility_for_screen",
     "apply_csv_play_initial_wafer_visibility_on_stage",
+    "collect_non_atm_first_wafer_inits",
+    "NonAtmFirstWaferInit",
     "reset_csv_play_stop_initial_state",
     "collect_csv_play_motion_reset_prim_paths",
     "apply_material_binding_to_prim",

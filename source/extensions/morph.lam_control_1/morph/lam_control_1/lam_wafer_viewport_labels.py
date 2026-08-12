@@ -421,6 +421,75 @@ class WaferNumberLabelTracker:
             self._bump_revision()
             return len(self._prim_to_label)
 
+    def apply_non_atm_first_baseline(
+        self,
+        entries: Sequence[Any],
+        *,
+        wafer_map: Optional[Dict[str, str]] = None,
+        stage: Optional[Usd.Stage] = None,
+    ) -> int:
+        """
+        Play 시작 — dwell 첫 위치가 ATM 팔이 아닌 웨이퍼: slot/arm 번호 + FOUP baseline 제거.
+
+        ``reset_foup_baseline`` 직후 호출. 공정 JSON 은 건드리지 않는다.
+        """
+        from .lam_wafer_prim_paths import (
+            LOGICAL_SLOT_VTM_EE_L,
+            LOGICAL_SLOT_VTM_EE_R,
+            resolve_wafer_prim_path_on_stage,
+        )
+
+        wm = wafer_map or load_wafer_prim_by_slot_key()
+        if not wm or not entries:
+            return 0
+        n = 0
+        with self._lock:
+            for ent in entries:
+                try:
+                    label = str(getattr(ent, "label", "") or "").strip()
+                    sk = str(getattr(ent, "slot_key", "") or "").strip()
+                    foup_sk = str(getattr(ent, "foup_slot_key", "") or "").strip()
+                    if not label or not sk:
+                        continue
+                    foup_raw = (wm.get(foup_sk) or "").strip()
+                    if foup_raw and stage is not None:
+                        foup_p = resolve_wafer_prim_path_on_stage(stage, foup_sk, foup_raw)
+                        if foup_p:
+                            fk = _normalize_path_key(foup_p)
+                            self._prim_to_label.pop(fk, None)
+                            self._foup_baseline_paths.discard(fk)
+                    raw = (wm.get(sk) or "").strip()
+                    if not raw:
+                        continue
+                    path = (
+                        resolve_wafer_prim_path_on_stage(stage, sk, raw)
+                        if stage is not None
+                        else raw
+                    )
+                    if not path:
+                        continue
+                    if sk in (LOGICAL_SLOT_VTM_EE_L, LOGICAL_SLOT_VTM_EE_R):
+                        self._assign_label_to_arm_paths(
+                            label,
+                            arm_sk=sk,
+                            arm_p=path,
+                            stage=stage,
+                        )
+                        n += 1
+                        continue
+                    placed = False
+                    for alias in _path_alias_set(path, sk, path, stage=stage):
+                        if alias:
+                            self._prim_to_label[alias] = label
+                            placed = True
+                    if placed:
+                        n += 1
+                except Exception:
+                    continue
+            if n:
+                self._bump_revision()
+        return n
+
     def _label_on_arm_for_place(self, arm_p: str, arm_sk: str) -> Optional[str]:
         """place 시 SLOT show 가 ARM hide 보다 먼저 올 때 — 팔 prim 에 아직 붙어 있는 번호."""
         if arm_sk:

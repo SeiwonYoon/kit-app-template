@@ -411,6 +411,41 @@ def seed_floorplan_foup_baseline(screen: int = 1) -> int:
     return get_floorplan_occupancy(screen).seed_foup_baseline()
 
 
+def seed_non_atm_first_wafer_occupancy(
+    screen: int,
+    entries: Sequence[Any],
+) -> int:
+    """Play 시작 — non-ATM-first 웨이퍼: FOUP 점유 제거 + 실제 slot(PM1~5 파란 라벨) 반영."""
+    if not entries:
+        return 0
+    t = get_floorplan_occupancy(int(screen))
+    n = 0
+    with t._lock:
+        for ent in entries:
+            try:
+                sk = str(getattr(ent, "slot_key", "") or "").strip()
+                foup_sk = str(getattr(ent, "foup_slot_key", "") or "").strip()
+                label = str(getattr(ent, "label", "") or "").strip()
+                if not sk or not label:
+                    continue
+                if foup_sk:
+                    t._remove_slot_unlocked(foup_sk)
+                if t._set_slot_unlocked(sk, label):
+                    n += 1
+            except Exception:
+                continue
+        if n:
+            t._revision += 1
+            listeners = list(t._listeners)
+            snap = t._snapshot_unlocked()
+        else:
+            listeners = []
+            snap = {}
+    if listeners:
+        t._emit(listeners, snap)
+    return n
+
+
 __all__ = [
     "ALL_OCC_REGIONS",
     "MULTI_REGIONS",
@@ -419,5 +454,6 @@ __all__ = [
     "clear_floorplan_occupancy",
     "get_floorplan_occupancy",
     "seed_floorplan_foup_baseline",
+    "seed_non_atm_first_wafer_occupancy",
     "slot_key_to_floorplan_region",
 ]
