@@ -13844,8 +13844,9 @@ def _restore_sim_prim_motion_to_initial(
     포트 LOT 숨김/보임(visibility)은 건드리지 않는다 — transform·TBS_OFFSET·인스턴스 replay 만 복원.
     ``preserve_foup_offsets=True`` 이면 FOUP 공정 플래그를 지우지 않고 EP plateau 를 유지한다.
     ``motion_only=True`` 이면 JSON 직전용 — ``end_replay_mode`` 는 생략하되,
-    대상 TIMESAMPLES 인스턴스는 ``begin_replay`` + mapping invalidate + start-frame
-    evaluate 로 end-pose 잔류를 지운다.
+    대상 TIMESAMPLES 인스턴스는 **이번 JSON step 의 start_frame/end_frame** 으로
+    ``scheduler.begin_replay`` + ``start(reset=True)`` + ``stop`` 하여 end-pose 잔류를
+    JSON 시작 시점에 지운다 (TIMESAMPLES 스텝 시작까지 기다리지 않음).
     ``preserve_peer_channel=True`` 이면 병렬 타 레일 보호 — 채널 전체 stop/scheduler.stop_all 생략,
     이번 JSON prim 만 중지·리셋한다.
     ``extra_steps_only=True`` 이면 path 목록을 ``extra_steps`` 만으로 한정(다른 runner last_steps 제외).
@@ -14054,23 +14055,112 @@ def _restore_sim_prim_motion_to_initial(
                 finally:
                     pop_usd_context_name(prev_ctx)
 
-        # motion_only(JSON 직전): 이번 JSON prim 만 range_start 로 스냅.
-        # invalidate/rebuild 없이 evaluate 만 하면 end-frame default 가 USD 에 남아
-        # 다음 공정이 끝 프레임에서 시작하는 회귀가 난다 (직렬·병렬 공통).
-        if motion_only and paths:
+        # motion_only(JSON 직전): TIMESAMPLES end-pose 잔재를 JSON **시작**에 지운다.
+        # 직렬·병렬 공통 — 이전에는 leftover ``inst.range`` + ad-hoc evaluate 만 해서
+        # write 가 실패하거나 이번 JSON ``start_frame`` 과 어긋나면, TIMESAMPLES 스텝이
+        # ``scheduler.start(reset=True)`` 할 때까지 이전 끝 프레임이 그대로 보였다.
+        if motion_only and (paths or extra_steps):
             try:
+                from .tbs_id_resolver import resolve_step_ref
                 from .tbs_lam_sequence_editor import _range_start_seconds_for_instance
                 from .tbs_split_composed_loader import get_split_runtime_for_usd_context
+                from .tbs_types import StepRef
 
                 path_set = {str(p).strip() for p in paths if str(p).strip().startswith("/")}
                 rt_ctx = get_split_runtime_for_usd_context(ext, usd_context_name)
                 reg = rt_ctx.registry if rt_ctx is not None else getattr(ext, "_tbs_registry", None)
                 ev = rt_ctx.evaluator if rt_ctx is not None else getattr(ext, "_tbs_evaluator", None)
+                sch = rt_ctx.scheduler if rt_ctx is not None else getattr(ext, "_tbs_scheduler", None)
+
+                # extra_steps 는 parsed(이번 JSON) → last_steps 순. prim 당 **첫** 스펙 유지
+                # → 이번 JSON TIMESAMPLES 의 start_frame/end_frame 이 우선.
+                playback_specs: Dict[str, Tuple[str, float, float]] = {}
+                if extra_steps and reg is not None and hasattr(reg, "all_instances"):
+                    for step in extra_steps:
+                        if not step:
+                            continue
+                        t_u = str(step.get("type") or "").upper()
+                        # TIMESAMPLES_REPLAY 만 Option E start/stop 스냅 대상.
+                        if t_u != "TIMESAMPLES_REPLAY":
+                            continue
+                        play = step.get("play") if isinstance(step.get("play"), dict) else {}
+
+                        def _val(key: str, default: Any = None, _play=play, _step=step):
+                            if key in _play and _play[key] is not None:
+                                return _play[key]
+                            if key in _step and _step[key] is not None:
+                                return _step[key]
+                            return default
+
+                        s_frame = _val("start_frame", None)
+                        e_frame = _val("end_frame", None)
+                        if (
+                            s_frame is not None
+                            and e_frame is not None
+                            and int(e_frame) > int(s_frame)
+                        ):
+                            range_mode = "frames"
+                            range_start = float(s_frame)
+                            range_end = float(e_frame)
+                        else:
+                            range_mode = str(_val("range_mode", "full") or "full")
+                            range_start = float(
+                                _val("range_start", _val("ratio_start", 0.0)) or 0.0
+                            )
+                            range_end = float(
+                                _val("range_end", _val("ratio_end", 0.0)) or 0.0
+                            )
+                        ref = StepRef.from_dict(step.get("ref"))
+                        pp = (ref.prim_path or "").strip()
+                        if not pp.startswith("/"):
+                            try:
+                                resolved = resolve_step_ref(reg.all_instances(), ref)
+                                inst_r = getattr(resolved, "instance", None)
+                                if inst_r is not None:
+                                    pp = str(getattr(inst_r, "prim_path", "") or "").strip()
+                            except Exception:
+                                pp = ""
+                        if not pp.startswith("/") or pp in playback_specs:
+                            continue
+                        playback_specs[pp] = (range_mode, range_start, range_end)
+                        path_set.add(pp)
+
                 if reg is not None and hasattr(reg, "all_instances") and path_set:
                     for inst in reg.all_instances():
                         pp = str(getattr(inst, "prim_path", "") or "").strip()
                         if pp not in path_set:
                             continue
+                        spec = playback_specs.get(pp)
+                        # TIMESAMPLES: 스텝 재생과 동일한 start(reset)+즉시 stop → start_frame 홀드.
+                        if sch is not None and spec is not None:
+                            try:
+                                fn_begin = getattr(sch, "begin_replay_mode", None)
+                                if callable(fn_begin):
+                                    fn_begin(pp)
+                            except Exception:
+                                pass
+                            try:
+                                rm, rs, re_ = spec
+                                ok = bool(
+                                    sch.start(
+                                        pp,
+                                        reset=True,
+                                        speed=1.0,
+                                        loop=False,
+                                        range_mode=str(rm),
+                                        range_start=float(rs),
+                                        range_end=float(re_),
+                                    )
+                                )
+                                if ok:
+                                    try:
+                                        sch.stop(pp)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                            continue
+                        # step range 없는 registry path — leftover inst.range start 로라도 스냅.
                         try:
                             inst.virtual_time = _range_start_seconds_for_instance(inst)
                             inst.state = "stopped"
@@ -14078,8 +14168,6 @@ def _restore_sim_prim_motion_to_initial(
                             pass
                         if ev is None:
                             continue
-                        # begin_replay 유지/재활성 — Option E 는 active prim 만 default write.
-                        # end_replay 는 호출하지 않는다(끝 자세 잠금 해제·마스터 타임코드 노출 방지).
                         try:
                             fn_begin = getattr(ev, "begin_replay_mode", None)
                             if callable(fn_begin):
