@@ -6416,6 +6416,21 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
                 pass
         except Exception:
             pass
+        try:
+            from .lam_viewport_overlay_state import seed_foup_counts_from_non_atm_first
+
+            n_foup_seed = seed_foup_counts_from_non_atm_first(
+                non_atm_first,
+                screen=si,
+            )
+            if n_foup_seed:
+                print(
+                    f"{_PRINT_PREFIX} FOUP 집계 seed: 화면{si} "
+                    f"non-ATM-first {n_foup_seed} → 진행중 반영",
+                    flush=True,
+                )
+        except Exception:
+            pass
     return (show_ok, hide_ok)
 
 

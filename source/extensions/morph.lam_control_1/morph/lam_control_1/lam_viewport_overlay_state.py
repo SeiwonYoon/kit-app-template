@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Set, Tuple
 
 _FOUP_ATM_EVENT_RE = re.compile(r"^atm_foup([1-3])_(pick|place)$", re.IGNORECASE)
 
@@ -135,6 +135,8 @@ _foup_counts_by_screen: Dict[int, Dict[int, FoupCounts]] = {
 _foup_counted_schedule_keys_by_screen: Dict[int, set[Tuple[Any, ...]]] = {
     1: set(_foup_counted_schedule_keys),
 }
+# Play 시작 시 non-ATM-first 로 이미 pick 집계된 (foup_index, cassette_slot)
+_foup_pre_picked_wafers_by_screen: Dict[int, Set[Tuple[int, int]]] = {1: set()}
 
 
 def _ensure_foup_screen(screen: int) -> Tuple[Dict[int, FoupCounts], set[Tuple[Any, ...]]]:
@@ -1008,6 +1010,7 @@ def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> N
         if screen is None:
             _foup_counts_by_screen.clear()
             _foup_counted_schedule_keys_by_screen.clear()
+            _foup_pre_picked_wafers_by_screen.clear()
             _foup_counts = dict(blank)
             _foup_counted_schedule_keys = set()
             _ensure_foup_screen(1)
@@ -1015,6 +1018,7 @@ def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> N
         si = max(1, int(screen))
         _foup_counts_by_screen[si] = dict(blank)
         _foup_counted_schedule_keys_by_screen[si] = set()
+        _foup_pre_picked_wafers_by_screen[si] = set()
         if si == 1:
             _foup_counts = dict(blank)
             _foup_counted_schedule_keys = set()
@@ -1028,6 +1032,72 @@ def schedule_entry_foup_match_key(sched: Any) -> Tuple[Any, ...]:
         str(getattr(sched, "category", "") or ""),
         str(getattr(sched, "event_name", "") or ""),
     )
+
+
+def _cassette_slot_from_schedule_entry(sched: Any) -> int:
+    """실행 스케줄 → cassette_slot (``simulation_play._status_wafer_lot_from_schedule_entry`` 동일)."""
+    try:
+        cas = int(getattr(sched, "cassette_slot", 0) or 0)
+    except Exception:
+        cas = 0
+    if cas <= 0:
+        title = str(getattr(sched, "title_ko", "") or "")
+        m = re.search(r"웨이퍼#(\d+)", title)
+        if m:
+            try:
+                cas = int(m.group(1))
+            except Exception:
+                cas = 0
+    return max(0, cas)
+
+
+def seed_foup_counts_from_non_atm_first(
+    inits: Sequence[Any],
+    *,
+    screen: int = 1,
+    total: int = 25,
+) -> int:
+    """Play 시작 — dwell non-ATM-first wafer 를 FOUP **진행중** 집계에 반영.
+
+    wafer visibility/라벨 초기화와 동일한 ``NonAtmFirstWaferInit`` 목록을 받아
+    FOUP1~3 ``picked_count`` 를 seed 한다. 이후 ``atm_foup{n}_pick`` JSON 이
+    같은 wafer 에 대해 실행되면 pick 중복 집계하지 않는다. ``place`` 는 항상
+    ``placed_back_count`` 를 올려 **완료** 카운트가 증가한다.
+    """
+    si = max(1, int(screen))
+    t = max(1, int(total))
+    picked_by_foup: Dict[int, int] = {1: 0, 2: 0, 3: 0}
+    pre_picked: Set[Tuple[int, int]] = set()
+    for ent in inits or ():
+        try:
+            fi = max(1, min(3, int(getattr(ent, "foup_index", 0) or 0)))
+            cs = int(getattr(ent, "cassette_slot", 0) or 0)
+        except Exception:
+            continue
+        if cs <= 0:
+            continue
+        key = (fi, cs)
+        if key in pre_picked:
+            continue
+        pre_picked.add(key)
+        picked_by_foup[fi] = picked_by_foup.get(fi, 0) + 1
+
+    with _lock:
+        global _foup_counted_schedule_keys
+        counts, _ = _ensure_foup_screen(si)
+        for fi in (1, 2, 3):
+            n = int(picked_by_foup.get(fi, 0) or 0)
+            counts[fi] = FoupCounts(total=t, picked_count=n, placed_back_count=0)
+            if si == 1:
+                _foup_counts[fi] = counts[fi]
+        _foup_pre_picked_wafers_by_screen[si] = set(pre_picked)
+        _foup_counted_schedule_keys_by_screen[si] = set()
+        if si == 1:
+            _foup_counted_schedule_keys = set()
+
+    n_total = sum(picked_by_foup.values())
+    notify_foup_counts_ui_refresh(screen=si)
+    return n_total
 
 
 def record_foup_event_from_schedule_entry(
@@ -1053,18 +1123,24 @@ def record_foup_event_from_schedule_entry(
     foup_n = int(m.group(1))
     po = str(m.group(2) or "").strip().lower()
     row_key = schedule_entry_foup_match_key(sched)
+    cas = _cassette_slot_from_schedule_entry(sched)
     with _lock:
         counts, counted = _ensure_foup_screen(si)
         if row_key in counted:
             return False
         counted.add(row_key)
         c = counts.get(foup_n, FoupCounts())
+        pre_picked = _foup_pre_picked_wafers_by_screen.get(si) or set()
         if po == "pick":
-            counts[foup_n] = FoupCounts(
-                total=c.total,
-                picked_count=c.picked_count + 1,
-                placed_back_count=c.placed_back_count,
-            )
+            # Play 시작 seed 로 이미 FOUP 밖(진행중)인 wafer — pick 중복 방지
+            if cas > 0 and (foup_n, cas) in pre_picked:
+                pre_picked.discard((foup_n, cas))
+            else:
+                counts[foup_n] = FoupCounts(
+                    total=c.total,
+                    picked_count=c.picked_count + 1,
+                    placed_back_count=c.placed_back_count,
+                )
         elif po == "place":
             counts[foup_n] = FoupCounts(
                 total=c.total,
@@ -1147,6 +1223,7 @@ __all__ = [
     "set_foup_counts",
     "get_foup_counts",
     "reset_all_foup_counts",
+    "seed_foup_counts_from_non_atm_first",
     "schedule_entry_foup_match_key",
     "record_foup_event_from_schedule_entry",
     "notify_foup_counts_ui_refresh",

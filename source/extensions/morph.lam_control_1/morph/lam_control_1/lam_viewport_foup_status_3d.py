@@ -1,7 +1,8 @@
 """FOUP 진행상황 3D 패널 (기능 #2) — v1.
 
-- pick/place 집계: ``lam_viewport_overlay_state.record_foup_event_from_schedule_entry``
-  (JSON 블록 실행 시작 시 ``atm_foup{n}_pick|place`` — FOUP 1~3 구분).
+- pick/place 집계: ``lam_viewport_overlay_state``
+  · Play 시작: ``seed_foup_counts_from_non_atm_first`` (slot 최초 wafer → 진행중)
+  · JSON 실행: ``record_foup_event_from_schedule_entry`` (``atm_foup{n}_pick|place``)
 - 이 패널은 ``get_foup_counts`` 를 읽어 3D 텍스트만 갱신한다.
 """
 
