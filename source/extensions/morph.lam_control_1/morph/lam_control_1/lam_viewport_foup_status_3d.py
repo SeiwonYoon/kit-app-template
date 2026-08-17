@@ -158,6 +158,12 @@ def reset_foup_play_session(*, screen: Optional[int] = None) -> None:
         reset_all_foup_counts(screen=screen)
     except Exception:
         pass
+    try:
+        from .lam_device_label_highlight import reset_device_label_highlights
+
+        reset_device_label_highlights(screen=screen)
+    except Exception:
+        pass
     if screen is not None:
         inst = _ACTIVE_FOUP_PANEL_BY_SCREEN.get(int(screen))
         if inst is not None:

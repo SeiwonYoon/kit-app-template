@@ -409,7 +409,7 @@ DEVICE_LABEL_DEFAULT_PADDING_PX: Tuple[int, int] = (10, 6)
 # 글자 폭 추정 후 전체에 곱하는 여유 배율 + 추가 px (sc.Label 실측보다 넉넉히)
 DEVICE_LABEL_CHAR_WIDTH_FACTOR: float = 1.05
 DEVICE_LABEL_WIDTH_SLACK_PX: int = 12
-# PM1~PM5 기기 라벨 — wafer 점유 시 배경 (읽기 전용 occupancy 미러, 시뮬 무영향)
+# PM1~PM5 / Airlock 강조 시 3D 기기 라벨 배경 (시뮬·평면도 occupancy 와 독립)
 DEVICE_LABEL_PM_OCCUPIED_BG_RGBA: Tuple[float, float, float, float] = (
     0.12,
     0.40,
@@ -458,7 +458,16 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
         offset_xyz_m=(-0.20, 0.0, 0.15),
         color_rgba=(1.0, 1.0, 1.0, 1.0),
         font_size=16,
+    ),
+    DeviceLabelSpec(
+        name="Airlock1",
+        # prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
+        prim_path="/World/aaa_1/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r07__________B_1114",
+        offset_xyz_m=(-0.20, 0.0, 0.15),
+        color_rgba=(1.0, 1.0, 1.0, 1.0),
+        font_size=16,
     )
+
 ]
 
 

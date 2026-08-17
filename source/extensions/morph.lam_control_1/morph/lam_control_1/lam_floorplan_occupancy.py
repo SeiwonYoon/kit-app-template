@@ -415,7 +415,7 @@ def seed_non_atm_first_wafer_occupancy(
     screen: int,
     entries: Sequence[Any],
 ) -> int:
-    """Play 시작 — non-ATM-first 웨이퍼: FOUP 점유 제거 + 실제 slot(PM1~5 파란 라벨) 반영."""
+    """Play 시작 — non-ATM-first 웨이퍼: FOUP 점유 제거 + 실제 slot 평면도 점유 반영."""
     if not entries:
         return 0
     t = get_floorplan_occupancy(int(screen))

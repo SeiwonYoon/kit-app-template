@@ -3907,6 +3907,12 @@ def _csv_play_timeline_row_begin_entry(
         record_foup_event_from_schedule_entry(sched, screen=si)
     except Exception:
         pass
+    try:
+        from .lam_device_label_highlight import record_device_label_event_from_schedule_entry
+
+        record_device_label_event_from_schedule_entry(sched, screen=si)
+    except Exception:
+        pass
     state_line = _status_state_line_from_schedule_entry(sched)
     cas, lot = _status_wafer_lot_from_schedule_entry(sched)
     sess = csv_play_screen_session(si)
@@ -6429,6 +6435,12 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
                     f"non-ATM-first {n_foup_seed} → 진행중 반영",
                     flush=True,
                 )
+        except Exception:
+            pass
+        try:
+            from .lam_device_label_highlight import seed_airlock_highlights_from_dwells
+
+            seed_airlock_highlights_from_dwells(dwells, screen=si)
         except Exception:
             pass
     return (show_ok, hide_ok)

@@ -1,6 +1,11 @@
 """기기정보보기 3D 라벨 (기능 #3) — v1.
 
 설정(SSOT): lam_viewport_overlay_config.DEVICE_LABEL_SPECS
+
+배경색 규칙 (3D 라벨만):
+- PM1~5: 항상 강조(파란) — wafer 점유 무관.
+- AL1/AL2 (Airlock): ``lam_device_label_highlight`` — VTM airlock JSON 시작 시
+  강조, ATM airlock JSON 시작 시 spec 기본색. Play 시작 dwell seed 포함.
 """
 
 from __future__ import annotations
@@ -23,8 +28,17 @@ from .lam_viewport_overlay_config import (
 from .lam_viewport_overlay_state import get_toggle_device_labels
 
 _PM_LABEL_NAME_RE = re.compile(r"^PM([1-5])$", re.IGNORECASE)
-# 실무 라벨: ``PM5 strip`` 등 — PM1~5 문자열이 포함되면 점유 파란 배경 대상
+# 실무 라벨: ``PM5 strip`` 등 — PM1~5 문자열이 포함되면 항상 강조(파란) 배경
 _PM_LABEL_NAME_CONTAINS_RE = re.compile(r"\bPM([1-5])\b", re.IGNORECASE)
+# Airlock 1·2 — ``AL1`` / ``AirLock1`` / ``Airlock 2`` 등
+_AL_LABEL_NAME_RE = re.compile(
+    r"^(?:AL|AirLock|Airlock)\s*([12])$",
+    re.IGNORECASE,
+)
+_AL_LABEL_NAME_CONTAINS_RE = re.compile(
+    r"\b(?:AL|AirLock|Airlock)\s*([12])\b",
+    re.IGNORECASE,
+)
 
 if TYPE_CHECKING:
     from .lam_viewport import LamViewport
@@ -202,6 +216,37 @@ def _estimate_label_panel_size(
     return w, h
 
 
+def refresh_device_labels_panel_ui(*, screen: Optional[int] = None) -> None:
+    """기기 라벨 배경/위치 갱신 (메인 스레드 post_update)."""
+    if screen is not None:
+        targets = [_ACTIVE_DEVICE_PANEL_BY_SCREEN.get(int(screen))]
+    else:
+        targets = list(_ACTIVE_DEVICE_PANEL_BY_SCREEN.values())
+
+    def _ui() -> None:
+        for inst in targets:
+            if inst is None or not getattr(inst, "_built", False):
+                continue
+            try:
+                inst._rebuild()
+            except Exception:
+                pass
+
+    try:
+        import omni.kit.app as kapp  # type: ignore
+
+        app = kapp.get_app()
+        if app is not None:
+            app.post_update(_ui)
+            return
+    except Exception:
+        pass
+    try:
+        _ui()
+    except Exception:
+        pass
+
+
 class LamViewportDeviceLabels3d:
     def __init__(
         self,
@@ -221,19 +266,19 @@ class LamViewportDeviceLabels3d:
         self._built = False
         self._post_update_sub: Any = None
         self._last_tick = 0.0
-        self._last_occ_rev: int = -1
+        self._last_hl_rev: int = -1
         self._sync_token: float = 0.0
 
-    def _floorplan_occ_revision(self) -> int:
+    def _highlight_revision(self) -> int:
         try:
-            from .lam_floorplan_occupancy import get_floorplan_occupancy
+            from .lam_device_label_highlight import get_device_label_highlight_revision
 
-            return int(get_floorplan_occupancy(self._screen).revision)
+            return int(get_device_label_highlight_revision(screen=self._screen))
         except Exception:
             return -1
 
-    def _pm_region_for_spec_name(self, name: str) -> Optional[str]:
-        """라벨명에 ``PM1``~``PM5`` 가 포함되면 평면도 region ``pm1``~``pm5``.
+    def _pm_index_for_spec_name(self, name: str) -> Optional[int]:
+        """라벨명에 ``PM1``~``PM5`` 가 포함되면 chamber index 1~5.
 
         정확 일치(``PM5``)뿐 아니라 ``PM5 strip`` 등 실무 표기도 인식.
         ``PM10`` 오인 방지를 위해 단어 경계(``\\b``) 사용.
@@ -244,22 +289,33 @@ class LamViewportDeviceLabels3d:
         m = _PM_LABEL_NAME_RE.fullmatch(raw) or _PM_LABEL_NAME_CONTAINS_RE.search(raw)
         if not m:
             return None
-        return f"pm{int(m.group(1))}"
+        return int(m.group(1))
+
+    def _airlock_index_for_spec_name(self, name: str) -> Optional[int]:
+        """라벨명 ``AL1`` / ``AirLock2`` 등 → airlock index 1|2."""
+        raw = str(name or "").strip()
+        if not raw:
+            return None
+        m = _AL_LABEL_NAME_RE.fullmatch(raw) or _AL_LABEL_NAME_CONTAINS_RE.search(raw)
+        if not m:
+            return None
+        return int(m.group(1))
 
     def _bg_rgba_for_spec(self, spec: DeviceLabelSpec) -> Tuple[float, float, float, float]:
-        """PM1~5 만 점유 시 파란 배경. 그 외·비점유는 spec 기본색."""
+        """PM1~5: 항상 강조(파란). Airlock 1·2: VTM/초기 seed 시 강조, ATM JSON 시 기본."""
         base = tuple(spec.bg_rgba)
-        region = self._pm_region_for_spec_name(spec.name)
-        if not region:
-            return base  # type: ignore[return-value]
-        try:
-            from .lam_floorplan_occupancy import get_floorplan_occupancy
+        if self._pm_index_for_spec_name(spec.name) is not None:
+            return tuple(DEVICE_LABEL_PM_OCCUPIED_BG_RGBA)  # type: ignore[return-value]
+        al_n = self._airlock_index_for_spec_name(spec.name)
+        if al_n is not None:
+            try:
+                from .lam_device_label_highlight import is_airlock_highlighted
 
-            snap = get_floorplan_occupancy(self._screen).snapshot()
-            if snap.get(region):
-                return tuple(DEVICE_LABEL_PM_OCCUPIED_BG_RGBA)  # type: ignore[return-value]
-        except Exception:
-            pass
+                if is_airlock_highlighted(al_n, screen=self._screen):
+                    return tuple(DEVICE_LABEL_PM_OCCUPIED_BG_RGBA)  # type: ignore[return-value]
+            except Exception:
+                pass
+            return base  # type: ignore[return-value]
         return base  # type: ignore[return-value]
 
     def _device_labels_toggle_on(self) -> bool:
@@ -530,12 +586,12 @@ class LamViewportDeviceLabels3d:
             if not self._device_labels_toggle_on():
                 self.destroy()
                 return
-            occ_rev = self._floorplan_occ_revision()
+            hl_rev = self._highlight_revision()
             now = time.time()
-            # 점유 변경 시 즉시 배경 갱신, 그 외(위치 추적)는 0.5s 주기
-            if occ_rev == self._last_occ_rev and (now - self._last_tick) < 0.5:
+            # airlock 강조 변경 시 즉시, 그 외(prim 위치 추적)는 0.5s 주기
+            if hl_rev == self._last_hl_rev and (now - self._last_tick) < 0.5:
                 return
-            self._last_occ_rev = occ_rev
+            self._last_hl_rev = hl_rev
             self._last_tick = now
             self._rebuild()
 
@@ -618,5 +674,6 @@ __all__ = [
     "LamViewportDeviceLabels3d",
     "force_remove_all_device_sceneviews",
     "force_remove_device_sceneviews",
+    "refresh_device_labels_panel_ui",
 ]
 
