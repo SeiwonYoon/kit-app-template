@@ -910,6 +910,15 @@ def _process_merged_response(
                     csv_win._lam_used_foup_count = used_n
                 except Exception:
                     pass
+            try:
+                from .lam_foup_lot_display import apply_foup_lot_display_from_lot_map
+
+                apply_foup_lot_display_from_lot_map(
+                    lot_map if isinstance(lot_map, dict) else {},
+                    screen=screen,
+                )
+            except Exception:
+                pass
             _fed_diag(
                 "S10_foup_usage_count",
                 "defer extra hide until post-fly prim phase",

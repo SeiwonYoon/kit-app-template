@@ -216,6 +216,11 @@ FEDERATION_BEARER_TOKEN: str = ""
 # 추가 헤더 예: {"X-API-Key": "..."}
 FEDERATION_EXTRA_HEADERS: dict = {}
 
+# FOUP lot_id / FOUP 슬롯 웨이퍼 번호 3D 라벨 색 (RGBA 0~1) — FOUP1 파랑 / FOUP2 빨강 / FOUP3 초록
+FOUP1_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.20, 0.55, 1.00, 1.00)
+FOUP2_LOT_COLOR_RGBA: tuple[float, float, float, float] = (1.00, 0.25, 0.25, 1.00)
+FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.00)
+
 
 def default_viewport_split_count() -> int:
     """로드·유지할 화면 런타임 수. 표시 개수와 무관하게 항상 2."""
@@ -305,6 +310,9 @@ __all__ = [
     "FEDERATION_VERBOSE_PARSE_LOG",
     "FEDERATION_BEARER_TOKEN",
     "FEDERATION_EXTRA_HEADERS",
+    "FOUP1_LOT_COLOR_RGBA",
+    "FOUP2_LOT_COLOR_RGBA",
+    "FOUP3_LOT_COLOR_RGBA",
     "default_viewport_split_count",
     "default_csv_play_screen_count",
     "default_visible_screens",

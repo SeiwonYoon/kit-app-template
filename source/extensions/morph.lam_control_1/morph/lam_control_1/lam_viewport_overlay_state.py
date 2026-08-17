@@ -137,6 +137,8 @@ _foup_counted_schedule_keys_by_screen: Dict[int, set[Tuple[Any, ...]]] = {
 }
 # Play 시작 시 non-ATM-first 로 이미 pick 집계된 (foup_index, cassette_slot)
 _foup_pre_picked_wafers_by_screen: Dict[int, Set[Tuple[int, int]]] = {1: set()}
+# FOUP index → lot_id (파싱·Play 시작 시 갱신) — 화면별
+_foup_lot_id_by_index_by_screen: Dict[int, Dict[int, str]] = {1: {}}
 
 
 def _ensure_foup_screen(screen: int) -> Tuple[Dict[int, FoupCounts], set[Tuple[Any, ...]]]:
@@ -997,6 +999,36 @@ def get_foup_counts(foup_index: int, *, screen: int = 1) -> FoupCounts:
         return counts.get(fi, FoupCounts())
 
 
+def set_foup_lot_id_by_index(
+    mapping: Dict[int, str],
+    *,
+    screen: int = 1,
+) -> None:
+    """FOUP1~3 → lot_id (3D 패널·웨이퍼 라벨 색용)."""
+    si = max(1, int(screen))
+    cleaned: Dict[int, str] = {}
+    for fi, lid in (mapping or {}).items():
+        fi_i = int(fi)
+        if fi_i not in (1, 2, 3):
+            continue
+        text = str(lid or "").strip()
+        if text and not text.startswith("__anon_"):
+            cleaned[fi_i] = text
+    with _lock:
+        _foup_lot_id_by_index_by_screen[si] = cleaned
+
+
+def get_lot_id_for_foup(foup_index: int, *, screen: int = 1) -> str:
+    """표시용 lot_id — 없으면 ``FOUP{n}``."""
+    fi = int(foup_index)
+    with _lock:
+        m = _foup_lot_id_by_index_by_screen.get(max(1, int(screen)), {})
+        lid = str(m.get(fi) or "").strip()
+    if lid and not lid.startswith("__anon_"):
+        return lid
+    return f"FOUP{fi}"
+
+
 def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> None:
     """FOUP1~3 pick/place 집계 초기화 — CSV 정지(초기화) 시 호출."""
     with _lock:
@@ -1011,6 +1043,7 @@ def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> N
             _foup_counts_by_screen.clear()
             _foup_counted_schedule_keys_by_screen.clear()
             _foup_pre_picked_wafers_by_screen.clear()
+            _foup_lot_id_by_index_by_screen.clear()
             _foup_counts = dict(blank)
             _foup_counted_schedule_keys = set()
             _ensure_foup_screen(1)
@@ -1019,6 +1052,7 @@ def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> N
         _foup_counts_by_screen[si] = dict(blank)
         _foup_counted_schedule_keys_by_screen[si] = set()
         _foup_pre_picked_wafers_by_screen[si] = set()
+        _foup_lot_id_by_index_by_screen[si] = {}
         if si == 1:
             _foup_counts = dict(blank)
             _foup_counted_schedule_keys = set()
@@ -1222,6 +1256,8 @@ __all__ = [
     "get_active_schedule_keys",
     "set_foup_counts",
     "get_foup_counts",
+    "set_foup_lot_id_by_index",
+    "get_lot_id_for_foup",
     "reset_all_foup_counts",
     "seed_foup_counts_from_non_atm_first",
     "schedule_entry_foup_match_key",

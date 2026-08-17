@@ -6443,6 +6443,12 @@ def apply_csv_play_initial_wafer_visibility_on_stage(
             seed_airlock_highlights_from_dwells(dwells, screen=si)
         except Exception:
             pass
+        try:
+            from .lam_foup_lot_display import apply_foup_lot_display_from_dwells
+
+            apply_foup_lot_display_from_dwells(dwells, screen=si)
+        except Exception:
+            pass
     return (show_ok, hide_ok)
 
 

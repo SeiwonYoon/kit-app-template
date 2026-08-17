@@ -390,7 +390,7 @@ FOUP_PANEL_OFFSET_XYZ_M: Tuple[float, float, float] = (-20, -35, 0.10)
 
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
 FOUP_PANEL_WIDTH_PX: int = 220
-FOUP_PANEL_HEIGHT_PX: int = 94
+FOUP_PANEL_HEIGHT_PX: int = 120
 FOUP_PANEL_LINE_HEIGHT_PX: int = 26
 FOUP_PANEL_FONT_SIZE: int = 15
 FOUP_PANEL_BG_RGBA: Tuple[float, float, float, float] = (0.10, 0.12, 0.15, 0.75)

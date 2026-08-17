@@ -3,7 +3,8 @@
 - pick/place 집계: ``lam_viewport_overlay_state``
   · Play 시작: ``seed_foup_counts_from_non_atm_first`` (slot 최초 wafer → 진행중)
   · JSON 실행: ``record_foup_event_from_schedule_entry`` (``atm_foup{n}_pick|place``)
-- 이 패널은 ``get_foup_counts`` 를 읽어 3D 텍스트만 갱신한다.
+- 4줄: lot_id(FOUP별 색) / current/total / 진행중 / 완료
+- 웨이퍼 번호 3D 라벨 색: ``lam_foup_lot_display`` — FOUP·팔·장비 등 표시 위치와 무관하게 lot 색 유지
 """
 
 from __future__ import annotations
@@ -28,8 +29,10 @@ from .lam_viewport_overlay_config import (
 from .lam_viewport_overlay_state import (
     FoupCounts,
     get_foup_counts,
+    get_lot_id_for_foup,
     get_toggle_foup_status,
 )
+from .lam_foup_lot_display import foup_lot_color_rgba
 
 if TYPE_CHECKING:
     from .lam_viewport import LamViewport
@@ -46,6 +49,8 @@ _ACTIVE_FOUP_PANEL_BY_SCREEN: Dict[int, "LamFoupStatus3dPanel"] = {}
 # SceneView id → screen (화면1 전역 OFF 가 화면2 를 지우지 않도록)
 _ACTIVE_SCENEVIEW_SCREEN: Dict[int, int] = {}
 
+_PANEL_LINE_COUNT = 4
+_WHITE = (1.0, 1.0, 1.0, 1.0)
 _PANEL_W = int(FOUP_PANEL_WIDTH_PX)
 _PANEL_H = int(FOUP_PANEL_HEIGHT_PX)
 _LINE_H = int(FOUP_PANEL_LINE_HEIGHT_PX)
@@ -602,8 +607,19 @@ class LamFoupStatus3dPanel:
 
     def _ensure_ui_built(self) -> None:
         """Scene graph는 1회만 만든 뒤, text/transform만 업데이트."""
-        if not self._built or not self._root or self._panel_nodes:
+        if not self._built or not self._root:
             return
+        if self._panel_nodes:
+            for node in self._panel_nodes.values():
+                if len(list(node.get("labels") or [])) != _PANEL_LINE_COUNT:
+                    self._panel_nodes.clear()
+                    try:
+                        self._root.clear()
+                    except Exception:
+                        pass
+                    break
+            else:
+                return
         with self._root:
             # NOTE: 앵커 prim이 없는 FOUP은 노드를 만들지 않는다.
             for fi in (1, 2, 3):
@@ -631,13 +647,13 @@ class LamFoupStatus3dPanel:
                         left = -_PANEL_W // 2 + 10
                         top = _PANEL_H // 2 - 20
                         labels = []
-                        for i in range(3):
+                        for i in range(_PANEL_LINE_COUNT):
                             y = top - i * _LINE_H
                             with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
                                 lbl = sc.Label(
                                     "",
                                     size=int(FOUP_PANEL_FONT_SIZE),
-                                    color=(1.0, 1.0, 1.0, 1.0),
+                                    color=_WHITE,
                                     alignment=ui.Alignment.LEFT_CENTER,
                                 )
                                 labels.append(lbl)
@@ -682,15 +698,20 @@ class LamFoupStatus3dPanel:
                 pass
 
             c: FoupCounts = get_foup_counts(fi, screen=self._screen)
-            lines = [
-                f"FOUP{fi}  {c.current_in_foup_now}/{c.total}",
-                f"진행중 {c.in_process_count}",
-                f"완료 {c.done_count}",
+            lot_id = get_lot_id_for_foup(fi, screen=self._screen)
+            lot_color = foup_lot_color_rgba(fi)
+            lines: list[tuple[str, tuple[float, float, float, float]]] = [
+                (lot_id, lot_color),
+                (f"{c.current_in_foup_now}/{c.total}", _WHITE),
+                (f"진행중 {c.in_process_count}", _WHITE),
+                (f"완료 {c.done_count}", _WHITE),
             ]
             lbls = list(node.get("labels") or [])
             for i in range(min(len(lbls), len(lines))):
+                text, color = lines[i]
                 try:
-                    lbls[i].text = lines[i]
+                    lbls[i].text = text
+                    lbls[i].color = color
                 except Exception:
                     pass
 
@@ -712,7 +733,7 @@ class LamFoupStatus3dPanel:
                 left = -panel_w // 2 + 10
                 top = panel_h // 2 - 18
                 lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-                for i, ln in enumerate(lines[:3]):
+                for i, ln in enumerate(lines[:_PANEL_LINE_COUNT]):
                     y = top - i * _LINE_H
                     with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
                         sc.Label(
