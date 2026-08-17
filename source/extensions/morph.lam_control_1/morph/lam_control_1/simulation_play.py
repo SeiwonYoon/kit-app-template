@@ -485,6 +485,7 @@ def _csv_playback_config_tag() -> str:
             tag = f"{tag}|occ_order_swap=2|occ=1"
     except Exception:
         tag = f"{tag}|occ_order_swap=2|atm_end_foup=2"
+    tag = f"{tag}|json_t0=1"
     return tag
 
 
@@ -2446,6 +2447,67 @@ def _reattach_block_schedules(
     return out
 
 
+def _align_playback_timeline_to_first_json(
+    schedule: List[CsvPlaybackScheduleEntry],
+    blocks: Optional[List[CsvTimedPlaybackBlock]] = None,
+) -> Tuple[List[CsvPlaybackScheduleEntry], List[CsvTimedPlaybackBlock]]:
+    """선행 dwell-only 구간을 재생 시계에서 제외 — 첫 JSON 이 t≈0.
+
+    dwell 파싱·JSON 스텝·초기 wafer visibility 는 변경하지 않는다.
+    타임라인·재생 ``time_sec`` 만 shift. 첫 이벤트가 이미 JSON 이면 no-op.
+    """
+    blks = list(blocks or [])
+    lead_is_dwell_only = False
+    json_times: List[float] = []
+
+    if blks:
+        ordered = sorted(blks, key=lambda b: (float(b.time_sec), int(b.sort_order)))
+        lead_is_dwell_only = not bool(ordered[0].steps)
+        json_times = [float(b.time_sec) for b in blks if b.steps]
+    elif schedule:
+        ordered_s = sorted(
+            schedule, key=lambda e: (float(e.time_sec), int(e.sort_order))
+        )
+        lead_is_dwell_only = str(ordered_s[0].category or "") == "dwell"
+        json_times = [
+            float(e.time_sec)
+            for e in schedule
+            if str(e.category or "") in ("pick", "transfer", "place")
+        ]
+    else:
+        return schedule, blks
+
+    if not lead_is_dwell_only or not json_times:
+        return schedule, blks
+    shift = min(json_times)
+    if shift < 1e-9:
+        return schedule, blks
+
+    def _shift_sec(t: float) -> float:
+        return float(t) - shift
+
+    new_schedule = [replace(e, time_sec=_shift_sec(e.time_sec)) for e in schedule]
+    new_blocks: List[CsvTimedPlaybackBlock] = []
+    for b in blks:
+        sched = b.schedule
+        if sched is not None:
+            sched = replace(sched, time_sec=_shift_sec(sched.time_sec))
+        new_blocks.append(
+            replace(
+                b,
+                time_sec=_shift_sec(b.time_sec),
+                schedule=sched,
+            )
+        )
+    if not is_csv_playback_compact_log():
+        print(
+            f"{_PRINT_PREFIX} playback timeline: leading dwell {shift:.3f}s skipped "
+            f"(first JSON → t=0)",
+            flush=True,
+        )
+    return new_schedule, new_blocks
+
+
 def _block_from_schedule(
     sched: CsvPlaybackScheduleEntry,
     steps: LamSimJsonSteps,
@@ -3501,6 +3563,7 @@ def build_csv_playback_schedule_meta(
         schedule, None, dwells=dwells
     )
     schedule, _ = _apply_atm_foup_place_gap_serial(schedule, None, dwells=dwells)
+    schedule, _ = _align_playback_timeline_to_first_json(schedule, None)
     return _stamp_schedule_row_ids(schedule)
 
 
@@ -3677,6 +3740,7 @@ def build_and_cache_csv_playback(
     schedule, blocks, occ_diags = _maybe_apply_occupancy_scheduler(
         dwells, schedule, blocks
     )
+    schedule, blocks = _align_playback_timeline_to_first_json(schedule, blocks)
     try:
         st = path.stat()
         mtime_ns, size = int(st.st_mtime_ns), int(st.st_size)
@@ -3733,6 +3797,7 @@ def build_and_cache_from_dwells(
     schedule, blocks, occ_diags = _maybe_apply_occupancy_scheduler(
         dwells, schedule, blocks
     )
+    schedule, blocks = _align_playback_timeline_to_first_json(schedule, blocks)
     t_end = float(dwells[-1].end_sec) if dwells else 0.0
     cached = CachedCsvPlayback(
         path=path,
@@ -3753,7 +3818,8 @@ def build_and_cache_from_dwells(
 
 def build_csv_timed_playback_blocks(dwells: List[DwellRecord]) -> List[CsvTimedPlaybackBlock]:
     """CSV 시각 동기 재생용 블록만 반환."""
-    _, blocks = build_csv_playback_plan(dwells)
+    schedule, blocks = build_csv_playback_plan(dwells)
+    _, blocks = _align_playback_timeline_to_first_json(schedule, blocks)
     return blocks
 
 
@@ -3767,7 +3833,8 @@ def build_csv_playback_steps_from_dwells(dwells: List[DwellRecord]) -> LamSimJso
 
 def build_csv_playback_schedule(dwells: List[DwellRecord]) -> List[CsvPlaybackScheduleEntry]:
     """시간순 스케줄 항목만 반환 (스텝 빌드 포함 — 캐시된 plan 이 있으면 그 schedule 사용)."""
-    schedule, _ = build_csv_playback_plan(dwells)
+    schedule, blocks = build_csv_playback_plan(dwells)
+    schedule, _ = _align_playback_timeline_to_first_json(schedule, blocks)
     return schedule
 
 
@@ -10114,6 +10181,9 @@ class LamSimulationCsvPlayWindow:
                 )
                 schedule, blocks, occ_diags = _maybe_apply_occupancy_scheduler(
                     dwells, schedule, blocks
+                )
+                schedule, blocks = _align_playback_timeline_to_first_json(
+                    schedule, blocks
                 )
                 try:
                     st = path.stat()
