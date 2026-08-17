@@ -92,13 +92,20 @@ def _ensure_panel_occ_keys(occ: Optional[Dict[str, str]]) -> Dict[str, str]:
     return out
 
 
-def _renewal_plan_floor(ext: Any, screen: int) -> float:
-    """Deprecated — per-event hold 사용."""
-    return 0.0
+def _normalize_sparse_delta(delta: Optional[Mapping[str, str]]) -> Dict[str, str]:
+    """renewal delta — 변경 포트만 (``_ensure_panel_occ_keys`` 금지)."""
+    out: Dict[str, str] = {}
+    if not isinstance(delta, Mapping):
+        return out
+    for k, v in delta.items():
+        ku = str(k or "").strip().upper()
+        if ku:
+            out[ku] = str(v or "")
+    return out
 
 
 def reset_playback_renewal_runtime(ext: Any, screen: int) -> None:
-    """다음 gated JSON event 시작·재생 종료 — renewal applied/hold/panel 잔상 제거."""
+    """다음 gated JSON event 시작·재생 종료 — renewal applied/hold 잔상 제거."""
     scr = int(screen)
     clear_renewal_occ_hold(ext, scr)
     sk = str(scr)
@@ -106,12 +113,6 @@ def reset_playback_renewal_runtime(ext: Any, screen: int) -> None:
         by = getattr(ext, "_sim_playback_renewal_applied_by_screen", None)
         if isinstance(by, dict):
             by.pop(sk, None)
-    except Exception:
-        pass
-    try:
-        pan = getattr(ext, "_sim_playback_renewal_panel_by_screen", None)
-        if isinstance(pan, dict):
-            pan.pop(sk, None)
     except Exception:
         pass
 
@@ -335,15 +336,27 @@ def _renewal_apply_dedupe(src: Dict[str, Any]) -> str:
     return f"{ev}|{t0:.4f}|{bn}"
 
 
+def _last_panel_occ(ext: Any, screen: int) -> Dict[str, str]:
+    try:
+        by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        raw = by.get(str(int(screen))) if isinstance(by, dict) else None
+        if isinstance(raw, dict):
+            return _ensure_panel_occ_keys(dict(raw))
+    except Exception:
+        pass
+    return _ensure_panel_occ_keys({})
+
+
 def mark_playback_renewal_wall_applied(
     ext: Any,
     screen: int,
     src: Dict[str, Any],
     *,
     sync_t: Optional[float] = None,
-    occ: Optional[Dict[str, str]] = None,
+    delta: Optional[Dict[str, str]] = None,
+    pre_occ: Optional[Dict[str, str]] = None,
 ) -> None:
-    """renewal wall 콜백 — 현재 job dedupe + 패널 occ SSOT 기록."""
+    """renewal wall — dedupe + pre_occ 스냅샷 + delta hold."""
     if not isinstance(src, dict):
         return
     sk = str(int(screen))
@@ -356,29 +369,19 @@ def mark_playback_renewal_wall_applied(
         by[sk] = dedupe
     except Exception:
         pass
-    if isinstance(occ, dict) and occ:
-        try:
-            pan = getattr(ext, "_sim_playback_renewal_panel_by_screen", None)
-            if not isinstance(pan, dict):
-                pan = {}
-                ext._sim_playback_renewal_panel_by_screen = pan
-            pan[sk] = {
-                "dedupe": dedupe,
-                "sync_t": float(sync_t) if sync_t is not None else 0.0,
-                "occ": _ensure_panel_occ_keys(dict(occ)),
-            }
-        except Exception:
-            pass
-
-
-def _renewal_wall_applied_for_src(ext: Any, screen: int, src: Dict[str, Any]) -> bool:
-    try:
-        by = getattr(ext, "_sim_playback_renewal_applied_by_screen", None)
-        if not isinstance(by, dict):
-            return False
-        return str(by.get(str(int(screen)), "") or "") == _renewal_apply_dedupe(dict(src))
-    except Exception:
-        return False
+    dlt = dict(delta or {}) or _occ_delta_for_anim_src(dict(src))
+    pre = _ensure_panel_occ_keys(dict(pre_occ or _last_panel_occ(ext, int(screen))))
+    st = float(sync_t) if sync_t is not None and float(sync_t) > 1e-9 else 0.0
+    if dlt or st > 1e-9 or any(str(v or "").strip() for v in pre.values()):
+        _set_renewal_occ_hold(
+            ext,
+            int(screen),
+            float(st),
+            dedupe=dedupe,
+            delta=dlt or None,
+            pre_occ=pre,
+            wall_applied=True,
+        )
 
 
 def _renewal_wall_applied_for_screen(ext: Any, screen: int) -> bool:
@@ -392,22 +395,11 @@ def _renewal_wall_applied_for_screen(ext: Any, screen: int) -> bool:
         return False
 
 
-def _renewal_panel_record(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
-    try:
-        pan = getattr(ext, "_sim_playback_renewal_panel_by_screen", None)
-        if not isinstance(pan, dict):
-            return None
-        rec = pan.get(str(int(screen)))
-        return rec if isinstance(rec, dict) else None
-    except Exception:
-        return None
-
-
 def _renewal_stored_sync_t(ext: Any, screen: int) -> Optional[float]:
-    rec = _renewal_panel_record(ext, int(screen))
-    if isinstance(rec, dict):
+    hold = _get_renewal_occ_hold(ext, int(screen))
+    if isinstance(hold, dict):
         try:
-            st = rec.get("sync_t")
+            st = hold.get("sync_t")
             if st is not None and float(st) > 1e-9:
                 return float(st)
         except Exception:
@@ -526,19 +518,12 @@ def playback_plan_frontier_sim(ext: Any, screen: int) -> Optional[float]:
     return float(min(candidates))
 
 
-def _set_renewal_plan_floor(ext: Any, screen: int, t_floor: float) -> None:
-    """Deprecated — no-op."""
-    return
-
-
 def _get_renewal_occ_hold(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
     try:
         by = getattr(ext, "_sim_playback_renewal_occ_hold_by_screen", None)
         if isinstance(by, dict):
             hold = by.get(str(int(screen)))
-            if isinstance(hold, dict) and (
-                isinstance(hold.get("delta"), dict) or isinstance(hold.get("occ"), dict)
-            ):
+            if isinstance(hold, dict) and isinstance(hold.get("delta"), dict):
                 return hold
     except Exception:
         pass
@@ -548,30 +533,22 @@ def _get_renewal_occ_hold(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
 def _set_renewal_occ_hold(
     ext: Any,
     screen: int,
-    occ: Dict[str, str],
     sync_t: float,
     *,
     dedupe: str = "",
     delta: Optional[Dict[str, str]] = None,
-    milestone_occ: Optional[Dict[str, str]] = None,
+    pre_occ: Optional[Dict[str, str]] = None,
     wall_applied: bool = False,
 ) -> None:
-    """
-    renewal hold — **이벤트 delta 만** 저장 (전체 panel 금지).
-
-    병렬 A∥B 동시 renewal 시 **키별 merge** (덮어쓰기로 EP/BP delta 가
-    사라지며 INOUT만 남는 버그 방지).
-
-    과거: plan milestone 전체 occ 를 hold 하면 sync_t 시점의 **다른 포트 미래 LOT** 까지
-    sim_now 이전에 패널에 떠 LOT 깜빡임이 난다.
-    """
+    """renewal hold — renewal 직전 ``pre_occ`` + 누적 ``delta`` (전체 panel occ 금지)."""
     try:
         by = getattr(ext, "_sim_playback_renewal_occ_hold_by_screen", None)
         if not isinstance(by, dict):
             by = {}
             ext._sim_playback_renewal_occ_hold_by_screen = by
+        sk = str(int(screen))
+        prev = by.get(sk)
         dlt: Dict[str, str] = {}
-        prev = by.get(str(int(screen)))
         if isinstance(prev, dict) and isinstance(prev.get("delta"), dict):
             for k, v in prev["delta"].items():
                 ku = str(k).strip().upper()
@@ -582,30 +559,25 @@ def _set_renewal_occ_hold(
                 ku = str(k).strip().upper()
                 if ku:
                     dlt[ku] = str(v or "")
+        pre_keep: Dict[str, str] = {}
+        if isinstance(prev, dict) and isinstance(prev.get("pre_occ"), dict):
+            pre_keep = _ensure_panel_occ_keys(dict(prev["pre_occ"]))
+        elif isinstance(pre_occ, dict) and pre_occ:
+            pre_keep = _ensure_panel_occ_keys(dict(pre_occ))
         sync_keep = float(sync_t)
         try:
             if isinstance(prev, dict) and prev.get("sync_t") is not None:
                 sync_keep = max(float(prev.get("sync_t")), float(sync_t))
         except Exception:
             sync_keep = float(sync_t)
-        entry: Dict[str, Any] = {
+        by[sk] = {
+            "pre_occ": dict(pre_keep),
             "delta": dict(dlt),
-            # 레거시 키 — 읽기 시 delta 우선
-            "occ": dict(dlt) if dlt else dict(occ or {}),
             "sync_t": float(sync_keep),
             "dedupe": str(dedupe or ""),
             "wall_applied": bool(wall_applied)
             or bool(isinstance(prev, dict) and prev.get("wall_applied")),
         }
-        if isinstance(milestone_occ, dict) and milestone_occ:
-            entry["milestone_occ"] = {
-                str(k).strip().upper(): str(v or "")
-                for k, v in milestone_occ.items()
-                if str(k or "").strip()
-            }
-        elif isinstance(prev, dict) and isinstance(prev.get("milestone_occ"), dict):
-            entry["milestone_occ"] = dict(prev["milestone_occ"])
-        by[str(int(screen))] = entry
     except Exception:
         pass
 
@@ -650,21 +622,21 @@ def _merge_renewal_delta_onto_plan(
     plan_occ: Dict[str, str],
     delta: Mapping[str, str],
 ) -> Dict[str, str]:
+    """전체 패널 occ + **희소** delta (delta에 없는 포트는 유지)."""
     out = _ensure_panel_occ_keys(dict(plan_occ))
-    for k, v in (delta or {}).items():
-        ku = str(k).strip().upper()
-        if ku in out or ku:
+    sparse = _normalize_sparse_delta(delta)
+    for ku, v in sparse.items():
+        if ku in out:
             out[ku] = str(v or "")
     # BP→EP delta 가 EP 에 lot 을 올렸으면 동일 lot INOUT 잔상 제거
     try:
-        for k, v in (delta or {}).items():
-            ku = str(k).strip().upper()
+        for ku, v in sparse.items():
             lot = str(v or "").strip()
             if ku.startswith("EP") and lot and str(out.get("INOUT") or "").strip() == lot:
                 out["INOUT"] = ""
     except Exception:
         pass
-    return _ensure_panel_occ_keys(dict(out))
+    return out
 
 
 def _clear_renewal_occ_hold(ext: Any, screen: int) -> None:
@@ -859,70 +831,36 @@ def _find_wall_renewal_step(sched: Any, src: Dict[str, Any]) -> Optional[Any]:
     return best
 
 
-def _resolve_renewal_panel_occ_for_wall(
+def _resolve_renewal_sync_t_for_wall(
     ext: Any,
     screen: int,
-    snap: PlaybackPlanSnapshot,
     src: Dict[str, Any],
-    sim_ref: float,
-) -> Tuple[Optional[float], Optional[Dict[str, str]]]:
-    """
-    renewal wall 패널 occ — schedule step ``renewal_full_panel_occ`` 우선.
-
-    milestone search 만 쓰면 EP1 lot 유지·EP2 오염 등 partial occ 로 깜빡일 수 있다.
-    """
+) -> Optional[float]:
+    """renewal wall 시각 — schedule step sync, 없으면 runtime 계산."""
     scr = int(screen)
     src_r = dict(src)
     sync_t: Optional[float] = None
-    occ: Optional[Dict[str, str]] = None
 
     sched = get_stored_playback_schedule_for_screen(ext, scr)
     step = _find_wall_renewal_step(sched, src_r)
     if step is not None:
         try:
-            from .playback_renewal_ports import (
-                renewal_full_panel_occ_for_step,
-                renewal_playback_port_sync_for_step,
-            )
+            from .playback_renewal_ports import renewal_playback_port_sync_for_step
 
             st = step.t_playback_port_sync
             if st is None:
                 st = renewal_playback_port_sync_for_step(step)
             if st is not None and float(st) > 1e-9:
                 sync_t = float(st)
-
-            base_occ: Optional[Dict[str, str]] = None
-            try:
-                t_evt = float(step.t_event or 0.0)
-                if t_evt > 1e-9:
-                    base_occ = dict(snap.ports_at(max(0.0, t_evt - 1e-4)))
-            except Exception:
-                base_occ = None
-
-            occ_step = renewal_full_panel_occ_for_step(step, base_occ=base_occ)
-            if isinstance(occ_step, dict) and occ_step:
-                occ = _ensure_panel_occ_keys(dict(occ_step))
         except Exception:
             sync_t = None
-            occ = None
-
-    if occ is None:
-        mile = _find_plan_renewal_milestone_for_event(snap, src_r, float(sim_ref))
-        if mile is not None:
-            try:
-                if sync_t is None or float(sync_t) <= 1e-9:
-                    sync_t = float(mile[0])
-                occ = _ensure_panel_occ_keys(dict(mile[1]))
-            except Exception:
-                pass
 
     if sync_t is None or float(sync_t) <= 1e-9:
         try:
             sync_t = _resolve_renewal_sync_t_for_playback(ext, scr, src_r)
         except Exception:
             sync_t = None
-
-    return sync_t, occ
+    return sync_t
 
 
 def clear_runtime_bar_rows(ext: Any, *, screen: Optional[int] = None) -> None:
@@ -931,74 +869,35 @@ def clear_runtime_bar_rows(ext: Any, *, screen: Optional[int] = None) -> None:
     return
 
 
-def _renewal_occ_for_playback_sync(
+def _renewal_merged_panel_occ(
     ext: Any,
     screen: int,
-    sim_now: float,
-    plan_occ: Dict[str, str],
-) -> Tuple[Dict[str, str], float]:
-    """레거시 no-op — renewal 포트는 plan lookup adjust + wall 직접 apply 만."""
-    del ext, screen
-    return _ensure_panel_occ_keys(dict(plan_occ)), float(sim_now)
-
-
-def _dedupe_panel_lot_ghosts(occ: Dict[str, str]) -> Dict[str, str]:
-    """같은 LOT 이 여러 포트에 보이면 EP > BP > INOUT 우선으로 하나만 남긴다."""
-    out = dict(occ or {})
-    by_lot: Dict[str, List[str]] = {}
-    for k, v in out.items():
-        lid = str(v or "").strip()
-        ku = str(k or "").strip().upper()
-        if not lid or not ku:
-            continue
-        by_lot.setdefault(lid, []).append(ku)
-    for lid, ports in by_lot.items():
-        if len(ports) <= 1:
-            continue
-        best = ""
-        for p in ports:
-            if p.startswith("EP"):
-                best = p
-                break
-        if not best:
-            for p in ports:
-                if p.startswith("BP"):
-                    best = p
-                    break
-        if not best:
-            best = ports[0]
-        for p in ports:
-            if p != best:
-                out[p] = ""
-    return out
-
-
-def _renewal_panel_occ_if_applied(ext: Any, screen: int) -> Optional[Dict[str, str]]:
-    """
-    renewal wall 적용 후 패널 occ SSOT.
-
-    active job dedupe 가 heartbeat 마다 어긋나도 화면 applied + panel store 를 우선한다.
-    JSON wall 해제 후 공정 대기까지 유지 (다음 gated event 시작 시 reset).
-    """
-    scr = int(screen)
-    if not _renewal_wall_applied_for_screen(ext, scr):
+    snap: Optional[PlaybackPlanSnapshot] = None,
+    *,
+    t_sim: float = 0.0,
+) -> Optional[Dict[str, str]]:
+    """renewal 구간 패널 occ = renewal 직전 ``pre_occ`` + 희소 ``delta``."""
+    if not _renewal_wall_applied_for_screen(ext, int(screen)):
         return None
-    rec = _renewal_panel_record(ext, scr)
-    if not isinstance(rec, dict):
+    hold = _get_renewal_occ_hold(ext, int(screen))
+    if not isinstance(hold, dict):
         return None
-    try:
-        by = getattr(ext, "_sim_playback_renewal_applied_by_screen", None)
-        if isinstance(by, dict):
-            applied = str(by.get(str(scr), "") or "")
-            stored = str(rec.get("dedupe", "") or "")
-            if applied and stored and applied != stored:
-                return None
-    except Exception:
-        pass
-    occ = rec.get("occ")
-    if isinstance(occ, dict) and occ:
-        return _ensure_panel_occ_keys(dict(occ))
-    return None
+    sparse = _normalize_sparse_delta(
+        hold.get("delta") if isinstance(hold.get("delta"), dict) else None
+    )
+    if not sparse:
+        return None
+    base = _ensure_panel_occ_keys(
+        dict(hold.get("pre_occ") if isinstance(hold.get("pre_occ"), dict) else {})
+    )
+    if not any(str(v or "").strip() for v in base.values()) and snap is not None:
+        try:
+            sync_t = float(hold.get("sync_t") or t_sim or 0.0)
+            t_pre = max(0.0, sync_t - 1e-3) if sync_t > 1e-9 else max(0.0, float(t_sim))
+            base = _ensure_panel_occ_keys(dict(snap.ports_at(float(t_pre))))
+        except Exception:
+            pass
+    return _merge_renewal_delta_onto_plan(dict(base), sparse)
 
 
 def _playback_ports_at_sim(
@@ -1007,10 +906,14 @@ def _playback_ports_at_sim(
     screen: int,
     t_sim: float,
 ) -> Dict[str, str]:
-    """재생 포트 SSOT = plan ``ports_at(t)`` + renewal 적용 후 pinned occ."""
-    pinned = _renewal_panel_occ_if_applied(ext, int(screen))
-    if pinned is not None:
-        return dict(pinned)
+    """재생 포트 SSOT — renewal 구간은 pre_occ+delta, 그 외 plan ``ports_at(t)``."""
+    scr = int(screen)
+    if _renewal_wall_applied_for_screen(ext, scr):
+        sync_t = _renewal_stored_sync_t(ext, scr)
+        if sync_t is None or float(t_sim) + 1e-6 >= float(sync_t):
+            merged = _renewal_merged_panel_occ(ext, scr, snap, t_sim=float(t_sim))
+            if merged is not None:
+                return dict(merged)
     return _ensure_panel_occ_keys(dict(snap.ports_at(float(t_sim))))
 
 
@@ -1898,12 +1801,6 @@ def clear_playback_plan_runtime_state(ext: Any) -> None:
             applied_by.clear()
     except Exception:
         pass
-    try:
-        pan_by = getattr(ext, "_sim_playback_renewal_panel_by_screen", None)
-        if isinstance(pan_by, dict):
-            pan_by.clear()
-    except Exception:
-        pass
     clear_removed_prim_hide_holds(ext)
     clear_runtime_bar_rows(ext)
 
@@ -2150,68 +2047,6 @@ def resolve_playback_ui_at_sim(
     )
 
 
-def _find_plan_renewal_milestone_for_event(
-    snap: PlaybackPlanSnapshot,
-    src: Dict[str, Any],
-    sim_now: float,
-) -> Optional[Tuple[float, Dict[str, str]]]:
-    """
-    이 이벤트가 만들어내는 **plan occ milestone** 을 직접 찾는다 (sync_t 재계산 금지).
-
-    wall 이 자체 계산한 sync_t 가 plan milestone 시각과 어긋나면(예: resolve fallback)
-    hold 가 즉시 해제되어 이전 상태가 보이는 버그가 난다. plan milestone 은 이미 정확하므로
-    이벤트 결과(ARRIVED/MOVE → ``to==lot``, REMOVED → ``port==''``)와 일치하고 ``sim_now`` 에
-    가장 가까운(>= sim_now - 1.0) milestone 을 그대로 채택한다.
-    """
-    try:
-        from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
-    except Exception:
-        return None
-
-    ev = _normalize_anim_event_seq(
-        _s_val(src.get("event") or src.get("event_seq") or src.get("seq"))
-    )
-    if not ev:
-        return None
-    lot = str(src.get("lot_id") or "").strip()
-    to = _canon_port(src.get("to_port_id") or src.get("port_id"))
-    port = _canon_port(src.get("port_id") or src.get("event_port_id") or src.get("to_port_id"))
-
-    def _matches(occ: Dict[str, str]) -> bool:
-        if ev in _MOVE_FAMILY:
-            if not to:
-                return False
-            return str(occ.get(to, "") or "").strip() == lot and lot != ""
-        if ev == "ARRIVED":
-            dest = to or port
-            if not dest:
-                return False
-            return str(occ.get(dest, "") or "").strip() == lot and lot != ""
-        if ev == "REMOVED":
-            tgt = port or to
-            if not tgt:
-                return False
-            return str(occ.get(tgt, "") or "").strip() == ""
-        return False
-
-    lo = float(sim_now) - 1.0
-    best: Optional[Tuple[float, Dict[str, str]]] = None
-    for m in snap.milestones or ():
-        if str(getattr(m, "kind", "")) != "occ_full":
-            continue
-        t_ms = float(getattr(m, "t_sim", 0.0) or 0.0)
-        if t_ms < lo:
-            continue
-        data = getattr(m, "data", None)
-        if not isinstance(data, dict):
-            continue
-        if not _matches(data):
-            continue
-        if best is None or t_ms < best[0]:
-            best = (t_ms, _ensure_panel_occ_keys(dict(data)))
-    return best
-
-
 def _dump_plan_milestones_once(ext: Any, screen: int, snap: PlaybackPlanSnapshot) -> None:
     """디버그 — 화면별 plan occ 마일스톤을 1회만 콘솔에 덤프."""
     try:
@@ -2284,29 +2119,30 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
     src_r = dict(src)
     sim_ref = float(_sim_now_for_screen(ext, scr, None))
 
-    sync_t, occ_panel = _resolve_renewal_panel_occ_for_wall(ext, scr, snap, src_r, sim_ref)
+    sync_t = _resolve_renewal_sync_t_for_wall(ext, scr, src_r)
 
     delta = _occ_delta_for_anim_src(src_r)
-    del delta  # plan milestone SSOT — delta hold 미사용
-
+    lookup_t = (
+        float(sync_t)
+        if sync_t is not None and float(sync_t) > 1e-9
+        else float(sim_ref)
+    )
+    pre_occ = _last_panel_occ(ext, scr)
+    if not any(str(v or "").strip() for v in pre_occ.values()):
+        try:
+            pre_occ = _ensure_panel_occ_keys(
+                dict(snap.ports_at(max(0.0, float(lookup_t) - 1e-3)))
+            )
+        except Exception:
+            pass
     mark_playback_renewal_wall_applied(
         ext,
         scr,
         dict(src),
         sync_t=sync_t,
-        occ=occ_panel if isinstance(occ_panel, dict) else None,
+        delta=delta if delta else None,
+        pre_occ=pre_occ,
     )
-
-    if isinstance(occ_panel, dict) and occ_panel:
-        try:
-            _apply_plan_ports_to_panel(
-                ext,
-                int(scr),
-                dict(occ_panel),
-                t_display=float(sim_ref),
-            )
-        except Exception:
-            pass
 
     t_refresh: Optional[float] = (
         float(sync_t) if sync_t is not None and float(sync_t) > 1e-9 else None
