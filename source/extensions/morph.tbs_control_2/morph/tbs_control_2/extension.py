@@ -352,6 +352,17 @@ class Extension(omni.ext.IExt):
         set_tbs_extension_instance(self)
         ensure_kit_main_dispatch()
         _log_extension_load_paths(ext_id)
+
+        try:
+            import carb.settings  # type: ignore
+
+            settings = carb.settings.get_settings()
+            settings.set("/rtx/denoiser/enabled", False)
+            settings.set("/rtx/sampling/maxSamples", 1024)
+            settings.set("/rtx/sampling/maxAccumulatedFrames", 1)
+        except Exception:
+            pass
+
         install_xform_op_order_warning_filter()
         self._ext_id = ext_id
         self._tracked_paths: List[str] = []

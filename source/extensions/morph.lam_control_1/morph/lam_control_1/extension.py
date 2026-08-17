@@ -121,6 +121,16 @@ class LamControlExtension(omni.ext.IExt):
             pass
 
         try:
+            import carb.settings  # type: ignore
+
+            settings = carb.settings.get_settings()
+            settings.set("/rtx/denoiser/enabled", False)
+            settings.set("/rtx/sampling/maxSamples", 1024)
+            settings.set("/rtx/sampling/maxAccumulatedFrames", 1)
+        except Exception:
+            pass
+
+        try:
             teardown_lam_multi_viewports(self, skip_deferred_restore=True)
         except Exception:
             pass
