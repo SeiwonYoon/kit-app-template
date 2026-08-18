@@ -6,6 +6,7 @@
 - PM1~5: 항상 강조(파란) — wafer 점유 무관.
 - AL1/AL2 (Airlock): ``lam_device_label_highlight`` — VTM airlock JSON 시작 시
   강조, ATM airlock JSON 시작 시 spec 기본색. Play 시작 dwell seed 포함.
+- 강조 변경 시 `_root.clear()` 전체 재생성 금지. 배경 Rectangle visible 만 전환.
 """
 
 from __future__ import annotations
@@ -217,7 +218,7 @@ def _estimate_label_panel_size(
 
 
 def refresh_device_labels_panel_ui(*, screen: Optional[int] = None) -> None:
-    """기기 라벨 배경/위치 갱신 (메인 스레드 post_update)."""
+    """기기 라벨 배경색만 갱신 (전체 재생성 금지 — 메인 스레드 post_update)."""
     if screen is not None:
         targets = [_ACTIVE_DEVICE_PANEL_BY_SCREEN.get(int(screen))]
     else:
@@ -228,7 +229,7 @@ def refresh_device_labels_panel_ui(*, screen: Optional[int] = None) -> None:
             if inst is None or not getattr(inst, "_built", False):
                 continue
             try:
-                inst._rebuild()
+                inst._refresh_highlight_colors()
             except Exception:
                 pass
 
@@ -268,6 +269,8 @@ class LamViewportDeviceLabels3d:
         self._last_tick = 0.0
         self._last_hl_rev: int = -1
         self._sync_token: float = 0.0
+        self._label_roots: dict[str, Any] = {}
+        self._bg_rects: dict[str, Any] = {}
 
     def _highlight_revision(self) -> int:
         try:
@@ -485,6 +488,8 @@ class LamViewportDeviceLabels3d:
         self._vw = None
         self._viewport_window = None
         self._mounted_vp_api = None
+        self._label_roots.clear()
+        self._bg_rects.clear()
         # 이 패널 소유 창만 클리어 — 화면1 Viewport 절대 건드리지 않음
         if owned is not None and callable(getattr(owned, "get_frame", None)):
             try:
@@ -588,12 +593,21 @@ class LamViewportDeviceLabels3d:
                 return
             hl_rev = self._highlight_revision()
             now = time.time()
-            # airlock 강조 변경 시 즉시, 그 외(prim 위치 추적)는 0.5s 주기
-            if hl_rev == self._last_hl_rev and (now - self._last_tick) < 0.5:
+            hl_changed = hl_rev != self._last_hl_rev
+            due_pos = (now - self._last_tick) >= 0.5
+            if not hl_changed and not due_pos:
                 return
-            self._last_hl_rev = hl_rev
-            self._last_tick = now
-            self._rebuild()
+            if not self._label_roots:
+                self._rebuild()
+                self._last_hl_rev = hl_rev
+                self._last_tick = now
+                return
+            if hl_changed:
+                self._last_hl_rev = hl_rev
+                self._apply_highlight_colors()
+            if due_pos:
+                self._last_tick = now
+                self._tick_positions()
 
         self._post_update_sub = stream.create_subscription_to_pop(_on, name="morph.lam_control_1:device_labels_3d")
 
@@ -604,6 +618,61 @@ class LamViewportDeviceLabels3d:
             except Exception:
                 pass
             self._post_update_sub = None
+
+    def _refresh_highlight_colors(self) -> None:
+        """airlock 강조만 바뀐 경우 — 전체 라벨 재생성 없이 배경색만 갱신."""
+        if not self._built or not self._root:
+            return
+        if not self._label_roots:
+            self._rebuild()
+            return
+        self._apply_highlight_colors()
+        self._last_hl_rev = self._highlight_revision()
+
+    def _apply_highlight_colors(self) -> None:
+        occ = tuple(DEVICE_LABEL_PM_OCCUPIED_BG_RGBA)
+        for spec in DEVICE_LABEL_SPECS:
+            pair = self._bg_rects.get(spec.name)
+            if not pair:
+                continue
+            fill_base, fill_hl = pair
+            bg = self._bg_rgba_for_spec(spec)
+            highlighted = tuple(bg) == occ
+            try:
+                fill_base.visible = not highlighted
+                fill_hl.visible = highlighted
+            except Exception:
+                try:
+                    fill_base.color = bg
+                    fill_hl.color = bg
+                except Exception:
+                    pass
+
+    def _tick_positions(self) -> None:
+        if not self._label_roots:
+            return
+        st = self._stage_for_panel()
+        if st is None:
+            return
+        for spec in DEVICE_LABEL_SPECS:
+            root = self._label_roots.get(spec.name)
+            if root is None:
+                continue
+            p = _normalize_path(spec.prim_path)
+            if not p:
+                continue
+            prim = st.GetPrimAtPath(p)
+            if not prim or not prim.IsValid():
+                continue
+            center = _prim_world_center(prim)
+            if center is None:
+                continue
+            ox, oy, oz = spec.offset_xyz_m
+            pos = (center[0] + ox, center[1] + oy, center[2] + oz)
+            try:
+                root.transform = sc.Matrix44.get_translation_matrix(*pos)
+            except Exception:
+                continue
 
     def _rebuild(self) -> None:
         if not self._device_labels_toggle_on():
@@ -617,12 +686,21 @@ class LamViewportDeviceLabels3d:
                 self._root.clear()
             except Exception:
                 pass
+            self._label_roots.clear()
+            self._bg_rects.clear()
+            return
+
+        if self._label_roots:
+            self._tick_positions()
+            self._apply_highlight_colors()
             return
 
         try:
             self._root.clear()
         except Exception:
             return
+        self._label_roots.clear()
+        self._bg_rects.clear()
 
         with self._root:
             for spec in DEVICE_LABEL_SPECS:
@@ -654,7 +732,21 @@ class LamViewportDeviceLabels3d:
         )
         with root:
             with sc.Transform(scale_to=sc.Space.SCREEN):
-                sc.Rectangle(width=panel_w, height=panel_h, color=bg, wireframe=False)
+                fill_base = sc.Rectangle(
+                    width=panel_w, height=panel_h, color=tuple(spec.bg_rgba), wireframe=False
+                )
+                fill_hl = sc.Rectangle(
+                    width=panel_w,
+                    height=panel_h,
+                    color=tuple(DEVICE_LABEL_PM_OCCUPIED_BG_RGBA),
+                    wireframe=False,
+                )
+                highlighted = tuple(bg) == tuple(DEVICE_LABEL_PM_OCCUPIED_BG_RGBA)
+                try:
+                    fill_base.visible = not highlighted
+                    fill_hl.visible = highlighted
+                except Exception:
+                    pass
                 if spec.show_border:
                     sc.Rectangle(
                         width=panel_w,
@@ -668,6 +760,8 @@ class LamViewportDeviceLabels3d:
                     color=text_color,
                     alignment=ui.Alignment.CENTER,
                 )
+        self._label_roots[spec.name] = root
+        self._bg_rects[spec.name] = (fill_base, fill_hl)
 
 
 __all__ = [

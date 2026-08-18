@@ -236,16 +236,18 @@ def make_wafer_label_step_context(
     slot_wafer_path: str,
     arm_wafer_path: str,
     wafer_label: str = "",
+    foup_index: Optional[int] = None,
 ) -> Dict[str, str]:
     """이벤트 JSON ``PRIM_VISIBILITY`` 스텝에 붙일 라벨 컨텍스트.
 
     ``wafer_label`` — CSV ``cassette_slot`` 등에서 온 표시 번호(``17`` → ``17``).
     FOUP/버퍼 슬롯 pick 시 hide/show 가 slot_key 경로와 어긋나도 번호를 유지한다.
+    ``foup_index`` — lot 색(1~3). 슬롯 키가 FOUP 가 아닌 airlock/장비 pick 에도 이식한다.
     """
     po = "pick" if (event_name or "").strip().endswith("_pick") else "place"
     sk = (slot_key or "").strip()
     label = (wafer_label or "").strip() or (cassette_style_label_for_slot_key(sk) or "")
-    return {
+    ctx: Dict[str, str] = {
         "event_name": (event_name or "").strip(),
         "slot_key": sk,
         "arm_slot_key": (arm_slot_key or "").strip(),
@@ -254,6 +256,16 @@ def make_wafer_label_step_context(
         "pick_or_place": po,
         "wafer_label": label,
     }
+    fi = foup_index
+    if fi is None:
+        fi = foup_index_from_slot_key(sk)
+    try:
+        fi_i = int(fi) if fi is not None else 0
+    except Exception:
+        fi_i = 0
+    if 1 <= fi_i <= 3:
+        ctx["foup_index"] = str(fi_i)
+    return ctx
 
 
 def annotate_steps_with_wafer_label_context(
@@ -275,21 +287,35 @@ def annotate_steps_with_wafer_label_context(
 
 
 def stamp_wafer_cassette_label_on_steps(
-    steps: List[Dict[str, Any]], cassette_slot: int
+    steps: List[Dict[str, Any]],
+    cassette_slot: int,
+    *,
+    foup_index: Optional[int] = None,
 ) -> None:
-    """ATM/VTM pick·place PRIM_VISIBILITY ctx — CSV ``cassette_slot`` 번호로 통일."""
+    """ATM/VTM pick·place PRIM_VISIBILITY ctx — CSV ``cassette_slot`` 번호·FOUP 색 통일."""
     try:
         label = f"{int(cassette_slot):02d}"
     except Exception:
         label = str(cassette_slot or "").strip()
-    if not label:
+    fi_s = ""
+    if foup_index is not None:
+        try:
+            fi_i = int(foup_index)
+            if 1 <= fi_i <= 3:
+                fi_s = str(fi_i)
+        except Exception:
+            fi_s = ""
+    if not label and not fi_s:
         return
     for st in steps:
         if not isinstance(st, dict):
             continue
         ctx = st.get(_WAFER_LABEL_CTX_KEY)
         if isinstance(ctx, dict):
-            ctx["wafer_label"] = label
+            if label:
+                ctx["wafer_label"] = label
+            if fi_s:
+                ctx["foup_index"] = fi_s
 
 
 def _post_update_once(callback) -> None:
@@ -359,6 +385,7 @@ class WaferNumberLabelTracker:
         self._prim_to_label: Dict[str, str] = {}
         self._arm_carried: Dict[str, str] = {}
         self._arm_foup_carried: Dict[str, int] = {}
+        self._arm_path_keys: Dict[str, str] = {}
         self._foup_baseline_paths: set[str] = set()
         self._prim_to_foup_index: Dict[str, int] = {}
         self._revision: int = 0
@@ -380,6 +407,35 @@ class WaferNumberLabelTracker:
         except Exception:
             return raw
 
+    def _foup_index_from_ctx(self, ctx: Dict[str, str]) -> Optional[int]:
+        raw = (ctx.get("foup_index") or "").strip()
+        if not raw:
+            return None
+        try:
+            fi = int(raw)
+        except Exception:
+            return None
+        return fi if 1 <= fi <= 3 else None
+
+    def _resolve_pick_foup(
+        self,
+        ctx: Dict[str, str],
+        *,
+        popped_foup: Optional[int] = None,
+        slot_key: str = "",
+        arm_sk: str = "",
+    ) -> Optional[int]:
+        fi = self._foup_index_from_ctx(ctx)
+        if fi is not None:
+            return fi
+        if popped_foup is not None:
+            return int(popped_foup)
+        if arm_sk:
+            carried = self._arm_foup_carried.get(arm_sk)
+            if carried is not None:
+                return int(carried)
+        return self._foup_index_from_slot_key(slot_key)
+
     def _pop_label_for_aliases(
         self,
         prim_path: str,
@@ -399,6 +455,7 @@ class WaferNumberLabelTracker:
             self._prim_to_label.clear()
             self._arm_carried.clear()
             self._arm_foup_carried.clear()
+            self._arm_path_keys.clear()
             self._foup_baseline_paths.clear()
             self._prim_to_foup_index.clear()
             self._bump_revision()
@@ -408,7 +465,14 @@ class WaferNumberLabelTracker:
         key = _normalize_path_key(prim_path)
         with self._lock:
             fi = self._prim_to_foup_index.get(key)
-        return int(fi) if fi is not None else None
+            if fi is not None:
+                return int(fi)
+            arm_sk = self._arm_path_keys.get(key)
+            if arm_sk:
+                carried = self._arm_foup_carried.get(arm_sk)
+                if carried is not None:
+                    return int(carried)
+        return None
 
     def _foup_index_from_slot_key(self, slot_key: str) -> Optional[int]:
         fi = foup_index_from_slot_key(slot_key)
@@ -481,6 +545,7 @@ class WaferNumberLabelTracker:
             self._prim_to_label.clear()
             self._arm_carried.clear()
             self._arm_foup_carried.clear()
+            self._arm_path_keys.clear()
             self._foup_baseline_paths.clear()
             self._prim_to_foup_index.clear()
             wm = wafer_map or load_wafer_prim_by_slot_key()
@@ -632,6 +697,8 @@ class WaferNumberLabelTracker:
             keys.add(ep)
         for key in keys:
             self._prim_to_label[key] = label
+            if arm_sk:
+                self._arm_path_keys[key] = arm_sk
         self._assign_foup_to_paths(keys, foup_index)
 
     def on_visibility(
@@ -698,17 +765,32 @@ class WaferNumberLabelTracker:
                         p, slot_key, slot_p, stage=stage
                     )
                     label = self._resolve_pick_label(ctx, popped=popped) or cassette
+                    foup_index = self._resolve_pick_foup(
+                        ctx,
+                        popped_foup=popped_foup,
+                        slot_key=slot_key,
+                        arm_sk=arm_sk,
+                    )
                     if label and arm_sk:
                         # arm show 전까지 carried 만 — 번호가 팔 위치로 먼저 점프하지 않음
                         self._arm_carried[arm_sk] = label
-                        if popped_foup is not None:
-                            self._arm_foup_carried[arm_sk] = int(popped_foup)
+                        if foup_index is not None:
+                            self._arm_foup_carried[arm_sk] = int(foup_index)
+                            # ARM show 가 먼저였으면 팔 prim 색이 비어 있으므로 여기서 이식
+                            arm_keys: set[str] = set()
+                            for alias in _path_alias_set(arm_p, arm_sk, arm_p, stage=stage):
+                                if alias:
+                                    arm_keys.add(alias)
+                                    self._arm_path_keys[alias] = arm_sk
+                            self._assign_foup_to_paths(arm_keys, foup_index)
                     changed = bool(label)
                 elif is_arm and visible:
                     label = self._resolve_pick_label(ctx) or cassette
-                    foup_index = self._arm_foup_carried.get(arm_sk)
-                    if foup_index is None:
-                        foup_index = self._foup_index_from_slot_key(slot_key)
+                    foup_index = self._resolve_pick_foup(
+                        ctx,
+                        slot_key=slot_key,
+                        arm_sk=arm_sk,
+                    )
                     if label:
                         self._assign_label_to_arm_paths(
                             label,
@@ -728,7 +810,11 @@ class WaferNumberLabelTracker:
                         label = explicit or cassette
                     foup_index = self._foup_on_arm_for_place(arm_p, arm_sk)
                     if foup_index is None:
-                        foup_index = self._foup_index_from_slot_key(slot_key)
+                        foup_index = self._resolve_pick_foup(
+                            ctx,
+                            slot_key=slot_key,
+                            arm_sk=arm_sk,
+                        )
                     if label:
                         if arm_sk:
                             self._arm_carried[arm_sk] = label
@@ -752,11 +838,12 @@ class WaferNumberLabelTracker:
                     popped_foup = self._pop_foup_for_aliases(
                         p, arm_sk, arm_p, stage=stage
                     )
-                    if popped_foup is None and arm_sk:
-                        fi = self._arm_foup_carried.get(arm_sk)
-                        popped_foup = int(fi) if fi is not None else None
                     if popped_foup is None:
-                        popped_foup = self._foup_index_from_slot_key(slot_key)
+                        popped_foup = self._resolve_pick_foup(
+                            ctx,
+                            slot_key=slot_key,
+                            arm_sk=arm_sk,
+                        )
                     if label:
                         placed = self._assign_label_to_slot_aliases(
                             label,
@@ -772,6 +859,8 @@ class WaferNumberLabelTracker:
                         if arm_sk:
                             self._arm_carried.pop(arm_sk, None)
                             self._arm_foup_carried.pop(arm_sk, None)
+                            for alias in _path_alias_set(p, arm_sk, arm_p, stage=stage):
+                                self._arm_path_keys.pop(alias, None)
                         changed = placed or bool(label)
             if changed:
                 self._bump_revision()

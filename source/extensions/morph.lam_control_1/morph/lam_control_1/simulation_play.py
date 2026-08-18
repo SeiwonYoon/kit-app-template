@@ -1687,7 +1687,9 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
     try:
         from .lam_wafer_viewport_labels import stamp_wafer_cassette_label_on_steps
 
-        stamp_wafer_cassette_label_on_steps(steps, curr.cassette_slot)
+        stamp_wafer_cassette_label_on_steps(
+            steps, curr.cassette_slot, foup_index=getattr(curr, "foup_index", None)
+        )
     except Exception:
         pass
     return steps
@@ -1716,14 +1718,16 @@ def build_foup_pick_place_steps(
     try:
         from .lam_wafer_viewport_labels import stamp_wafer_cassette_label_on_steps
 
-        stamp_wafer_cassette_label_on_steps(steps, cassette_slot)
+        stamp_wafer_cassette_label_on_steps(
+            steps, cassette_slot, foup_index=foup_index
+        )
     except Exception:
         pass
     return steps
 
 
 def build_aligner_after_foup_pick_steps(
-    pick_or_place: str, *, cassette_slot: int
+    pick_or_place: str, *, cassette_slot: int, foup_index: Optional[int] = None
 ) -> LamSimJsonSteps:
     """FOUP pick 직후 합성 Aligner 공정 — ``atm_aligner_place`` / ``atm_aligner_pick``."""
     from .lam_event_sequences import build_steps_for_event
@@ -1740,7 +1744,9 @@ def build_aligner_after_foup_pick_steps(
     try:
         from .lam_wafer_viewport_labels import stamp_wafer_cassette_label_on_steps
 
-        stamp_wafer_cassette_label_on_steps(steps, cassette_slot)
+        stamp_wafer_cassette_label_on_steps(
+            steps, cassette_slot, foup_index=foup_index
+        )
     except Exception:
         pass
     return steps
@@ -1884,7 +1890,9 @@ def _append_aligner_after_foup_pick(
         try:
             deferred = bool(deferred_pick and po == "pick")
             if blocks is not None:
-                steps = build_aligner_after_foup_pick_steps(po, cassette_slot=cassette_slot)
+                steps = build_aligner_after_foup_pick_steps(
+                    po, cassette_slot=cassette_slot, foup_index=foup_index
+                )
                 if not steps:
                     continue
                 ent = _aligner_schedule_entry(
