@@ -10,6 +10,7 @@ _RTX_MAX_SAMPLES_DURING_OPEN = 1
 _RTX_MAX_SAMPLES_AFTER_OPEN = 1024
 
 _saved_max_samples: Optional[int] = None
+_suspend_depth: int = 0
 
 
 def _viewport_window_names() -> List[str]:
@@ -70,7 +71,10 @@ def _set_rtx_max_samples(value: int) -> Optional[int]:
 
 def suspend_viewport_draw() -> None:
     """USD 오픈·Extract 전 — 라이브 뷰포트가 로드를 방해하지 않게 한다."""
-    global _saved_max_samples
+    global _saved_max_samples, _suspend_depth
+    _suspend_depth += 1
+    if _suspend_depth > 1:
+        return
     _saved_max_samples = _set_rtx_max_samples(_RTX_MAX_SAMPLES_DURING_OPEN)
     _set_viewport_updates(False)
     print(
@@ -82,7 +86,12 @@ def suspend_viewport_draw() -> None:
 
 def resume_viewport_draw() -> None:
     """로드 완료 후 그리기 재개 — 화질은 기동 시와 동일(maxSamples=1024)."""
-    global _saved_max_samples
+    global _saved_max_samples, _suspend_depth
+    if _suspend_depth <= 0:
+        return
+    _suspend_depth -= 1
+    if _suspend_depth > 0:
+        return
     restore = (
         int(_saved_max_samples)
         if _saved_max_samples is not None

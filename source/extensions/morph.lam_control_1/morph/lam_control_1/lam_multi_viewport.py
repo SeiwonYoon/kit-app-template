@@ -2161,6 +2161,17 @@ async def _wait_default_usd_context_idle(*, max_frames: int = 180) -> None:
 
 async def _ctx_open_stage_path(ctx: Any, root: str, sess_path: Optional[str]) -> Tuple[bool, str]:
     """보조 컨텍스트에서 ``root`` 스테이지를 연다. ``sess_path`` 가 있으면 session layer 와 함께."""
+    from .lam_viewport_open_draw import resume_viewport_draw, suspend_viewport_draw
+
+    suspend_viewport_draw()
+    try:
+        return await _ctx_open_stage_path_impl(ctx, root, sess_path)
+    finally:
+        resume_viewport_draw()
+
+
+async def _ctx_open_stage_path_impl(ctx: Any, root: str, sess_path: Optional[str]) -> Tuple[bool, str]:
+    """``open_stage`` 본체 — 호출측에서 그리기 정지 구간을 감싼다."""
     # 화면1 default 컨텍스트 open/close 중이면 보조 open 경합 → 대기 후 재시도
     await _wait_default_usd_context_idle(max_frames=180)
     sess_uri = Path(sess_path).as_uri() if sess_path else None
@@ -5040,6 +5051,26 @@ async def _load_aux_split_stages_background(
     if int(getattr(ext, "_lam_multi_viewport_apply_token", 0) or 0) != token:
         return
 
+    from .lam_viewport_open_draw import resume_viewport_draw, suspend_viewport_draw
+
+    suspend_viewport_draw()
+    try:
+        await _load_aux_split_stages_background_impl(
+            ext, n, token, usd_path, prev_n=prev_n, serialize_gpu=serialize_gpu
+        )
+    finally:
+        resume_viewport_draw()
+
+
+async def _load_aux_split_stages_background_impl(
+    ext: Any,
+    n: int,
+    token: int,
+    usd_path: str,
+    *,
+    prev_n: int = 1,
+    serialize_gpu: bool = False,
+) -> None:
     swap_settle = _STARTUP_STAGE_SWAP_SETTLE_FRAMES if serialize_gpu else 6
 
     dual_path = False

@@ -14,6 +14,11 @@ R1 > R2 > R3. 동일 prim 이 다중 규칙으로 발견되어도 인스턴스�
 - R1 은 `lam:instance` 가 있는 prim (통상 `/World/<instance_id>`).
 - R2/R3 은 `/World` 의 **직계 자식** prim 만 — reference 내부·drag&drop 하위 경로는
   별도 인스턴스로 올리지 않는다 (합성 USD 재오픈 시 목록이 2~3개로 유지되도록).
+
+스캔 (2026-08-19):
+- `/World` 가 있으면 **직계 자식만** 본다. World 밖 배경 USD 트리는 순회하지 않는다.
+- 등록 규칙(R1/R2/R3)은 그대로. `/World/<이름>` 인스턴스는 이전과 동일하게 등록된다.
+- `/World` 가 없는 비정상 stage 만 예전처럼 전체 Traverse 한다.
 """
 
 from __future__ import annotations
@@ -49,6 +54,28 @@ def _is_world_direct_child(prim_path: str) -> bool:
     """`/World/<name>` 형태의 인스턴스 루트 prim 인지 (깊이 2)."""
     parts = [p for p in (prim_path or "").split("/") if p]
     return len(parts) == 2 and parts[0] == "World"
+
+
+def _iter_discover_root_prims(stage) -> tuple[list, str]:
+    """인스턴스 후보 스캔 대상.
+
+    `/World` 직계만 보면 배경(World 밖 reference) 트리를 걷지 않는다.
+    등록 결과(`/World/<이름>`)는 기존 Traverse 와 같다.
+    """
+    try:
+        world = stage.GetPrimAtPath("/World")
+    except Exception:
+        world = None
+    if world is not None:
+        try:
+            if bool(world.IsValid()):
+                return list(world.GetChildren()), "world_children"
+        except Exception:
+            pass
+    try:
+        return list(stage.Traverse()), "stage_traverse"
+    except Exception:
+        return [], "empty"
 
 
 def _stage_local_time_range(prim) -> tuple[float, float, float]:
@@ -122,7 +149,8 @@ class CompositionDiscovery:
             return []
 
         added: List[AnimationInstance] = []
-        for prim in stage.Traverse():
+        roots, scope = _iter_discover_root_prims(stage)
+        for prim in roots:
             try:
                 prim_path = str(prim.GetPath())
             except Exception:
@@ -141,7 +169,11 @@ class CompositionDiscovery:
             if inst is not None:
                 added.append(inst)
 
-        print(f"{_PRINT_PREFIX} discover added={len(added)}", flush=True)
+        print(
+            f"{_PRINT_PREFIX} discover added={len(added)} scope={scope} "
+            f"roots={len(roots)}",
+            flush=True,
+        )
         return added
 
     # ----------------------------------------------------------------- R1
