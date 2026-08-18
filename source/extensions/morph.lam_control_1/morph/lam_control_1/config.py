@@ -1,8 +1,8 @@
-"""Federation 등 환경별 호스트 — 저장소 최상단 루트 ``.env`` 로드.
+"""환경별 호스트 — 저장소 최상단 루트 ``.env`` 로드.
 
 로컬 / 개발 / 운영 각각 리포 루트 ``.env`` 에
-``FEDERATION_QUERY_URL``, ``FEDERATION_SIMULATION_GET_BASE_URL`` 호스트만 두고,
-이 모듈에서 공통 path 를 이어 붙여 ``lam_sim_control_defaults`` 에 공급한다.
+``FEDERATION_QUERY_URL``, ``FEDERATION_SIMULATION_GET_BASE_URL``,
+``NUCLEUS_HOST_KEY`` 호스트만 두고, 이 모듈에서 공통 path 를 이어 붙인다.
 
 python-dotenv 없이 KEY=VALUE 만 파싱한다 (Kit 의존성 추가 없음).
 """
@@ -16,6 +16,8 @@ from typing import Dict, Optional
 # ---------------------------------------------------------------------------
 # 환경과 무관한 공통 path (호스트만 .env)
 # ---------------------------------------------------------------------------
+# Nucleus USD — ``usd_query_url()`` = NUCLEUS_HOST_KEY + 이 path
+USD_QUERY_URL: str = "/Projects/lam"
 # POST Federation query
 FEDERATION_QUERY_PATH: str = "/queries/mcc-target-prev-lot-history/run"
 # Simulation GET — ``lam_federation_client.build_simulation_get_url`` 가 base 뒤에 붙임
@@ -76,7 +78,13 @@ def load_env(*, force_reload: bool = False) -> Dict[str, str]:
     file_vals = _parse_env_file(env_file_path())
     merged: Dict[str, str] = dict(file_vals)
     for k, v in os.environ.items():
-        if k.startswith("FEDERATION_") and str(v or "").strip():
+        if not str(v or "").strip():
+            continue
+        if k.startswith("FEDERATION_") or k in (
+            "NUCLEUS_HOST_KEY",
+            "OMNI_USER",
+            "OMNI_PASS",
+        ):
             merged[k] = str(v).strip()
     _ENV_CACHE = merged
     return dict(merged)
@@ -103,41 +111,47 @@ def _join_url(base: str, path: str) -> str:
     return f"{b}{p}"
 
 
-def federation_query_host(
-    *,
-    default: str = "http://10.61.59.208",
-) -> str:
+def federation_query_host(*, default: str = "") -> str:
     """``.env`` 의 ``FEDERATION_QUERY_URL`` 호스트 (path 제외)."""
     return _get("FEDERATION_QUERY_URL", default).rstrip("/")
 
 
-def federation_simulation_get_host(
-    *,
-    default: str = "http://hytwindev.skhynix.com/svc/fab",
-) -> str:
+def federation_simulation_get_host(*, default: str = "") -> str:
     """``.env`` 의 ``FEDERATION_SIMULATION_GET_BASE_URL`` 호스트/베이스."""
     return _get("FEDERATION_SIMULATION_GET_BASE_URL", default).rstrip("/")
 
 
 def federation_query_url(
     *,
-    default_host: str = "http://10.61.59.208",
+    default_host: str = "",
     query_path: str = FEDERATION_QUERY_PATH,
 ) -> str:
     """defaults ``FEDERATION_QUERY_URL`` — 호스트 + 공통 query path."""
     return _join_url(federation_query_host(default=default_host), query_path)
 
 
-def federation_simulation_get_base_url(
-    *,
-    default_host: str = "http://hytwindev.skhynix.com/svc/fab",
-) -> str:
+def federation_simulation_get_base_url(*, default_host: str = "") -> str:
     """defaults ``FEDERATION_SIMULATION_GET_BASE_URL`` — GET path 는 client 가 이어 붙임."""
     return federation_simulation_get_host(default=default_host)
 
 
+def usd_query_host(*, default: str = "") -> str:
+    """``.env`` 의 ``NUCLEUS_HOST_KEY`` (path 제외)."""
+    return _get("NUCLEUS_HOST_KEY", default).rstrip("/")
+
+
+def usd_query_url(
+    *,
+    default_host: str = "",
+    query_path: str = USD_QUERY_URL,
+) -> str:
+    """Nucleus USD 베이스 — 호스트 + ``USD_QUERY_URL`` (``/Projects/lam``)."""
+    return _join_url(usd_query_host(default=default_host), query_path)
+
+
 __all__ = [
     "FEDERATION_QUERY_PATH",
+    "USD_QUERY_URL",
     "env_file_path",
     "federation_query_host",
     "federation_query_url",
@@ -145,4 +159,6 @@ __all__ = [
     "federation_simulation_get_host",
     "load_env",
     "repo_root",
+    "usd_query_host",
+    "usd_query_url",
 ]

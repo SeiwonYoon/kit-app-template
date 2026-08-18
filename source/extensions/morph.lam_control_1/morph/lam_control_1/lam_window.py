@@ -53,6 +53,7 @@ from .lam_viewport_startup_focus import schedule_startup_viewport_focus_after_st
 from .lam_wafer_viewport_labels import (
     LamWaferFoupViewportLabels,
 )
+from .config import usd_query_url as _usd_query_url  # noqa: F401 — 실무 Nucleus 주석 경로용
 
 
 # ---------------------------------------------------------------------------
@@ -63,23 +64,18 @@ from .lam_wafer_viewport_labels import (
 # 동일하게 로드(Discover + Extract 자동). False 이면 수동 Open Master.
 load_automatically = True
 
-# 절대 경로 예 (Windows):
-#   default_load_usd_path = r"C:\Users\ptK\Documents\kit-app-template_mine\lam\usd\master.usd"
-# Nucleus URL 예:
-#   default_load_usd_path = "omniverse://10.139.35.208/Users/....../Combine.usd"
-# 절대 경로 예 (Linux/macOS):
-#   default_load_usd_path = "/home/user/kit-app-template_mine/lam/usd/master.usd"
-# 확장 data/ 기준 상대 경로 예:
-#   default_load_usd_path = "usd/master.usd"
-#   default_load_usd_path = "usd/LAM_v02/FBX/Combine_01.usd"
+# 테스트(로컬) — 확장 data/ 상대 경로. Nucleus 가 아님. /Projects/lam 없음.
 default_load_usd_path = "usd/master_1.usd"
-# default_load_usd_path = "usd/combine_05.usd"
+# 실무 Nucleus: .env NUCLEUS_HOST_KEY + config USD_QUERY_URL(/Projects/lam) + 파일.
+# 로컬 테스트 경로를 주석하고 아래를 켜면 됨.
+# default_load_usd_path = f"{_usd_query_url()}/usd_v01/combine_01.usd"
 
 # 2화면 분할 시 보조 타일(화면2+)에 열 Master USD — 화면1과 **경로만 다르고 내용 동일**한 복사본 권장.
 # 설정 시 런타임 copy_async·Flatten prewarm 을 생략하고, 화면2는 open_stage 후
 # 화면1 Discover/Flatten/Extract 결과를 재사용한다(실패분만 폴백 Extract).
 # 비우면 기존처럼 화면1 Master 를 복제한다.
 default_aux_load_usd_path = "usd/master_3.usd"
+# default_aux_load_usd_path = f"{_usd_query_url()}/usd_v01/combine_02.usd"
 
 _PRINT_PREFIX = "[LAM/WIN]"
 
