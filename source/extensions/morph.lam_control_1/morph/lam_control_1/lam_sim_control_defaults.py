@@ -221,6 +221,15 @@ FOUP1_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.20, 0.55, 1.00, 1.0
 FOUP2_LOT_COLOR_RGBA: tuple[float, float, float, float] = (1.00, 0.25, 0.25, 1.00)
 FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.00)
 
+# ---------------------------------------------------------------------------
+# Extract 결과 캐시 (data/preextract/)
+# ---------------------------------------------------------------------------
+# False: 지금과 같이 Extract(Flatten) 후 인스턴스별 layer 를 data/preextract/ 에
+#        매번 덮어쓴다. 로컬에서 실무 USD 로 캐시를 만들 때 사용.
+# True : Flatten/Extract 생략. 저장된 layer 만 읽어 attach (배포용).
+#        파일이 없으면 해당 인스턴스는 Extract 실패와 동일하게 처리한다.
+USE_PREEXTRACTED_LAYERS: bool = False
+
 
 def default_viewport_split_count() -> int:
     """로드·유지할 화면 런타임 수. 표시 개수와 무관하게 항상 2."""
@@ -305,6 +314,7 @@ __all__ = [
     "FEDERATION_FETCH_TIMEOUT_SEC",
     "FEDERATION_USE_FIXTURE",
     "FEDERATION_TEST_WINDOW_AUTO_SHOW",
+    "USE_PREEXTRACTED_LAYERS",
     "FEDERATION_LOG_ROW_SAMPLE",
     "FEDERATION_LOG_FULL_RESPONSE",
     "FEDERATION_VERBOSE_PARSE_LOG",
