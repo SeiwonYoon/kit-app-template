@@ -220,6 +220,24 @@ FEDERATION_EXTRA_HEADERS: dict = {}
 FOUP1_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.20, 0.55, 1.00, 1.00)
 FOUP2_LOT_COLOR_RGBA: tuple[float, float, float, float] = (1.00, 0.25, 0.25, 1.00)
 FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.00)
+# 색 샘플 (밝은 배경에서도 잘 보이게 채도·명도를 잡음). 필요 시 위 튜플에 복사.
+#   흰색   (1.00, 1.00, 1.00, 1.00)
+#   검정   (0.00, 0.00, 0.00, 1.00)
+#   빨강   (0.90, 0.12, 0.12, 1.00)
+#   주황   (0.95, 0.45, 0.05, 1.00)
+#   노랑   (0.85, 0.70, 0.00, 1.00)
+#   초록   (0.10, 0.62, 0.22, 1.00)
+#   청록   (0.00, 0.55, 0.55, 1.00)
+#   파랑   (0.10, 0.35, 0.90, 1.00)
+#   남색   (0.08, 0.18, 0.55, 1.00)
+#   보라   (0.55, 0.15, 0.75, 1.00)
+#   자주   (0.70, 0.08, 0.40, 1.00)
+#   갈색   (0.55, 0.28, 0.08, 1.00)
+#   회색   (0.35, 0.35, 0.38, 1.00)
+# FOUP 상태보기 패널 첫 줄(lot_id) 글자 크기 [px]. 나머지 줄은 overlay 의 FOUP_PANEL_FONT_SIZE.
+FOUP_LOT_ID_FONT_SIZE: int = 15
+# 웨이퍼 번호 3D 라벨 글자 크기 [px] (전 슬롯 공통).
+WAFER_NUMBER_LABEL_FONT_SIZE: int = 16
 
 # ---------------------------------------------------------------------------
 # Extract 결과 캐시 (data/preextract/)
@@ -323,6 +341,8 @@ __all__ = [
     "FOUP1_LOT_COLOR_RGBA",
     "FOUP2_LOT_COLOR_RGBA",
     "FOUP3_LOT_COLOR_RGBA",
+    "FOUP_LOT_ID_FONT_SIZE",
+    "WAFER_NUMBER_LABEL_FONT_SIZE",
     "default_viewport_split_count",
     "default_csv_play_screen_count",
     "default_visible_screens",

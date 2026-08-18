@@ -21,6 +21,7 @@ import omni.ui as ui
 from omni.ui import scene as sc
 from pxr import Usd, UsdGeom
 
+from .lam_sim_control_defaults import WAFER_NUMBER_LABEL_FONT_SIZE
 from .lam_viewport_overlay_config import WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS
 from .lam_buffer_return_rules import foup_index_from_slot_key
 from .lam_foup_lot_display import foup_lot_color_rgba
@@ -61,7 +62,6 @@ if TYPE_CHECKING:
 _PRINT_PREFIX = "[LAM/WaferLabels]"
 
 _FRAME_SLOT = "morph.lam_control_1:wafer_foup_labels"
-_LABEL_FONT_SIZE = 16
 _LABEL_COLOR = (1.0, 1.0, 1.0, 1.0)
 
 # 위치 추적: prim BBox 중심 — 매 post_update(및 이동 중 update) 동기 갱신
@@ -1448,7 +1448,7 @@ class LamWaferFoupViewportLabels:
             with sc.Transform(scale_to=sc.Space.SCREEN):
                 sc.Label(
                     text,
-                    size=_LABEL_FONT_SIZE,
+                    size=int(WAFER_NUMBER_LABEL_FONT_SIZE),
                     color=color,
                     alignment=ui.Alignment.CENTER,
                 )

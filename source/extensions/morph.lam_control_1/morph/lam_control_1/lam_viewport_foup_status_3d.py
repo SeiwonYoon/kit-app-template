@@ -16,6 +16,7 @@ import omni.ui as ui
 from omni.ui import scene as sc
 from pxr import Usd, UsdGeom
 
+from .lam_sim_control_defaults import FOUP_LOT_ID_FONT_SIZE
 from .lam_viewport_overlay_config import (
     FOUP_ANCHOR_PRIM_BY_INDEX,
     FOUP_PANEL_BG_RGBA,
@@ -650,9 +651,14 @@ class LamFoupStatus3dPanel:
                         for i in range(_PANEL_LINE_COUNT):
                             y = top - i * _LINE_H
                             with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
+                                font_sz = (
+                                    int(FOUP_LOT_ID_FONT_SIZE)
+                                    if i == 0
+                                    else int(FOUP_PANEL_FONT_SIZE)
+                                )
                                 lbl = sc.Label(
                                     "",
-                                    size=int(FOUP_PANEL_FONT_SIZE),
+                                    size=font_sz,
                                     color=_WHITE,
                                     alignment=ui.Alignment.LEFT_CENTER,
                                 )
@@ -712,6 +718,10 @@ class LamFoupStatus3dPanel:
                 try:
                     lbls[i].text = text
                     lbls[i].color = color
+                    if i == 0:
+                        lbls[i].size = int(FOUP_LOT_ID_FONT_SIZE)
+                    else:
+                        lbls[i].size = int(FOUP_PANEL_FONT_SIZE)
                 except Exception:
                     pass
 
@@ -736,9 +746,14 @@ class LamFoupStatus3dPanel:
                 for i, ln in enumerate(lines[:_PANEL_LINE_COUNT]):
                     y = top - i * _LINE_H
                     with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
+                        font_sz = (
+                            int(FOUP_LOT_ID_FONT_SIZE)
+                            if i == 0
+                            else int(FOUP_PANEL_FONT_SIZE)
+                        )
                         sc.Label(
                             ln,
-                            size=15,
+                            size=font_sz,
                             color=(1.0, 1.0, 1.0, 1.0),
                             alignment=ui.Alignment.LEFT_CENTER,
                         )
