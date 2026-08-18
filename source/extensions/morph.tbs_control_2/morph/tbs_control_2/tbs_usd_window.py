@@ -600,30 +600,33 @@ class TbsUsdWindow:
         if not path:
             self._log(f"{prefix}Master path 가 비어 있습니다.")
             return False
-        ok = self._master.open_master(path)
-        self._log(f"{prefix}Open Master {'OK' if ok else 'FAIL'}: {path}")
-        if ok:
-            try:
-                from .tbs_extract_from_master import clear_master_flatten_cache
+        from .tbs_viewport_open_draw import viewport_draw_after_usd_open
 
-                clear_master_flatten_cache()
-            except Exception:
-                pass
-            try:
-                self._master.set_root_layer_edit_target()
-            except Exception:
-                pass
-            self._clear_registry_for_master_reload()
-            added = self._discovery.discover()
-            self._log(f"{prefix}Discover added={len(added)}")
-            extract_prefix = log_prefix or "Open Master"
-            self._auto_extract_after_master_open(log_prefix=extract_prefix)
-            listener = self._master_open_listener
-            if callable(listener):
+        with viewport_draw_after_usd_open():
+            ok = self._master.open_master(path)
+            self._log(f"{prefix}Open Master {'OK' if ok else 'FAIL'}: {path}")
+            if ok:
                 try:
-                    listener()
-                except Exception as exc:
-                    print(f"{_PRINT_PREFIX} master_open_listener: {exc}", flush=True)
+                    from .tbs_extract_from_master import clear_master_flatten_cache
+
+                    clear_master_flatten_cache()
+                except Exception:
+                    pass
+                try:
+                    self._master.set_root_layer_edit_target()
+                except Exception:
+                    pass
+                self._clear_registry_for_master_reload()
+                added = self._discovery.discover()
+                self._log(f"{prefix}Discover added={len(added)}")
+                extract_prefix = log_prefix or "Open Master"
+                self._auto_extract_after_master_open(log_prefix=extract_prefix)
+                listener = self._master_open_listener
+                if callable(listener):
+                    try:
+                        listener()
+                    except Exception as exc:
+                        print(f"{_PRINT_PREFIX} master_open_listener: {exc}", flush=True)
         return ok
 
     def open_master_at_path(self, path: str, *, log_prefix: str = "") -> bool:
@@ -667,6 +670,24 @@ class TbsUsdWindow:
         """합성 USD Open 직후 — 등록된 각 인스턴스에 Extract 를 일괄 실행."""
         instances = self._registry.all_instances()
         if not instances:
+            return
+        use_preextract = False
+        try:
+            from .sim_control_defaults import USE_PREEXTRACTED_LAYERS
+
+            use_preextract = bool(USE_PREEXTRACTED_LAYERS)
+        except Exception:
+            use_preextract = False
+        if use_preextract:
+            self._log(
+                f"{log_prefix} — 등록 인스턴스 {len(instances)}개 "
+                f"preextract 캐시 attach (Flatten 생략)..."
+            )
+            for inst in instances:
+                self._run_extract_for_instance(
+                    inst.prim_path,
+                    log_prefix=log_prefix,
+                )
             return
         self._log(
             f"{log_prefix} — 등록 인스턴스 {len(instances)}개에 대해 Extract 자동 실행..."
@@ -1663,10 +1684,23 @@ class TbsUsdWindow:
                 flush=True,
             )
 
-        self._log(
-            f"{prefix}Extract 시작 prim={prim_path} "
-            f"(in-memory layer 생성 + 자산 종류 검증 중...)"
-        )
+        use_preextract = False
+        try:
+            from .sim_control_defaults import USE_PREEXTRACTED_LAYERS
+
+            use_preextract = bool(USE_PREEXTRACTED_LAYERS)
+        except Exception:
+            use_preextract = False
+        if use_preextract:
+            self._log(
+                f"{prefix}Extract 시작 prim={prim_path} "
+                f"(preextract 캐시 로드 + attach...)"
+            )
+        else:
+            self._log(
+                f"{prefix}Extract 시작 prim={prim_path} "
+                f"(in-memory layer 생성 + 자산 종류 검증 중...)"
+            )
 
         try:
             result = self._evaluator.extract_and_attach_from_master(

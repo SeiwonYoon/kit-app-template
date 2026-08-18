@@ -38,7 +38,16 @@ def resolve_local_data_path(file_path: PathLike | None) -> str | None:
     return None
 
 
+def resolve_local_data_path_or_default(file_path: PathLike) -> Path:
+    """존재하지 않아도 ``data/`` 아래 경로를 ``Path`` 로 반환 (디렉터리 생성용)."""
+    resolved = resolve_local_data_path(file_path)
+    if resolved is not None:
+        return Path(resolved)
+    return extension_data_root() / str(file_path).strip()
+
+
 __all__ = [
     "extension_data_root",
     "resolve_local_data_path",
+    "resolve_local_data_path_or_default",
 ]

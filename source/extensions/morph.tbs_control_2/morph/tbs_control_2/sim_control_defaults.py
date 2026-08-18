@@ -186,6 +186,15 @@ SIM_BAR_PREVIEW_DEFAULT: bool = True
 #   · FOUP 등은 기존처럼 독립. EBS OFF 는 MOVE 가 거의 없어 사실상 직렬.
 SIM_PARALLEL_NONCONFLICTING_MOVES: bool = False
 
+# ---------------------------------------------------------------------------
+# Extract 결과 캐시 (data/preextract/)
+# ---------------------------------------------------------------------------
+# False: 지금과 같이 Extract(Flatten) 후 인스턴스별 layer 를 data/preextract/ 에
+#        매번 덮어쓴다. 로컬에서 실무 USD 로 캐시를 만들 때 사용.
+# True : Flatten/Extract 생략. 저장된 layer 만 읽어 attach (배포용).
+#        파일이 없으면 해당 인스턴스는 Extract 실패와 동일하게 처리한다.
+USE_PREEXTRACTED_LAYERS: bool = False
+
 __all__ = [
     "SimControlDefaults",
     "SIM_CONTROL_DEFAULTS",
@@ -215,4 +224,5 @@ __all__ = [
     "SIM_PRERUN_EXPORT_JSON",
     "SIM_BAR_PREVIEW_DEFAULT",
     "SIM_PARALLEL_NONCONFLICTING_MOVES",
+    "USE_PREEXTRACTED_LAYERS",
 ]

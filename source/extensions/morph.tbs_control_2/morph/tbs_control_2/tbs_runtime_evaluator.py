@@ -655,23 +655,18 @@ class RuntimeEvaluator:
     ):
         """**[Extract] 신규 path** (2026-05-13) — master 의 prim_path 하위 트리를 직접 추출.
 
-        사용자가 ``/World/<인스턴스>`` 하위에 자산을 **drag&drop** 으로 직접 넣은 경우
-        ``add_usd`` 가 박은 reference 와는 다른 형태가 된다 (Kit drop handler 가 자식
-        prim 으로 reference 박음). 이 경우 본 메서드를 호출하면:
-
-          1) ``master_stage.Flatten()`` 으로 모든 composition 평가.
-          2) ``Sdf.CopySpec`` 으로 ``prim_path`` 하위 트리만 anonymous layer 의 ``/Root``
-             아래로 복사.
-          3) 그 anonymous layer 를 ``attach_memory_baked_layer`` 로 같은 인스턴스
-             runtime 의 offscreen stage 에 attach → TIMESAMPLES_REPLAY 그대로 동작.
-
-        본 메서드는 **기존 ``attach_memory_baked_layer`` 를 그대로 활용** 하며, bake
-        와는 독립된 신규 path 다. bake 흐름 / TIMESAMPLES_REPLAY 흐름 모두 변경하지
-        않는다.
-
-        Returns:
-            ``lam_extract_from_master.ExtractResult`` — ``ok`` / ``layer`` / 통계 포함.
+        ``USE_PREEXTRACTED_LAYERS=True`` 이면 Flatten 없이 ``data/preextract`` 파일을
+        attach 한다. False 이면 기존 Extract 후 같은 경로에 layer 를 덮어쓴다.
         """
+        try:
+            from .sim_control_defaults import USE_PREEXTRACTED_LAYERS
+        except Exception:
+            USE_PREEXTRACTED_LAYERS = False  # type: ignore[misc]
+        if bool(USE_PREEXTRACTED_LAYERS):
+            return self._attach_from_preextract_cache(
+                prim_path, source_asset_for_log=source_asset_for_log
+            )
+
         from .tbs_extract_from_master import (
             ExtractResult,
             extract_subtree_to_anonymous_layer,
@@ -693,13 +688,28 @@ class RuntimeEvaluator:
 
         tag = prim_path.split("/")[-1] if prim_path else "anon"
         result = extract_subtree_to_anonymous_layer(stage, prim_path, tag_hint=tag)
+
+        def _persist(res):
+            try:
+                from .tbs_preextract_cache import save_extract_result
+
+                save_extract_result(prim_path, res)
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} preextract SAVE fail prim={prim_path}: {exc}",
+                    flush=True,
+                )
+            return res
+
         if not result.ok or result.layer is None:
             print(
                 f"{_PRINT_PREFIX} extract FAIL prim={prim_path} "
                 f"error={result.error!r} stats={result.to_log_line()}",
                 flush=True,
             )
-            return result
+            return _persist(result)
+
+        _persist(result)
 
         # 2026-05-14 — attach 전에 inst.source_asset 을 result.discovered_asset_path 로
         # 미리 갱신해, attach 안에서 호출되는 ``sync_mirror_root_prim_path_from_master``
@@ -769,6 +779,108 @@ class RuntimeEvaluator:
         print(
             f"{_PRINT_PREFIX} extract+attach OK prim={prim_path} "
             f"{result.to_log_line()} (TIMESAMPLES_REPLAY 즉시 사용 가능)",
+            flush=True,
+        )
+        return result
+
+    def _attach_from_preextract_cache(
+        self,
+        prim_path: str,
+        *,
+        source_asset_for_log: str = "",
+    ):
+        """``USE_PREEXTRACTED_LAYERS=True`` — Flatten 없이 저장된 layer attach."""
+        from .tbs_extract_from_master import ExtractResult
+        from .tbs_preextract_cache import (
+            apply_entry_to_result,
+            load_preextract_layer,
+            manifest_entry,
+        )
+
+        result = ExtractResult(root_prim_path=prim_path, asset_label=prim_path)
+        entry = manifest_entry(prim_path)
+        if not isinstance(entry, dict):
+            result.error = (
+                f"preextract manifest 에 prim={prim_path} 없음. "
+                f"USE_PREEXTRACTED_LAYERS=False 로 Extract 해 data/preextract 를 만드세요."
+            )
+            print(f"{_PRINT_PREFIX} extract FAIL: {result.error}", flush=True)
+            return result
+
+        apply_entry_to_result(result, entry, prim_path=prim_path)
+        if not bool(entry.get("ok")):
+            print(
+                f"{_PRINT_PREFIX} extract FAIL prim={prim_path} "
+                f"error={result.error!r} stats={result.to_log_line()} "
+                f"(preextract cache)",
+                flush=True,
+            )
+            return result
+
+        layer = load_preextract_layer(prim_path)
+        if layer is None:
+            result.ok = False
+            result.error = f"preextract layer 파일을 열 수 없음 prim={prim_path}"
+            print(
+                f"{_PRINT_PREFIX} extract FAIL prim={prim_path} "
+                f"error={result.error!r} stats={result.to_log_line()}",
+                flush=True,
+            )
+            return result
+        result.layer = layer
+
+        discovered_for_attach = ""
+        try:
+            from .tbs_extract_from_master import normalize_asset_uri_to_path
+
+            discovered_for_attach = normalize_asset_uri_to_path(
+                (result.discovered_asset_path or "").strip()
+            )
+            if discovered_for_attach:
+                inst_obj = None
+                try:
+                    for it in self._registry.all_instances():
+                        if it.prim_path == prim_path:
+                            inst_obj = it
+                            break
+                except Exception:
+                    inst_obj = None
+                if inst_obj is not None and not (
+                    getattr(inst_obj, "source_asset", "") or ""
+                ).strip():
+                    inst_obj.source_asset = discovered_for_attach
+        except Exception:
+            discovered_for_attach = result.discovered_asset_path or ""
+
+        try:
+            attach_ok = self.attach_memory_baked_layer(
+                prim_path,
+                result.layer,
+                source_asset_for_log=source_asset_for_log
+                or "<preextract-cache>",
+                mirror_asset_path_hint=discovered_for_attach,
+            )
+        except Exception as exc:
+            result.ok = False
+            result.error = f"attach_memory_baked_layer 예외: {exc}"
+            print(
+                f"{_PRINT_PREFIX} extract attach EXC prim={prim_path} exc={exc}",
+                flush=True,
+            )
+            return result
+
+        if not attach_ok:
+            result.ok = False
+            result.error = "attach_memory_baked_layer returned False (runtime 없음?)"
+            print(
+                f"{_PRINT_PREFIX} extract attach FAIL prim={prim_path}",
+                flush=True,
+            )
+            return result
+
+        print(
+            f"{_PRINT_PREFIX} extract+attach OK prim={prim_path} "
+            f"{result.to_log_line()} (preextract cache, TIMESAMPLES_REPLAY 즉시 사용 가능)",
             flush=True,
         )
         return result
