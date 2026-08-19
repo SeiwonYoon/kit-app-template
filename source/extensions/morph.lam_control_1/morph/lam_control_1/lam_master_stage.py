@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Any, Dict, Optional
 
 
@@ -157,9 +158,63 @@ class MasterStage:
         ctx = ou.get_context(self._context_name)
         # open 전에 기존 인스턴스 sublayer 캐시는 모두 비움(이전 stage 와 무관해짐).
         self._inst_sublayers.clear()
+        open_path = path
         try:
-            ok = ctx.open_stage(path)
+            from .lam_sim_control_defaults import USE_PRESTRIPPED_OPEN_STAGE
+            from .lam_usd_strip_external import (
+                apply_prestripped_open_stage_policy,
+                prepare_aux_open_stage_cache_if_needed,
+            )
+
+            saved = apply_prestripped_open_stage_policy(path)
+            if bool(USE_PRESTRIPPED_OPEN_STAGE):
+                if not saved:
+                    print(
+                        f"{_PRINT_PREFIX} data/stripped_open 캐시 없음. "
+                        f"USE_PRESTRIPPED_OPEN_STAGE=False 로 한 번 열어 "
+                        f"data/stripped_open 을 만드세요. path={path}",
+                        flush=True,
+                    )
+                    return False
+                open_path = saved
+                print(
+                    f"{_PRINT_PREFIX} prestripped open {open_path}",
+                    flush=True,
+                )
+            else:
+                prepare_aux_open_stage_cache_if_needed(path)
+                open_path = path
+                print(
+                    f"{_PRINT_PREFIX} stripped cache saved={saved} "
+                    f"open_stage 원본={path}",
+                    flush=True,
+                )
         except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} external-strip skip: {exc}",
+                flush=True,
+            )
+            open_path = path
+        start_time = 0.0
+        try:
+            print("오픈스테이지1111111111111", flush=True)
+            print(
+                f"{_PRINT_PREFIX} open_stage path={open_path}",
+                flush=True,
+            )
+            start_time = time.time()
+            ok = ctx.open_stage(open_path)
+            elapsed = time.time() - start_time
+            print(
+                f"오픈스테이지완료22222222(소요: {elapsed:.2f}초)",
+                flush=True,
+            )
+        except Exception as exc:
+            elapsed = time.time() - start_time
+            print(
+                f"오픈스테이지완료22222222(소요: {elapsed:.2f}초) FAIL {exc}",
+                flush=True,
+            )
             print(f"{_PRINT_PREFIX} open_stage failed: {exc}", flush=True)
             return False
 

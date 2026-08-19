@@ -195,6 +195,10 @@ SIM_PARALLEL_NONCONFLICTING_MOVES: bool = False
 #        파일이 없으면 해당 인스턴스는 Extract 실패와 동일하게 처리한다.
 USE_PREEXTRACTED_LAYERS: bool = False
 
+# open_stage 용 외부 경로 제거 캐시 (data/stripped_open/) — Extract 와 동일 구조.
+# False: 캐시는 만들되 화면은 원본을 연다. True: 저장본만 연다 (없으면 실패).
+USE_PRESTRIPPED_OPEN_STAGE: bool = False
+
 __all__ = [
     "SimControlDefaults",
     "SIM_CONTROL_DEFAULTS",
@@ -225,4 +229,5 @@ __all__ = [
     "SIM_BAR_PREVIEW_DEFAULT",
     "SIM_PARALLEL_NONCONFLICTING_MOVES",
     "USE_PREEXTRACTED_LAYERS",
+    "USE_PRESTRIPPED_OPEN_STAGE",
 ]

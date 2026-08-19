@@ -246,7 +246,12 @@ WAFER_NUMBER_LABEL_FONT_SIZE: int = 16
 #        매번 덮어쓴다. 로컬에서 실무 USD 로 캐시를 만들 때 사용.
 # True : Flatten/Extract 생략. 저장된 layer 만 읽어 attach (배포용).
 #        파일이 없으면 해당 인스턴스는 Extract 실패와 동일하게 처리한다.
-USE_PREEXTRACTED_LAYERS: bool = False
+USE_PREEXTRACTED_LAYERS: bool = True
+
+# open_stage 용 외부 경로 제거 캐시 (data/stripped_open/) — Extract 와 동일 구조.
+# False: 캐시는 만들되, 화면은 원본 USD 를 open_stage (로컬).
+# True : ``data/stripped_open/`` 저장본만 open_stage (배포). 없으면 실패.
+USE_PRESTRIPPED_OPEN_STAGE: bool = True
 
 
 def default_viewport_split_count() -> int:
@@ -333,6 +338,7 @@ __all__ = [
     "FEDERATION_USE_FIXTURE",
     "FEDERATION_TEST_WINDOW_AUTO_SHOW",
     "USE_PREEXTRACTED_LAYERS",
+    "USE_PRESTRIPPED_OPEN_STAGE",
     "FEDERATION_LOG_ROW_SAMPLE",
     "FEDERATION_LOG_FULL_RESPONSE",
     "FEDERATION_VERBOSE_PARSE_LOG",

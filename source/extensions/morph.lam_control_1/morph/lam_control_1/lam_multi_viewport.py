@@ -2269,7 +2269,35 @@ async def _open_aux_stage_with_unique_session(
     """
     root_path: Optional[str] = None
     p_in = str(usd_path or "").strip()
-    if _is_preopened_aux_stage_path(p_in, ext, ti):
+    if not _is_lam_clone_aux_path(p_in) and not _is_lam_composed_snapshot_path(p_in):
+        try:
+            from .lam_sim_control_defaults import USE_PRESTRIPPED_OPEN_STAGE
+            from .lam_usd_strip_external import (
+                apply_prestripped_open_stage_policy,
+                isolate_prestripped_open_for_aux,
+            )
+
+            if bool(USE_PRESTRIPPED_OPEN_STAGE):
+                applied = isolate_prestripped_open_for_aux(p_in)
+                if not applied:
+                    return False, (
+                        "data/stripped_open 캐시 없음. "
+                        "USE_PRESTRIPPED_OPEN_STAGE=False 로 한 번 열어 "
+                        f"화면2 USD 캐시를 만드세요. path={p_in}"
+                    )
+                print(
+                    f"[LAM multi-sim] prestripped aux open {applied} (src={p_in})",
+                    flush=True,
+                )
+                p_in = applied
+                usd_path = applied
+                root_path = applied
+                _register_session_layer_path(ext, applied)
+            else:
+                apply_prestripped_open_stage_policy(p_in)
+        except Exception as exc:
+            print(f"[LAM multi-sim] aux prestrip skip: {exc}", flush=True)
+    if root_path is None and _is_preopened_aux_stage_path(p_in, ext, ti):
         try:
             from .lam_data_paths import resolve_local_data_path
             from .lam_split_composed_loader import aux_usd_path_is_direct_open, resolve_split_aux_usd_path
