@@ -1,8 +1,13 @@
-"""open_stage 전 — 외부 자산 경로를 뺀 복사본을 ``data/stripped_open/`` 에 둔다.
+"""open_stage 전 — 외부 자산을 빼고, 로컬 참조는 캐시 안으로 상대경로로 묶는다.
 
 Extract 의 ``data/preextract/`` 와 같은 사용법:
-False 로 로컬에서 생성 → 배포는 True 로 그 파일만 연다.
+모드 1 로 로컬에서 생성 → 모드 2 로 배포에서 ``data/stripped_open/`` 만 연다.
+모드 0 은 원본만 연다 (캐시 없음).
 원본 USD 는 수정하지 않는다.
+
+캐시는 자체 완결이다. USD·텍스처·payload 등 로컬 파일을 같이 복사하고
+참조는 ``./파일명`` 만 쓴다. 외부(네트워크) 참조는 비워 빨강이 된다.
+개발자 PC 절대경로·rebase(tmp) 는 쓰지 않는다.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from .tbs_data_paths import resolve_local_data_path_or_default
 _PRINT_PREFIX = "[TBS/UsdStrip]"
 _DIR_REL = "stripped_open"
 _MANIFEST_NAME = "manifest.json"
+_MANIFEST_VERSION = 2
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_]+")
 
 
@@ -30,6 +36,27 @@ def stripped_open_dir() -> Path:
     return d
 
 
+def clear_stripped_open_cache() -> None:
+    """``data/stripped_open/`` 안 파일을 전부 지운다 (폴더는 유지). 모드 1 재생성용."""
+    d = stripped_open_dir()
+    removed = 0
+    try:
+        for child in list(d.iterdir()):
+            try:
+                if child.is_file() or child.is_symlink():
+                    child.unlink()
+                    removed += 1
+                elif child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                    removed += 1
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} clear skip {child}: {exc}", flush=True)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} clear fail: {exc}", flush=True)
+        return
+    print(f"{_PRINT_PREFIX} cleared data/stripped_open removed={removed}", flush=True)
+
+
 def _manifest_path() -> Path:
     return stripped_open_dir() / _MANIFEST_NAME
 
@@ -37,20 +64,22 @@ def _manifest_path() -> Path:
 def _load_manifest() -> Dict[str, Any]:
     p = _manifest_path()
     if not p.is_file():
-        return {"version": 1, "roots": {}}
+        return {"version": _MANIFEST_VERSION, "roots": {}}
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception as exc:
         print(f"{_PRINT_PREFIX} manifest read fail: {exc}", flush=True)
-        return {"version": 1, "roots": {}}
+        return {"version": _MANIFEST_VERSION, "roots": {}}
     if not isinstance(data, dict):
-        return {"version": 1, "roots": {}}
+        return {"version": _MANIFEST_VERSION, "roots": {}}
     if not isinstance(data.get("roots"), dict):
         data["roots"] = {}
     return data
 
 
 def _write_manifest(data: Dict[str, Any]) -> None:
+    data = dict(data)
+    data["version"] = _MANIFEST_VERSION
     try:
         _manifest_path().write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
@@ -60,15 +89,22 @@ def _write_manifest(data: Dict[str, Any]) -> None:
         print(f"{_PRINT_PREFIX} manifest write fail: {exc}", flush=True)
 
 
+def _path_key(path: str) -> str:
+    return os.path.normcase(os.path.normpath(path))
+
+
 def _cache_file_for(orig: str) -> str:
-    base = os.path.splitext(os.path.basename(orig))[0]
-    slug = _SLUG_RE.sub("_", base).strip("_") or "layer"
-    digest = hashlib.md5(os.path.normpath(orig).encode("utf-8")).hexdigest()[:8]
-    return str(stripped_open_dir() / f"{slug}_{digest}.usdc")
+    stem, ext = os.path.splitext(os.path.basename(orig))
+    slug = _SLUG_RE.sub("_", stem).strip("_") or "asset"
+    digest = hashlib.md5(_path_key(orig).encode("utf-8")).hexdigest()[:8]
+    if not ext:
+        ext = ".usdc"
+    return str(stripped_open_dir() / f"{slug}_{digest}{ext.lower()}")
 
 
 def _cache_rel(mapped_abs: str) -> str:
-    return "./" + os.path.basename(mapped_abs)
+    """캐시 폴더 기준 상대경로 (배포 Linux 포함 — 슬래시만 사용)."""
+    return "./" + os.path.basename(mapped_abs).replace("\\", "/")
 
 
 def is_blocked_asset_path(raw: str) -> bool:
@@ -108,33 +144,43 @@ def is_stripped_open_cache_path(path: str) -> bool:
         return False
 
 
-def apply_prestripped_open_stage_policy(src_path: str) -> Optional[str]:
-    """True: 캐시 경로(없으면 None). False: 캐시 생성 후 원본 경로."""
+def prestripped_open_stage_mode() -> int:
+    """0=원본만, 1=캐시생성+원본, 2=캐시만. 잘못된 값은 0."""
     from .sim_control_defaults import USE_PRESTRIPPED_OPEN_STAGE
 
+    try:
+        mode = int(USE_PRESTRIPPED_OPEN_STAGE)
+    except Exception:
+        mode = 0
+    return mode if mode in (0, 1, 2) else 0
+
+
+def apply_prestripped_open_stage_policy(src_path: str) -> Optional[str]:
+    """모드에 따라 열 경로를 돌려준다. 2에서 캐시 없으면 None."""
     src = (src_path or "").strip()
     if not src:
         return None
     if is_stripped_open_cache_path(src):
         return src
-    if bool(USE_PRESTRIPPED_OPEN_STAGE):
+    mode = prestripped_open_stage_mode()
+    if mode == 2:
         return resolve_prestripped_open_path(src)
-    try:
-        prepare_open_path_without_external_assets(src)
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} cache prepare skip: {exc}", flush=True)
+    if mode == 1:
+        try:
+            prepare_open_path_without_external_assets(src)
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} cache prepare skip: {exc}", flush=True)
     return src
 
 
 def isolate_prestripped_open_for_aux(src_path: str, fallback_src: str = "") -> Optional[str]:
-    """화면2 True: 캐시 세트 전체를 임시 폴더에 복사해 연다.
+    """화면2: 모드 2면 캐시 세트 전체를 임시 폴더에 복사해 연다.
 
-    루트만 복제하면 같은 폴더의 상대 참조가 깨진다.
-    ``src_path`` 캐시가 없으면 화면1 Master(내용 동일 복사본) 캐시를 쓴다.
+    상대경로 ``./파일`` 이므로 세트 전체를 같이 복사해야 한다.
+    ``src_path`` 캐시가 없으면 화면1 Master 캐시를 쓴다.
     """
-    from .sim_control_defaults import USE_PRESTRIPPED_OPEN_STAGE
-
-    if not bool(USE_PRESTRIPPED_OPEN_STAGE):
+    mode = prestripped_open_stage_mode()
+    if mode != 2:
         return apply_prestripped_open_stage_policy(src_path)
 
     fb = (fallback_src or "").strip()
@@ -175,7 +221,7 @@ def isolate_prestripped_open_for_aux(src_path: str, fallback_src: str = "") -> O
     tmp = tempfile.mkdtemp(prefix="morph_tbs_stripped_aux_")
     cache = stripped_open_dir()
     for name in names:
-        bn = os.path.basename(str(name))
+        bn = os.path.basename(str(name).replace("\\", "/"))
         src = cache / bn
         if src.is_file():
             shutil.copy2(src, os.path.join(tmp, bn))
@@ -190,10 +236,8 @@ def isolate_prestripped_open_for_aux(src_path: str, fallback_src: str = "") -> O
 
 
 def prepare_aux_open_stage_cache_if_needed(primary_path: str = "") -> None:
-    """화면1 False 생성 시 화면2 Master 도 같은 폴더에 캐시."""
-    from .sim_control_defaults import USE_PRESTRIPPED_OPEN_STAGE
-
-    if bool(USE_PRESTRIPPED_OPEN_STAGE):
+    """모드 1일 때 화면2 Master 도 같은 폴더에 캐시."""
+    if prestripped_open_stage_mode() != 1:
         return
     try:
         from . import tbs_usd_window as _tuw
@@ -203,8 +247,8 @@ def prepare_aux_open_stage_cache_if_needed(primary_path: str = "") -> None:
         aux = resolve_local_data_path(raw) if raw else None
         if not aux:
             return
-        pri = os.path.normcase(os.path.normpath(os.path.abspath(primary_path or "")))
-        aux_n = os.path.normcase(os.path.normpath(os.path.abspath(aux)))
+        pri = _path_key(os.path.abspath(primary_path or ""))
+        aux_n = _path_key(os.path.abspath(aux))
         if pri and pri == aux_n:
             return
         prepare_open_path_without_external_assets(str(aux))
@@ -213,7 +257,7 @@ def prepare_aux_open_stage_cache_if_needed(primary_path: str = "") -> None:
 
 
 def resolve_prestripped_open_path(root_path: str) -> Optional[str]:
-    """배포 True — ``data/stripped_open`` 저장본. 경로가 바뀌면 Master 폴더로 rebase."""
+    """배포 True — ``data/stripped_open`` 저장본을 그대로 연다 (rebase/tmp 없음)."""
     root = os.path.normpath(os.path.abspath((root_path or "").strip()))
     if not root:
         return None
@@ -221,90 +265,199 @@ def resolve_prestripped_open_path(root_path: str) -> Optional[str]:
     entry = (_load_manifest().get("roots") or {}).get(base)
     if not isinstance(entry, dict):
         return None
-    open_file = str(entry.get("open_file") or "").strip()
+    open_file = str(entry.get("open_file") or "").strip().replace("\\", "/")
+    open_file = os.path.basename(open_file)
     if not open_file:
         return None
     src = stripped_open_dir() / open_file
     if not src.is_file():
         return None
-    old_dir = os.path.normpath(str(entry.get("source_master_dir") or ""))
-    new_dir = os.path.normpath(os.path.dirname(root))
-    files = entry.get("files")
-    names = [str(x) for x in files] if isinstance(files, list) and files else [open_file]
-    if old_dir and os.path.normcase(old_dir) != os.path.normcase(new_dir):
-        return _rebase_cache_to_master_dir(names, open_file, old_dir, new_dir)
     return str(src.resolve())
 
 
-def _rebase_cache_to_master_dir(
-    names: List[str], open_file: str, old_dir: str, new_dir: str
-) -> Optional[str]:
+def prepare_open_path_without_external_assets(root_path: str) -> str:
+    """외부 참조 제거 + 로컬 USD/텍스처를 캐시에 복사. 참조는 ``./파일``.
+
+    외부(차단) 경로는 비워 모드 2에서 빨강이 되고,
+    로컬 파일은 캐시로 복사되어 정상 표시되도록 한다.
+    """
+    root = os.path.normpath(os.path.abspath((root_path or "").strip()))
+    if not root or not os.path.isfile(root):
+        return root_path
     try:
         from pxr import Sdf  # type: ignore
-    except Exception:
-        return None
-    tmp = tempfile.mkdtemp(prefix="lam_stripped_")
-    cache = stripped_open_dir()
-    for name in names:
-        src = cache / os.path.basename(str(name))
-        if src.is_file():
-            shutil.copy2(src, os.path.join(tmp, src.name))
-    root_tmp = os.path.join(tmp, os.path.basename(open_file))
-    if not os.path.isfile(root_tmp):
-        return None
-    for name in names:
-        p = os.path.join(tmp, os.path.basename(str(name)))
-        if not os.path.isfile(p):
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} pxr 없음 — 원본 유지: {exc}", flush=True)
+        return root_path
+
+    try:
+        local_layers, _children = _collect_local_layers(Sdf, root)
+        if not local_layers:
+            return root_path
+
+        asset_files: Set[str] = set()
+        for lyr_path in local_layers:
+            asset_files |= _collect_local_non_usd_assets(Sdf, lyr_path)
+
+        # 자체 완결: 도달 가능한 로컬 USD + 텍스처 전부 복사
+        needs_copy: Set[str] = set(local_layers) | set(asset_files)
+        needs_copy.add(root)
+
+        remap: Dict[str, str] = {}
+        for orig in needs_copy:
+            remap[_path_key(orig)] = _cache_file_for(orig)
+
+        copied_assets = 0
+        for orig in sorted(asset_files):
+            dest = remap[_path_key(orig)]
+            try:
+                os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+                if os.path.abspath(orig) != os.path.abspath(dest):
+                    shutil.copy2(orig, dest)
+                copied_assets += 1
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} asset copy fail {orig}: {exc}", flush=True)
+
+        stripped_total = 0
+        for orig in local_layers:
+            dest = remap[_path_key(orig)]
+            n = _write_sanitized_layer(Sdf, orig, dest, remap)
+            stripped_total += n
+
+        out = remap[_path_key(root)]
+        man = _load_manifest()
+        man.setdefault("roots", {})
+        # 상대경로만 — 절대 source_master_dir / rebase 금지
+        man["roots"][os.path.basename(root)] = {
+            "open_file": os.path.basename(out).replace("\\", "/"),
+            "files": sorted(
+                {
+                    os.path.basename(remap[k]).replace("\\", "/")
+                    for k in remap
+                }
+            ),
+        }
+        _write_manifest(man)
+        print(
+            f"{_PRINT_PREFIX} data/stripped_open "
+            f"usd={len(local_layers)} assets={copied_assets} "
+            f"stripped_refs={stripped_total} open={out}",
+            flush=True,
+        )
+        return out if os.path.isfile(out) else root_path
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} 실패 — 원본 유지: {exc}", flush=True)
+        return root_path
+
+
+def _collect_local_layers(Sdf: Any, root: str) -> Tuple[List[str], Dict[str, List[str]]]:
+    seen: Set[str] = set()
+    order: List[str] = []
+    children: Dict[str, List[str]] = {}
+    queue = [root]
+    while queue:
+        cur = queue.pop(0)
+        cur_n = os.path.normpath(cur)
+        key = _path_key(cur_n)
+        if key in seen:
             continue
-        layer = Sdf.Layer.FindOrOpen(p)
+        if not os.path.isfile(cur_n):
+            continue
+        seen.add(key)
+        order.append(cur_n)
+        children[cur_n] = []
+        layer = Sdf.Layer.FindOrOpen(cur_n)
         if layer is None:
             continue
-        _rebase_paths_in_layer(layer, old_dir, new_dir)
-        try:
-            layer.Save()
-        except Exception:
-            pass
-    print(
-        f"{_PRINT_PREFIX} rebase {old_dir} -> {new_dir} open={root_tmp}",
-        flush=True,
-    )
-    return root_tmp
+        for ref in _layer_dep_strings(layer):
+            if is_blocked_asset_path(ref):
+                continue
+            abs_p = _resolve_on_layer(layer, ref)
+            if not abs_p or is_blocked_asset_path(abs_p):
+                continue
+            if not os.path.isfile(abs_p):
+                continue
+            if not _looks_like_usd(abs_p):
+                continue
+            abs_n = os.path.normpath(abs_p)
+            children[cur_n].append(abs_n)
+            if _path_key(abs_n) not in seen:
+                queue.append(abs_n)
+        # reference / payload 도 레이어 그래프에 포함
+        for abs_p in _collect_arc_usd_paths(Sdf, layer):
+            if _path_key(abs_p) not in seen:
+                children[cur_n].append(abs_p)
+                queue.append(abs_p)
+    return order, children
 
 
-def _rebase_paths_in_layer(layer: Any, old_dir: str, new_dir: str) -> None:
-    old_n = os.path.normpath(old_dir)
-    new_n = os.path.normpath(new_dir)
+def _collect_arc_usd_paths(Sdf: Any, layer: Any) -> List[str]:
+    out: List[str] = []
+    try:
+        roots = list(layer.rootPrims.values())
+    except Exception:
+        return out
+    for root in roots:
+        for spec in _iter_prim_specs(root):
+            for list_name in ("referenceList", "payloadList"):
+                lst = getattr(spec, list_name, None)
+                if lst is None:
+                    continue
+                for attr in (
+                    "explicitItems",
+                    "addedItems",
+                    "prependedItems",
+                    "appendedItems",
+                ):
+                    try:
+                        items = list(getattr(lst, attr) or [])
+                    except Exception:
+                        continue
+                    for item in items:
+                        try:
+                            ap = str(getattr(item, "assetPath", "") or "")
+                        except Exception:
+                            continue
+                        if not ap or is_blocked_asset_path(ap):
+                            continue
+                        abs_p = _resolve_on_layer(layer, ap)
+                        if (
+                            abs_p
+                            and os.path.isfile(abs_p)
+                            and not is_blocked_asset_path(abs_p)
+                            and _looks_like_usd(abs_p)
+                        ):
+                            out.append(os.path.normpath(abs_p))
+    return out
 
-    def _fix(s: str) -> str:
-        raw = (s or "").strip()
+
+def _collect_local_non_usd_assets(Sdf: Any, layer_path: str) -> Set[str]:
+    """레이어가 가리키는 로컬 비-USD 파일(텍스처·mdl 등)."""
+    found: Set[str] = set()
+    layer = Sdf.Layer.FindOrOpen(layer_path)
+    if layer is None:
+        return found
+
+    def _maybe_add(raw: str) -> None:
         if not raw or is_blocked_asset_path(raw):
-            return raw
-        if raw.startswith("./") and not os.path.isabs(raw):
-            return raw
-        try:
-            norm = os.path.normpath(raw)
-        except Exception:
-            return raw
-        old_c = os.path.normcase(old_n)
-        if os.path.normcase(norm).startswith(old_c):
-            rest = norm[len(old_n) :].lstrip("\\/")
-            return os.path.normpath(os.path.join(new_n, rest))
-        return raw
+            return
+        abs_p = _resolve_on_layer(layer, raw)
+        if not abs_p or is_blocked_asset_path(abs_p):
+            return
+        if not os.path.isfile(abs_p):
+            return
+        if _looks_like_usd(abs_p):
+            return
+        found.add(os.path.normpath(abs_p))
 
     try:
-        old_subs = [str(x) for x in list(layer.subLayerPaths or [])]
-        new_subs = [_fix(x) for x in old_subs]
-        if new_subs != old_subs:
-            while len(layer.subLayerPaths):
-                del layer.subLayerPaths[0]
-            for p in new_subs:
-                layer.subLayerPaths.append(p)
+        fn = getattr(layer, "GetExternalReferences", None)
+        if callable(fn):
+            for ref in list(fn() or []):
+                _maybe_add(str(ref))
     except Exception:
         pass
-    try:
-        from pxr import Sdf  # type: ignore
-    except Exception:
-        Sdf = None
+
     try:
         roots = list(layer.rootPrims.values())
     except Exception:
@@ -323,104 +476,21 @@ def _rebase_paths_in_layer(layer: Any, old_dir: str, new_dir: str) -> None:
                 if "asset" not in tname.lower():
                     continue
                 try:
-                    d = attr.default
-                    ns = _fix(_asset_str(d))
-                    if ns and ns != _asset_str(d):
-                        attr.default = Sdf.AssetPath(ns) if Sdf is not None else ns
+                    _maybe_add(_asset_str(attr.default))
                 except Exception:
                     pass
-
-
-def prepare_open_path_without_external_assets(root_path: str) -> str:
-    """외부 참조를 뺀 로컬 sidecar 경로. 손댈 것이 없으면 원본 경로."""
-    root = os.path.normpath(os.path.abspath((root_path or "").strip()))
-    if not root or not os.path.isfile(root):
-        return root_path
-    try:
-        from pxr import Sdf  # type: ignore
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} pxr 없음 — 원본 유지: {exc}", flush=True)
-        return root_path
-
-    try:
-        local_layers, children = _collect_local_layers(Sdf, root)
-        if not local_layers:
-            return root_path
-        needs_strip = {p: _layer_has_blocked(Sdf, p) for p in local_layers}
-        needs_copy: Set[str] = {p for p, hit in needs_strip.items() if hit}
-        changed = True
-        while changed:
-            changed = False
-            for parent, chs in children.items():
-                if parent in needs_copy:
-                    continue
-                if any(c in needs_copy for c in chs):
-                    needs_copy.add(parent)
-                    changed = True
-        needs_copy.add(root)
-
-        remap: Dict[str, str] = {}
-        for orig in needs_copy:
-            remap[orig] = _cache_file_for(orig)
-
-        stripped_total = 0
-        for orig in needs_copy:
-            n = _write_sanitized_layer(Sdf, orig, remap[orig], remap)
-            stripped_total += n
-
-        out = remap[root]
-        man = _load_manifest()
-        man.setdefault("roots", {})
-        man["roots"][os.path.basename(root)] = {
-            "source_master_dir": os.path.dirname(root),
-            "open_file": os.path.basename(out),
-            "files": [os.path.basename(remap[p]) for p in needs_copy],
-        }
-        _write_manifest(man)
-        print(
-            f"{_PRINT_PREFIX} data/stripped_open copied={len(needs_copy)} "
-            f"stripped_refs={stripped_total} open={out}",
-            flush=True,
-        )
-        return out if os.path.isfile(out) else root_path
-    except Exception as exc:
-        print(f"{_PRINT_PREFIX} 실패 — 원본 유지: {exc}", flush=True)
-        return root_path
-
-
-def _collect_local_layers(Sdf: Any, root: str) -> Tuple[List[str], Dict[str, List[str]]]:
-    seen: Set[str] = set()
-    order: List[str] = []
-    children: Dict[str, List[str]] = {}
-    queue = [root]
-    while queue:
-        cur = queue.pop(0)
-        cur_n = os.path.normpath(cur)
-        if cur_n in seen:
-            continue
-        if not os.path.isfile(cur_n):
-            continue
-        seen.add(cur_n)
-        order.append(cur_n)
-        children[cur_n] = []
-        layer = Sdf.Layer.FindOrOpen(cur_n)
-        if layer is None:
-            continue
-        for ref in _layer_dep_strings(layer):
-            if is_blocked_asset_path(ref):
-                continue
-            abs_p = _resolve_on_layer(layer, ref)
-            if not abs_p or is_blocked_asset_path(abs_p):
-                continue
-            if not os.path.isfile(abs_p):
-                continue
-            if not _looks_like_usd(abs_p):
-                continue
-            abs_n = os.path.normpath(abs_p)
-            children[cur_n].append(abs_n)
-            if abs_n not in seen:
-                queue.append(abs_n)
-    return order, children
+                try:
+                    samples = dict(getattr(attr, "timeSamples", None) or {})
+                except Exception:
+                    samples = {}
+                for val in samples.values():
+                    _maybe_add(_asset_str(val))
+            for key in ("info:mdl:sourceAsset", "sourceAsset"):
+                try:
+                    _maybe_add(_asset_str(spec.GetInfo(key)))
+                except Exception:
+                    pass
+    return found
 
 
 def _looks_like_usd(path: str) -> bool:
@@ -466,20 +536,6 @@ def _resolve_on_layer(layer: Any, asset_path: str) -> str:
     return ap
 
 
-def _layer_has_blocked(Sdf: Any, path: str) -> bool:
-    layer = Sdf.Layer.FindOrOpen(path)
-    if layer is None:
-        return False
-    for ref in _layer_dep_strings(layer):
-        if is_blocked_asset_path(ref):
-            return True
-        abs_p = _resolve_on_layer(layer, ref)
-        if abs_p and is_blocked_asset_path(abs_p):
-            return True
-    n = _sanitize_layer_in_place(Sdf, layer, remap={}, dry_run=True, resolve_layer=layer)
-    return n > 0
-
-
 def _write_sanitized_layer(
     Sdf: Any, orig: str, dest: str, remap: Dict[str, str]
 ) -> int:
@@ -501,59 +557,11 @@ def _write_sanitized_layer(
     n = _sanitize_layer_in_place(
         Sdf, dst, remap=remap, dry_run=False, resolve_layer=src
     )
-    _bake_local_assets_absolute(Sdf, dst, src)
     try:
         dst.Save()
     except Exception as exc:
         print(f"{_PRINT_PREFIX} Save 실패 {dest}: {exc}", flush=True)
     return n
-
-
-def _bake_local_assets_absolute(Sdf: Any, dst: Any, src: Any) -> None:
-    """캐시가 data/ 에 있어도 텍스처는 원본 폴더의 절대 경로로 남긴다."""
-    try:
-        roots = list(dst.rootPrims.values())
-    except Exception:
-        return
-    for root in roots:
-        for spec in _iter_prim_specs(root):
-            try:
-                attrs = list(spec.attributes.values())
-            except Exception:
-                attrs = []
-            for attr in attrs:
-                try:
-                    tname = str(getattr(attr, "typeName", "") or "")
-                except Exception:
-                    continue
-                if "asset" not in tname.lower():
-                    continue
-                try:
-                    s = _asset_str(attr.default)
-                except Exception:
-                    s = ""
-                if not s or is_blocked_asset_path(s):
-                    continue
-                abs_p = _resolve_on_layer(src, s)
-                if abs_p and os.path.isfile(abs_p) and not is_blocked_asset_path(abs_p):
-                    try:
-                        attr.default = Sdf.AssetPath(abs_p)
-                    except Exception:
-                        pass
-            for key in ("info:mdl:sourceAsset", "sourceAsset"):
-                try:
-                    info = spec.GetInfo(key)
-                except Exception:
-                    continue
-                s = _asset_str(info)
-                if not s or is_blocked_asset_path(s):
-                    continue
-                abs_p = _resolve_on_layer(src, s)
-                if abs_p and os.path.isfile(abs_p) and not is_blocked_asset_path(abs_p):
-                    try:
-                        spec.SetInfo(key, Sdf.AssetPath(abs_p))
-                    except Exception:
-                        pass
 
 
 def _iter_prim_specs(spec: Any) -> Iterable[Any]:
@@ -601,26 +609,34 @@ def _sanitize_layer_in_place(
     for root in roots:
         for spec in _iter_prim_specs(root):
             n += _filter_prim_arcs(Sdf, src, spec, remap, dry_run)
-            n += _filter_prim_assets(Sdf, spec, dry_run)
+            n += _filter_prim_assets(Sdf, src, spec, remap, dry_run)
     return n
 
 
 def _kept_asset_path(
     resolve_layer: Any, asset_path: str, remap: Dict[str, str]
 ) -> Optional[str]:
-    """차단 경로는 None. 캐시로 복사된 USD 는 ./파일, 그 외 로컬 파일은 절대 경로."""
+    """차단·미해결 로컬은 None. 캐시에 있는 로컬은 ``./파일`` (절대경로 금지)."""
     if is_blocked_asset_path(asset_path):
         return None
     abs_p = _resolve_on_layer(resolve_layer, asset_path)
     if abs_p and is_blocked_asset_path(abs_p):
         return None
     if abs_p:
-        mapped = remap.get(os.path.normpath(abs_p), "")
+        mapped = remap.get(_path_key(abs_p), "")
         if mapped:
             return _cache_rel(mapped)
         if os.path.isfile(abs_p):
-            return abs_p.replace("\\", "/")
-    return asset_path
+            # 캐시에 없으면 배포에서 깨지므로 비움
+            return None
+    # 파일이 없는 상대경로 등은 배포에서 따라가지 않도록 제거
+    if asset_path and not is_blocked_asset_path(asset_path):
+        # 이미 ./캐시파일 형태면 유지
+        base = os.path.basename(asset_path.replace("\\", "/"))
+        for dest in remap.values():
+            if os.path.basename(dest.replace("\\", "/")) == base:
+                return _cache_rel(dest)
+    return None
 
 
 def _filter_sublayers(
@@ -650,12 +666,6 @@ def _filter_sublayers(
     except Exception:
         pass
     return n
-
-
-def _rewrite_arc_path(
-    layer: Any, asset_path: str, remap: Dict[str, str]
-) -> Optional[str]:
-    return _kept_asset_path(layer, asset_path, remap)
 
 
 def _filter_prim_arcs(
@@ -695,7 +705,10 @@ def _filter_list_op(
             except Exception:
                 new_items.append(item)
                 continue
-            rewritten = _rewrite_arc_path(layer, ap, remap)
+            if not ap:
+                new_items.append(item)
+                continue
+            rewritten = _kept_asset_path(layer, ap, remap)
             if rewritten is None:
                 n += 1
                 changed = True
@@ -722,13 +735,35 @@ def _filter_list_op(
     return n
 
 
-def _filter_prim_assets(Sdf: Any, spec: Any, dry_run: bool) -> int:
+def _filter_prim_assets(
+    Sdf: Any,
+    resolve_layer: Any,
+    spec: Any,
+    remap: Dict[str, str],
+    dry_run: bool,
+) -> int:
     n = 0
     empty = None
     try:
         empty = Sdf.AssetPath("")
     except Exception:
         empty = ""
+
+    def _rewrite_val(raw: str) -> Tuple[Optional[Any], bool]:
+        """(새 AssetPath 또는 empty, 변경/제거 여부)."""
+        s = (raw or "").strip()
+        if not s:
+            return None, False
+        kept = _kept_asset_path(resolve_layer, s, remap)
+        if kept is None:
+            return empty, True
+        if kept == s:
+            return None, False
+        try:
+            return Sdf.AssetPath(kept), True
+        except Exception:
+            return kept, True
+
     try:
         attrs = list(spec.attributes.values())
     except Exception:
@@ -744,36 +779,43 @@ def _filter_prim_assets(Sdf: Any, spec: Any, dry_run: bool) -> int:
             default = attr.default
         except Exception:
             default = None
-        if _asset_str(default) and is_blocked_asset_path(_asset_str(default)):
+        new_v, changed = _rewrite_val(_asset_str(default))
+        if changed:
             n += 1
-            if not dry_run:
+            if not dry_run and new_v is not None:
                 try:
-                    attr.default = empty
+                    attr.default = new_v
                 except Exception:
                     pass
         try:
             samples = dict(getattr(attr, "timeSamples", None) or {})
         except Exception:
             samples = {}
+        sample_changed = False
         for t, val in list(samples.items()):
-            if _asset_str(val) and is_blocked_asset_path(_asset_str(val)):
+            new_s, ch = _rewrite_val(_asset_str(val))
+            if ch:
                 n += 1
-                if not dry_run:
-                    try:
-                        samples[t] = empty
-                        attr.timeSamples = samples
-                    except Exception:
-                        pass
+                sample_changed = True
+                if not dry_run and new_s is not None:
+                    samples[t] = new_s
+        if sample_changed and not dry_run:
+            try:
+                attr.timeSamples = samples
+            except Exception:
+                pass
+
     for key in ("info:mdl:sourceAsset", "sourceAsset"):
         try:
             info = spec.GetInfo(key)
         except Exception:
             continue
-        if _asset_str(info) and is_blocked_asset_path(_asset_str(info)):
+        new_v, changed = _rewrite_val(_asset_str(info))
+        if changed:
             n += 1
-            if not dry_run:
+            if not dry_run and new_v is not None:
                 try:
-                    spec.SetInfo(key, empty)
+                    spec.SetInfo(key, new_v)
                 except Exception:
                     pass
     return n
@@ -781,11 +823,13 @@ def _filter_prim_assets(Sdf: Any, spec: Any, dry_run: bool) -> int:
 
 __all__ = [
     "apply_prestripped_open_stage_policy",
+    "clear_stripped_open_cache",
     "isolate_prestripped_open_for_aux",
     "is_blocked_asset_path",
     "is_stripped_open_cache_path",
     "prepare_aux_open_stage_cache_if_needed",
     "prepare_open_path_without_external_assets",
+    "prestripped_open_stage_mode",
     "resolve_prestripped_open_path",
     "stripped_sidecar_path",
 ]

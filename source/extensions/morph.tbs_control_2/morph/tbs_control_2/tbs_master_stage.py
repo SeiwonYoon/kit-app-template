@@ -157,33 +157,44 @@ class MasterStage:
         self._inst_sublayers.clear()
         open_path = path
         try:
-            from .sim_control_defaults import USE_PRESTRIPPED_OPEN_STAGE
             from .tbs_usd_strip_external import (
                 apply_prestripped_open_stage_policy,
+                clear_stripped_open_cache,
                 prepare_aux_open_stage_cache_if_needed,
+                prestripped_open_stage_mode,
             )
 
+            mode = prestripped_open_stage_mode()
+            if mode == 1:
+                # 모드 1: 캐시 폴더를 비운 뒤 화면1·2 Master 를 새로 생성
+                clear_stripped_open_cache()
             saved = apply_prestripped_open_stage_policy(path)
-            if bool(USE_PRESTRIPPED_OPEN_STAGE):
+            if mode == 2:
                 if not saved:
                     print(
                         f"{_PRINT_PREFIX} data/stripped_open 캐시 없음. "
-                        f"USE_PRESTRIPPED_OPEN_STAGE=False 로 한 번 열어 "
+                        f"USE_PRESTRIPPED_OPEN_STAGE=1 로 한 번 열어 "
                         f"data/stripped_open 을 만드세요. path={path}",
                         flush=True,
                     )
                     return False
                 open_path = saved
                 print(
-                    f"{_PRINT_PREFIX} prestripped open {open_path}",
+                    f"{_PRINT_PREFIX} prestripped open mode=2 {open_path}",
                     flush=True,
                 )
-            else:
+            elif mode == 1:
                 prepare_aux_open_stage_cache_if_needed(path)
                 open_path = path
                 print(
-                    f"{_PRINT_PREFIX} stripped cache saved={saved} "
-                    f"open_stage 원본={path}",
+                    f"{_PRINT_PREFIX} stripped cache rebuilt "
+                    f"open_stage 원본={path} mode=1",
+                    flush=True,
+                )
+            else:
+                open_path = path
+                print(
+                    f"{_PRINT_PREFIX} open_stage 원본만 mode=0 path={path}",
                     flush=True,
                 )
         except Exception as exc:

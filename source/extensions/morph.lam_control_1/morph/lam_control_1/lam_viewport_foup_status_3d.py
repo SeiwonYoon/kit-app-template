@@ -649,7 +649,7 @@ class LamFoupStatus3dPanel:
                         top = _PANEL_H // 2 - 20
                         labels = []
                         for i in range(_PANEL_LINE_COUNT):
-                            y = top - i * _LINE_H
+                            y = top - i * _LINE_H - (10 if i >= 1 else 0)
                             with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
                                 font_sz = (
                                     int(FOUP_LOT_ID_FONT_SIZE)
@@ -744,7 +744,7 @@ class LamFoupStatus3dPanel:
                 top = panel_h // 2 - 18
                 lines = [ln for ln in (text or "").splitlines() if ln.strip()]
                 for i, ln in enumerate(lines[:_PANEL_LINE_COUNT]):
-                    y = top - i * _LINE_H
+                    y = top - i * _LINE_H - (10 if i >= 1 else 0)
                     with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
                         font_sz = (
                             int(FOUP_LOT_ID_FONT_SIZE)

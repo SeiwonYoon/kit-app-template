@@ -2218,18 +2218,19 @@ async def _open_aux_stage_with_unique_session(
     p_in = str(usd_path or "").strip()
     if not _is_tbs_clone_aux_path(p_in) and not _is_tbs_composed_snapshot_path(p_in):
         try:
-            from .sim_control_defaults import USE_PRESTRIPPED_OPEN_STAGE
             from .tbs_usd_strip_external import (
                 apply_prestripped_open_stage_policy,
                 isolate_prestripped_open_for_aux,
+                prestripped_open_stage_mode,
             )
 
-            if bool(USE_PRESTRIPPED_OPEN_STAGE):
+            mode = prestripped_open_stage_mode()
+            if mode == 2:
                 applied = isolate_prestripped_open_for_aux(p_in)
                 if not applied:
                     return False, (
                         "data/stripped_open 캐시 없음. "
-                        "USE_PRESTRIPPED_OPEN_STAGE=False 로 한 번 열어 "
+                        "USE_PRESTRIPPED_OPEN_STAGE=1 로 한 번 열어 "
                         f"화면2 USD 캐시를 만드세요. path={p_in}"
                     )
                 print(
@@ -2240,7 +2241,7 @@ async def _open_aux_stage_with_unique_session(
                 usd_path = applied
                 root_path = applied
                 _register_session_layer_path(ext, applied)
-            else:
+            elif mode == 1:
                 apply_prestripped_open_stage_policy(p_in)
         except Exception as exc:
             print(f"[TBS multi-sim] aux prestrip skip: {exc}", flush=True)

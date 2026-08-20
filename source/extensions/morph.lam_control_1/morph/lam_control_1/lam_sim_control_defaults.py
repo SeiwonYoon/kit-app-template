@@ -235,9 +235,9 @@ FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.0
 #   갈색   (0.55, 0.28, 0.08, 1.00)
 #   회색   (0.35, 0.35, 0.38, 1.00)
 # FOUP 상태보기 패널 첫 줄(lot_id) 글자 크기 [px]. 나머지 줄은 overlay 의 FOUP_PANEL_FONT_SIZE.
-FOUP_LOT_ID_FONT_SIZE: int = 15
+FOUP_LOT_ID_FONT_SIZE: int = 22
 # 웨이퍼 번호 3D 라벨 글자 크기 [px] (전 슬롯 공통).
-WAFER_NUMBER_LABEL_FONT_SIZE: int = 16
+WAFER_NUMBER_LABEL_FONT_SIZE: int = 20
 
 # ---------------------------------------------------------------------------
 # Extract 결과 캐시 (data/preextract/)
@@ -248,10 +248,11 @@ WAFER_NUMBER_LABEL_FONT_SIZE: int = 16
 #        파일이 없으면 해당 인스턴스는 Extract 실패와 동일하게 처리한다.
 USE_PREEXTRACTED_LAYERS: bool = True
 
-# open_stage 용 외부 경로 제거 캐시 (data/stripped_open/) — Extract 와 동일 구조.
-# False: 캐시는 만들되, 화면은 원본 USD 를 open_stage (로컬).
-# True : ``data/stripped_open/`` 저장본만 open_stage (배포). 없으면 실패.
-USE_PRESTRIPPED_OPEN_STAGE: bool = True
+# open_stage 용 외부 경로 제거 캐시 (data/stripped_open/)
+# 0: 원본 USD 만 open_stage (캐시 생성 없음)
+# 1: 캐시 생성 + 화면은 원본 open_stage (로컬에서 배포용 캐시 만들 때)
+# 2: ``data/stripped_open/`` 저장본만 open_stage (배포). 없으면 실패
+USE_PRESTRIPPED_OPEN_STAGE: int = 2
 
 
 def default_viewport_split_count() -> int:
