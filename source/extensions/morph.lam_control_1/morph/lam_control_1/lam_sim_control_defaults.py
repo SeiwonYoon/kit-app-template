@@ -256,7 +256,7 @@ USE_PREEXTRACTED_LAYERS: bool = True
 # 0: 원본 USD 만 open_stage (캐시 생성 없음)
 # 1: 캐시 생성 + 화면은 원본 open_stage (로컬에서 배포용 캐시 만들 때)
 # 2: ``data/stripped_open/`` 저장본만 open_stage (배포). 없으면 실패
-USE_PRESTRIPPED_OPEN_STAGE: int = 0
+USE_PRESTRIPPED_OPEN_STAGE: int = 2
 
 
 def default_viewport_split_count() -> int:

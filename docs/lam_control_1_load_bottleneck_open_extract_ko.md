@@ -49,17 +49,17 @@
 
 스위치: `lam_sim_control_defaults.py` / `sim_control_defaults.py` 의 `USE_PRESTRIPPED_OPEN_STAGE`
 
-저장 위치: `data/stripped_open/` (`manifest.json` + USD·텍스처 등)  
-원본 USD는 수정하지 않는다. 복사본에서 외부 경로는 비우고, **로컬로 읽히던 USD/텍스처/payload는 같이 복사**한 뒤 참조를 `./파일명` 상대경로로만 남긴다.  
-`manifest.json`에도 절대경로·개발자 PC 경로를 쓰지 않는다. 배포(Linux)에서 rebase로 `tmp/...`를 열어 검게 나오던 동작은 제거했다.
+저장 위치: `data/stripped_open/<bundle>/` (`manifest.json` + **원본과 같은 상대 폴더 구조**)  
+원본 USD는 수정하지 않는다. 도달 가능한 로컬 USD·MDL·이미지를 **구조를 유지한 채** 복사하고, USD 안의 **외부(네트워크) 경로만** 비운다. MDL 내부 상대경로는 폴더 구조가 같아서 그대로 동작한다.  
+`manifest.json`에도 절대경로를 쓰지 않는다.
 
 ### 모드 0 / 1 / 2
 
 | 값 | 어디서 | 화면이 여는 파일 | 캐시 |
 |----|--------|------------------|------|
 | **0** | 평소 로컬 | **원본 USD만** | 만들지 않음 |
-| **1** | 로컬 (캐시 만들기) | **원본 USD** | `data/stripped_open/`에 생성 |
-| **2** | 배포 | **`data/stripped_open/`만** (tmp rebase 없음) | 읽기만. 없으면 실패 |
+| **1** | 로컬 (캐시 만들기) | **원본 USD** | `data/stripped_open/<bundle>/`에 **폴더 구조 유지** 복사 |
+| **2** | 배포 | **`data/stripped_open/<bundle>/`만** | 읽기만. 없으면 실패 |
 
 0은 예전처럼 원본만 연다.  
 1은 화면은 원본이고, 배포용 캐시만 만들어 둔다.  
@@ -71,8 +71,8 @@
 ### 현장에서 쓰는 순서
 
 1. 로컬에서 플래그를 **1**, 배포와 **같은 Master**(화면1·화면2 USD)로 앱을 한 번 연다.
-   (`data/stripped_open/` 를 **비운 뒤** USD·로컬 텍스처를 새로 복사하고 `./` 로 참조를 맞춘다.)
-2. `data/stripped_open/`에 파일이 생겼는지 확인한다.
+   (`data/stripped_open/` 를 **비운 뒤** `usd`/`usd_v01` 로컬 의존 트리를 **폴더 구조 유지**로 복사하고, 외부 URL만 제거한다.)
+2. `data/stripped_open/<bundle>/`에 파일이 생겼는지 확인한다.
 3. 그 폴더를 `data/preextract/`와 같이 배포 패키지에 넣고, 배포 플래그를 **2**로 둔다.
 4. Master가 바뀌면 1~3을 다시 한다. 평소 로컬 확인만 할 때는 **0**을 쓴다.
 
