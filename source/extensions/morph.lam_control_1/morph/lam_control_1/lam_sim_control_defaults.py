@@ -238,6 +238,10 @@ FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.0
 FOUP_LOT_ID_FONT_SIZE: int = 22
 # 웨이퍼 번호 3D 라벨 글자 크기 [px] (전 슬롯 공통).
 WAFER_NUMBER_LABEL_FONT_SIZE: int = 20
+# 웨이퍼 번호 라벨 원형 배경 (sc.Widget + ui.Circle). RGBA 0~1.
+WAFER_NUMBER_LABEL_BG_COLOR_RGBA: tuple[float, float, float, float] = (0.00, 0.00, 0.00, 1.00)
+# 원형 배경 지름 [px]. 글자보다 약간 크게.
+WAFER_NUMBER_LABEL_BG_SIZE_PX: int = 32
 
 # ---------------------------------------------------------------------------
 # Extract 결과 캐시 (data/preextract/)
@@ -252,7 +256,7 @@ USE_PREEXTRACTED_LAYERS: bool = True
 # 0: 원본 USD 만 open_stage (캐시 생성 없음)
 # 1: 캐시 생성 + 화면은 원본 open_stage (로컬에서 배포용 캐시 만들 때)
 # 2: ``data/stripped_open/`` 저장본만 open_stage (배포). 없으면 실패
-USE_PRESTRIPPED_OPEN_STAGE: int = 2
+USE_PRESTRIPPED_OPEN_STAGE: int = 0
 
 
 def default_viewport_split_count() -> int:
@@ -350,6 +354,8 @@ __all__ = [
     "FOUP3_LOT_COLOR_RGBA",
     "FOUP_LOT_ID_FONT_SIZE",
     "WAFER_NUMBER_LABEL_FONT_SIZE",
+    "WAFER_NUMBER_LABEL_BG_COLOR_RGBA",
+    "WAFER_NUMBER_LABEL_BG_SIZE_PX",
     "default_viewport_split_count",
     "default_csv_play_screen_count",
     "default_visible_screens",

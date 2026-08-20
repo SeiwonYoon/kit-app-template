@@ -21,7 +21,11 @@ import omni.ui as ui
 from omni.ui import scene as sc
 from pxr import Usd, UsdGeom
 
-from .lam_sim_control_defaults import WAFER_NUMBER_LABEL_FONT_SIZE
+from .lam_sim_control_defaults import (
+    WAFER_NUMBER_LABEL_BG_COLOR_RGBA,
+    WAFER_NUMBER_LABEL_BG_SIZE_PX,
+    WAFER_NUMBER_LABEL_FONT_SIZE,
+)
 from .lam_viewport_overlay_config import WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS
 from .lam_buffer_return_rules import foup_index_from_slot_key
 from .lam_foup_lot_display import foup_lot_color_rgba
@@ -1444,15 +1448,66 @@ class LamWaferFoupViewportLabels:
             look_at=sc.Transform.LookAt.CAMERA,
             transform=sc.Matrix44.get_translation_matrix(*world_pos),
         )
+        bg_size = max(8, int(WAFER_NUMBER_LABEL_BG_SIZE_PX))
+        font_sz = max(8, int(WAFER_NUMBER_LABEL_FONT_SIZE))
+        bg_argb = _rgba01_to_argb(tuple(WAFER_NUMBER_LABEL_BG_COLOR_RGBA))
+        fg_argb = _rgba01_to_argb(color)
+        half = float(bg_size) * 0.5
         with root:
             with sc.Transform(scale_to=sc.Space.SCREEN):
-                sc.Label(
-                    text,
-                    size=int(WAFER_NUMBER_LABEL_FONT_SIZE),
-                    color=color,
-                    alignment=ui.Alignment.CENTER,
-                )
+                # Widget 은 좌하단/코너 기준인 경우가 많아 중심에 맞춤
+                with sc.Transform(
+                    transform=sc.Matrix44.get_translation_matrix(-half, -half, 0.0)
+                ):
+                    try:
+                        widget = sc.Widget(bg_size, bg_size)
+                        frame = getattr(widget, "frame", None)
+                        ctx = frame if frame is not None else widget
+                        with ctx:
+                            with ui.ZStack():
+                                ui.Circle(
+                                    style={
+                                        "background_color": bg_argb,
+                                        "border_width": 0,
+                                    }
+                                )
+                                ui.Label(
+                                    str(text or ""),
+                                    alignment=ui.Alignment.CENTER,
+                                    style={
+                                        "color": fg_argb,
+                                        "font_size": font_sz,
+                                    },
+                                )
+                    except Exception as exc:
+                        try:
+                            print(
+                                f"{_PRINT_PREFIX} Widget/Circle label fallback: {exc}",
+                                flush=True,
+                            )
+                        except Exception:
+                            pass
+                        sc.Label(
+                            str(text or ""),
+                            size=font_sz,
+                            color=color,
+                            alignment=ui.Alignment.CENTER,
+                        )
         return root
+
+
+def _rgba01_to_argb(rgba: Tuple[float, float, float, float]) -> int:
+    """omni.ui style 용 0xAARRGGBB."""
+    try:
+        r, g, b, a = (max(0.0, min(1.0, float(x))) for x in rgba[:4])
+    except Exception:
+        r, g, b, a = 1.0, 1.0, 1.0, 1.0
+    return (
+        (int(round(a * 255.0)) << 24)
+        | (int(round(r * 255.0)) << 16)
+        | (int(round(g * 255.0)) << 8)
+        | int(round(b * 255.0))
+    )
 
 
 __all__ = [
