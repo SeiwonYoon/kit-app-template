@@ -33,8 +33,10 @@ simulation_engine.py — TBS simpy 공정 시뮬레이션 코어
 
 【공정 흐름(직렬 모드)】
 1) LOT 생성 타이머·회수 타이머를 별도 프로세스로 상시 구동
-2) _run_serial_flow: BP→EP → 회수 → IN/OUT→BP → OHT 투입
-   (OHT→IN/OUT 안착 후 IN/OUT→BP 를 같은 함수에서 체인하지 않음)
+2) _run_serial_flow / parallel wave 공통 우선순위(SSOT):
+   BP→EP → OHT→EP → 회수(REMOVED) → INOUT→BP → OHT→INOUT
+   (OHT→EP / OHT→INOUT 은 별도 _step_* — 한 스텝에 묶지 않음.
+    OHT→INOUT 안착 후 INOUT→BP 를 같은 함수에서 체인하지 않음)
 3) EP FOUP 공정(전역 capacity=1) 후 회수 대기 → REMOVED
 4) total_lots(초기 적재 + max_oht_lots) 완료 시 종료/요약
 
@@ -442,6 +444,7 @@ class TBSSimulationEngine:
         # True 모드 2레일: A=ARRIVED/REMOVED(_oht_path_inflight), B=MOVE(_move_rail_inflight).
         # _bp_to_ep_inflight 는 하위 호환 alias (B 레일과 동일).
         self._oht_path_inflight = False
+        self._pickup_inflight = False  # REMOVED 진행 중 (ARRIVED 와 구분 — INOUT→BP 보류용)
         self._a_rail_ep: str = ""
         self._move_rail_inflight = False
         self._b_rail_ep: str = ""
@@ -1026,7 +1029,7 @@ class TBSSimulationEngine:
             pass
 
     def _parallel_schedule_wave(self, *, reason: str = "") -> bool:
-        """병렬 SSOT: REMOVED→B→OHT wave 1회 + 오케스트레이터 kick.
+        """병렬 SSOT: 우선순위 wave 1회 + 오케스트레이터 kick.
 
         FOUP 종료·티켓 타이머·A/B 레일 free 등 모든 경로가 여기만 호출한다.
         """
@@ -1063,7 +1066,7 @@ class TBSSimulationEngine:
         self._parallel_schedule_wave(reason="a_rail_freed")
 
     def _on_b_rail_freed(self) -> None:
-        """B레일(MOVE) 종료 → wave 재평가 (BP→EP 또는 INOUT→BP / REMOVED∥…)."""
+        """B레일(MOVE) 종료 → wave 재평가 (BP→EP / INOUT→BP는 회수 보류 가드 후)."""
         if not self._parallel_enabled():
             return
         self._parallel_schedule_wave(reason="b_rail_freed")
@@ -1113,6 +1116,7 @@ class TBSSimulationEngine:
         self._locked_ports.clear()
         self._bp_to_ep_inflight = False
         self._oht_path_inflight = False
+        self._pickup_inflight = False
         self._move_rail_inflight = False
         self._a_rail_ep = ""
         self._b_rail_ep = ""
@@ -1178,6 +1182,7 @@ class TBSSimulationEngine:
         self._locked_ports.clear()
         self._bp_to_ep_inflight = False
         self._oht_path_inflight = False
+        self._pickup_inflight = False
         self._move_rail_inflight = False
         self._a_rail_ep = ""
         self._b_rail_ep = ""
@@ -1290,7 +1295,7 @@ class TBSSimulationEngine:
                 return
             self._pickup_tickets += 1
             self._log(f"회수티켓+1 | 누적={self._pickup_tickets}")
-            # 회수대기 EP 가 있으면 티켓으로 wave (REMOVED∥INOUT→BP 등)
+            # 회수대기 EP 가 있으면 티켓으로 wave (REMOVED 가 INOUT→BP 보다 앞)
             try:
                 self._parallel_schedule_wave(reason="pickup_ticket")
             except Exception:
@@ -1410,23 +1415,14 @@ class TBSSimulationEngine:
 
     def _run_serial_flow(self):
         """
-        메인 오케스트레이터.
+        메인 오케스트레이터. 실행 순서/우선순위는 여기(+ parallel wave)만 바꾼다.
 
-        유지보수 관점에서 "시뮬이 다음에 무엇을 할지 결정하는 곳"을 이 함수 1곳으로 고정한다.
-        세부 구현은 _step_* 헬퍼로 분리하되, 실행 순서/우선순위는 여기서만 바꾼다.
-
-        우선순위(상단일수록 먼저 시도) — EBS 효율: 빈 EP 채움·회수가 IN/OUT→BP 보다 앞:
-        - 1) BUFFER -> EP 채움
-        - 2) EP -> OHT 회수 (pickup 티켓이 있으면 FIFO EP 회수)
-        - 3) IN/OUT -> BUFFER (IN/OUT 적재분을 버퍼로) — OHT→IN/OUT 과 체인하지 않음
-        - 4) OHT 투입 (빈 EP면 direct, 아니면 IN/OUT 경유; IN/OUT 안착 후 루프 재평가)
-        - 5) 대기 로그 + 짧은 sleep
+        우선순위 SSOT (가능하면 위에서부터 1건):
+        1) BP→EP  2) OHT→EP  3) REMOVED  4) INOUT→BP  5) OHT→INOUT  6) idle
 
         ``SIM_PARALLEL_NONCONFLICTING_MOVES``:
-        - False(기본·직렬): ``_step_*`` 를 우선순위 순으로 **1건씩 yield-until-complete**.
-          FOUP(``_run_ep_foup_process``)만 EP 안착 시 백그라운드 process 로 JSON 과 병행.
-        - True(병렬): 2레일 nofollow wave — A(ARRIVED/REMOVED) ∥ B(MOVE_*).
-          동일 EPn 목표면 동시 불가. Wave: REMOVED → B → OHT.
+        - False: ``_step_*`` yield-until-complete (FOUP만 백그라운드).
+        - True: 동일 SSOT 순 nofollow wave. A∥B, 동일 EPn 금지.
         """
         yield self.env.timeout(0.1)
         parallel = bool(getattr(self, "_parallel_nonconflicting_moves", False))
@@ -1437,7 +1433,6 @@ class TBSSimulationEngine:
             self._log_heartbeat_if_due()
 
             if parallel:
-                # 병렬: A∥B nofollow wave (FOUP 는 EP 안착 시 별도 process)
                 started = self._start_parallel_nonconflicting_wave()
                 a_busy = bool(getattr(self, "_oht_path_inflight", False))
                 b_busy = bool(getattr(self, "_move_rail_inflight", False))
@@ -1449,12 +1444,16 @@ class TBSSimulationEngine:
                 yield from self._step_idle_wait()
                 continue
 
-            # --- 직렬(False): 우선순위 순 1건씩 yield-until-complete ---
-            # FOUP(_run_ep_foup_process)는 EP 안착 시 백그라운드 process 로 별도 진행.
-            # (JSON ARRIVED/MOVE/REMOVED 와 동시 가능 — 전역 FOUP Resource capacity=1)
+            # 직렬: SSOT 순 1건씩
             did = False
             try:
                 did = bool((yield from self._step_buffer_to_ep()))
+            except Exception:
+                did = False
+            if did:
+                continue
+            try:
+                did = bool((yield from self._step_oht_to_ep()))
             except Exception:
                 did = False
             if did:
@@ -1472,7 +1471,7 @@ class TBSSimulationEngine:
             if did:
                 continue
             try:
-                did = bool((yield from self._step_oht_input()))
+                did = bool((yield from self._step_oht_to_inout()))
             except Exception:
                 did = False
             if did:
@@ -1512,48 +1511,39 @@ class TBSSimulationEngine:
         )
 
     def _start_parallel_nonconflicting_wave(self) -> bool:
-        """2레일 비충돌 기동. A(ARRIVED/REMOVED)와 B(MOVE)를 각각 최대 1건.
+        """2레일 비충돌 기동. 순서 = 직렬 SSOT.
 
-        - A끼리·B끼리는 동시 기동하지 않음.
-        - A∥B 는 끝 EPn 목표가 다를 때만.
-        - 기동 순서: **REMOVED → B(MOVE) → OHT ARRIVED**
-          (빈 EP 를 OHT 가 가로채기 전에 BP→EP 가 잡게)
-        - B: 빈 EP+BP LOT 있으면 **BP→EP 우선**, 그다음 INOUT→BP.
+        BP→EP → OHT→EP → REMOVED → INOUT→BP → OHT→INOUT
+        (B의 BP→EP/INOUT→BP 는 분리 호출 — 한 묶음으로 먼저 소진하지 않음)
         """
         started = False
-        # 1) 회수(REMOVED)만 먼저 — OHT 투입은 B 보다 뒤
+        if self._try_start_buffer_to_ep_nofollow():
+            started = True
+        if not bool(getattr(self, "_oht_path_inflight", False)):
+            if self._try_start_oht_to_ep_nofollow():
+                started = True
         if not bool(getattr(self, "_oht_path_inflight", False)):
             if self._try_start_pickup_nofollow():
                 started = True
-        # 2) 버퍼/INOUT MOVE — 빈 EP 보충을 OHT 직접투입보다 앞당김
-        if self._try_start_b_rail_nofollow():
+        if self._try_start_inout_to_bp_nofollow():
             started = True
-        # 3) OHT→EP/INOUT (버퍼가 채울 빈 EP 는 직접투입 보류)
         if not bool(getattr(self, "_oht_path_inflight", False)):
-            if self._try_start_oht_input_nofollow():
+            if self._try_start_oht_to_inout_nofollow():
                 started = True
         return started
 
     def _try_start_a_rail_nofollow(self) -> bool:
-        """A레일: REMOVED 우선, 없으면 OHT→EP/INOUT(ARRIVED).
-
-        주의: ``_start_parallel_nonconflicting_wave`` 는 REMOVED 와 OHT 를
-        분리 호출한다. 본 함수는 직렬·레거시 호출용으로 유지.
-        """
+        """A레일 1건 (레거시): OHT→EP → REMOVED → OHT→INOUT."""
         if bool(getattr(self, "_oht_path_inflight", False)):
             return False
+        if self._try_start_oht_to_ep_nofollow():
+            return True
         if self._try_start_pickup_nofollow():
             return True
-        return bool(self._try_start_oht_input_nofollow())
+        return bool(self._try_start_oht_to_inout_nofollow())
 
     def _try_start_b_rail_nofollow(self) -> bool:
-        """B레일: MOVE 1건.
-
-        우선순위:
-        1) **지금** 빈 EP + BP LOT + A EP 비충돌 → BP→EP
-        2) 그 외 INOUT FULL + 빈 BP → INOUT→BP
-           (REMOVED 중 soon-empty EP 만으로는 INOUT→BP 를 막지 않음)
-        """
+        """B레일 1건 (레거시): BP→EP → INOUT→BP."""
         if bool(getattr(self, "_move_rail_inflight", False)):
             return False
         if self._try_start_buffer_to_ep_nofollow():
@@ -1619,19 +1609,45 @@ class TBSSimulationEngine:
             pass
         return True
 
-    def _should_defer_inout_to_bp(self) -> bool:
-        """BP→EP 를 **지금** 기동할 수 있을 때만 INOUT→BP 보류.
+    def _can_start_pickup_now(self) -> bool:
+        """REMOVED 를 **지금** 기동할 수 있으면 True (티켓·awaiting·A레일·B EP 비충돌)."""
+        if bool(getattr(self, "_oht_path_inflight", False)):
+            return False
+        if bool(getattr(self, "_pickup_inflight", False)):
+            return False
+        if self._pickup_tickets <= 0 or len(self.completed_lots) >= self._total_lots:
+            return False
+        ep_pick = self._find_ep_awaiting_pickup()
+        if not ep_pick:
+            return False
+        ep_tok = self._ep_target_token(ep_pick)
+        try:
+            from .sim_parallel_rails import ep_targets_conflict
 
-        규칙 (A∥B):
-        - 빈 EP + BP LOT + A와 EP 비충돌 → B는 BP→EP 우선 (INOUT→BP 보류)
-        - REMOVED 중 동일 EP 만 곧 비는 경우 → BP→EP 는 EP 충돌로 불가
-          → INOUT→빈BP 를 보류하면 B 공회전 = REMOVED∥INOUT→BP 위반
-          → 이 경우 보류하지 않음 (INOUT→BP 기동)
+            if ep_targets_conflict(str(getattr(self, "_b_rail_ep", "") or ""), ep_tok):
+                return False
+        except Exception:
+            pass
+        return True
+
+    def _should_hold_for_removed(self) -> bool:
+        """REMOVED 대기(awaiting)·진행 중이면 True.
+
+        티켓이 아직 없어도 awaiting 이면 회수가 SSOT상 INOUT→BP·OHT→INOUT 보다 앞.
+        (티켓=0 이라 pickup 스텝이 False 여도 OHT→INOUT 이 끼어들지 않게)
         """
-        return bool(self._can_start_buffer_to_ep_now())
+        if bool(getattr(self, "_pickup_inflight", False)):
+            return True
+        return self._find_ep_awaiting_pickup() is not None
+
+    def _should_defer_inout_to_bp(self) -> bool:
+        """INOUT→BP 보류: BP→EP 가능이거나 REMOVED 대기/진행."""
+        if self._can_start_buffer_to_ep_now():
+            return True
+        return self._should_hold_for_removed()
 
     def _try_start_inout_to_bp_nofollow(self) -> bool:
-        """INOUT→BP (B레일). INOUT FULL·빈 BP·잠금/적재중 가드."""
+        """INOUT→BP (B레일)."""
         if not self._ebs_enabled:
             return False
         if bool(getattr(self, "_move_rail_inflight", False)):
@@ -1644,7 +1660,6 @@ class TBSSimulationEngine:
             return False
         if not self._find_oldest_empty_buffer():
             return False
-        # BP→EP 를 지금 시작할 수 있으면만 보류 — REMOVED 중 soon-empty 만으로는 보류 금지
         if self._should_defer_inout_to_bp():
             return False
         self._move_rail_inflight = True
@@ -1671,15 +1686,14 @@ class TBSSimulationEngine:
                 pass
 
     def _step_bp1_to_buffer(self):
-        """IN/OUT 적재분(초기 포함)을 버퍼로 1회 이송 가능하면 실행 후 True.
-
-        OHT→IN/OUT 과 체인하지 않는다 — 오케스트레이터가 BP→EP·회수 다음 순서로 호출한다.
-        """
+        """4) IN/OUT → BUFFER. OHT→IN/OUT 과 체인하지 않음."""
         if not self._ebs_enabled:
             return False
         if bool(getattr(self, "_oht_loading_bp1", False)):
             return False
         if self._is_port_locked(INOUT_PORT):
+            return False
+        if self._should_defer_inout_to_bp():
             return False
         if self.ports.get(INOUT_PORT) is not None and self._find_oldest_empty_buffer():
             yield self.env.process(self._move_bp1_to_buffer())
@@ -1687,7 +1701,7 @@ class TBSSimulationEngine:
         return False
 
     def _step_pickup_to_oht(self):
-        """2) 회수 티켓 처리: 가능한 EP를 FIFO로 회수한다.
+        """3) 회수 티켓 처리: 가능한 EP를 FIFO로 회수한다.
 
         연속 awaiting EP 가 있으면 pickup 종료마다 chain 티켓으로 이어서 회수
         (간격 타이머 공백 없이 REMOVED→REMOVED).
@@ -1708,28 +1722,45 @@ class TBSSimulationEngine:
                 break
         return did_pickup
 
-    def _step_oht_input(self):
-        """3) OHT 투입: direct(빈 EP) 우선, 아니면 IN/OUT 경유. 1건 실행하면 True."""
-        if self._oht_input_queue and not bool(
-            getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)
-        ):
+    def _oht_queue_head_ready(self) -> bool:
+        """OHT 큐 head 가 READYTOLOAD 확인을 통과했는지."""
+        if not self._oht_input_queue:
             return False
+        return bool(getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True))
 
-        if self._oht_input_queue and self._can_load_to_ep_direct():
-            ep_target = self._find_empty_ep()
-            if ep_target:
-                lot = self._oht_input_queue.pop(0)
-                self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
-                yield self.env.process(self._load_lot_to_ep_direct(lot, ep_target))
-                return True
+    def _step_oht_to_ep(self):
+        """2) OHT → EP 직접투입. 1건 실행하면 True."""
+        if not self._oht_queue_head_ready():
+            return False
+        if not (self._oht_input_queue and self._can_load_to_ep_direct()):
+            return False
+        ep_target = self._find_empty_ep()
+        if not ep_target:
+            return False
+        lot = self._oht_input_queue.pop(0)
+        self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
+        yield self.env.process(self._load_lot_to_ep_direct(lot, ep_target))
+        return True
 
-        if self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1():
-            lot = self._oht_input_queue.pop(0)
-            self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
-            yield self.env.process(self._load_lot_to_inout(lot))
+    def _step_oht_to_inout(self):
+        """5) OHT → IN/OUT. REMOVED 대기/진행 중이면 보류."""
+        if self._should_hold_for_removed():
+            return False
+        if not self._oht_queue_head_ready():
+            return False
+        if not (self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1()):
+            return False
+        lot = self._oht_input_queue.pop(0)
+        self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
+        yield self.env.process(self._load_lot_to_inout(lot))
+        return True
+
+    def _step_oht_input(self):
+        """레거시: OHT→EP 후 OHT→INOUT. 직렬 오케스트레이터는 분리 _step_* 사용."""
+        did = bool((yield from self._step_oht_to_ep()))
+        if did:
             return True
-
-        return False
+        return bool((yield from self._step_oht_to_inout()))
 
     def _step_buffer_to_ep(self):
         """1) 버퍼 → EP 1회 이송 가능하면 실행 후 True."""
@@ -1745,7 +1776,7 @@ class TBSSimulationEngine:
         return False
 
     def _step_idle_wait(self):
-        """4) 할 일 없을 때: WAIT 로그(디듀프) + 짧은 sleep."""
+        """6) 할 일 없을 때: WAIT 로그(디듀프) + 짧은 sleep."""
         now = float(self.env.now) if self.env is not None else 0.0
         wait_interval = self._log_cfg.wait_interval()
         if self._status_log_policy.may_log_wait(now, wait_interval):
@@ -1768,24 +1799,15 @@ class TBSSimulationEngine:
 
     def _try_start_pickup_nofollow(self) -> bool:
         """회수 1건을 기동만 하고 완료는 기다리지 않음 (A레일)."""
-        if bool(getattr(self, "_oht_path_inflight", False)):
-            return False
-        if self._pickup_tickets <= 0 or len(self.completed_lots) >= self._total_lots:
+        if not self._can_start_pickup_now():
             return False
         ep_pick = self._find_ep_awaiting_pickup()
         if not ep_pick:
             return False
         ep_tok = self._ep_target_token(ep_pick)
-        try:
-            from .sim_parallel_rails import ep_targets_conflict
-        except Exception:
-            ep_targets_conflict = None  # type: ignore
-        if ep_targets_conflict is not None and ep_targets_conflict(
-            str(getattr(self, "_b_rail_ep", "") or ""), ep_tok
-        ):
-            return False
         self._pickup_tickets -= 1
         self._oht_path_inflight = True
+        self._pickup_inflight = True
         self._a_rail_ep = ep_tok
         self._lock_port(ep_pick)
         self.env.process(self._execute_pickup_parallel(ep_pick))
@@ -1798,6 +1820,7 @@ class TBSSimulationEngine:
         finally:
             self._unlock_port(ep_port)
             self._oht_path_inflight = False
+            self._pickup_inflight = False
             self._a_rail_ep = ""
             try:
                 self._on_a_rail_freed()
@@ -1805,7 +1828,11 @@ class TBSSimulationEngine:
                 pass
 
     def _buffer_can_feed_empty_ep(self, ep_port: Optional[str] = None) -> bool:
-        """EBS ON · 빈 EP + oldest BP 에 LOT 있으면 True (OHT 직접투입 보류 조건)."""
+        """EBS ON · 빈 EP + oldest BP 에 LOT 있으면 True (진단/가드용).
+
+        공정 우선순위 SSOT 상 OHT→EP 가 BP→EP 보다 앞이므로,
+        OHT 직접투입 보류에는 쓰지 않는다.
+        """
         if not bool(getattr(self, "_ebs_enabled", False)):
             return False
         ep = str(ep_port or "").strip().upper() or self._find_empty_ep()
@@ -1816,52 +1843,57 @@ class TBSSimulationEngine:
             return False
         return self.ports.get(bp) is not None
 
-    def _try_start_oht_input_nofollow(self) -> bool:
-        """OHT→EP 또는 OHT→INOUT 을 기동만 (A레일).
-
-        빈 EP 를 BP LOT 이 채울 수 있으면 OHT→EP 직접투입을 하지 않고
-        (가능하면) OHT→INOUT 만 시도한다 — MOVE BP→EP 가 EP 를 가져야 함.
-        """
+    def _try_start_oht_to_ep_nofollow(self) -> bool:
+        """OHT→EP 기동만 (A레일). B레일과 동일 EPn 이면 보류."""
         if bool(getattr(self, "_oht_path_inflight", False)):
             return False
-        if self._oht_input_queue and not bool(
-            getattr(self._oht_input_queue[0], "ready_to_load_confirmed", True)
+        if not self._oht_queue_head_ready():
+            return False
+        if not (self._oht_input_queue and self._can_load_to_ep_direct()):
+            return False
+        ep_target = self._find_empty_ep()
+        if not ep_target:
+            return False
+        ep_tok = self._ep_target_token(ep_target)
+        try:
+            from .sim_parallel_rails import ep_targets_conflict
+        except Exception:
+            ep_targets_conflict = None  # type: ignore
+        if ep_targets_conflict is not None and ep_targets_conflict(
+            str(getattr(self, "_b_rail_ep", "") or ""), ep_tok
         ):
             return False
+        lot = self._oht_input_queue.pop(0)
+        self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
+        self._oht_path_inflight = True
+        self._a_rail_ep = ep_tok
+        self._dispatching_to_ep[ep_target] = True
+        self._lock_port(ep_target)
+        self.env.process(self._load_lot_to_ep_direct_parallel(lot, ep_target))
+        return True
 
-        if self._oht_input_queue and self._can_load_to_ep_direct():
-            ep_target = self._find_empty_ep()
-            # 버퍼가 채울 빈 EP 는 OHT 직접투입 금지 (BP→EP 우선)
-            if ep_target and self._buffer_can_feed_empty_ep(ep_target):
-                ep_target = None
-            if ep_target:
-                ep_tok = self._ep_target_token(ep_target)
-                try:
-                    from .sim_parallel_rails import ep_targets_conflict
-                except Exception:
-                    ep_targets_conflict = None  # type: ignore
-                if ep_targets_conflict is not None and ep_targets_conflict(
-                    str(getattr(self, "_b_rail_ep", "") or ""), ep_tok
-                ):
-                    return False
-                lot = self._oht_input_queue.pop(0)
-                self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
-                self._oht_path_inflight = True
-                self._a_rail_ep = ep_tok
-                self._dispatching_to_ep[ep_target] = True
-                self._lock_port(ep_target)
-                self.env.process(self._load_lot_to_ep_direct_parallel(lot, ep_target))
-                return True
+    def _try_start_oht_to_inout_nofollow(self) -> bool:
+        """OHT→INOUT 기동만 (A레일). REMOVED 대기/진행 중이면 보류."""
+        if bool(getattr(self, "_oht_path_inflight", False)):
+            return False
+        if self._should_hold_for_removed():
+            return False
+        if not self._oht_queue_head_ready():
+            return False
+        if not (self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1()):
+            return False
+        lot = self._oht_input_queue.pop(0)
+        self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
+        self._oht_path_inflight = True
+        self._a_rail_ep = ""
+        self.env.process(self._load_lot_to_inout_parallel(lot))
+        return True
 
-        if self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1():
-            lot = self._oht_input_queue.pop(0)
-            self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
-            self._oht_path_inflight = True
-            self._a_rail_ep = ""
-            self.env.process(self._load_lot_to_inout_parallel(lot))
+    def _try_start_oht_input_nofollow(self) -> bool:
+        """레거시: OHT→EP 후 OHT→INOUT. wave 는 분리 nofollow 사용."""
+        if self._try_start_oht_to_ep_nofollow():
             return True
-
-        return False
+        return bool(self._try_start_oht_to_inout_nofollow())
 
     def _load_lot_to_ep_direct_parallel(self, lot: Lot, ep_port: str):
         """병렬 모드용 OHT→EP 래퍼."""
@@ -2465,7 +2497,7 @@ class TBSSimulationEngine:
                 self._ep_ready_since[ep_port] = float(self.env.now)
             except Exception:
                 pass
-            # 병렬 SSOT: awaiting 등록 후 wave 1곳 (REMOVED·INOUT→BP 등)
+            # 병렬 SSOT: awaiting 등록 후 wave 1곳 (INOUT→BP 는 awaiting 중 보류)
             try:
                 self._parallel_schedule_wave(reason="foup_end")
             except Exception:
@@ -2480,94 +2512,98 @@ class TBSSimulationEngine:
         if lot is None:
             self._ep_awaiting_pickup[ep_port] = False
             return
-        self._ep_awaiting_pickup[ep_port] = False
-        unload_time, fix_key = self._presampled_lot_move("ep_to_oht", lot, self._timing.rand_ep_to_oht)
-        lot_disp = self._lot_display_id(lot)
-        self._request_gate(
-            {
-                "seq": "READYTOUNLOAD",
-                "port_id": ep_port,
-                "lot_id": lot.lot_id,
-                "lot_seq": str(lot.sequence),
-                "foup_id": lot.foup_id,
-                "est_sec": f"{unload_time:.1f}",
-                "title": "EP -> OHT 회수(READYTOUNLOAD)",
-            }
-        )
-        _rtu_evt: Dict[str, str] = {"seq": "READYTOUNLOAD", "port_id": ep_port, "lot_id": lot.lot_id}
-        self._enrich_lot_payload(_rtu_evt, lot, None, unload_time)
-        self._emit_event(_rtu_evt)
-        self._log_event_block(
-            seq="READYTOUNLOAD",
-            summary=f"{ep_port} 에서 OHT 회수 준비(반출 대기)",
-            lot_id=lot_disp,
-            anim_line="애니메이션: 없음",
-            proc_line=f"회수 이동 예상(공정): {unload_time:.1f}s",
-        )
-        anim_wait = self._request_gate(
-            {
+        self._pickup_inflight = True
+        try:
+            self._ep_awaiting_pickup[ep_port] = False
+            unload_time, fix_key = self._presampled_lot_move("ep_to_oht", lot, self._timing.rand_ep_to_oht)
+            lot_disp = self._lot_display_id(lot)
+            self._request_gate(
+                {
+                    "seq": "READYTOUNLOAD",
+                    "port_id": ep_port,
+                    "lot_id": lot.lot_id,
+                    "lot_seq": str(lot.sequence),
+                    "foup_id": lot.foup_id,
+                    "est_sec": f"{unload_time:.1f}",
+                    "title": "EP -> OHT 회수(READYTOUNLOAD)",
+                }
+            )
+            _rtu_evt: Dict[str, str] = {"seq": "READYTOUNLOAD", "port_id": ep_port, "lot_id": lot.lot_id}
+            self._enrich_lot_payload(_rtu_evt, lot, None, unload_time)
+            self._emit_event(_rtu_evt)
+            self._log_event_block(
+                seq="READYTOUNLOAD",
+                summary=f"{ep_port} 에서 OHT 회수 준비(반출 대기)",
+                lot_id=lot_disp,
+                anim_line="애니메이션: 없음",
+                proc_line=f"회수 이동 예상(공정): {unload_time:.1f}s",
+            )
+            anim_wait = self._request_gate(
+                {
+                    "seq": "REMOVED",
+                    "port_id": ep_port,
+                    "lot_id": lot.lot_id,
+                    "lot_seq": str(lot.sequence),
+                    "foup_id": lot.foup_id,
+                    "est_sec": f"{unload_time:.1f}",
+                    "title": "EP -> OHT 회수(REMOVED)",
+                }
+            )
+            aw_u, total_wait, proc_only = self._proc_anim_pair(unload_time, anim_wait)
+            self._stage_mark(lot.lot_id, "ep_to_oht_start")
+            self._route_mark(lot.lot_id, "ep_to_oht_from", ep_port)
+            self._route_mark(lot.lot_id, "ep_to_oht_to", "OHT")
+            _rm_evt: Dict[str, str] = {
                 "seq": "REMOVED",
                 "port_id": ep_port,
                 "lot_id": lot.lot_id,
-                "lot_seq": str(lot.sequence),
-                "foup_id": lot.foup_id,
-                "est_sec": f"{unload_time:.1f}",
-                "title": "EP -> OHT 회수(REMOVED)",
+                # JSON 재생 속도 자동 배속(공정시간 동기화)용
+                "proc_sec": f"{float(unload_time):.3f}",
             }
-        )
-        aw_u, total_wait, proc_only = self._proc_anim_pair(unload_time, anim_wait)
-        self._stage_mark(lot.lot_id, "ep_to_oht_start")
-        self._route_mark(lot.lot_id, "ep_to_oht_from", ep_port)
-        self._route_mark(lot.lot_id, "ep_to_oht_to", "OHT")
-        _rm_evt: Dict[str, str] = {
-            "seq": "REMOVED",
-            "port_id": ep_port,
-            "lot_id": lot.lot_id,
-            # JSON 재생 속도 자동 배속(공정시간 동기화)용
-            "proc_sec": f"{float(unload_time):.3f}",
-        }
-        self._enrich_lot_payload(_rm_evt, lot, fix_key, unload_time)
-        self._emit_event(_rm_evt)
-        _rm_aj = _log_anim_removed_ep_json(ep_port)
-        proc_txt = (
-            f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
-            if self._process_time_priority
-            else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
-        )
-        self._log_event_block(
-            seq="REMOVED",
-            summary=f"{ep_port} -> OHT 회수 실행",
-            lot_id=lot_disp,
-            anim_line=f"애니메이션: {_rm_aj} (추정 {aw_u:.1f}s)",
-            proc_line=proc_txt,
-        )
-        _rm_prog: Dict[str, str] = {}
-        self._enrich_lot_payload(_rm_prog, lot, fix_key, unload_time)
-        yield self.env.process(
-            self._wait_with_progress(
-                total_sec=total_wait,
-                label=f"{ep_port}->OHT {lot_disp}",
-                detail=f"{lot_disp} {ep_port}->OHT 회수(출발포트={ep_port}, 도착포트=OHT) | 공정={unload_time:.1f}s 애니={aw_u:.1f}s",
-                proc_sec=unload_time,
-                anim_sec=float(anim_wait),
-                progress_interval=self._log_cfg.progress_interval(),
-                event_seq="REMOVED",
-                linked_anim_json=_rm_aj,
-                from_port_id=ep_port,
-                to_port_id="OHT",
-                lot_id=lot.lot_id,
-                port_id=ep_port,
-                progress_extra=_rm_prog or None,
+            self._enrich_lot_payload(_rm_evt, lot, fix_key, unload_time)
+            self._emit_event(_rm_evt)
+            _rm_aj = _log_anim_removed_ep_json(ep_port)
+            proc_txt = (
+                f"공정시간 우선: {total_wait:.1f}s (공정 {proc_only:.1f}s)"
+                if self._process_time_priority
+                else f"공정시간: {total_wait:.1f}s (JSON {aw_u:.1f}s)"
             )
-        )
-        self._stage_mark(lot.lot_id, "ep_to_oht_end")
-        self._remove_from_port(ep_port)
-        # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
-        self._emit_port_occ_refresh("EP 회수 완료 후 포트 표시 갱신")
-        self.completed_lots.append(lot.lot_id)
-        self._log(
-            f"{lot_disp} | 회수완료 {len(self.completed_lots)}/{self._total_lots} | q={len(self._oht_input_queue)}"
-        )
+            self._log_event_block(
+                seq="REMOVED",
+                summary=f"{ep_port} -> OHT 회수 실행",
+                lot_id=lot_disp,
+                anim_line=f"애니메이션: {_rm_aj} (추정 {aw_u:.1f}s)",
+                proc_line=proc_txt,
+            )
+            _rm_prog: Dict[str, str] = {}
+            self._enrich_lot_payload(_rm_prog, lot, fix_key, unload_time)
+            yield self.env.process(
+                self._wait_with_progress(
+                    total_sec=total_wait,
+                    label=f"{ep_port}->OHT {lot_disp}",
+                    detail=f"{lot_disp} {ep_port}->OHT 회수(출발포트={ep_port}, 도착포트=OHT) | 공정={unload_time:.1f}s 애니={aw_u:.1f}s",
+                    proc_sec=unload_time,
+                    anim_sec=float(anim_wait),
+                    progress_interval=self._log_cfg.progress_interval(),
+                    event_seq="REMOVED",
+                    linked_anim_json=_rm_aj,
+                    from_port_id=ep_port,
+                    to_port_id="OHT",
+                    lot_id=lot.lot_id,
+                    port_id=ep_port,
+                    progress_extra=_rm_prog or None,
+                )
+            )
+            self._stage_mark(lot.lot_id, "ep_to_oht_end")
+            self._remove_from_port(ep_port)
+            # 완료 상태(포트 점유/매핑 prim)를 즉시 반영하기 위한 갱신 이벤트.
+            self._emit_port_occ_refresh("EP 회수 완료 후 포트 표시 갱신")
+            self.completed_lots.append(lot.lot_id)
+            self._log(
+                f"{lot_disp} | 회수완료 {len(self.completed_lots)}/{self._total_lots} | q={len(self._oht_input_queue)}"
+            )
+        finally:
+            self._pickup_inflight = False
 
     def _set_port(self, port: str, event_cd: str, start_cd: str, lot: Lot, emit_arrived_event: bool = True) -> None:
         """포트 점유·상태코드를 갱신한다. 필요 시 ARRIVED 이벤트."""

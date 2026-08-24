@@ -179,10 +179,12 @@ SIM_BAR_PREVIEW_DEFAULT: bool = True
 # True: A레일(ARRIVED/REMOVED) 1 + B레일(MOVE_*) 1.
 #   · A끼리·B끼리 직렬, A∥B 만 허용(다른 인스턴스).
 #   · JSON/포트 끝 EPn 이 같으면 A∥B 금지.
-#   · B: 지금 기동 가능하면 BP→EP 우선, 아니면 INOUT→BP (REMOVED soon-empty 로 보류 금지).
-#   · Wave: REMOVED → B → OHT. A/B free·FOUP end·티켓 은 ``_parallel_schedule_wave`` SSOT.
-#   · 회수: 간격 타이머 티켓 유지. awaiting backlog 시 REMOVED 종료 후 chain 티켓으로 연속 회수.
-#   · 버퍼가 채울 빈 EP 에는 OHT→EP 직접투입 보류.
+#   · 우선순위 SSOT (직렬·wave 공통):
+#       BP→EP → OHT→EP → REMOVED → INOUT→BP → OHT→INOUT
+#   · Wave 도 위 순서로 분리 기동.
+#   · INOUT→BP: 같은 틱 BP→EP·REMOVED 가능/진행이면 보류.
+#   · A/B free·FOUP end·티켓 은 ``_parallel_schedule_wave`` SSOT.
+#   · 회수: 간격 타이머 티켓 유지. awaiting backlog 시 REMOVED 종료 후 chain 티켓.
 #   · FOUP 등은 기존처럼 독립. EBS OFF 는 MOVE 가 거의 없어 사실상 직렬.
 SIM_PARALLEL_NONCONFLICTING_MOVES: bool = False
 
@@ -199,7 +201,7 @@ USE_PREEXTRACTED_LAYERS: bool = False
 # 0: 원본 USD 만 open_stage (캐시 생성 없음)
 # 1: 캐시 생성 + 화면은 원본 open_stage (로컬에서 배포용 캐시 만들 때)
 # 2: ``data/stripped_open/`` 저장본만 open_stage (배포). 없으면 실패
-USE_PRESTRIPPED_OPEN_STAGE: int = 1
+USE_PRESTRIPPED_OPEN_STAGE: int = 0
 
 __all__ = [
     "SimControlDefaults",

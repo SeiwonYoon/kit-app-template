@@ -1158,20 +1158,22 @@ SimPy **generator** 하나가 while 루프로 “지금 뭘 할지”를 결정�
 def _run_serial_flow(self):
     yield self.env.timeout(0.1)
     while self._running and len(self.completed_lots) < self._total_lots:
-        if yield from self._step_bp1_to_buffer():   continue
-        if yield from self._step_pickup_to_oht():   continue
         if yield from self._step_buffer_to_ep():    continue
-        if yield from self._step_oht_input():       continue
+        if yield from self._step_oht_to_ep():      continue
+        if yield from self._step_pickup_to_oht():   continue
+        if yield from self._step_bp1_to_buffer():   continue
+        if yield from self._step_oht_to_inout():    continue
         yield from self._step_idle_wait()           # 할 일 없으면 0.2초 sleep
 ```
 
-**우선순위** (위에서 아래):
+**우선순위** (위에서 아래, 직렬·병렬 wave 공통 SSOT):
 
-1. INOUT → 버퍼 이송  
-2. EP → OHT 회수  
-3. 버퍼 → EP 이송  
-4. OHT LOT 투입  
-5. idle 대기
+1. 버퍼 → EP (BP→EP)  
+2. OHT → EP 직접투입  
+3. EP → OHT 회수 (REMOVED)  
+4. INOUT → 버퍼  
+5. OHT → INOUT  
+6. idle 대기
 
 **② 원초 구현** — SimPy generator (`simpy`):
 

@@ -8,15 +8,18 @@
   B ``move`` : MOVE_*              — B끼리 직렬
   A∥B        : 허용. JSON/포트 끝 EPn 이 같으면 금지.
 
-B 우선순위 (기동 가능할 때만)
-  1) 빈 EP + BP LOT + A와 동일 EP 아님 → BP→EP
-  2) INOUT FULL + 빈 BP                 → INOUT→BP
-  · REMOVED 중 "곧 빌 EP"만으로는 INOUT→BP 를 막지 않음
-    (그 EP로는 BP→EP 가 충돌로 불가 → B 공회전 = 규칙 위반).
+공정 우선순위 (직렬 _step_* · 병렬 wave 공통)
+  1) BP→EP
+  2) OHT→EP
+  3) REMOVED (EP→OHT)
+  4) INOUT→BP
+  5) OHT→INOUT
+  · B 후보(1·4)는 wave 에서 분리 기동.
+  · INOUT→BP / OHT→INOUT: EP awaiting 또는 REMOVED 진행 중이면 보류
+    (티켓=0 이어도 ARRIVED INOUT 이 회수보다 앞서지 않게).
 
-Wave 기동 순서 (같은 틱)
-  REMOVED → B(MOVE) → OHT ARRIVED
-  · 버퍼가 채울 빈 EP: OHT→EP 직접투입 보류.
+Wave 기동 순서 (같은 틱) = 위 1→5
+  · OHT→EP / OHT→INOUT 은 별도 nofollow.
 
 회수 티켓 (pickup)
   · 간격 타이머가 티켓을 쌓음 — FOUP 종료만으로 즉시 티켓을 주지 않음
@@ -26,7 +29,7 @@ Wave 기동 순서 (같은 틱)
   · A/B 레일 free 시 wave 를 한곳(``_parallel_schedule_wave``)에서만 재평가.
 
 직렬(False)
-  · 위 nofollow/wave 미사용. 기존 yield 직렬 유지.
+  · 위 nofollow/wave 미사용. 기존 yield 직렬 유지(우선순위는 동일 SSOT).
 ===========================================================================
 """
 
