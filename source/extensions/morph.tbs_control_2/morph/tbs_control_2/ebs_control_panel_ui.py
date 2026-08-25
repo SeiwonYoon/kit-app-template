@@ -649,6 +649,23 @@ def _build_ebs_control_panel_compact(
             ui.Button("재시작", width=60, clicked_fn=lambda: on_sim_restart_clicked(ext))
             ui.Button("정지", width=60, clicked_fn=lambda: on_sim_stop_clicked(ext))
             ui.Button("리셋", width=60, clicked_fn=lambda: on_sim_reset_clicked(ext))
+            def _on_view_save() -> None:
+                try:
+                    from .tbs_sim_camera import log_sim_camera_view_capture
+
+                    log_sim_camera_view_capture()
+                except Exception as exc:
+                    print(f"[TBS/EBS-HUD] 뷰 저장 실패: {exc}", flush=True)
+
+            ui.Button(
+                "뷰 저장",
+                width=60,
+                clicked_fn=_on_view_save,
+                tooltip=(
+                    "현재 뷰를 콘솔에 출력 (sim_control_defaults.SIM_CAMERA_VIEW 붙여넣기용). "
+                    "즉시 적용 없음 — SIM_CAMERA_MODE_ENABLED=True 후 시뮬 시작 시 적용."
+                ),
+            )
             ui.Label(
                 "두 화면 동시 적용",
                 width=0,

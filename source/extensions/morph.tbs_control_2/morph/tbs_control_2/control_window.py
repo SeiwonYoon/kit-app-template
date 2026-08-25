@@ -12625,6 +12625,16 @@ def on_sim_start_clicked(ext: Any) -> None:
         _plv.clear_foup_in_progress()
     except Exception:
         pass
+    # 시뮬 시작 카메라 (SIM_CAMERA_MODE_ENABLED / VIEW / PRIM_PATH)
+    try:
+        from .tbs_sim_camera import apply_sim_camera_on_start
+
+        apply_sim_camera_on_start()
+    except Exception as _cam_exc:
+        try:
+            _append_sim_log(ext, f"[SIM] 카메라 적용 실패: {_cam_exc}")
+        except Exception:
+            pass
     # 포트 LOT prim 의 baseline transform 을 "시뮬 시작 직전(원위치)" 에 미리 캡처한다.
     # 이유:
     #   - baseline 캐시는 평소 SequenceRunner.run 진입 시 처음 잡힌다.

@@ -7,6 +7,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional, Tuple
+
+
+@dataclass(frozen=True)
+class SimCameraViewSpec:
+    """시뮬 시작용 카메라 뷰 (월드 좌표). 「뷰 저장」 로그를 여기로 붙여넣는다."""
+
+    eye_xyz: Tuple[float, float, float]
+    target_xyz: Tuple[float, float, float]
+    up_xyz: Tuple[float, float, float] = (0.0, 0.0, 1.0)
 
 
 @dataclass(frozen=True)
@@ -203,8 +213,27 @@ USE_PREEXTRACTED_LAYERS: bool = False
 # 2: ``data/stripped_open/`` 저장본만 open_stage (배포). 없으면 실패
 USE_PRESTRIPPED_OPEN_STAGE: int = 0
 
+# ---------------------------------------------------------------------------
+# 시뮬 시작 카메라 (구현: tbs_sim_camera.py · LAM play-camera 와 동일 워크플로)
+# ---------------------------------------------------------------------------
+# True  → 시뮬 시작 시 SIM_CAMERA_PRIM_PATH 에 bind 하고,
+#         SIM_CAMERA_VIEW 가 있으면 그 뷰로 맞춘 뒤 시뮬 진행.
+# False → 기존처럼 Perspective(/OmniverseKit_Persp) 로 시작.
+SIM_CAMERA_MODE_ENABLED: bool = False
+# stage 트리의 USD Camera prim 경로 (예: "/Camera", "/Camera_fly")
+SIM_CAMERA_PRIM_PATH: str = ""
+# 「뷰 저장」 버튼 로그를 붙여넣는다. None 이면 prim 현재 상태만 bind.
+SIM_CAMERA_VIEW: Optional[SimCameraViewSpec] = None
+# 예)
+# SIM_CAMERA_VIEW = SimCameraViewSpec(
+#     eye_xyz=(0.0, 0.0, 0.0),
+#     target_xyz=(0.0, 0.0, 0.0),
+#     up_xyz=(0.0, 0.0, 1.0),
+# )
+
 __all__ = [
     "SimControlDefaults",
+    "SimCameraViewSpec",
     "SIM_CONTROL_DEFAULTS",
     "SIM_RENEWAL_DEBUG",
     "SHOW_VIEWPORT_EBS_CONTROL_HUD",
@@ -234,4 +263,7 @@ __all__ = [
     "SIM_PARALLEL_NONCONFLICTING_MOVES",
     "USE_PREEXTRACTED_LAYERS",
     "USE_PRESTRIPPED_OPEN_STAGE",
+    "SIM_CAMERA_MODE_ENABLED",
+    "SIM_CAMERA_PRIM_PATH",
+    "SIM_CAMERA_VIEW",
 ]
