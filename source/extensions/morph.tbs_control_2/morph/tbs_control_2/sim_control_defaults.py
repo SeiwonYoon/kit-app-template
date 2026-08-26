@@ -224,6 +224,8 @@ SIM_CAMERA_MODE_ENABLED: bool = False
 SIM_CAMERA_PRIM_PATH: str = ""
 # 「뷰 저장」 버튼 로그를 붙여넣는다. None 이면 prim 현재 상태만 bind.
 SIM_CAMERA_VIEW: Optional[SimCameraViewSpec] = None
+# 시뮬 시작 시 현재 뷰 → SIM_CAMERA_VIEW 로 fly 하는 시간(초). LAM PLAY_CAMERA_FLY_DURATION_SEC 대응.
+SIM_CAMERA_FLY_DURATION_SEC: float = 2.0
 # 예)
 # SIM_CAMERA_VIEW = SimCameraViewSpec(
 #     eye_xyz=(0.0, 0.0, 0.0),
@@ -266,4 +268,5 @@ __all__ = [
     "SIM_CAMERA_MODE_ENABLED",
     "SIM_CAMERA_PRIM_PATH",
     "SIM_CAMERA_VIEW",
+    "SIM_CAMERA_FLY_DURATION_SEC",
 ]

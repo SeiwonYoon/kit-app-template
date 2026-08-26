@@ -1,23 +1,32 @@
-"""TBS 시뮬 시작 카메라 — ``sim_control_defaults`` + EBS HUD「뷰 저장」.
+"""TBS 시뮬 시작 카메라 fly + 정지 시 Perspective 줌 복귀.
 
-워크플로 (LAM play-camera 와 동일):
-1) 「뷰 저장」 → 현재 뷰를 콘솔에 config 스니펫으로 출력 (즉시 적용 아님)
-2) ``SIM_CAMERA_VIEW`` / ``SIM_CAMERA_PRIM_PATH`` 에 붙여넣고
-   ``SIM_CAMERA_MODE_ENABLED = True``
-3) 시뮬 시작 시 해당 카메라·뷰로 맞춘 뒤 시뮬 진행
-   (False 면 Perspective 로 시작)
+워크플로 (LAM ``lam_play_camera_fly`` 유사):
+1) 「뷰 저장」 → 콘솔에 config 스니펫 (즉시 적용 없음)
+2) ``SIM_CAMERA_VIEW`` / ``SIM_CAMERA_PRIM_PATH`` + ``SIM_CAMERA_MODE_ENABLED=True``
+3) 시뮬 시작: 현재 Perspective 뷰를 기억 → target 으로 fly → (있으면) Camera prim bind
+4) 시뮬 정지: Perspective 복귀 + 시작 전 줌/뷰 복원
+
+UI·웹 모두 ``on_sim_start_clicked`` / ``on_sim_stop_clicked`` 를 타므로 동일 경로.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from pxr import Gf, Sdf, Usd, UsdGeom  # type: ignore
 
 _PRINT_PREFIX = "[TBS/SimCamera]"
 _PERSP_CAMERA_PATH = "/OmniverseKit_Persp"
 _COI_ATTR = "omni:kit:centerOfInterest"
+
+# 시뮬 시작 직전 Perspective 뷰 — 정지 시 복원
+_pre_sim_view: Optional["CameraViewSnapshot"] = None
+_pre_sim_up: Tuple[float, float, float] = (0.0, 0.0, 1.0)
+_fly_sub: Any = None
+_fly_done: Optional[threading.Event] = None
 
 
 @dataclass(frozen=True)
@@ -28,6 +37,23 @@ class CameraViewSnapshot:
 
 def _vec3(t: Tuple[float, float, float]) -> Gf.Vec3d:
     return Gf.Vec3d(float(t[0]), float(t[1]), float(t[2]))
+
+
+def _lerp3(
+    a: Tuple[float, float, float],
+    b: Tuple[float, float, float],
+    u: float,
+) -> Tuple[float, float, float]:
+    return (
+        a[0] + (b[0] - a[0]) * u,
+        a[1] + (b[1] - a[1]) * u,
+        a[2] + (b[2] - a[2]) * u,
+    )
+
+
+def _smoothstep01(t: float) -> float:
+    x = max(0.0, min(1.0, float(t)))
+    return x * x * (3.0 - 2.0 * x)
 
 
 def _is_session_camera_path(path: str) -> bool:
@@ -108,7 +134,6 @@ def _resolve_camera_up_vector(
     else:
         up_v.Normalize()
     if abs(Gf.Dot(fwd, up_v)) > 0.999:
-        # forward 와 평행하면 대체 up
         alt = Gf.Vec3d(0.0, 0.0, 1.0)
         if abs(Gf.Dot(fwd, alt)) > 0.999:
             alt = Gf.Vec3d(0.0, 1.0, 0.0)
@@ -431,51 +456,219 @@ def _cfg_camera_view() -> Any:
         return None
 
 
-def apply_sim_camera_on_start() -> bool:
-    """시뮬 시작 직전 카메라 적용.
+def _cfg_fly_duration_sec() -> float:
+    try:
+        from .sim_control_defaults import SIM_CAMERA_FLY_DURATION_SEC
 
-    - ``SIM_CAMERA_MODE_ENABLED=False`` → Perspective bind (기존과 동일)
-    - ``True`` → prim 경로 bind + ``SIM_CAMERA_VIEW`` 가 있으면 그 뷰로 맞춤
+        return max(0.05, float(SIM_CAMERA_FLY_DURATION_SEC))
+    except Exception:
+        return 2.0
+
+
+def _target_from_config() -> Tuple[Optional[CameraViewSnapshot], Tuple[float, float, float]]:
+    view = _cfg_camera_view()
+    up = (0.0, 0.0, 1.0)
+    if view is None:
+        return None, up
+    try:
+        snap = CameraViewSnapshot(
+            eye_xyz=tuple(float(x) for x in view.eye_xyz),  # type: ignore[arg-type]
+            target_xyz=tuple(float(x) for x in view.target_xyz),  # type: ignore[arg-type]
+        )
+        up = tuple(float(x) for x in getattr(view, "up_xyz", (0.0, 0.0, 1.0)))
+        return snap, up
+    except Exception:
+        return None, up
+
+
+def _views_are_close(
+    a: CameraViewSnapshot,
+    b: CameraViewSnapshot,
+    *,
+    pos_eps_m: float = 0.05,
+) -> bool:
+    de = (_vec3(a.eye_xyz) - _vec3(b.eye_xyz)).GetLength()
+    dt = (_vec3(a.target_xyz) - _vec3(b.target_xyz)).GetLength()
+    return de <= pos_eps_m and dt <= pos_eps_m
+
+
+def _stop_fly_subscription() -> None:
+    global _fly_sub, _fly_done
+    try:
+        if _fly_sub is not None:
+            _fly_sub.unsubscribe()
+    except Exception:
+        pass
+    _fly_sub = None
+    if _fly_done is not None:
+        try:
+            _fly_done.set()
+        except Exception:
+            pass
+    _fly_done = None
+
+
+def _remember_pre_sim_view(snap: Optional[CameraViewSnapshot], up: Tuple[float, float, float]) -> None:
+    global _pre_sim_view, _pre_sim_up
+    if snap is None:
+        return
+    _pre_sim_view = snap
+    _pre_sim_up = up
+    e = snap.eye_xyz
+    print(
+        f"{_PRINT_PREFIX} pre-sim view 저장 "
+        f"eye=({e[0]:.3f},{e[1]:.3f},{e[2]:.3f})",
+        flush=True,
+    )
+
+
+def _finish_fly_to_target(
+    target: CameraViewSnapshot,
+    *,
+    up_xyz: Tuple[float, float, float],
+    assign_prim_path: str = "",
+) -> bool:
+    path = str(assign_prim_path or "").strip()
+    if path and not _is_session_camera_path(path):
+        apply_view_to_camera_prim(path, target, up_xyz=up_xyz)
+        ok = set_viewport_camera_prim_path(path)
+        print(f"{_PRINT_PREFIX} fly 종료 → prim bind path={path!r} ok={ok}", flush=True)
+        return ok
+    apply_view_to_perspective(target, up_xyz=up_xyz)
+    ok = set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
+    print(f"{_PRINT_PREFIX} fly 종료 → Perspective 뷰 고정 ok={ok}", flush=True)
+    return ok
+
+
+def _start_fly_animation(
+    start: CameraViewSnapshot,
+    end: CameraViewSnapshot,
+    done: threading.Event,
+    *,
+    up_xyz: Tuple[float, float, float],
+    on_complete: Optional[Callable[[], None]] = None,
+) -> None:
+    """main 스레드: update 구독으로 eye/target 보간. 즉시 반환."""
+    global _fly_sub, _fly_done
+    _stop_fly_subscription()
+    _fly_done = done
+    dur = _cfg_fly_duration_sec()
+    t0 = time.perf_counter()
+    up = up_xyz
+
+    def _finish() -> None:
+        global _fly_sub
+        try:
+            if _fly_sub is not None:
+                _fly_sub.unsubscribe()
+        except Exception:
+            pass
+        _fly_sub = None
+        if callable(on_complete):
+            try:
+                on_complete()
+            except Exception:
+                pass
+        done.set()
+
+    def _tick(_event) -> None:
+        elapsed = time.perf_counter() - t0
+        u = _smoothstep01(elapsed / dur) if dur > 1e-9 else 1.0
+        eye = _lerp3(start.eye_xyz, end.eye_xyz, u)
+        tgt = _lerp3(start.target_xyz, end.target_xyz, u)
+        apply_view_to_perspective(
+            CameraViewSnapshot(eye_xyz=eye, target_xyz=tgt),
+            up_xyz=up,
+        )
+        if u >= 1.0 - 1e-9:
+            apply_view_to_perspective(end, up_xyz=up)
+            _finish()
+
+    try:
+        import omni.kit.app as _app  # type: ignore
+
+        stream = _app.get_app().get_update_event_stream()
+        _fly_sub = stream.create_subscription_to_pop(
+            _tick,
+            name="morph.tbs_control_2:sim_camera_fly",
+        )
+        set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
+        apply_view_to_perspective(start, up_xyz=up)
+        print(f"{_PRINT_PREFIX} fly 시작 ({dur:.2f}s)", flush=True)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} fly 구독 실패: {exc}", flush=True)
+        if callable(on_complete):
+            try:
+                on_complete()
+            except Exception:
+                pass
+        done.set()
+
+
+def apply_sim_camera_on_start() -> bool:
+    """시뮬 시작 직전 카메라.
+
+    - OFF → Perspective
+    - ON  → 현재 뷰 기억 후 target 으로 fly (완료 시 Camera prim bind)
     """
     if not _cfg_camera_mode_enabled():
+        _stop_fly_subscription()
         ok = set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
-        print(
-            f"{_PRINT_PREFIX} 카메라 모드 OFF → Perspective 시작 ok={ok}",
-            flush=True,
-        )
+        print(f"{_PRINT_PREFIX} 카메라 모드 OFF → Perspective 시작 ok={ok}", flush=True)
         return ok
 
     prim = _cfg_camera_prim_path()
-    view = _cfg_camera_view()
-    snap: Optional[CameraViewSnapshot] = None
-    up = (0.0, 0.0, 1.0)
-    if view is not None:
-        try:
-            snap = CameraViewSnapshot(
-                eye_xyz=tuple(float(x) for x in view.eye_xyz),  # type: ignore[arg-type]
-                target_xyz=tuple(float(x) for x in view.target_xyz),  # type: ignore[arg-type]
+    target, up = _target_from_config()
+    set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
+    current = capture_current_view()
+    _remember_pre_sim_view(current, _capture_world_up())
+
+    if target is None:
+        if prim and not _is_session_camera_path(prim):
+            ok = set_viewport_camera_prim_path(prim)
+            print(
+                f"{_PRINT_PREFIX} 카메라 모드 ON (VIEW 없음) → prim bind={prim!r} ok={ok}",
+                flush=True,
             )
-            up = tuple(float(x) for x in getattr(view, "up_xyz", (0.0, 0.0, 1.0)))
-        except Exception:
-            snap = None
+            return ok
+        print(f"{_PRINT_PREFIX} 카메라 모드 ON (VIEW·prim 없음)", flush=True)
+        return True
 
-    if prim and not _is_session_camera_path(prim):
-        if snap is not None:
-            apply_view_to_camera_prim(prim, snap, up_xyz=up)
-        ok = set_viewport_camera_prim_path(prim)
-        print(
-            f"{_PRINT_PREFIX} 카메라 모드 ON → prim={prim!r} "
-            f"view={'set' if snap else 'prim-as-is'} bind_ok={ok}",
-            flush=True,
-        )
-        return ok
+    if current is None:
+        return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim)
 
-    # prim 경로 없으면 Perspective 에 뷰만 적용
-    if snap is not None:
-        apply_view_to_perspective(snap, up_xyz=up)
+    if _views_are_close(current, target):
+        return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim)
+
+    done = threading.Event()
+
+    def _complete() -> None:
+        _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim)
+
+    _start_fly_animation(current, target, done, up_xyz=up, on_complete=_complete)
+    return True
+
+
+def restore_sim_camera_on_stop() -> bool:
+    """시뮬 정지: fly 중단 → Perspective → 시작 전 줌/뷰 복원.
+
+    UI·웹 ``on_sim_stop_clicked`` 공통.
+    """
+    global _pre_sim_view, _pre_sim_up
+    _stop_fly_subscription()
+    snap = _pre_sim_view
+    up = _pre_sim_up
     ok = set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
+    applied = False
+    if snap is not None:
+        try:
+            applied = bool(apply_view_to_perspective(snap, up_xyz=up))
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} pre-sim 복원 실패: {exc}", flush=True)
+    _pre_sim_view = None
+    _pre_sim_up = (0.0, 0.0, 1.0)
     print(
-        f"{_PRINT_PREFIX} 카메라 모드 ON (prim 경로 없음) → Perspective+VIEW ok={ok}",
+        f"{_PRINT_PREFIX} 정지 → Perspective 복귀 bind_ok={ok} zoom_restore={applied}",
         flush=True,
     )
-    return ok
+    return bool(ok or applied)

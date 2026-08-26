@@ -14318,6 +14318,16 @@ def on_sim_stop_clicked(
         _plv.clear_foup_in_progress()
     except Exception:
         pass
+    # 시뮬 정지 카메라: fly 중단 + Perspective + 시작 전 줌 복원 (UI·웹 공통)
+    try:
+        from .tbs_sim_camera import restore_sim_camera_on_stop
+
+        restore_sim_camera_on_stop()
+    except Exception as _cam_exc:
+        try:
+            _append_sim_log(ext, f"[SIM] 카메라 복원 실패: {_cam_exc}")
+        except Exception:
+            pass
     try:
         holders = getattr(ext, "_foup_unmark_subs", None)
         if isinstance(holders, list):
