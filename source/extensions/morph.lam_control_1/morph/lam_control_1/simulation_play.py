@@ -188,7 +188,8 @@ def parse_module_nm_to_slot_key(module_nm: str) -> Optional[str]:
         if al_n in (3, 4):
             return f"buffer{al_n}_{slot_n}"
         return f"cooling_{slot_n}"
-    m = re.fullmatch(r"PM(\d+)-PML\d+", nm, re.IGNORECASE)
+    # PM5-PML1 (정식) / PM5-PM1 (MCC 변형) 모두 chamberN
+    m = re.fullmatch(r"PM(\d+)-PML?\d+", nm, re.IGNORECASE)
     if m:
         return f"chamber{int(m.group(1))}"
     m = re.fullmatch(r"PM(\d+)PML\d+", nm, re.IGNORECASE)
@@ -1539,11 +1540,103 @@ def load_csv_dwell_timeline(csv_path: Path) -> List[DwellRecord]:
     return dwells
 
 
+# MCC PM5(stripper) 간헐 점유 겹침 보정 — 앞 wafer end 를 뒤 start − eps 로 절삭.
+_PM5_OCCUPANCY_OVERLAP_EPS_SEC: float = 0.001
+_PM5_SLOT_KEY: str = "chamber5"
+
+
+def _is_pm5_dwell(d: DwellRecord) -> bool:
+    """PM5 단일 챔버 dwell 여부 (``slot_key`` 또는 module_nm)."""
+    if str(getattr(d, "slot_key", "") or "").strip() == _PM5_SLOT_KEY:
+        return True
+    nm = str(getattr(d, "module_nm", "") or "").strip().upper()
+    return bool(re.match(r"^PM5($|-|PML)", nm))
+
+
+def repair_pm5_chamber_occupancy_overlaps(
+    dwells: Sequence[DwellRecord],
+    *,
+    eps_sec: float = _PM5_OCCUPANCY_OVERLAP_EPS_SEC,
+) -> List[DwellRecord]:
+    """PM5 한정: 서로 다른 웨이퍼 dwell 이 겹치면 앞(먼저 시작)의 ``end_sec`` 절삭.
+
+    ``앞.end = 뒤.start − eps`` 로, 앞이 뒤 start 보다 조금이라도 먼저 끝나게 한다.
+    절삭 후 ``end <= start`` 가 되면 해당 겹침은 보정하지 않고 경고만 남긴다.
+    """
+    items = list(dwells or [])
+    if len(items) < 2:
+        return items
+
+    eps = max(1e-6, float(eps_sec))
+    pm5_idx = [i for i, d in enumerate(items) if _is_pm5_dwell(d)]
+    if len(pm5_idx) < 2:
+        return items
+
+    # start 오름차순으로 훑으며 직전 점유와만 비교 (다중 겹침도 연쇄 처리)
+    order = sorted(
+        pm5_idx,
+        key=lambda i: (
+            float(items[i].start_sec),
+            float(items[i].end_sec),
+            str(items[i].lot_id or ""),
+            int(items[i].cassette_slot),
+        ),
+    )
+    prev_i: Optional[int] = None
+    n_fixed = 0
+    for i in order:
+        cur = items[i]
+        if prev_i is None:
+            prev_i = i
+            continue
+        prev = items[prev_i]
+        if _same_wafer_dwell(prev, cur):
+            prev_i = i
+            continue
+        if float(cur.start_sec) >= float(prev.end_sec) - 1e-12:
+            prev_i = i
+            continue
+        new_end = float(cur.start_sec) - eps
+        if new_end <= float(prev.start_sec) + 1e-12:
+            print(
+                f"{_PRINT_PREFIX} PM5 overlap skip (trim would invert) "
+                f"prev=lot={prev.lot_id!r} cs={prev.cassette_slot} "
+                f"[{prev.start_sec:.6f},{prev.end_sec:.6f}) "
+                f"next=lot={cur.lot_id!r} cs={cur.cassette_slot} "
+                f"[{cur.start_sec:.6f},{cur.end_sec:.6f})",
+                flush=True,
+            )
+            prev_i = i
+            continue
+        old_end = float(prev.end_sec)
+        items[prev_i] = replace(prev, end_sec=new_end)
+        n_fixed += 1
+        print(
+            f"{_PRINT_PREFIX} PM5 overlap trim: "
+            f"lot={prev.lot_id!r} cs={prev.cassette_slot} "
+            f"end {old_end:.6f} → {new_end:.6f} "
+            f"(before next cs={cur.cassette_slot} start={float(cur.start_sec):.6f}, "
+            f"overlap={old_end - float(cur.start_sec):.6f}s)",
+            flush=True,
+        )
+        prev_i = i
+
+    if n_fixed:
+        print(
+            f"{_PRINT_PREFIX} PM5 occupancy repair: trimmed {n_fixed} end_sec",
+            flush=True,
+        )
+    return items
+
+
 def rows_to_dwell_records(
     rows: Iterable[ParsedCsvRow],
     lot_id_to_foup: Optional[Dict[str, int]] = None,
 ) -> List[DwellRecord]:
-    """``ParsedCsvRow`` → ``DwellRecord`` (미지원 ``module_nm`` 은 스킵)."""
+    """``ParsedCsvRow`` → ``DwellRecord`` (미지원 ``module_nm`` 은 스킵).
+
+    변환 후 PM5 웨이퍼 간 점유 겹침이 있으면 앞 wafer ``end_sec`` 을 절삭한다.
+    """
     lot_map = lot_id_to_foup or build_lot_id_to_foup_index(rows)
     out: List[DwellRecord] = []
     for r in rows:
@@ -1575,7 +1668,7 @@ def rows_to_dwell_records(
                 eqp_id=r.eqp_id,
             )
         )
-    return out
+    return repair_pm5_chamber_occupancy_overlaps(out)
 
 
 def sort_dwells_for_playback(dwells: List[DwellRecord]) -> List[DwellRecord]:
@@ -11259,6 +11352,7 @@ __all__ = [
     "resolve_csv_path",
     "read_csv_rows",
     "rows_to_dwell_records",
+    "repair_pm5_chamber_occupancy_overlaps",
     "sort_dwells_for_playback",
     "slot_key_for_module_nm",
     "dwell_duration_sec",
