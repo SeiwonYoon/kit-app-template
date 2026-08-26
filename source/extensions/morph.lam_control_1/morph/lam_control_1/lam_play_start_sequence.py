@@ -1,15 +1,14 @@
-"""CSV Play 시작 전 오케스트레이션 — 카메라 fly · prim 숨김 · 재생 사이 delay.
+"""CSV Play 시작 전 오케스트레이션 — 카메라 fly · prim 숨김/보임 · 재생 사이 delay.
 
 기준 (lam_viewport_overlay_config):
-- prim 숨김 시작: (카메라 fly **끝**) + PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC
-  - fly 미실행/스킵 시 카메라 끝 = 타임라인 t0
-  - delay <= 0: 예정 fly duration 기준으로 스케줄(겹침)
-  - delay > 0: fly **실제 완료** 후 delay 만큼 대기
+- prim 숨김/보임 시작: 카메라 fly **실제 완료** 이후
+  (+ PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC, 음수면 0으로 취급 — fly 와 겹치지 않음)
+  - fly 미실행/스킵 시 카메라 끝 = 즉시(또는 delay만)
+  - ``PLAY_HIDE_PRIM_SPECS`` + ``PLAY_SHOW_PRIM_SPECS`` 모두 이 시점 이후 적용
 - CSV 재생 시작: (prim 숨김 **끝**) + PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC
   - delay <= 0: prim 숨김 **시작** + 예정 hide duration 기준 스케줄(겹침)
   - delay > 0: hide **실제 완료** 후 delay 만큼 대기
 """
-
 from __future__ import annotations
 
 import threading
@@ -90,20 +89,20 @@ def _run_play_start_preflight_timeline(
     on_before_prim_hide: Optional[Callable[[], None]] = None,
     log_tag: str = "",
 ) -> bool:
-    """화면별 Play preflight 공통 타임라인 (카메라 → prim hide → CSV 시작 대기)."""
+    """화면별 Play preflight 공통 타임라인 (카메라 → prim hide/show → CSV 시작 대기)."""
     if stop_requested():
         return False
 
     delay_cp = _delay_camera_to_prim_hide_sec()
     delay_pp = _delay_prim_hide_to_play_sec()
-    t0 = time.monotonic()
     tag = f" {log_tag}" if log_tag else ""
 
     cam_done = threading.Event()
     cam_kicked = kickoff_camera(cam_done)
     cam_planned = planned_camera_sec() if cam_kicked else 0.0
 
-    if cam_kicked and delay_cp > 0.0:
+    # PLAY_HIDE / PLAY_SHOW 모두 fly **실제 완료** 이후에만 시작 (예정시간 겹침 없음)
+    if cam_kicked:
         cam_wait_deadline = time.monotonic() + max(15.0, cam_planned + 12.0)
         if not _wait_event_until(
             cam_done,
@@ -114,17 +113,19 @@ def _run_play_start_preflight_timeline(
             return False
         if stop_requested():
             return False
-        prim_start = time.monotonic() + delay_cp
+        extra = max(0.0, float(delay_cp))
+        prim_start = time.monotonic() + extra
         print(
-            f"{_PRINT_PREFIX}{tag} prim hide @ camera end + {delay_cp:.2f}s",
+            f"{_PRINT_PREFIX}{tag} prim hide/show @ camera end"
+            + (f" + {extra:.2f}s" if extra > 1e-9 else " (immediate)"),
             flush=True,
         )
     else:
-        prim_start = t0 + cam_planned + delay_cp
-        if cam_kicked and delay_cp < 0.0:
+        extra = max(0.0, float(delay_cp))
+        prim_start = time.monotonic() + extra
+        if extra > 1e-9:
             print(
-                f"{_PRINT_PREFIX}{tag} prim hide @ t0+{cam_planned:.2f}s"
-                f"{delay_cp:+.2f}s (overlap camera)",
+                f"{_PRINT_PREFIX}{tag} prim hide/show @ t0 + {extra:.2f}s (no camera fly)",
                 flush=True,
             )
 
@@ -139,8 +140,11 @@ def _run_play_start_preflight_timeline(
             print(f"{_PRINT_PREFIX}{tag} before prim hide hook: {exc}", flush=True)
 
     prim_done = threading.Event()
+    # kickoff 시점에 PLAY_HIDE + PLAY_SHOW 적용 (lam_play_prim_hide)
     prim_kicked = kickoff_prim_hide(prim_done)
     prim_planned = planned_prim_hide_sec() if prim_kicked else 0.0
+    # prim_start 를 CSV 스케줄 기준으로 고정 (아래 delay_pp<=0 분기)
+    prim_phase_t0 = prim_start
 
     if prim_kicked and delay_pp > 0.0:
         prim_wait_deadline = time.monotonic() + max(20.0, prim_planned + 15.0)
@@ -159,7 +163,7 @@ def _run_play_start_preflight_timeline(
             flush=True,
         )
     else:
-        csv_start = prim_start + prim_planned + delay_pp
+        csv_start = prim_phase_t0 + prim_planned + delay_pp
         if prim_kicked and delay_pp < 0.0:
             print(
                 f"{_PRINT_PREFIX}{tag} CSV @ prim start + {prim_planned:.2f}s"

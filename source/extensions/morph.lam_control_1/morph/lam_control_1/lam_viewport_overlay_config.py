@@ -41,8 +41,8 @@ PLAY_CAMERA_FLY_POSITION_EPS_M: float = 0.05
 PLAY_CAMERA_FLY_DIRECTION_EPS_DEG: float = 1.0
 
 # Play 시작 단계 사이 대기 [s] — 기준 시각 기준으로 다음 단계 시작
-# 카메라→prim: (카메라 fly 끝) + PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC
-#   예) fly 2s, delay -2 → 동시 시작 / delay 0 → fly 직후 / delay +2 → fly 후 2s
+# 카메라→prim hide/show: fly **실제 완료** 후 + PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC
+#   (음수는 0으로 취급 — fly 와 겹치지 않음). delay 0 → fly 직후 / delay +2 → fly 후 2s
 # prim→CSV: (prim 숨김 끝) + PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC (음수면 fade 중 재생 시작)
 PLAY_DELAY_CAMERA_TO_PRIM_HIDE_SEC: float = 0
 PLAY_DELAY_PRIM_HIDE_TO_PLAY_SEC: float = 2
