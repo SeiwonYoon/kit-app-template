@@ -9960,6 +9960,15 @@ def _bootstrap_partial_prerun_playback(
 
 def _drain_sim_log_queue(ext: Any) -> None:
     try:
+        try:
+            from .tbs_sim_camera import is_sim_camera_flying
+
+            if is_sim_camera_flying():
+                # 카메라 FLY 가 아직 진행 중이면 완료될 때까지 재생 시작을 다음 프레임으로 보류
+                return
+        except Exception:
+            pass
+
         # 프리런 완료 시점에 타임라인 플레이어를 시작한다(메인 스레드에서만).
         try:
             ev = getattr(ext, "_sim_prerun_done_evt", None)
@@ -12629,7 +12638,7 @@ def on_sim_start_clicked(ext: Any) -> None:
     try:
         from .tbs_sim_camera import apply_sim_camera_on_start
 
-        apply_sim_camera_on_start()
+        apply_sim_camera_on_start(ext=ext)
     except Exception as _cam_exc:
         try:
             _append_sim_log(ext, f"[SIM] 카메라 적용 실패: {_cam_exc}")
@@ -14322,7 +14331,7 @@ def on_sim_stop_clicked(
     try:
         from .tbs_sim_camera import restore_sim_camera_on_stop
 
-        restore_sim_camera_on_stop()
+        restore_sim_camera_on_stop(ext=ext)
     except Exception as _cam_exc:
         try:
             _append_sim_log(ext, f"[SIM] 카메라 복원 실패: {_cam_exc}")

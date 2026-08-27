@@ -1,10 +1,10 @@
 """TBS 시뮬 시작 카메라 fly + 정지 시 Perspective 줌 복귀.
 
-워크플로 (LAM ``lam_play_camera_fly`` 유사):
+워크플로 (LAM ``lam_play_camera_fly`` 패턴 기반):
 1) 「뷰 저장」 → 콘솔에 config 스니펫 (즉시 적용 없음)
 2) ``SIM_CAMERA_VIEW`` / ``SIM_CAMERA_PRIM_PATH`` + ``SIM_CAMERA_MODE_ENABLED=True``
-3) 시뮬 시작: 현재 Perspective 뷰를 기억 → target 으로 fly → (있으면) Camera prim bind
-4) 시뮬 정지: Perspective 복귀 + 시작 전 줌/뷰 복원
+3) 시뮬 시작: 현재 Perspective 뷰(화면별)를 기억 → target 으로 fly → (있으면) Camera prim bind
+4) 시뮬 정지: Perspective 복귀 + 시작 전 줌/뷰 복원 (다중 프레임 안정화)
 
 UI·웹 모두 ``on_sim_start_clicked`` / ``on_sim_stop_clicked`` 를 타므로 동일 경로.
 """
@@ -14,7 +14,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from pxr import Gf, Sdf, Usd, UsdGeom  # type: ignore
 
@@ -22,11 +22,13 @@ _PRINT_PREFIX = "[TBS/SimCamera]"
 _PERSP_CAMERA_PATH = "/OmniverseKit_Persp"
 _COI_ATTR = "omni:kit:centerOfInterest"
 
-# 시뮬 시작 직전 Perspective 뷰 — 정지 시 복원
-_pre_sim_view: Optional["CameraViewSnapshot"] = None
-_pre_sim_up: Tuple[float, float, float] = (0.0, 0.0, 1.0)
+# 시뮬 시작 직전 Perspective 뷰 (컨텍스트별 / 전역) — 정지 시 복원
+_pre_sim_views: Dict[str, "CameraViewSnapshot"] = {}
+_pre_sim_ups: Dict[str, Tuple[float, float, float]] = {}
 _fly_sub: Any = None
-_fly_done: Optional[threading.Event] = None
+_fly_done_evt: Optional[threading.Event] = None
+_fly_active: bool = False
+_stop_persp_restore_sub: Any = None
 
 
 @dataclass(frozen=True)
@@ -61,11 +63,12 @@ def _is_session_camera_path(path: str) -> bool:
     return not p or p == _PERSP_CAMERA_PATH or "Persp" in p
 
 
-def _get_stage() -> Any:
+def _get_stage_for_context(usd_context_name: str = "") -> Any:
     try:
         import omni.usd as ou  # type: ignore
 
-        ctx = ou.get_context()
+        cn = str(usd_context_name or "").strip()
+        ctx = ou.get_context(cn) if cn else ou.get_context()
         if ctx is None:
             return None
         return ctx.get_stage()
@@ -82,32 +85,79 @@ def _get_active_viewport_api() -> Any:
         return None
 
 
-def _iter_viewport_apis() -> List[Any]:
-    apis: List[Any] = []
-    seen: set[int] = set()
+def _resolve_viewport_context_name(viewport_api: Any) -> str:
+    if viewport_api is None:
+        return ""
+    try:
+        cn = getattr(viewport_api, "usd_context_name", None)
+        if cn is not None and str(cn).strip():
+            return str(cn).strip()
+    except Exception:
+        pass
+    try:
+        ctx = getattr(viewport_api, "usd_context", None)
+        if ctx is not None and hasattr(ctx, "get_name"):
+            return str(ctx.get_name() or "").strip()
+    except Exception:
+        pass
+    return ""
 
-    def _add(api: Any) -> None:
+
+def _iter_viewport_and_contexts(ext: Any = None) -> List[Tuple[Any, str]]:
+    """모든 분할 화면(화면1, 화면2 등)의 (viewport_api, usd_context_name) 쌍."""
+    results: List[Tuple[Any, str]] = []
+    seen_ids: set[int] = set()
+
+    def _add(api: Any, default_ctx: str = "") -> None:
         if api is None:
             return
         oid = id(api)
-        if oid in seen:
+        if oid in seen_ids:
             return
-        seen.add(oid)
-        apis.append(api)
+        seen_ids.add(oid)
+        ctx = _resolve_viewport_context_name(api) or default_ctx
+        results.append((api, ctx))
 
-    _add(_get_active_viewport_api())
-    for win_name in ("Viewport", "TBS_SimSplit_1", "TBS_SimSplit_2", "TBS_SimSplit_3"):
+    # 1) 활성 뷰포트
+    act_vp = _get_active_viewport_api()
+    if act_vp is not None:
+        _add(act_vp, "")
+
+    # 2) 표준 윈도우 이름 기반 조회
+    win_names = ["Viewport", "TBS_SimSplit_1", "TBS_SimSplit_2", "TBS_SimSplit_3"]
+    for idx, win_name in enumerate(win_names):
         try:
             from omni.kit.viewport.utility import get_viewport_from_window_name  # type: ignore
 
-            _add(get_viewport_from_window_name(str(win_name)))
+            vp = get_viewport_from_window_name(str(win_name))
+            if vp is not None:
+                ctx_hint = "" if idx == 0 else f"TBS_SimSplit_{idx}"
+                _add(vp, ctx_hint)
         except Exception:
             pass
-    return apis
+
+    # 3) ext 객체에 기록된 컨텍스트명 기반 보조 매핑
+    if ext is not None:
+        try:
+            ctx_names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+            for c_idx, c_name in enumerate(ctx_names):
+                try:
+                    from omni.kit.viewport.utility import get_viewport_from_window_name  # type: ignore
+
+                    wn = f"TBS_SimSplit_{c_idx + 1}"
+                    vp = get_viewport_from_window_name(wn)
+                    if vp is not None:
+                        _add(vp, str(c_name))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    return results
 
 
-def _active_camera_path_str() -> str:
-    api = _get_active_viewport_api()
+def _active_camera_path_str(viewport_api: Any = None) -> str:
+    api = viewport_api if viewport_api is not None else _get_active_viewport_api()
     if api is None:
         return ""
     try:
@@ -185,8 +235,9 @@ def _write_prim_local_xform(
     local_matrix: Gf.Matrix4d,
     *,
     coi: Optional[Gf.Vec3d] = None,
+    usd_context_name: str = "",
 ) -> bool:
-    stage = _get_stage()
+    stage = _get_stage_for_context(usd_context_name)
     path = str(prim_path or "").strip()
     if not stage or not path:
         return False
@@ -210,7 +261,7 @@ def _write_prim_local_xform(
                     coi_attr.Set(coi)
         return True
     except Exception as exc:
-        print(f"{_PRINT_PREFIX} USD xform set failed: {exc}", flush=True)
+        print(f"{_PRINT_PREFIX} USD xform set failed (ctx={usd_context_name!r}): {exc}", flush=True)
         return False
 
 
@@ -226,8 +277,8 @@ def _read_coi_local(prim: Usd.Prim) -> Gf.Vec3d:
     return Gf.Vec3d(0.0, 0.0, -500.0)
 
 
-def _snapshot_from_camera_prim(camera_path: str = "") -> Optional[CameraViewSnapshot]:
-    stage = _get_stage()
+def _snapshot_from_camera_prim(camera_path: str = "", usd_context_name: str = "") -> Optional[CameraViewSnapshot]:
+    stage = _get_stage_for_context(usd_context_name)
     path = str(camera_path or "").strip() or _active_camera_path_str()
     if not stage or not path:
         return None
@@ -292,16 +343,17 @@ def _snapshot_from_viewport_state(viewport_api: Any = None) -> Optional[CameraVi
         return None
 
 
-def capture_current_view() -> Optional[CameraViewSnapshot]:
-    snap = _snapshot_from_viewport_state(_get_active_viewport_api())
+def capture_current_view(viewport_api: Any = None, usd_context_name: str = "") -> Optional[CameraViewSnapshot]:
+    vp = viewport_api if viewport_api is not None else _get_active_viewport_api()
+    snap = _snapshot_from_viewport_state(vp)
     if snap is not None:
         return snap
-    return _snapshot_from_camera_prim()
+    return _snapshot_from_camera_prim(usd_context_name=usd_context_name)
 
 
-def _capture_world_up() -> Tuple[float, float, float]:
-    stage = _get_stage()
-    path = _active_camera_path_str()
+def _capture_world_up(viewport_api: Any = None, usd_context_name: str = "") -> Tuple[float, float, float]:
+    stage = _get_stage_for_context(usd_context_name)
+    path = _active_camera_path_str(viewport_api)
     if not stage or not path:
         return (0.0, 0.0, 1.0)
     prim = stage.GetPrimAtPath(path)
@@ -354,12 +406,12 @@ def log_sim_camera_view_capture() -> bool:
     return True
 
 
-def set_viewport_camera_prim_path(prim_path: str) -> bool:
+def set_viewport_camera_prim_path(prim_path: str, ext: Any = None) -> bool:
     path = str(prim_path or "").strip()
     if not path:
         return False
     ok = False
-    for api in _iter_viewport_apis():
+    for api, _ctx in _iter_viewport_and_contexts(ext):
         try:
             api.camera_path = Sdf.Path(path)
             ok = True
@@ -377,16 +429,17 @@ def apply_view_to_camera_prim(
     snap: CameraViewSnapshot,
     *,
     up_xyz: Tuple[float, float, float] = (0.0, 0.0, 1.0),
+    usd_context_name: str = "",
 ) -> bool:
     path = str(prim_path or "").strip()
     if not path or _is_session_camera_path(path):
         return False
-    stage = _get_stage()
+    stage = _get_stage_for_context(usd_context_name)
     if not stage:
         return False
     cam_prim = stage.GetPrimAtPath(path)
     if not cam_prim or not cam_prim.IsValid():
-        print(f"{_PRINT_PREFIX} Camera prim 없음 path={path!r}", flush=True)
+        print(f"{_PRINT_PREFIX} Camera prim 없음 path={path!r} (ctx={usd_context_name!r})", flush=True)
         return False
     dist = (_vec3(snap.target_xyz) - _vec3(snap.eye_xyz)).GetLength()
     if dist < 1e-6:
@@ -397,10 +450,7 @@ def apply_view_to_camera_prim(
         path,
         new_local,
         coi=Gf.Vec3d(0.0, 0.0, -float(dist)),
-    )
-    print(
-        f"{_PRINT_PREFIX} Camera prim 뷰 적용 path={path!r} dist={dist:.3f} ok={ok}",
-        flush=True,
+        usd_context_name=usd_context_name,
     )
     return ok
 
@@ -409,9 +459,11 @@ def apply_view_to_perspective(
     snap: CameraViewSnapshot,
     *,
     up_xyz: Tuple[float, float, float] = (0.0, 0.0, 1.0),
+    usd_context_name: str = "",
+    viewport_api: Any = None,
 ) -> bool:
-    """Perspective session 카메라에 뷰 기록."""
-    stage = _get_stage()
+    """Perspective session 카메라에 뷰 기록 + ViewportCameraState 동기화."""
+    stage = _get_stage_for_context(usd_context_name)
     if not stage:
         return False
     cam_prim = stage.GetPrimAtPath(_PERSP_CAMERA_PATH)
@@ -422,11 +474,50 @@ def apply_view_to_perspective(
         return False
     up = _resolve_camera_up_vector(snap.eye_xyz, snap.target_xyz, up_xyz)
     new_local = _camera_local_matrix(cam_prim, snap.eye_xyz, snap.target_xyz, up)
-    return _write_prim_local_xform(
+    ok = _write_prim_local_xform(
         _PERSP_CAMERA_PATH,
         new_local,
         coi=Gf.Vec3d(0.0, 0.0, -float(dist)),
+        usd_context_name=usd_context_name,
     )
+    # ViewportCameraState 가 사용 가능하면 실시간 내부 상태도 동기화
+    if viewport_api is not None:
+        try:
+            from omni.kit.viewport.utility.camera_state import ViewportCameraState  # type: ignore
+
+            st = ViewportCameraState(viewport_api)
+            if st is not None:
+                st.set_position_world(Gf.Vec3d(float(snap.eye_xyz[0]), float(snap.eye_xyz[1]), float(snap.eye_xyz[2])), True)
+                st.set_target_world(Gf.Vec3d(float(snap.target_xyz[0]), float(snap.target_xyz[1]), float(snap.target_xyz[2])), True)
+        except Exception:
+            pass
+    return ok
+
+
+def apply_view_to_all_screens(
+    snap: CameraViewSnapshot,
+    *,
+    up_xyz: Tuple[float, float, float] = (0.0, 0.0, 1.0),
+    assign_prim_path: str = "",
+    ext: Any = None,
+) -> bool:
+    """모든 분할 화면(화면1, 화면2 등)에 일관된 뷰 적용."""
+    path = str(assign_prim_path or "").strip()
+    is_prim = bool(path and not _is_session_camera_path(path))
+    vps = _iter_viewport_and_contexts(ext)
+    ok = False
+    for api, ctx in vps:
+        if is_prim:
+            prim_ok = apply_view_to_camera_prim(path, snap, up_xyz=up_xyz, usd_context_name=ctx)
+            ok = prim_ok or ok
+        else:
+            persp_ok = apply_view_to_perspective(snap, up_xyz=up_xyz, usd_context_name=ctx, viewport_api=api)
+            ok = persp_ok or ok
+    if is_prim:
+        set_viewport_camera_prim_path(path, ext=ext)
+    else:
+        set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=ext)
+    return ok
 
 
 def _cfg_camera_mode_enabled() -> bool:
@@ -492,34 +583,56 @@ def _views_are_close(
     return de <= pos_eps_m and dt <= pos_eps_m
 
 
+def is_sim_camera_flying() -> bool:
+    """카메라 FLY 애니메이션이 현재 동작 중인지 여부."""
+    global _fly_active
+    return bool(_fly_active)
+
+
 def _stop_fly_subscription() -> None:
-    global _fly_sub, _fly_done
+    global _fly_sub, _fly_done_evt, _fly_active
+    _fly_active = False
     try:
         if _fly_sub is not None:
             _fly_sub.unsubscribe()
     except Exception:
         pass
     _fly_sub = None
-    if _fly_done is not None:
+    if _fly_done_evt is not None:
         try:
-            _fly_done.set()
+            _fly_done_evt.set()
         except Exception:
             pass
-    _fly_done = None
+    _fly_done_evt = None
 
 
-def _remember_pre_sim_view(snap: Optional[CameraViewSnapshot], up: Tuple[float, float, float]) -> None:
-    global _pre_sim_view, _pre_sim_up
-    if snap is None:
+def _stop_stop_perspective_restore_subscription() -> None:
+    global _stop_persp_restore_sub
+    try:
+        if _stop_persp_restore_sub is not None:
+            _stop_persp_restore_sub.unsubscribe()
+    except Exception:
+        pass
+    _stop_persp_restore_sub = None
+
+
+def _remember_pre_sim_views(ext: Any = None) -> None:
+    """시뮬 시작 직전 모든 뷰포트의 시점을 기억."""
+    global _pre_sim_views, _pre_sim_ups
+    # 이미 fly 중이거나 이전에 기억된 상태가 있으면 덮어쓰지 않음
+    if _pre_sim_views:
         return
-    _pre_sim_view = snap
-    _pre_sim_up = up
-    e = snap.eye_xyz
-    print(
-        f"{_PRINT_PREFIX} pre-sim view 저장 "
-        f"eye=({e[0]:.3f},{e[1]:.3f},{e[2]:.3f})",
-        flush=True,
-    )
+    for api, ctx in _iter_viewport_and_contexts(ext):
+        snap = capture_current_view(api, ctx)
+        if snap is not None:
+            _pre_sim_views[ctx] = snap
+            _pre_sim_ups[ctx] = _capture_world_up(api, ctx)
+            e = snap.eye_xyz
+            print(
+                f"{_PRINT_PREFIX} pre-sim view 저장 (ctx={ctx!r}) "
+                f"eye=({e[0]:.3f},{e[1]:.3f},{e[2]:.3f})",
+                flush=True,
+            )
 
 
 def _finish_fly_to_target(
@@ -527,16 +640,16 @@ def _finish_fly_to_target(
     *,
     up_xyz: Tuple[float, float, float],
     assign_prim_path: str = "",
+    ext: Any = None,
 ) -> bool:
+    global _fly_active
+    _fly_active = False
+    ok = apply_view_to_all_screens(target, up_xyz=up_xyz, assign_prim_path=assign_prim_path, ext=ext)
     path = str(assign_prim_path or "").strip()
     if path and not _is_session_camera_path(path):
-        apply_view_to_camera_prim(path, target, up_xyz=up_xyz)
-        ok = set_viewport_camera_prim_path(path)
         print(f"{_PRINT_PREFIX} fly 종료 → prim bind path={path!r} ok={ok}", flush=True)
-        return ok
-    apply_view_to_perspective(target, up_xyz=up_xyz)
-    ok = set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
-    print(f"{_PRINT_PREFIX} fly 종료 → Perspective 뷰 고정 ok={ok}", flush=True)
+    else:
+        print(f"{_PRINT_PREFIX} fly 종료 → Perspective 뷰 고정 ok={ok}", flush=True)
     return ok
 
 
@@ -546,18 +659,22 @@ def _start_fly_animation(
     done: threading.Event,
     *,
     up_xyz: Tuple[float, float, float],
+    assign_prim_path: str = "",
+    ext: Any = None,
     on_complete: Optional[Callable[[], None]] = None,
 ) -> None:
-    """main 스레드: update 구독으로 eye/target 보간. 즉시 반환."""
-    global _fly_sub, _fly_done
+    """main 스레드: update 구독으로 모든 화면에 대해 eye/target 보간."""
+    global _fly_sub, _fly_done_evt, _fly_active
     _stop_fly_subscription()
-    _fly_done = done
+    _fly_active = True
+    _fly_done_evt = done
     dur = _cfg_fly_duration_sec()
     t0 = time.perf_counter()
     up = up_xyz
 
     def _finish() -> None:
-        global _fly_sub
+        global _fly_sub, _fly_active
+        _fly_active = False
         try:
             if _fly_sub is not None:
                 _fly_sub.unsubscribe()
@@ -576,27 +693,26 @@ def _start_fly_animation(
         u = _smoothstep01(elapsed / dur) if dur > 1e-9 else 1.0
         eye = _lerp3(start.eye_xyz, end.eye_xyz, u)
         tgt = _lerp3(start.target_xyz, end.target_xyz, u)
-        apply_view_to_perspective(
-            CameraViewSnapshot(eye_xyz=eye, target_xyz=tgt),
-            up_xyz=up,
-        )
+        cur_snap = CameraViewSnapshot(eye_xyz=eye, target_xyz=tgt)
+        apply_view_to_all_screens(cur_snap, up_xyz=up, assign_prim_path="", ext=ext)
         if u >= 1.0 - 1e-9:
-            apply_view_to_perspective(end, up_xyz=up)
+            apply_view_to_all_screens(end, up_xyz=up, assign_prim_path=assign_prim_path, ext=ext)
             _finish()
 
     try:
         import omni.kit.app as _app  # type: ignore
 
+        set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=ext)
+        apply_view_to_all_screens(start, up_xyz=up, assign_prim_path="", ext=ext)
         stream = _app.get_app().get_update_event_stream()
         _fly_sub = stream.create_subscription_to_pop(
             _tick,
             name="morph.tbs_control_2:sim_camera_fly",
         )
-        set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
-        apply_view_to_perspective(start, up_xyz=up)
         print(f"{_PRINT_PREFIX} fly 시작 ({dur:.2f}s)", flush=True)
     except Exception as exc:
         print(f"{_PRINT_PREFIX} fly 구독 실패: {exc}", flush=True)
+        _fly_active = False
         if callable(on_complete):
             try:
                 on_complete()
@@ -605,70 +721,107 @@ def _start_fly_animation(
         done.set()
 
 
-def apply_sim_camera_on_start() -> bool:
-    """시뮬 시작 직전 카메라.
-
-    - OFF → Perspective
-    - ON  → 현재 뷰 기억 후 target 으로 fly (완료 시 Camera prim bind)
-    """
+def apply_sim_camera_on_start(ext: Any = None) -> bool:
+    """시뮬 시작 직전 카메라 설정 및 FLY 실행."""
+    _stop_stop_perspective_restore_subscription()
     if not _cfg_camera_mode_enabled():
         _stop_fly_subscription()
-        ok = set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
+        ok = set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=ext)
         print(f"{_PRINT_PREFIX} 카메라 모드 OFF → Perspective 시작 ok={ok}", flush=True)
         return ok
 
     prim = _cfg_camera_prim_path()
     target, up = _target_from_config()
-    set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
-    current = capture_current_view()
-    _remember_pre_sim_view(current, _capture_world_up())
+    set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=ext)
+    
+    # 1) 시작 전 시점 저장 (정지 시 복원용)
+    _remember_pre_sim_views(ext)
 
     if target is None:
         if prim and not _is_session_camera_path(prim):
-            ok = set_viewport_camera_prim_path(prim)
-            print(
-                f"{_PRINT_PREFIX} 카메라 모드 ON (VIEW 없음) → prim bind={prim!r} ok={ok}",
-                flush=True,
-            )
+            ok = set_viewport_camera_prim_path(prim, ext=ext)
+            print(f"{_PRINT_PREFIX} 카메라 모드 ON (VIEW 없음) → prim bind={prim!r} ok={ok}", flush=True)
             return ok
         print(f"{_PRINT_PREFIX} 카메라 모드 ON (VIEW·prim 없음)", flush=True)
         return True
 
+    current = capture_current_view()
     if current is None:
-        return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim)
+        return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim, ext=ext)
 
+    # 이미 동일 위치이면 fly 생략하고 바인딩
     if _views_are_close(current, target):
-        return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim)
+        return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim, ext=ext)
 
     done = threading.Event()
 
     def _complete() -> None:
-        _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim)
+        _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim, ext=ext)
 
-    _start_fly_animation(current, target, done, up_xyz=up, on_complete=_complete)
+    _start_fly_animation(
+        current,
+        target,
+        done,
+        up_xyz=up,
+        assign_prim_path=prim,
+        ext=ext,
+        on_complete=_complete,
+    )
     return True
 
 
-def restore_sim_camera_on_stop() -> bool:
-    """시뮬 정지: fly 중단 → Perspective → 시작 전 줌/뷰 복원.
+def schedule_restore_perspective_after_sim_stop(
+    ext: Any = None,
+    *,
+    delay_frames: int = 10,
+) -> None:
+    """정지 후 race 대비 — 여러 프레임 동안 Perspective 및 줌 복원을 안정적으로 정착."""
+    global _stop_persp_restore_sub, _pre_sim_views, _pre_sim_ups
+    _stop_stop_perspective_restore_subscription()
+    
+    snaps = dict(_pre_sim_views)
+    ups = dict(_pre_sim_ups)
+    if not snaps:
+        return
 
-    UI·웹 ``on_sim_stop_clicked`` 공통.
-    """
-    global _pre_sim_view, _pre_sim_up
+    frames_left = [max(1, int(delay_frames))]
+
+    def _apply_step(is_final: bool = False) -> None:
+        for api, ctx in _iter_viewport_and_contexts(ext):
+            snap = snaps.get(ctx) or snaps.get("")
+            up = ups.get(ctx) or (0.0, 0.0, 1.0)
+            if snap is not None:
+                apply_view_to_perspective(snap, up_xyz=up, usd_context_name=ctx, viewport_api=api)
+        set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=ext)
+        if is_final:
+            _pre_sim_views.clear()
+            _pre_sim_ups.clear()
+
+    def _tick(_e=None) -> None:
+        if frames_left[0] > 0:
+            frames_left[0] -= 1
+            _apply_step(is_final=False)
+            return
+        _stop_stop_perspective_restore_subscription()
+        _apply_step(is_final=True)
+        print(f"{_PRINT_PREFIX} 정지 후 Perspective 복원 완료 (다중 프레임 정착)", flush=True)
+
+    try:
+        import omni.kit.app as _app  # type: ignore
+
+        _apply_step(is_final=False)
+        stream = _app.get_app().get_update_event_stream()
+        _stop_persp_restore_sub = stream.create_subscription_to_pop(
+            _tick,
+            name="morph.tbs_control_2:stop_perspective_restore",
+        )
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} stop perspective restore schedule failed: {exc}", flush=True)
+        _apply_step(is_final=True)
+
+
+def restore_sim_camera_on_stop(ext: Any = None) -> bool:
+    """시뮬 정지: fly 중단 → Perspective 복귀 + 시작 전 줌 복원."""
     _stop_fly_subscription()
-    snap = _pre_sim_view
-    up = _pre_sim_up
-    ok = set_viewport_camera_prim_path(_PERSP_CAMERA_PATH)
-    applied = False
-    if snap is not None:
-        try:
-            applied = bool(apply_view_to_perspective(snap, up_xyz=up))
-        except Exception as exc:
-            print(f"{_PRINT_PREFIX} pre-sim 복원 실패: {exc}", flush=True)
-    _pre_sim_view = None
-    _pre_sim_up = (0.0, 0.0, 1.0)
-    print(
-        f"{_PRINT_PREFIX} 정지 → Perspective 복귀 bind_ok={ok} zoom_restore={applied}",
-        flush=True,
-    )
-    return bool(ok or applied)
+    schedule_restore_perspective_after_sim_stop(ext=ext, delay_frames=8)
+    return True
