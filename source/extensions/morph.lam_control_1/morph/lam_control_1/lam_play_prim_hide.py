@@ -20,7 +20,9 @@ from pxr import Sdf, Usd, UsdGeom, UsdShade  # type: ignore  # noqa: E402
 
 _PRINT_PREFIX = "[LAM/PlayPrimHide]"
 
-PlayHidePhase = Literal["play_start", "play_stop_reset", "ui_hide", "ui_show"]
+PlayHidePhase = Literal[
+    "play_start", "play_stop_reset", "pre_play_fly", "ui_hide", "ui_show"
+]
 
 _lock = threading.Lock()
 # context_key("") = 화면1 기본 USD context / 그 외 = aux context 이름
@@ -1182,6 +1184,16 @@ def _apply_phase_instant(phase: str) -> None:
             _force_show_all_show_specs()
         return
 
+    if phase == "pre_play_fly":
+        # 시뮬레이션 시작 전(카메라 FLY 시작 전): show 목록은 FLY 도중 보이지 않도록 숨김
+        if show_specs:
+            _hide_all_show_specs_instant(snapshot_restore="inherited")
+            print(
+                f"{_PRINT_PREFIX} pre_play_fly: hid {len(show_specs)} show spec(s) before camera fly",
+                flush=True,
+            )
+        return
+
     if phase == "play_stop_reset":
         try:
             from .lam_viewport_overlay_config import (
@@ -1208,11 +1220,11 @@ def _apply_phase_instant(phase: str) -> None:
                 _restore_all_show_specs()
             print(f"{_PRINT_PREFIX} play_stop_reset: restored visibility", flush=True)
         elif hide_checked:
-            # 체크 ON: show 목록은 항상 보이게 유지
+            # 체크 ON: hide 목록은 숨김 유지, show 목록은 시뮬 정지 시 원래대로 복원/숨김
             if show_specs:
-                _force_show_all_show_specs()
+                _restore_all_show_specs()
             print(
-                f"{_PRINT_PREFIX} play_stop_reset: keep hidden (prim숨김 checked)",
+                f"{_PRINT_PREFIX} play_stop_reset: keep hidden (prim숨김 checked, show specs reset)",
                 flush=True,
             )
         else:

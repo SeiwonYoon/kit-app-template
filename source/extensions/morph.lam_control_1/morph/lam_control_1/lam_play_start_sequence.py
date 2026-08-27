@@ -246,6 +246,16 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
     def _stop() -> bool:
         return bool(csv_playback_stop_requested(screen=si))
 
+    # 시뮬레이션 시작 직전 (카메라 FLY 시작 전):
+    # 이전 실행/UI 체크로 켜져 있던 show_specs 가 FLY 도중에 노출되지 않도록 사전에 숨김 처리.
+    # (카메라 FLY 완료 후 _kickoff_prim_hide 단계에서 정상적으로 show 됨)
+    try:
+        from .lam_play_prim_hide import apply_play_prim_hide_phase_for_context
+
+        apply_play_prim_hide_phase_for_context(ctx or "", "pre_play_fly")
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} pre_play_fly hide: {exc}", flush=True)
+
     def _kickoff_camera(done: threading.Event) -> bool:
         if not need_cam:
             done.set()
