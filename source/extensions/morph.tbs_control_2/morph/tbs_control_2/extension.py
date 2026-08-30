@@ -91,6 +91,14 @@ from .tbs_extension_singleton import clear_tbs_extension_instance, set_tbs_exten
 
 _PRINT_PREFIX = "[TBS]"
 
+# ---------------------------------------------------------------------------
+# Viewport orbit gizmo (viewport_orbit_gizmo.py) — 수동 on/off
+# 단일 메인 Viewport 전용. 화면2·분할 viewport 미적용.
+# ---------------------------------------------------------------------------
+# 사용: 아래 attach 블록 주석 해제 + PRIM 경로 입력
+# _ORBIT_GIZMO_TARGET_PRIM = "/World/YourPrim"
+# on_startup 안의 attach_orbit_gizmo(...) 호출도 함께 주석 해제
+
 
 def _start_with_dual_screen_enabled() -> bool:
     """앱 시작 시 2분할로 시작할지 (``sim_control_defaults.START_WITH_DUAL_SCREEN``)."""
@@ -410,6 +418,9 @@ class Extension(omni.ext.IExt):
             attach_tbs_viewport_control_hud(self)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} viewport control HUD attach failed: {exc}", flush=True)
+        # --- Viewport orbit gizmo (수동 적용) ---
+        # from .viewport_orbit_gizmo import attach_orbit_gizmo
+        # attach_orbit_gizmo(self, "/World/YourPrim")
         from .ebs_control_panel_ui import get_sim_ep_count_idx
         from .tbs_ep_port_visibility import (
             ep_count_from_combo_idx,
@@ -634,6 +645,12 @@ class Extension(omni.ext.IExt):
             from .tbs_viewport_control_hud import destroy_tbs_viewport_control_hud
 
             destroy_tbs_viewport_control_hud(self)
+        except Exception:
+            pass
+        try:
+            from .viewport_orbit_gizmo import destroy_orbit_gizmo
+
+            destroy_orbit_gizmo(self)
         except Exception:
             pass
         if self._control_window is not None:
