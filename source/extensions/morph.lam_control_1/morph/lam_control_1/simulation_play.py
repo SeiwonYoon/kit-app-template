@@ -1553,14 +1553,56 @@ def _is_pm5_dwell(d: DwellRecord) -> bool:
     return bool(re.match(r"^PM5($|-|PML)", nm))
 
 
+def _cascade_shift_wafer_tail_after_pm5_trim(
+    items: List[DwellRecord],
+    *,
+    lot_id: str,
+    cassette_slot: int,
+    old_end_sec: float,
+    delta_sec: float,
+) -> int:
+    """PM5 ``end`` 절삭 후, 동일 웨이퍼에서 ``old_end_sec`` 이후 dwell 전체를 ``delta_sec`` 만큼 앞당긴다.
+
+    MCC 타임라인은 보통 ``dwell[i].end == dwell[i+1].start`` 이므로, PM5 end 만 자르면
+    transfer(다음 dwell start 기준)와 어긋난다. 후속 step 의 start/end 를 같이 shift 한다.
+    """
+    delta = float(delta_sec)
+    if delta <= 1e-12:
+        return 0
+    boundary = float(old_end_sec)
+    lid = str(lot_id or "")
+    cs = int(cassette_slot)
+    n_shifted = 0
+    for j, d in enumerate(items):
+        if str(d.lot_id or "") != lid or int(d.cassette_slot) != cs:
+            continue
+        if float(d.start_sec) < boundary - 1e-9:
+            continue
+        new_start = float(d.start_sec) - delta
+        new_end = float(d.end_sec) - delta
+        if new_end < new_start - 1e-9:
+            print(
+                f"{_PRINT_PREFIX} PM5 cascade skip (would invert) "
+                f"lot={lid!r} cs={cs} module={d.module_nm!r} "
+                f"[{d.start_sec:.6f},{d.end_sec:.6f})",
+                flush=True,
+            )
+            continue
+        items[j] = replace(d, start_sec=new_start, end_sec=new_end)
+        n_shifted += 1
+    return n_shifted
+
+
 def repair_pm5_chamber_occupancy_overlaps(
     dwells: Sequence[DwellRecord],
     *,
     eps_sec: float = _PM5_OCCUPANCY_OVERLAP_EPS_SEC,
 ) -> List[DwellRecord]:
-    """PM5 한정: 서로 다른 웨이퍼 dwell 이 겹치면 앞(먼저 시작)의 ``end_sec`` 절삭.
+    """PM5 한정: 서로 다른 웨이퍼 dwell 이 겹치면 앞(먼저 시작)의 ``end_sec`` 절삭 + 연쇄 shift.
 
     ``앞.end = 뒤.start − eps`` 로, 앞이 뒤 start 보다 조금이라도 먼저 끝나게 한다.
+    절삭량만큼 동일 웨이퍼의 후속 dwell(``start >= old_end``) start/end 를 함께 당겨
+    transfer 시각(다음 dwell start)과 타임라인 체인을 맞춘다.
     절삭 후 ``end <= start`` 가 되면 해당 겹침은 보정하지 않고 경고만 남긴다.
     """
     items = list(dwells or [])
@@ -1584,6 +1626,7 @@ def repair_pm5_chamber_occupancy_overlaps(
     )
     prev_i: Optional[int] = None
     n_fixed = 0
+    n_cascade = 0
     for i in order:
         cur = items[i]
         if prev_i is None:
@@ -1609,21 +1652,32 @@ def repair_pm5_chamber_occupancy_overlaps(
             prev_i = i
             continue
         old_end = float(prev.end_sec)
+        delta = old_end - new_end
         items[prev_i] = replace(prev, end_sec=new_end)
+        shifted = _cascade_shift_wafer_tail_after_pm5_trim(
+            items,
+            lot_id=prev.lot_id,
+            cassette_slot=int(prev.cassette_slot),
+            old_end_sec=old_end,
+            delta_sec=delta,
+        )
         n_fixed += 1
+        n_cascade += shifted
         print(
             f"{_PRINT_PREFIX} PM5 overlap trim: "
             f"lot={prev.lot_id!r} cs={prev.cassette_slot} "
             f"end {old_end:.6f} → {new_end:.6f} "
             f"(before next cs={cur.cassette_slot} start={float(cur.start_sec):.6f}, "
-            f"overlap={old_end - float(cur.start_sec):.6f}s)",
+            f"overlap={old_end - float(cur.start_sec):.6f}s, "
+            f"cascade_shifted={shifted})",
             flush=True,
         )
         prev_i = i
 
     if n_fixed:
         print(
-            f"{_PRINT_PREFIX} PM5 occupancy repair: trimmed {n_fixed} end_sec",
+            f"{_PRINT_PREFIX} PM5 occupancy repair: trimmed {n_fixed} end_sec, "
+            f"cascade_shifted {n_cascade} dwell(s)",
             flush=True,
         )
     return items
@@ -1635,7 +1689,7 @@ def rows_to_dwell_records(
 ) -> List[DwellRecord]:
     """``ParsedCsvRow`` → ``DwellRecord`` (미지원 ``module_nm`` 은 스킵).
 
-    변환 후 PM5 웨이퍼 간 점유 겹침이 있으면 앞 wafer ``end_sec`` 을 절삭한다.
+    변환 후 PM5 웨이퍼 간 점유 겹침이 있으면 앞 wafer ``end_sec`` 절삭 및 후속 dwell 연쇄 shift.
     """
     lot_map = lot_id_to_foup or build_lot_id_to_foup_index(rows)
     out: List[DwellRecord] = []
