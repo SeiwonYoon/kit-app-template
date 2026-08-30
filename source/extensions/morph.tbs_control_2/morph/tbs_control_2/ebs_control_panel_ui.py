@@ -663,7 +663,8 @@ def _build_ebs_control_panel_compact(
                 clicked_fn=_on_view_save,
                 tooltip=(
                     "현재 뷰를 콘솔에 출력 (sim_control_defaults.SIM_CAMERA_VIEW 붙여넣기용). "
-                    "즉시 적용 없음 — SIM_CAMERA_MODE_ENABLED=True 후 시뮬 시작 시 적용."
+                    "즉시 적용 없음 — SIM_CAMERA_MODE_ENABLED=True 후 시뮬 시작 시 적용. "
+                    "SIM_CAMERA_FLY_ENABLED=False 이면 fly 없이 즉시 이동."
                 ),
             )
             ui.Label(

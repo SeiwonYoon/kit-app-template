@@ -3,8 +3,12 @@
 워크플로 (LAM ``lam_play_camera_fly`` 패턴 기반):
 1) 「뷰 저장」 → 콘솔에 config 스니펫 (즉시 적용 없음)
 2) ``SIM_CAMERA_VIEW`` / ``SIM_CAMERA_PRIM_PATH`` + ``SIM_CAMERA_MODE_ENABLED=True``
-3) 시뮬 시작: 현재 Perspective 뷰(화면별)를 기억 → target 으로 fly → (있으면) Camera prim bind
+3) ``SIM_CAMERA_FLY_ENABLED=True``  → 현재 뷰 기억 → target 으로 fly → (있으면) Camera prim bind
+   ``SIM_CAMERA_FLY_ENABLED=False`` → fly 없이 ``SIM_CAMERA_VIEW`` 로 즉시 이동
 4) 시뮬 정지: Perspective 복귀 + 시작 전 줌/뷰 복원 (다중 프레임 안정화)
+
+fly 구간은 Perspective 로만 진행하고 Persp aperture 를 목표 Camera FOV 로 보간한 뒤,
+종료 시에만 Camera prim look-through (LAM 과 동일 — 줌 점프 방지).
 
 UI·웹 모두 ``on_sim_start_clicked`` / ``on_sim_stop_clicked`` 를 타므로 동일 경로.
 """
@@ -382,6 +386,7 @@ def format_config_snippet(
     return (
         "# sim_control_defaults.py 에 붙여넣기\n"
         "SIM_CAMERA_MODE_ENABLED = True\n"
+        "SIM_CAMERA_FLY_ENABLED = True  # False → fly 없이 즉시 이동\n"
         "# SIM_CAMERA_PRIM_PATH = \"/Camera\"  # stage 실제 Camera prim 경로\n"
         "SIM_CAMERA_VIEW = SimCameraViewSpec(\n"
         f"    eye_xyz=({e[0]:.6f}, {e[1]:.6f}, {e[2]:.6f}),\n"
@@ -520,6 +525,138 @@ def apply_view_to_all_screens(
     return ok
 
 
+def _read_camera_aperture(
+    prim_path: str,
+    *,
+    usd_context_name: str = "",
+) -> Optional[Tuple[float, float]]:
+    """Camera prim 의 (horizontal, vertical) aperture."""
+    stage = _get_stage_for_context(usd_context_name)
+    path = str(prim_path or "").strip()
+    if not stage or not path:
+        return None
+    cam_prim = stage.GetPrimAtPath(path)
+    if not cam_prim or not cam_prim.IsValid():
+        return None
+    try:
+        cam = UsdGeom.Camera(cam_prim)
+        h = cam.GetHorizontalApertureAttr().Get()
+        v = cam.GetVerticalApertureAttr().Get()
+        if h is None or v is None:
+            return None
+        return (float(h), float(v))
+    except Exception:
+        return None
+
+
+def _read_camera_focal_length(
+    prim_path: str,
+    *,
+    usd_context_name: str = "",
+) -> Optional[float]:
+    stage = _get_stage_for_context(usd_context_name)
+    path = str(prim_path or "").strip()
+    if not stage or not path:
+        return None
+    cam_prim = stage.GetPrimAtPath(path)
+    if not cam_prim or not cam_prim.IsValid():
+        return None
+    try:
+        f = UsdGeom.Camera(cam_prim).GetFocalLengthAttr().Get()
+        return float(f) if f else None
+    except Exception:
+        return None
+
+
+def _set_camera_aperture(
+    prim_path: str,
+    horizontal: float,
+    vertical: float,
+    *,
+    usd_context_name: str = "",
+) -> bool:
+    stage = _get_stage_for_context(usd_context_name)
+    path = str(prim_path or "").strip()
+    if not stage or not path:
+        return False
+    cam_prim = stage.GetPrimAtPath(path)
+    if not cam_prim or not cam_prim.IsValid():
+        return False
+    try:
+        cam = UsdGeom.Camera(cam_prim)
+        with Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer())):
+            cam.GetHorizontalApertureAttr().Set(float(horizontal))
+            cam.GetVerticalApertureAttr().Set(float(vertical))
+        return True
+    except Exception:
+        return False
+
+
+def _persp_aperture_matching_camera_prim(
+    prim_path: str,
+    *,
+    usd_context_name: str = "",
+) -> Optional[Tuple[float, float]]:
+    """목표 Camera prim FOV 와 같은 화면이 되도록 Persp (h,v) aperture 계산."""
+    prim_ap = _read_camera_aperture(prim_path, usd_context_name=usd_context_name)
+    if prim_ap is None:
+        return None
+    persp_f = _read_camera_focal_length(_PERSP_CAMERA_PATH, usd_context_name=usd_context_name)
+    prim_f = _read_camera_focal_length(prim_path, usd_context_name=usd_context_name)
+    if not persp_f or not prim_f:
+        return prim_ap
+    scale = persp_f / prim_f
+    return (prim_ap[0] * scale, prim_ap[1] * scale)
+
+
+def _persp_equivalent_aperture_for_prim(
+    prim_path: str,
+    *,
+    usd_context_name: str = "",
+) -> Optional[Tuple[float, float]]:
+    """Persp 현재 FOV 와 같게 보이도록 Camera prim (h,v) aperture 계산 (bind 직전)."""
+    persp_ap = _read_camera_aperture(_PERSP_CAMERA_PATH, usd_context_name=usd_context_name)
+    if persp_ap is None:
+        return None
+    persp_f = _read_camera_focal_length(_PERSP_CAMERA_PATH, usd_context_name=usd_context_name)
+    prim_f = _read_camera_focal_length(prim_path, usd_context_name=usd_context_name)
+    if not persp_f or not prim_f:
+        return persp_ap
+    scale = prim_f / persp_f
+    return (persp_ap[0] * scale, persp_ap[1] * scale)
+
+
+def _apply_persp_aperture_all_screens(
+    hv: Tuple[float, float],
+    *,
+    ext: Any = None,
+) -> None:
+    for _api, ctx in _iter_viewport_and_contexts(ext):
+        _set_camera_aperture(
+            _PERSP_CAMERA_PATH,
+            hv[0],
+            hv[1],
+            usd_context_name=ctx,
+        )
+
+
+def _resolve_fly_aperture_blend(
+    assign_prim_path: str,
+    *,
+    ext: Any = None,
+) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    """fly 시작·종료 Persp aperture (첫 유효 context 기준)."""
+    path = str(assign_prim_path or "").strip()
+    if not path or _is_session_camera_path(path):
+        return None, None
+    for _api, ctx in _iter_viewport_and_contexts(ext):
+        end_ap = _persp_aperture_matching_camera_prim(path, usd_context_name=ctx)
+        cur_ap = _read_camera_aperture(_PERSP_CAMERA_PATH, usd_context_name=ctx)
+        if end_ap is not None and cur_ap is not None:
+            return cur_ap, end_ap
+    return None, None
+
+
 def _cfg_camera_mode_enabled() -> bool:
     try:
         from .sim_control_defaults import SIM_CAMERA_MODE_ENABLED
@@ -554,6 +691,15 @@ def _cfg_fly_duration_sec() -> float:
         return max(0.05, float(SIM_CAMERA_FLY_DURATION_SEC))
     except Exception:
         return 2.0
+
+
+def _cfg_camera_fly_enabled() -> bool:
+    try:
+        from .sim_control_defaults import SIM_CAMERA_FLY_ENABLED
+
+        return bool(SIM_CAMERA_FLY_ENABLED)
+    except Exception:
+        return True
 
 
 def _target_from_config() -> Tuple[Optional[CameraViewSnapshot], Tuple[float, float, float]]:
@@ -644,9 +790,21 @@ def _finish_fly_to_target(
 ) -> bool:
     global _fly_active
     _fly_active = False
-    ok = apply_view_to_all_screens(target, up_xyz=up_xyz, assign_prim_path=assign_prim_path, ext=ext)
     path = str(assign_prim_path or "").strip()
-    if path and not _is_session_camera_path(path):
+    use_prim = bool(path and not _is_session_camera_path(path))
+    if use_prim:
+        # Persp fly 종료 FOV 와 prim look-through FOV 를 맞춘 뒤 bind (줌 점프 방지)
+        for _api, ctx in _iter_viewport_and_contexts(ext):
+            eq_ap = _persp_equivalent_aperture_for_prim(path, usd_context_name=ctx)
+            if eq_ap is not None:
+                _set_camera_aperture(path, eq_ap[0], eq_ap[1], usd_context_name=ctx)
+    ok = apply_view_to_all_screens(
+        target,
+        up_xyz=up_xyz,
+        assign_prim_path=path if use_prim else "",
+        ext=ext,
+    )
+    if use_prim:
         print(f"{_PRINT_PREFIX} fly 종료 → prim bind path={path!r} ok={ok}", flush=True)
     else:
         print(f"{_PRINT_PREFIX} fly 종료 → Perspective 뷰 고정 ok={ok}", flush=True)
@@ -663,7 +821,7 @@ def _start_fly_animation(
     ext: Any = None,
     on_complete: Optional[Callable[[], None]] = None,
 ) -> None:
-    """main 스레드: update 구독으로 모든 화면에 대해 eye/target 보간."""
+    """main 스레드: Perspective + aperture 보간 fly. prim bind 는 on_complete 에서만."""
     global _fly_sub, _fly_done_evt, _fly_active
     _stop_fly_subscription()
     _fly_active = True
@@ -671,6 +829,21 @@ def _start_fly_animation(
     dur = _cfg_fly_duration_sec()
     t0 = time.perf_counter()
     up = up_xyz
+    ap_start, ap_end = _resolve_fly_aperture_blend(assign_prim_path, ext=ext)
+    if ap_start is not None and ap_end is not None:
+        print(
+            f"{_PRINT_PREFIX} Persp aperture 보간 "
+            f"h={ap_start[0]:.3f}->{ap_end[0]:.3f}",
+            flush=True,
+        )
+
+    def _aperture_at(u: float) -> Optional[Tuple[float, float]]:
+        if ap_start is None or ap_end is None:
+            return None
+        return (
+            ap_start[0] + (ap_end[0] - ap_start[0]) * u,
+            ap_start[1] + (ap_end[1] - ap_start[1]) * u,
+        )
 
     def _finish() -> None:
         global _fly_sub, _fly_active
@@ -694,9 +867,16 @@ def _start_fly_animation(
         eye = _lerp3(start.eye_xyz, end.eye_xyz, u)
         tgt = _lerp3(start.target_xyz, end.target_xyz, u)
         cur_snap = CameraViewSnapshot(eye_xyz=eye, target_xyz=tgt)
+        # fly 중: Perspective 만 (Camera prim bind 금지)
         apply_view_to_all_screens(cur_snap, up_xyz=up, assign_prim_path="", ext=ext)
+        ap = _aperture_at(u)
+        if ap is not None:
+            _apply_persp_aperture_all_screens(ap, ext=ext)
         if u >= 1.0 - 1e-9:
-            apply_view_to_all_screens(end, up_xyz=up, assign_prim_path=assign_prim_path, ext=ext)
+            apply_view_to_all_screens(end, up_xyz=up, assign_prim_path="", ext=ext)
+            ap_final = _aperture_at(1.0)
+            if ap_final is not None:
+                _apply_persp_aperture_all_screens(ap_final, ext=ext)
             _finish()
 
     try:
@@ -704,6 +884,8 @@ def _start_fly_animation(
 
         set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=ext)
         apply_view_to_all_screens(start, up_xyz=up, assign_prim_path="", ext=ext)
+        if ap_start is not None:
+            _apply_persp_aperture_all_screens(ap_start, ext=ext)
         stream = _app.get_app().get_update_event_stream()
         _fly_sub = stream.create_subscription_to_pop(
             _tick,
@@ -747,6 +929,11 @@ def apply_sim_camera_on_start(ext: Any = None) -> bool:
 
     current = capture_current_view()
     if current is None:
+        return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim, ext=ext)
+
+    # fly 비활성: 애니메이션 없이 SIM_CAMERA_VIEW 로 즉시 이동
+    if not _cfg_camera_fly_enabled():
+        print(f"{_PRINT_PREFIX} fly 비활성 — 즉시 이동", flush=True)
         return _finish_fly_to_target(target, up_xyz=up, assign_prim_path=prim, ext=ext)
 
     # 이미 동일 위치이면 fly 생략하고 바인딩
