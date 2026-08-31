@@ -5,7 +5,7 @@
 2) ``SIM_CAMERA_VIEW`` / ``SIM_CAMERA_PRIM_PATH`` + ``SIM_CAMERA_MODE_ENABLED=True``
 3) ``SIM_CAMERA_FLY_ENABLED=True``  → 현재 뷰 기억 → target 으로 fly → (있으면) Camera prim bind
    ``SIM_CAMERA_FLY_ENABLED=False`` → fly 없이 ``SIM_CAMERA_VIEW`` 로 즉시 이동
-4) 시뮬 정지: Perspective 복귀 + 시작 전 줌/뷰 복원 (다중 프레임 안정화)
+4) 시뮬 정지: Perspective 복귀 + 시작 전 시점·줌(aperture/focal) 복원 (다중 프레임 안정화)
 
 fly 구간은 Perspective 로만 진행하고 Persp aperture 를 목표 Camera FOV 로 보간한 뒤,
 종료 시에만 Camera prim look-through (LAM 과 동일 — 줌 점프 방지).
@@ -29,6 +29,8 @@ _COI_ATTR = "omni:kit:centerOfInterest"
 # 시뮬 시작 직전 Perspective 뷰 (컨텍스트별 / 전역) — 정지 시 복원
 _pre_sim_views: Dict[str, "CameraViewSnapshot"] = {}
 _pre_sim_ups: Dict[str, Tuple[float, float, float]] = {}
+_pre_sim_apertures: Dict[str, Tuple[float, float]] = {}
+_pre_sim_focal_lengths: Dict[str, float] = {}
 _fly_sub: Any = None
 _fly_done_evt: Optional[threading.Event] = None
 _fly_active: bool = False
@@ -592,6 +594,70 @@ def _set_camera_aperture(
         return False
 
 
+def _set_camera_focal_length(
+    prim_path: str,
+    focal_length: float,
+    *,
+    usd_context_name: str = "",
+) -> bool:
+    stage = _get_stage_for_context(usd_context_name)
+    path = str(prim_path or "").strip()
+    if not stage or not path:
+        return False
+    cam_prim = stage.GetPrimAtPath(path)
+    if not cam_prim or not cam_prim.IsValid():
+        return False
+    try:
+        cam = UsdGeom.Camera(cam_prim)
+        with Usd.EditContext(stage, Usd.EditTarget(stage.GetSessionLayer())):
+            cam.GetFocalLengthAttr().Set(float(focal_length))
+        return True
+    except Exception:
+        return False
+
+
+def _capture_persp_zoom_snapshot(
+    *,
+    usd_context_name: str = "",
+) -> Tuple[Optional[Tuple[float, float]], Optional[float]]:
+    """Persp session 카메라의 aperture·focal length (정지 시 줌 복원용)."""
+    ctx = str(usd_context_name or "").strip()
+    ap = _read_camera_aperture(_PERSP_CAMERA_PATH, usd_context_name=ctx)
+    fl = _read_camera_focal_length(_PERSP_CAMERA_PATH, usd_context_name=ctx)
+    return ap, fl
+
+
+def _apply_persp_zoom_snapshot(
+    *,
+    usd_context_name: str = "",
+    aperture: Optional[Tuple[float, float]] = None,
+    focal_length: Optional[float] = None,
+) -> bool:
+    """저장해 둔 Persp 줌(aperture·focal) 복원."""
+    ctx = str(usd_context_name or "").strip()
+    ok = False
+    if aperture is not None:
+        ok = (
+            _set_camera_aperture(
+                _PERSP_CAMERA_PATH,
+                aperture[0],
+                aperture[1],
+                usd_context_name=ctx,
+            )
+            or ok
+        )
+    if focal_length is not None:
+        ok = (
+            _set_camera_focal_length(
+                _PERSP_CAMERA_PATH,
+                focal_length,
+                usd_context_name=ctx,
+            )
+            or ok
+        )
+    return ok
+
+
 def _persp_aperture_matching_camera_prim(
     prim_path: str,
     *,
@@ -763,8 +829,8 @@ def _stop_stop_perspective_restore_subscription() -> None:
 
 
 def _remember_pre_sim_views(ext: Any = None) -> None:
-    """시뮬 시작 직전 모든 뷰포트의 시점을 기억."""
-    global _pre_sim_views, _pre_sim_ups
+    """시뮬 시작 직전 모든 뷰포트의 시점·줌(Persp aperture)을 기억."""
+    global _pre_sim_views, _pre_sim_ups, _pre_sim_apertures, _pre_sim_focal_lengths
     # 이미 fly 중이거나 이전에 기억된 상태가 있으면 덮어쓰지 않음
     if _pre_sim_views:
         return
@@ -773,10 +839,18 @@ def _remember_pre_sim_views(ext: Any = None) -> None:
         if snap is not None:
             _pre_sim_views[ctx] = snap
             _pre_sim_ups[ctx] = _capture_world_up(api, ctx)
+            ap, fl = _capture_persp_zoom_snapshot(usd_context_name=ctx)
+            if ap is not None:
+                _pre_sim_apertures[ctx] = ap
+            if fl is not None:
+                _pre_sim_focal_lengths[ctx] = fl
             e = snap.eye_xyz
+            ap_msg = ""
+            if ap is not None:
+                ap_msg = f" ap=({ap[0]:.3f},{ap[1]:.3f})"
             print(
                 f"{_PRINT_PREFIX} pre-sim view 저장 (ctx={ctx!r}) "
-                f"eye=({e[0]:.3f},{e[1]:.3f},{e[2]:.3f})",
+                f"eye=({e[0]:.3f},{e[1]:.3f},{e[2]:.3f}){ap_msg}",
                 flush=True,
             )
 
@@ -964,10 +1038,13 @@ def schedule_restore_perspective_after_sim_stop(
 ) -> None:
     """정지 후 race 대비 — 여러 프레임 동안 Perspective 및 줌 복원을 안정적으로 정착."""
     global _stop_persp_restore_sub, _pre_sim_views, _pre_sim_ups
+    global _pre_sim_apertures, _pre_sim_focal_lengths
     _stop_stop_perspective_restore_subscription()
-    
+
     snaps = dict(_pre_sim_views)
     ups = dict(_pre_sim_ups)
+    apertures = dict(_pre_sim_apertures)
+    focal_lengths = dict(_pre_sim_focal_lengths)
     if not snaps:
         return
 
@@ -977,12 +1054,29 @@ def schedule_restore_perspective_after_sim_stop(
         for api, ctx in _iter_viewport_and_contexts(ext):
             snap = snaps.get(ctx) or snaps.get("")
             up = ups.get(ctx) or (0.0, 0.0, 1.0)
+            ap = apertures.get(ctx) or apertures.get("")
+            fl = focal_lengths.get(ctx)
+            if fl is None and "" in focal_lengths:
+                fl = focal_lengths.get("")
             if snap is not None:
-                apply_view_to_perspective(snap, up_xyz=up, usd_context_name=ctx, viewport_api=api)
+                apply_view_to_perspective(
+                    snap,
+                    up_xyz=up,
+                    usd_context_name=ctx,
+                    viewport_api=api,
+                )
+            if ap is not None or fl is not None:
+                _apply_persp_zoom_snapshot(
+                    usd_context_name=ctx,
+                    aperture=ap,
+                    focal_length=fl,
+                )
         set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=ext)
         if is_final:
             _pre_sim_views.clear()
             _pre_sim_ups.clear()
+            _pre_sim_apertures.clear()
+            _pre_sim_focal_lengths.clear()
 
     def _tick(_e=None) -> None:
         if frames_left[0] > 0:
@@ -991,7 +1085,10 @@ def schedule_restore_perspective_after_sim_stop(
             return
         _stop_stop_perspective_restore_subscription()
         _apply_step(is_final=True)
-        print(f"{_PRINT_PREFIX} 정지 후 Perspective 복원 완료 (다중 프레임 정착)", flush=True)
+        print(
+            f"{_PRINT_PREFIX} 정지 후 Perspective·줌 복원 완료 (다중 프레임 정착)",
+            flush=True,
+        )
 
     try:
         import omni.kit.app as _app  # type: ignore
