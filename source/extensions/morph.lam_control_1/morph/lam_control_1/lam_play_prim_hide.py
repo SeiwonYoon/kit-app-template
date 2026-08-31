@@ -4,6 +4,17 @@ Fade 는 **update 이벤트(프레임)** 마다 opacity 를 갱신한다.
 (main 스레드 sleep 만 쓰면 뷰포트가 안 그려져 duration 후 한 번에 사라짐)
 
 Play 시작 fade: 이미 숨겨진 prim 은 다시 보이지 않음 — **현재 보이는 것만** fade hide.
+
+PLAY_HIDE vs PLAY_SHOW lifecycle
+--------------------------------
+- ``PLAY_HIDE_PRIM_SPECS``: USD snapshot 기반 — 정지(초기화) 시 ``play_stop_reset`` 으로
+  원래 visibility 복원 가능 (``PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET``).
+- ``PLAY_SHOW_PRIM_SPECS``: snapshot 복원 **사용 안 함**. 체크박스 정책 + 재생 phase 만 따른다.
+  - prim숨김 ON (``ui_hide``): idle 시 **보임**
+  - prim숨김 OFF (``ui_show``): idle 시 **숨김**
+  - ``pre_play_fly``: 카메라 FLY 전·도중 **숨김**
+  - ``play_start`` (fly 완료 후): **보임**
+  - ``play_stop_reset``: 위 idle 정책으로만 동기화 (snapshot restore 로 켜지지 않음)
 """
 
 from __future__ import annotations
@@ -1100,6 +1111,7 @@ def _force_show_all_specs() -> None:
 
 def _force_show_all_show_specs() -> None:
     """재생/체크 ON 시 show 목록 prim 은 항상 보이게."""
+    _clear_show_spec_snapshots()
     specs = _load_show_specs()
     paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
     paths = [p for p in paths if p]
@@ -1112,41 +1124,40 @@ def _force_show_all_show_specs() -> None:
         _reset_mdl_opacity_for_show(targets)
 
 
-def _hide_all_show_specs_instant(*, snapshot_restore: Optional[str] = None) -> None:
-    """체크 OFF 시 show 목록은 반대로 숨김."""
+def _clear_show_spec_snapshots() -> None:
+    """PLAY_SHOW 는 snapshot 복원 대상이 아님 — 잔여 토큰 제거."""
+    specs = _load_show_specs()
+    paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
+    paths = [p for p in paths if p]
+    if not paths:
+        return
+    store = _snap_store()
+    with _lock:
+        for path in paths:
+            store.pop(path, None)
+
+
+def _hide_show_specs_idle() -> None:
+    """PLAY_SHOW idle(비재생) — prim숨김 OFF 정책: 항상 숨김 (snapshot 미사용)."""
+    _clear_show_spec_snapshots()
     for spec in _load_show_specs():
         path = str(getattr(spec, "prim_path", "") or "").strip()
         if not path:
             continue
-        if snapshot_restore is not None:
-            _snap_store()[path] = str(snapshot_restore)
-        else:
-            _capture_snapshot(path)
         targets = _build_fade_targets(path)
         _clear_mdl_fade_opacity(targets)
         _set_visible_immediate(path, False)
 
 
-def _restore_all_show_specs() -> None:
-    """stop_reset 복원: show 목록도 원래 visibility 로 돌림.
+def _apply_show_specs_prim_hide_policy(hide_checked: bool) -> None:
+    """PLAY_SHOW 를 「prim숨김」 체크 상태의 idle 정책과 동기화.
 
-    snapshot 이 없으면 USD 저장 상태를 그대로 둔다.
-    (없으면 True 강제 → 앱/정지 시 숨김 저장 prim 이 켜지던 문제 방지)
+    snapshot restore 를 쓰지 않아 정지(초기화) 직후 flash 가 나지 않는다.
     """
-    specs = _load_show_specs()
-    paths = [str(getattr(s, "prim_path", "") or "").strip() for s in specs]
-    paths = [p for p in paths if p]
-    store = _snap_store()
-    with _lock:
-        snap = {p: store.pop(p, None) for p in paths}
-    for path in paths:
-        tok = snap.get(path)
-        if tok is None:
-            continue
-        targets = _build_fade_targets(path)
-        _clear_mdl_fade_opacity(targets)
-        _show_all_gprims_under(targets)
-        _apply_visibility_token(path, tok)
+    if hide_checked:
+        _force_show_all_show_specs()
+    else:
+        _hide_show_specs_idle()
 
 
 def _show_all_instant() -> None:
@@ -1187,7 +1198,7 @@ def _apply_phase_instant(phase: str) -> None:
     if phase == "pre_play_fly":
         # 시뮬레이션 시작 전(카메라 FLY 시작 전): show 목록은 FLY 도중 보이지 않도록 숨김
         if show_specs:
-            _hide_all_show_specs_instant(snapshot_restore="inherited")
+            _hide_show_specs_idle()
             print(
                 f"{_PRINT_PREFIX} pre_play_fly: hid {len(show_specs)} show spec(s) before camera fly",
                 flush=True,
@@ -1213,26 +1224,21 @@ def _apply_phase_instant(phase: str) -> None:
                 hide_checked = bool(get_toggle_play_prim_hide())
             except Exception:
                 hide_checked = False
-        restore = bool(restore_cfg) and not hide_checked
-        if restore:
+        restore_hide = bool(restore_cfg) and not hide_checked
+        if restore_hide:
             _restore_all_specs()
-            if show_specs:
-                _restore_all_show_specs()
-            print(f"{_PRINT_PREFIX} play_stop_reset: restored visibility", flush=True)
-        elif hide_checked:
-            # 체크 ON: hide 목록은 숨김 유지, show 목록은 시뮬 정지 시 원래대로 복원/숨김
-            if show_specs:
-                _restore_all_show_specs()
+        if show_specs:
+            _apply_show_specs_prim_hide_policy(hide_checked)
+        if restore_hide:
             print(
-                f"{_PRINT_PREFIX} play_stop_reset: keep hidden (prim숨김 checked, show specs reset)",
+                f"{_PRINT_PREFIX} play_stop_reset: restored PLAY_HIDE, "
+                f"PLAY_SHOW idle policy (prim숨김={'ON' if hide_checked else 'OFF'})",
                 flush=True,
             )
         else:
-            # 체크 OFF + restore 비활성: UI 정책대로 show 목록은 숨김
-            if show_specs:
-                _hide_all_show_specs_instant(snapshot_restore="inherited")
             print(
-                f"{_PRINT_PREFIX} play_stop_reset: keep hidden (restore disabled)",
+                f"{_PRINT_PREFIX} play_stop_reset: PLAY_SHOW idle policy "
+                f"(prim숨김={'ON' if hide_checked else 'OFF'})",
                 flush=True,
             )
         return
@@ -1241,7 +1247,7 @@ def _apply_phase_instant(phase: str) -> None:
         # 해제 시 항상 보이게 — 이미 invisible 인 상태를 snapshot 에 남기지 않음
         _hide_all_instant(snapshot_restore="inherited")
         if show_specs:
-            _force_show_all_show_specs()
+            _apply_show_specs_prim_hide_policy(True)
         found, total = prim_hide_specs_stage_status()
         if total > 0:
             print(
@@ -1253,7 +1259,7 @@ def _apply_phase_instant(phase: str) -> None:
     if phase == "ui_show":
         _force_show_all_specs()
         if show_specs:
-            _hide_all_show_specs_instant(snapshot_restore="inherited")
+            _apply_show_specs_prim_hide_policy(False)
         found, total = prim_hide_specs_stage_status()
         if total > 0:
             print(
