@@ -10761,10 +10761,12 @@ class LamSimulationCsvPlayWindow:
                     # 체크를 ON 으로 뒤집던 문제 — play_stop_reset phase 가
                     # 현재 체크 상태를 읽어 숨김 유지/복원을 알아서 분기한다.)
                     try:
+                        hide_checked = False
                         if cn:
                             from .lam_csv_screen_runtime import capture_csv_overlay_settings
                             from .lam_play_prim_hide import (
                                 apply_play_prim_hide_phase_for_context,
+                                reconcile_idle_show_specs_after_stop_reset,
                             )
 
                             hide_checked = bool(
@@ -10775,10 +10777,22 @@ class LamSimulationCsvPlayWindow:
                                 "play_stop_reset",
                                 prim_hide_checked=hide_checked,
                             )
+                            reconcile_idle_show_specs_after_stop_reset(
+                                hide_checked=hide_checked,
+                                usd_context_name=cn,
+                            )
                         else:
-                            from .lam_play_prim_hide import apply_play_prim_hide_phase
+                            from .lam_play_prim_hide import (
+                                apply_play_prim_hide_phase,
+                                reconcile_idle_show_specs_after_stop_reset,
+                            )
+                            from .lam_viewport_overlay_state import get_toggle_play_prim_hide
 
+                            hide_checked = bool(get_toggle_play_prim_hide())
                             apply_play_prim_hide_phase("play_stop_reset")
+                            reconcile_idle_show_specs_after_stop_reset(
+                                hide_checked=hide_checked,
+                            )
                     except Exception as exc:
                         print(
                             f"{_PRINT_PREFIX} play prim hide (stop_reset): {exc}",

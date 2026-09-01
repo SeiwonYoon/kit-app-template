@@ -244,6 +244,12 @@ def _federation_force_stop_reset_for_start(
 
     si = max(1, int(screen))
     gen = _bump_federation_start_generation(si)
+    try:
+        from .lam_play_prim_hide import set_suppress_idle_show_specs_after_stop_reset
+
+        set_suppress_idle_show_specs_after_stop_reset(True)
+    except Exception:
+        pass
     _fed_diag(
         "S07_force_stop_begin",
         "stop+reset before federation start",
@@ -326,8 +332,34 @@ def _federation_force_stop_reset_for_start(
         clear_csv_playback_stop(screen=si)
     except Exception:
         pass
+    try:
+        _federation_apply_pre_play_fly_hide(ext, lam_window, si)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} pre_play_fly after force_stop: {exc}", flush=True)
     _fed_diag("S07_force_stop_done", "ready for new start", screen=si, gen=gen)
     return gen
+
+
+def _federation_apply_pre_play_fly_hide(
+    ext: Any,
+    lam_window: Any,
+    screen: int,
+) -> None:
+    """Federation force_stop 직후 — parse/fly 전 PLAY_SHOW 숨김 (2회차 flash 방지)."""
+    from .lam_csv_screen_runtime import resolve_csv_screen_runtime
+    from .lam_play_prim_hide import apply_play_prim_hide_phase_for_context
+
+    si = max(1, int(screen))
+    sim_wins = getattr(lam_window, "_csv_sim_windows", {}) if lam_window else {}
+    csv_win = sim_wins.get(si) if isinstance(sim_wins, dict) else None
+    rt = resolve_csv_screen_runtime(
+        lam_window,
+        si,
+        csv_window=csv_win,
+        require_aux=False,
+    )
+    ctx = str(getattr(rt, "context_name", None) or "") if rt is not None else ""
+    apply_play_prim_hide_phase_for_context(ctx, "pre_play_fly")
 
 
 def _federation_force_stop_requested_screens(
@@ -675,6 +707,14 @@ def _start_federation_playback(
                 print(f"{_PRINT_PREFIX} screen{si} play failed: {exc}", flush=True)
                 _fed_diag("S15_play_failed", str(exc), screen=si)
             finally:
+                try:
+                    from .lam_play_prim_hide import (
+                        clear_suppress_idle_show_specs_after_stop_reset,
+                    )
+
+                    clear_suppress_idle_show_specs_after_stop_reset()
+                except Exception:
+                    pass
                 try:
                     from .lam_traffic_light_emissive import (
                         on_csv_playback_paused_or_stopped,

@@ -9,12 +9,12 @@ PLAY_HIDE vs PLAY_SHOW lifecycle
 --------------------------------
 - ``PLAY_HIDE_PRIM_SPECS``: USD snapshot 기반 — 정지(초기화) 시 ``play_stop_reset`` 으로
   원래 visibility 복원 가능 (``PLAY_HIDE_RESTORE_VISIBLE_ON_STOP_RESET``).
-- ``PLAY_SHOW_PRIM_SPECS``: snapshot 복원 **사용 안 함**. 체크박스 정책 + 재생 phase 만 따른다.
-  - prim숨김 ON (``ui_hide``): idle 시 **보임**
-  - prim숨김 OFF (``ui_show``): idle 시 **숨김**
-  - ``pre_play_fly``: 카메라 FLY 전·도중 **숨김**
-  - ``play_start`` (fly 완료 후): **보임**
-  - ``play_stop_reset``: 위 idle 정책으로만 동기화 (snapshot restore 로 켜지지 않음)
+- ``PLAY_SHOW_PRIM_SPECS``: snapshot 복원 **사용 안 함**.
+  - **보임** 허용: ``play_start`` (카메라 FLY **완료 후**) 만.
+  - **숨김**: ``pre_play_fly`` · ``play_stop_reset`` · Federation 재시작 직후 · prim숨김 OFF(``ui_show``).
+  - prim숨김 ON idle(``ui_hide``): 체크박스 토글 시에만 show — ``play_stop_reset`` 에서는 **켜지 않음**
+    (2회차 파싱/시뮬 클릭 시 flash 방지). UI 정지(초기화) 완료 후 idle 복구는
+    ``reconcile_idle_show_specs_after_stop_reset`` (Federation 재시작 중이면 생략).
 """
 
 from __future__ import annotations
@@ -48,6 +48,11 @@ _usd_context_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 _hide_checked_var: contextvars.ContextVar[Optional[bool]] = contextvars.ContextVar(
     "lam_prim_hide_checked",
     default=None,
+)
+# Federation 파싱/시뮬 재시작 — stop_reset 직후 idle show 복구 금지 (parse~fly 전 구간)
+_suppress_idle_show_after_stop_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "lam_suppress_idle_show_after_stop",
+    default=False,
 )
 
 
@@ -1150,14 +1155,44 @@ def _hide_show_specs_idle() -> None:
 
 
 def _apply_show_specs_prim_hide_policy(hide_checked: bool) -> None:
-    """PLAY_SHOW 를 「prim숨김」 체크 상태의 idle 정책과 동기화.
+    """PLAY_SHOW 를 「prim숨김」 체크 idle 정책과 동기화 (``ui_hide`` / ``ui_show`` 전용).
 
-    snapshot restore 를 쓰지 않아 정지(초기화) 직후 flash 가 나지 않는다.
+    ``play_stop_reset`` 에서는 호출하지 않는다 — 재시작 시 flash 원인.
     """
     if hide_checked:
         _force_show_all_show_specs()
     else:
         _hide_show_specs_idle()
+
+
+def set_suppress_idle_show_specs_after_stop_reset(suppress: bool) -> None:
+    """True — UI 정지 직후 idle show 복구 생략 (Federation 재시작 parse~fly 구간)."""
+    _suppress_idle_show_after_stop_var.set(bool(suppress))
+
+
+def clear_suppress_idle_show_specs_after_stop_reset() -> None:
+    _suppress_idle_show_after_stop_var.set(False)
+
+
+def reconcile_idle_show_specs_after_stop_reset(
+    *,
+    hide_checked: bool,
+    usd_context_name: str = "",
+) -> None:
+    """UI「정지(초기화)」worker 완료 후 — prim숨김 ON idle 이면 show 복구.
+
+    Federation 재시작(``set_suppress_idle_show_specs_after_stop_reset(True)``) 중에는 no-op.
+    """
+    if not hide_checked or _suppress_idle_show_after_stop_var.get():
+        return
+    if not _load_show_specs():
+        return
+    with play_prim_hide_stage_context(usd_context_name or None):
+        _force_show_all_show_specs()
+        print(
+            f"{_PRINT_PREFIX} stop_reset idle: show specs visible (prim숨김 ON)",
+            flush=True,
+        )
 
 
 def _show_all_instant() -> None:
@@ -1228,17 +1263,17 @@ def _apply_phase_instant(phase: str) -> None:
         if restore_hide:
             _restore_all_specs()
         if show_specs:
-            _apply_show_specs_prim_hide_policy(hide_checked)
+            # PLAY_SHOW 는 play_start(fly 후) 에서만 켬 — stop_reset 에서 절대 켜지 않음
+            _hide_show_specs_idle()
         if restore_hide:
             print(
                 f"{_PRINT_PREFIX} play_stop_reset: restored PLAY_HIDE, "
-                f"PLAY_SHOW idle policy (prim숨김={'ON' if hide_checked else 'OFF'})",
+                f"PLAY_SHOW hidden until play_start",
                 flush=True,
             )
         else:
             print(
-                f"{_PRINT_PREFIX} play_stop_reset: PLAY_SHOW idle policy "
-                f"(prim숨김={'ON' if hide_checked else 'OFF'})",
+                f"{_PRINT_PREFIX} play_stop_reset: PLAY_SHOW hidden until play_start",
                 flush=True,
             )
         return
@@ -1277,9 +1312,12 @@ __all__ = [
     "apply_play_prim_hide_phase_for_context",
     "apply_play_prim_hide_ui_instant",
     "apply_play_prim_hide_ui_instant_for_context",
+    "clear_suppress_idle_show_specs_after_stop_reset",
     "kickoff_play_prim_hide_play_start",
     "planned_play_prim_hide_duration_sec",
     "play_prim_hide_specs_configured",
     "play_prim_hide_stage_context",
     "prim_hide_specs_stage_status",
+    "reconcile_idle_show_specs_after_stop_reset",
+    "set_suppress_idle_show_specs_after_stop_reset",
 ]
