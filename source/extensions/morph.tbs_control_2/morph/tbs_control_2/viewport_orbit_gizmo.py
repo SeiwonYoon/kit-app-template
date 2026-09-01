@@ -18,7 +18,10 @@
 - **Perspective 모드**: 뷰포트는 ``/OmniverseKit_Persp`` → 씬 안에서 Camera prim 이
   어떻게 움직이는지 눈으로 확인.
 
-두 모드 모두 기즈모(드래그·X/Y/Z·Frame)는 **동일한 USD Camera prim** 의 transform 을 갱신한다.
+두 모드 모두 기즈모(드래그·3D 축 클릭·X/Y/Z·Frame)는 **동일한 USD Camera prim** 의 transform 을 갱신한다.
+
+패널 중앙 **3D 축 뷰큐브** (``omni.ui.scene``) 는 orbit yaw/pitch 와 동기 회전하며,
+축 핸들 클릭 시 거리 유지 fly(``_animate_to``) 를 수행한다.
 
 실제 조작 흐름
 --------------
@@ -57,9 +60,21 @@ ORBIT_GIZMO_PANEL_BORDER_RADIUS: int = 6
 ORBIT_GIZMO_PANEL_SPACING: int = 4
 ORBIT_GIZMO_TITLE_FONT_SIZE: int = 11
 
-# --- 원형 드래그(오빗) 영역 ---
-ORBIT_GIZMO_ORBIT_RING_HEIGHT: int = 56
-ORBIT_GIZMO_ORBIT_RING_FONT_SIZE: int = 22
+# --- 3D 축 오리엔테이션 위젯 (뷰큐브) ---
+ORBIT_GIZMO_ORBIT_RING_HEIGHT: int = 76
+ORBIT_GIZMO_AXIS_LENGTH: float = 0.58
+ORBIT_GIZMO_AXIS_NEG_LENGTH: float = 0.38
+ORBIT_GIZMO_CUBE_HALF: float = 0.11
+ORBIT_GIZMO_AXIS_HIT_THICKNESS: int = 14
+ORBIT_GIZMO_DRAG_ARC_RADIUS: float = 0.88
+ORBIT_GIZMO_LABEL_SIZE: int = 14
+
+# 축 색 (RGBA 0..1)
+_ORBIT_GIZMO_COLOR_X = (0.88, 0.22, 0.22, 1.0)
+_ORBIT_GIZMO_COLOR_Y = (0.22, 0.82, 0.35, 1.0)
+_ORBIT_GIZMO_COLOR_Z = (0.28, 0.48, 0.95, 1.0)
+_ORBIT_GIZMO_COLOR_NEG = (0.72, 0.74, 0.78, 0.9)
+_ORBIT_GIZMO_COLOR_CUBE = (0.92, 0.93, 0.95, 1.0)
 
 # --- 하단 버튼 일렬 (X · Y · Z · Frame) ---
 ORBIT_GIZMO_BUTTON_ROW_HEIGHT: int = 22
@@ -193,6 +208,195 @@ def _snap_axis_angles(axis: str) -> Tuple[float, float]:
         "+z": (0.0, 89.0),
         "-z": (0.0, -89.0),
     }.get(key, (0.0, 20.0))
+
+
+def _orientation_gizmo_matrix(yaw_deg: float, pitch_deg: float) -> Gf.Matrix4d:
+    """월드 축을 카메라 orbit(yaw/pitch)에 맞게 화면에 투영 — 역회전."""
+    rz = Gf.Rotation(Gf.Vec3d(0.0, 0.0, 1.0), float(-yaw_deg))
+    ry = Gf.Rotation(Gf.Vec3d(0.0, 1.0, 0.0), float(-pitch_deg))
+    m = Gf.Matrix4d(1.0)
+    m.SetRotateOnly(rz * ry)
+    return m
+
+
+def _axis_tip(axis: str, length: float) -> Tuple[float, float, float]:
+    key = str(axis or "").strip().lower()
+    if key in ("+x", "x"):
+        return (float(length), 0.0, 0.0)
+    if key == "-x":
+        return (-float(length), 0.0, 0.0)
+    if key in ("+y", "y"):
+        return (0.0, float(length), 0.0)
+    if key == "-y":
+        return (0.0, -float(length), 0.0)
+    if key in ("+z", "z"):
+        return (0.0, 0.0, float(length))
+    if key == "-z":
+        return (0.0, 0.0, -float(length))
+    return (0.0, 0.0, 0.0)
+
+
+# =============================================================================
+# 3D 축 오리엔테이션 위젯 (SceneView — orbit yaw/pitch 와 동기 회전)
+# =============================================================================
+
+
+class _OrientationGizmoWidget:
+    """패널 중앙 뷰큐브 — 드래그 orbit·fly 애니와 동일 yaw/pitch 로 Transform 갱신."""
+
+    def __init__(
+        self,
+        *,
+        on_axis_snap: Callable[[str], None],
+        on_orbit_drag_end: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self._on_axis_snap = on_axis_snap
+        self._on_orbit_drag_end = on_orbit_drag_end
+        self._axes_transform: Any = None
+        self._drag_arc: Any = None
+        self._scene_view: Any = None
+        self._dragging = False
+        self._drag_dx = 0.0
+        self._drag_dy = 0.0
+
+    def mount(
+        self,
+        wire_mouse: Callable[[Any], None],
+        *,
+        height: int = ORBIT_GIZMO_ORBIT_RING_HEIGHT,
+    ) -> Any:
+        import omni.ui as ui  # type: ignore
+        import omni.ui.scene as sc  # type: ignore
+
+        stack = ui.ZStack(height=int(height))
+        with stack:
+            self._scene_view = sc.SceneView(
+                aspect_ratio_policy=sc.AspectRatioPolicy.PRESERVE_ASPECT_FIT,
+                height=ui.Percent(100),
+            )
+            with self._scene_view.scene:
+                # 드래그 방향 arc — 축 회전과 분리(화면 고정 링)
+                self._drag_arc = sc.Arc(
+                    ORBIT_GIZMO_DRAG_ARC_RADIUS,
+                    begin=0.0,
+                    end=0.05,
+                    thickness=3,
+                    color=(1.0, 1.0, 1.0, 0.55),
+                    wireframe=True,
+                    sector=False,
+                    visible=False,
+                )
+                self._axes_transform = sc.Transform()
+                with self._axes_transform:
+                    self._build_axes_scene(sc)
+            # 투명 히트 영역 — orbit 드래그
+            hit = ui.Rectangle(style={"background_color": 0x01FFFFFF})
+            wire_mouse(hit)
+        return stack
+
+    def _build_axes_scene(self, sc: Any) -> None:
+        import omni.ui as ui  # type: ignore
+
+        h = ORBIT_GIZMO_CUBE_HALF
+        cube_edges = (
+            ((-h, -h, -h), (h, -h, -h)),
+            ((h, -h, -h), (h, h, -h)),
+            ((h, h, -h), (-h, h, -h)),
+            ((-h, h, -h), (-h, -h, -h)),
+            ((-h, -h, h), (h, -h, h)),
+            ((h, -h, h), (h, h, h)),
+            ((h, h, h), (-h, h, h)),
+            ((-h, h, h), (-h, -h, h)),
+            ((-h, -h, -h), (-h, -h, h)),
+            ((h, -h, -h), (h, -h, h)),
+            ((h, h, -h), (h, h, h)),
+            ((-h, h, -h), (-h, h, h)),
+        )
+        for a, b in cube_edges:
+            sc.Line(a, b, color=_ORBIT_GIZMO_COLOR_CUBE, thickness=2)
+
+        axis_specs = (
+            ("+x", ORBIT_GIZMO_AXIS_LENGTH, _ORBIT_GIZMO_COLOR_X, 4, "x"),
+            ("-x", ORBIT_GIZMO_AXIS_NEG_LENGTH, _ORBIT_GIZMO_COLOR_NEG, 2, ""),
+            ("+y", ORBIT_GIZMO_AXIS_LENGTH, _ORBIT_GIZMO_COLOR_Y, 4, "y"),
+            ("-y", ORBIT_GIZMO_AXIS_NEG_LENGTH, _ORBIT_GIZMO_COLOR_NEG, 2, ""),
+            ("+z", ORBIT_GIZMO_AXIS_LENGTH, _ORBIT_GIZMO_COLOR_Z, 4, "z"),
+            ("-z", ORBIT_GIZMO_AXIS_NEG_LENGTH, _ORBIT_GIZMO_COLOR_NEG, 2, ""),
+        )
+        origin = (0.0, 0.0, 0.0)
+        for axis_id, length, color, thick, label in axis_specs:
+            tip = _axis_tip(axis_id, length)
+
+            def _click(axis: str = axis_id) -> Callable[[Any], None]:
+                def _on_ended(*_a: Any) -> None:
+                    try:
+                        self._on_axis_snap(axis)
+                    except Exception:
+                        pass
+
+                return _on_ended
+
+            sc.Line(
+                origin,
+                tip,
+                color=color,
+                thickness=int(thick),
+                intersection_thickness=ORBIT_GIZMO_AXIS_HIT_THICKNESS,
+                gesture=sc.ClickGesture(on_ended_fn=_click()),
+            )
+            if label:
+                with sc.Transform(
+                    transform=sc.Matrix44.get_translation_matrix(tip[0], tip[1], tip[2])
+                ):
+                    with sc.Transform(scale_to=sc.Space.SCREEN):
+                        sc.Label(
+                            label,
+                            size=ORBIT_GIZMO_LABEL_SIZE,
+                            color=(1.0, 1.0, 1.0, 1.0),
+                            alignment=ui.Alignment.CENTER,
+                        )
+
+    def update(
+        self,
+        yaw_deg: float,
+        pitch_deg: float,
+        *,
+        drag_dx: float = 0.0,
+        drag_dy: float = 0.0,
+        dragging: bool = False,
+    ) -> None:
+        if self._axes_transform is not None:
+            try:
+                self._axes_transform.transform = _orientation_gizmo_matrix(yaw_deg, pitch_deg)
+            except Exception:
+                pass
+        self._dragging = bool(dragging)
+        self._drag_dx = float(drag_dx)
+        self._drag_dy = float(drag_dy)
+        self._update_drag_arc()
+
+    def clear_drag_hint(self) -> None:
+        self._dragging = False
+        self._drag_dx = 0.0
+        self._drag_dy = 0.0
+        self._update_drag_arc()
+
+    def _update_drag_arc(self) -> None:
+        arc = self._drag_arc
+        if arc is None:
+            return
+        try:
+            if not self._dragging or (abs(self._drag_dx) < 0.5 and abs(self._drag_dy) < 0.5):
+                arc.visible = False
+                return
+            mag = math.hypot(self._drag_dx, self._drag_dy)
+            span = min(1.4, 0.08 + mag * 0.018)
+            center = math.atan2(self._drag_dy, self._drag_dx)
+            arc.visible = True
+            arc.begin = float(center - span * 0.5)
+            arc.end = float(center + span * 0.5)
+        except Exception:
+            pass
 
 
 def _resolve_camera_up(
@@ -564,6 +768,8 @@ def _build_gizmo_widget(
     on_orbit_drag: Callable[[float, float], None],
     on_axis_snap: Callable[[str], None],
     on_frame_target: Callable[[], None],
+    orient_widget_out: Optional[list] = None,
+    on_orbit_drag_end: Optional[Callable[[], None]] = None,
 ) -> Any:
     import omni.ui as ui  # type: ignore
 
@@ -576,6 +782,11 @@ def _build_gizmo_widget(
 
     def _release(*_) -> bool:
         drag["on"] = False
+        if on_orbit_drag_end is not None:
+            try:
+                on_orbit_drag_end()
+            except Exception:
+                pass
         return True
 
     def _move(x: float, y: float, *_) -> bool:
@@ -647,14 +858,15 @@ def _build_gizmo_widget(
 
                 path_field.model.add_end_edit_fn(_on_path_end)
                 ui.Spacer(width=ORBIT_GIZMO_BUTTON_ROW_MARGIN_H)
-            # 원형 드래그 — 타깃 주위 orbit (실제 조작은 컨트롤러._on_drag)
-            with ui.ZStack(height=ORBIT_GIZMO_ORBIT_RING_HEIGHT):
-                ring = ui.Label(
-                    "◎",
-                    alignment=ui.Alignment.CENTER,
-                    style={"color": 0x88FFFFFF, "font_size": ORBIT_GIZMO_ORBIT_RING_FONT_SIZE},
-                )
-                _wire(ring)
+            # 3D 축 뷰큐브 — orbit 드래그·축 클릭 (yaw/pitch 와 Transform 동기)
+            orient = _OrientationGizmoWidget(
+                on_axis_snap=on_axis_snap,
+                on_orbit_drag_end=on_orbit_drag_end,
+            )
+            orient.mount(_wire, height=ORBIT_GIZMO_ORBIT_RING_HEIGHT)
+            if orient_widget_out is not None:
+                orient_widget_out.clear()
+                orient_widget_out.append(orient)
             # 하단 일렬: X · Y · Z · Frame
             with ui.HStack(
                 height=ORBIT_GIZMO_BUTTON_ROW_HEIGHT,
@@ -727,9 +939,59 @@ class _OrbitGizmoController:
         self._anim_target = (0.0, 0.0, 0.0)
         self._anim_up = (0.0, 0.0, 1.0)
         self._anim_dest_state: Optional[_OrbitCameraState] = None
+        self._orient_widget: Optional[_OrientationGizmoWidget] = None
+        self._anim_from_yaw = 0.0
+        self._anim_from_pitch = 0.0
+        self._drag_dx = 0.0
+        self._drag_dy = 0.0
+        self._dragging = False
+
+    def _sync_orientation_widget(
+        self,
+        *,
+        drag_dx: Optional[float] = None,
+        drag_dy: Optional[float] = None,
+        dragging: Optional[bool] = None,
+    ) -> None:
+        w = self._orient_widget
+        if w is None:
+            return
+        if drag_dx is not None:
+            self._drag_dx = float(drag_dx)
+        if drag_dy is not None:
+            self._drag_dy = float(drag_dy)
+        if dragging is not None:
+            self._dragging = bool(dragging)
+        yaw = 0.0
+        pitch = 0.0
+        if self._anim_dest_state is not None:
+            t = (time.perf_counter() - self._anim_start) / max(1e-3, ORBIT_GIZMO_ANIM_DURATION_SEC)
+            u = _smoothstep01(min(1.0, float(t)))
+            yaw = self._anim_from_yaw + (self._anim_dest_state.yaw_deg - self._anim_from_yaw) * u
+            pitch = self._anim_from_pitch + (self._anim_dest_state.pitch_deg - self._anim_from_pitch) * u
+        elif self._orbit is not None:
+            yaw = float(self._orbit.yaw_deg)
+            pitch = float(self._orbit.pitch_deg)
+        w.update(
+            yaw,
+            pitch,
+            drag_dx=self._drag_dx,
+            drag_dy=self._drag_dy,
+            dragging=self._dragging,
+        )
+
+    def _on_orbit_drag_end(self) -> None:
+        self._dragging = False
+        self._drag_dx = 0.0
+        self._drag_dy = 0.0
+        w = self._orient_widget
+        if w is not None:
+            w.clear_drag_hint()
+        self._sync_orientation_widget(dragging=False)
 
     def destroy(self) -> None:
         self._stop_anim()
+        self._orient_widget = None
         self._root = None
         mount = self._mount or _resolve_viewport_window()
         if mount is not None and callable(getattr(mount, "get_frame", None)):
@@ -798,6 +1060,7 @@ class _OrbitGizmoController:
                     ui.Spacer(height=ORBIT_GIZMO_PANEL_MARGIN_TOP)
                     with ui.HStack():
                         ui.Spacer()
+                        orient_holder: list = []
                         if token == self._ui_rebuild_token:
                             _build_gizmo_widget(
                                 mode_label=self._mode_label(),
@@ -808,7 +1071,11 @@ class _OrbitGizmoController:
                                 on_orbit_drag=self._on_drag,
                                 on_axis_snap=self._on_axis,
                                 on_frame_target=lambda: self._frame(True),
+                                orient_widget_out=orient_holder,
+                                on_orbit_drag_end=self._on_orbit_drag_end,
                             )
+                        self._orient_widget = orient_holder[0] if orient_holder else None
+                        self._sync_orientation_widget()
                         ui.Spacer(width=ORBIT_GIZMO_PANEL_MARGIN_RIGHT)
 
     def _mount_on(self, mount: Any, token: int) -> None:
@@ -824,6 +1091,7 @@ class _OrbitGizmoController:
             _set_viewport_look_through(self._camera_prim_path, self._viewport_api)
             if self._orbit:
                 self._apply_orbit_state(self._orbit)
+                self._sync_orientation_widget()
         else:
             self._enter_perspective_mode(silent=True)
         try:
@@ -949,6 +1217,7 @@ class _OrbitGizmoController:
         self._init_orbit_from_camera_or_target()
         if self._orbit:
             self._apply_orbit_state(self._orbit)
+        self._sync_orientation_widget()
         if self._view_mode == _ViewMode.CAMERA:
             _set_viewport_look_through(self._camera_prim_path, self._viewport_api)
         print(f"{_PRINT_PREFIX} camera path → {path!r}", flush=True)
@@ -959,6 +1228,9 @@ class _OrbitGizmoController:
         if not self._orbit:
             return
         self._stop_anim()
+        self._dragging = True
+        self._drag_dx = float(dx)
+        self._drag_dy = float(dy)
         self._orbit = _OrbitCameraState(
             self._orbit.target,
             self._orbit.distance,
@@ -967,6 +1239,7 @@ class _OrbitGizmoController:
             self._orbit.up,
         )
         self._apply_orbit_state(self._orbit)
+        self._sync_orientation_widget(drag_dx=dx, drag_dy=dy, dragging=True)
 
     def _on_axis(self, axis: str) -> None:
         if not self._orbit:
@@ -998,6 +1271,7 @@ class _OrbitGizmoController:
             self._animate_to(self._orbit)
         else:
             self._apply_orbit_state(self._orbit)
+            self._sync_orientation_widget()
 
     def _refresh_orbit_target(self) -> None:
         stage = _get_stage(self._usd_context)
@@ -1022,6 +1296,7 @@ class _OrbitGizmoController:
         )
         if not pair:
             self._apply_orbit_state(state)
+            self._sync_orientation_widget()
             return
         eye1, tgt = state.eye_target()
         self._anim_from_eye = pair[0]
@@ -1029,6 +1304,13 @@ class _OrbitGizmoController:
         self._anim_target = tgt
         self._anim_up = state.up
         self._anim_dest_state = state
+        if self._orbit is not None:
+            self._anim_from_yaw = float(self._orbit.yaw_deg)
+            self._anim_from_pitch = float(self._orbit.pitch_deg)
+        else:
+            self._anim_from_yaw = float(state.yaw_deg)
+            self._anim_from_pitch = float(state.pitch_deg)
+        self._dragging = False
         self._anim_start = time.perf_counter()
         self._stop_anim()
         try:
@@ -1071,9 +1353,11 @@ class _OrbitGizmoController:
             up=self._anim_up,
             usd_context_name=self._usd_context,
         )
+        self._sync_orientation_widget()
         if u >= 1.0 - 1e-9 and self._anim_dest_state is not None:
             self._orbit = self._anim_dest_state
             self._anim_dest_state = None
+            self._sync_orientation_widget()
 
 
 # =============================================================================
