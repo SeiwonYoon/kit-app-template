@@ -36,12 +36,15 @@ def is_curve_animation_running() -> bool:
         return False
 
 
-def _get_or_create_offset_translate_op(prim):
-    x = UsdGeom.Xformable(prim)
-    if not x:
+def _get_or_create_offset_translate_op(prim) -> Optional[UsdGeom.XformOp]:
+    xformable = UsdGeom.Xformable(prim)
+    if xformable is None:
         return None
     try:
-        for op in x.GetOrderedXformOps():
+        ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+        for op in ordered_ops:
+            if op is None:
+                continue
             try:
                 if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and _OFFSET_SUFFIX in op.GetName():
                     return op
@@ -50,7 +53,7 @@ def _get_or_create_offset_translate_op(prim):
     except Exception:
         pass
     try:
-        return x.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
+        return xformable.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
     except Exception:
         return None
 
@@ -60,7 +63,7 @@ def _get_prim_local_translate(prim) -> Gf.Vec3f:
         return Gf.Vec3f(0, 0, 0)
     try:
         op = _get_or_create_offset_translate_op(prim)
-        if op:
+        if op is not None:
             val = op.Get()
             if val is not None:
                 return Gf.Vec3f(float(val[0]), float(val[1]), float(val[2]))
@@ -75,7 +78,7 @@ def _set_prim_translate(prim, position: Gf.Vec3f) -> None:
     try:
         ensure_scale_xform_ops_first(prim)
         op = _get_or_create_offset_translate_op(prim)
-        if op:
+        if op is not None:
             op.Set(Gf.Vec3f(float(position[0]), float(position[1]), float(position[2])))
             return
     except Exception:
@@ -83,10 +86,13 @@ def _set_prim_translate(prim, position: Gf.Vec3f) -> None:
     try:
         ensure_scale_xform_ops_first(prim)
         xform = UsdGeom.Xformable(prim)
-        if not xform:
+        if xform is None:
             return
         translate_op = None
-        for op in xform.GetOrderedXformOps():
+        ordered_ops: List[UsdGeom.XformOp] = list(xform.GetOrderedXformOps())
+        for op in ordered_ops:
+            if op is None:
+                continue
             if op.GetOpType() == UsdGeom.XformOp.TypeTranslate:
                 translate_op = op
                 break

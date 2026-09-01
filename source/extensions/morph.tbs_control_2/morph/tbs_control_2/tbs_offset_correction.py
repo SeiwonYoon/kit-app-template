@@ -46,38 +46,44 @@ def _stage():
         return None
 
 
-def _get_or_create_offset_translate_op(prim):
+def _get_or_create_offset_translate_op(prim) -> Optional[UsdGeom.XformOp]:
     try:
         from pxr import UsdGeom  # type: ignore
 
-        x = UsdGeom.Xformable(prim)
-        if not x:
+        xformable = UsdGeom.Xformable(prim)
+        if xformable is None:
             return None
-        for op in x.GetOrderedXformOps():
+        ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+        for op in ordered_ops:
+            if op is None:
+                continue
             try:
                 if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and _OFFSET_SUFFIX in op.GetName():
                     return op
             except Exception:
                 continue
-        return x.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
+        return xformable.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
     except Exception:
         return None
 
 
-def _get_or_create_offset_rotate_op(prim):
+def _get_or_create_offset_rotate_op(prim) -> Optional[UsdGeom.XformOp]:
     try:
         from pxr import UsdGeom  # type: ignore
 
-        x = UsdGeom.Xformable(prim)
-        if not x:
+        xformable = UsdGeom.Xformable(prim)
+        if xformable is None:
             return None
-        for op in x.GetOrderedXformOps():
+        ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+        for op in ordered_ops:
+            if op is None:
+                continue
             try:
                 if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ and _OFFSET_SUFFIX in op.GetName():
                     return op
             except Exception:
                 continue
-        return x.AddRotateXYZOp(opSuffix=_OFFSET_SUFFIX)
+        return xformable.AddRotateXYZOp(opSuffix=_OFFSET_SUFFIX)
     except Exception:
         return None
 

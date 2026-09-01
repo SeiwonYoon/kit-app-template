@@ -74,8 +74,8 @@ SIM_CONTROL_DEFAULTS = SimControlDefaults()
 
 
 # renewal 포트 갱신 디버그 로그 상시 ON/OFF (여기만 바꾸면 됨).
-# True 면 [RENEWAL_DBG] 줄이 콘솔에 항상 찍힌다. 환경변수 TBS_RENEWAL_DEBUG 로도 켤 수 있음.
-SIM_RENEWAL_DEBUG: bool = True
+# False(기본) — 보안점검·배포 기본 OFF. 필요 시 True 또는 환경변수 TBS_RENEWAL_DEBUG=1.
+SIM_RENEWAL_DEBUG: bool = False
 
 # ---------------------------------------------------------------------------
 # Viewport EBS 제어 HUD (화면1 좌상단 패널)

@@ -33,6 +33,10 @@ from __future__ import annotations
 # 추후 기본을 "숨기지 않음"으로 바꿀 때는 False 로만 바꾸면 됨.
 KIT_CHROME_HIDE_DEFAULT_ON_LAUNCH = False
 
+# extension 인스턴스 속성 슬롯 (비밀키 아님 — SAST 하드코딩 오탐 방지용 모듈 상수)
+_EXT_ATTR_CHROME_BACKUP = "_kit_chrome_visibility_backup"
+_EXT_ATTR_CHROME_HIDE_ACTIVE = "_kit_chrome_hide_active"
+
 from typing import Any, Dict, List, Set
 
 import carb.settings
@@ -237,8 +241,6 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool, *, schedule_layout_refresh: 
     hidden=True: 기본 메뉴바·상태줄·알려진 패널 창을 숨김. TBS/시퀀스/Viewport·TBS_SimSplit_* 유지.
     hidden=False: 직전 백업으로 복원(없으면 메뉴만 보이게 시도).
     """
-    key = "_kit_chrome_visibility_backup"
-    flag = "_kit_chrome_hide_active"
     try:
         if hidden:
             backup: Dict[str, Any] = {"__wins__": {}}
@@ -274,10 +276,10 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool, *, schedule_layout_refresh: 
                 except Exception:
                     pass
 
-            setattr(ext, key, backup)
-            setattr(ext, flag, True)
+            setattr(ext, _EXT_ATTR_CHROME_BACKUP, backup)
+            setattr(ext, _EXT_ATTR_CHROME_HIDE_ACTIVE, True)
         else:
-            backup = getattr(ext, key, None)
+            backup = getattr(ext, _EXT_ATTR_CHROME_BACKUP, None)
             if not isinstance(backup, dict):
                 backup = {}
 
@@ -314,13 +316,13 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool, *, schedule_layout_refresh: 
                         pass
 
             try:
-                delattr(ext, key)
+                delattr(ext, _EXT_ATTR_CHROME_BACKUP)
             except Exception:
-                setattr(ext, key, None)
+                setattr(ext, _EXT_ATTR_CHROME_BACKUP, None)
             try:
-                delattr(ext, flag)
+                delattr(ext, _EXT_ATTR_CHROME_HIDE_ACTIVE)
             except Exception:
-                setattr(ext, flag, False)
+                setattr(ext, _EXT_ATTR_CHROME_HIDE_ACTIVE, False)
     finally:
         try:
             from . import sim_multi_view as _smv
@@ -341,7 +343,7 @@ def apply_kit_chrome_hidden(ext: Any, hidden: bool, *, schedule_layout_refresh: 
 
 
 def is_kit_chrome_hidden(ext: Any) -> bool:
-    return bool(getattr(ext, "_kit_chrome_hide_active", False))
+    return bool(getattr(ext, _EXT_ATTR_CHROME_HIDE_ACTIVE, False))
 
 
 def is_streaming_deployment() -> bool:

@@ -69,18 +69,21 @@ def is_prim_translate_animation_running(prim_path: str, usd_context_name: Option
     return anim_key(pp, ctx) in _animations
 
 
-def _get_or_create_offset_translate_op(prim):
+def _get_or_create_offset_translate_op(prim) -> Optional[UsdGeom.XformOp]:
     try:
-        x = UsdGeom.Xformable(prim)
-        if not x:
+        xformable = UsdGeom.Xformable(prim)
+        if xformable is None:
             return None
-        for op in x.GetOrderedXformOps():
+        ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+        for op in ordered_ops:
+            if op is None:
+                continue
             try:
                 if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and _OFFSET_SUFFIX in op.GetName():
                     return op
             except Exception:
                 continue
-        return x.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
+        return xformable.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
     except Exception:
         return None
 
@@ -90,7 +93,7 @@ def _get_prim_local_translate(prim):
         return Gf.Vec3f(0, 0, 0)
     try:
         op = _get_or_create_offset_translate_op(prim)
-        if op:
+        if op is not None:
             v = op.Get()
             if v is not None:
                 return Gf.Vec3f(float(v[0]), float(v[1]), float(v[2]))
@@ -104,7 +107,7 @@ def _set_prim_translate(prim, position) -> None:
         return
     try:
         op = _get_or_create_offset_translate_op(prim)
-        if op:
+        if op is not None:
             op.Set(Gf.Vec3f(float(position[0]), float(position[1]), float(position[2])))
     except Exception:
         pass

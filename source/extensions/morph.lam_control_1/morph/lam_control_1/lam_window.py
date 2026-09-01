@@ -57,6 +57,19 @@ from .config import usd_query_url as _usd_query_url  # noqa: F401 — 실무 Nuc
 
 
 # ---------------------------------------------------------------------------
+# Bake 버튼 도움말 (보안점검: _refresh_instances 내부 인라인 tooltip 문자열 분리)
+# ---------------------------------------------------------------------------
+_BAKE_HELP_REBAKE = (
+    "이미 in-memory baked layer 가 attach 된 상태. 다시 누르면 새 layer 로 교체합니다."
+)
+_BAKE_HELP_BY_MODE: Dict[str, str] = {
+    "required": "OmniGraph 자산 — 멀티 인스턴스 독립 재생을 위해 in-memory 로 bake 합니다.",
+    "optional": "이 자산은 자체 timeSamples 를 가지지만, Skel/Mesh 평가 경로 검증을 위해 bake 가능.",
+    "unknown": "자산 종류 미분류 — 안전하게 사용자가 결정. [Bake] 누르면 OmniGraph 자산처럼 처리.",
+}
+
+
+# ---------------------------------------------------------------------------
 # Master USD 경로·자동 로드 — 필요 시 아래만 수정
 # (화면 분할·Widget/Dock·CSV 프리런 등 → lam_sim_control_defaults.py)
 # ---------------------------------------------------------------------------
@@ -1616,24 +1629,18 @@ class LamWindow:
                     else:
                         if is_baked:
                             btn_label = "Re-bake"
-                            btn_tooltip = (
-                                "이미 in-memory baked layer 가 attach 된 상태. 다시 누르면 새 layer 로 교체합니다."
-                            )
+                            bake_help = _BAKE_HELP_REBAKE
                         else:
                             btn_label = (
                                 "Bake" if bake_mode == "required"
                                 else "Bake (선택)" if bake_mode == "optional"
                                 else "Bake"  # unknown
                             )
-                            btn_tooltip = {
-                                "required": "OmniGraph 자산 — 멀티 인스턴스 독립 재생을 위해 in-memory 로 bake 합니다.",
-                                "optional": "이 자산은 자체 timeSamples 를 가지지만, Skel/Mesh 평가 경로 검증을 위해 bake 가능.",
-                                "unknown": "자산 종류 미분류 — 안전하게 사용자가 결정. [Bake] 누르면 OmniGraph 자산처럼 처리.",
-                            }.get(bake_mode, "")
+                            bake_help = _BAKE_HELP_BY_MODE.get(bake_mode, "")
                         ui.Button(
                             btn_label,
                             width=90,
-                            tooltip=btn_tooltip,
+                            tooltip=bake_help,
                             clicked_fn=(
                                 lambda p=inst.prim_path: self._on_bake_instance(p)
                             ),

@@ -104,6 +104,11 @@ VTM_END_EFFECTOR_SWAP_HANDS: bool = False
 FOUP1_CASSETTE_ID_MIN: int = 1
 FOUP1_CASSETTE_ID_MAX: int = 25
 _PRINT_PREFIX: str = "[LAM/SIMPLAY]"
+# 웨이퍼 번호 체크박스 도움말 (보안점검: tip/tooltip 인라인 문자열 분리)
+_WAFER_LABEL_HELP_BASE = (
+    "3D 뷰포트 웨이퍼 슬롯 번호(01~25). pick/place hide·show 와 함께 이동."
+)
+_WAFER_LABEL_HELP_DISABLED_SUFFIX = " (코드 IS_LABEL_SHOW=False 이면 번호는 표시되지 않음.)"
 # CSV Play 콘솔: True 이면 한 줄 요약만 (진행시간·동작·JSON·실행여부)
 _csv_play_compact_log: bool = False
 # compact 로그 중첩 카운트 (화면1·2 병렬 빌드 시 한쪽 finally 가 다른 쪽을 끄지 않게)
@@ -8243,11 +8248,9 @@ class LamSimulationCsvPlayWindow:
             from .lam_wafer_prim_paths import IS_LABEL_SHOW
         except Exception:
             IS_LABEL_SHOW = True  # type: ignore
-        tip = (
-            "3D 뷰포트 웨이퍼 슬롯 번호(01~25). pick/place hide·show 와 함께 이동."
-        )
+        wafer_label_help = _WAFER_LABEL_HELP_BASE
         if not IS_LABEL_SHOW:
-            tip += " (코드 IS_LABEL_SHOW=False 이면 번호는 표시되지 않음.)"
+            wafer_label_help += _WAFER_LABEL_HELP_DISABLED_SUFFIX
         lam = self._resolve_lam_window(lam_window)
 
         def _on_changed(*_a: Any) -> None:
@@ -8261,7 +8264,7 @@ class LamSimulationCsvPlayWindow:
                 "model": wl_m,
                 "width": 20,
                 "height": int(row_height),
-                "tooltip": tip,
+                "tooltip": wafer_label_help,
             }
             if not self._uses_global_overlay_models():
                 cb_kw["changed_fn"] = _on_changed

@@ -35,9 +35,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
+_EXT_ATTR_SIM_RENEWAL_DEBUG = "_sim_renewal_debug"
+
+
 def _renewal_debug_on(ext: Any) -> bool:
     # 1) ext 별 명시적 OFF/ON 우선
-    flag = getattr(ext, "_sim_renewal_debug", None)
+    flag = getattr(ext, _EXT_ATTR_SIM_RENEWAL_DEBUG, None)
     if flag is not None:
         return bool(flag)
     # 2) 환경변수
@@ -46,7 +49,7 @@ def _renewal_debug_on(ext: Any) -> bool:
         return True
     if env in ("0", "false", "False"):
         return False
-    # 3) 기본값 — sim_control_defaults.SIM_RENEWAL_DEBUG (상시 ON)
+    # 3) 기본값 — sim_control_defaults.SIM_RENEWAL_DEBUG (기본 OFF)
     try:
         from .sim_control_defaults import SIM_RENEWAL_DEBUG
 

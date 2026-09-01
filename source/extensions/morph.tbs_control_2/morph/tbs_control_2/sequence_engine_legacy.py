@@ -777,34 +777,40 @@ def _apply_world_space_offset_correction(prim_paths: List[str], start_frame: int
             pass
 
 
-def _get_or_create_offset_translate_op(prim: Usd.Prim):
-    x = UsdGeom.Xformable(prim)
-    if not x:
+def _get_or_create_offset_translate_op(prim: Usd.Prim) -> Optional[UsdGeom.XformOp]:
+    xformable = UsdGeom.Xformable(prim)
+    if xformable is None:
         return None
     try:
-        for op in x.GetOrderedXformOps():
+        ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+        for op in ordered_ops:
+            if op is None:
+                continue
             if op.GetOpType() == UsdGeom.XformOp.TypeTranslate and _OFFSET_SUFFIX in op.GetName():
                 return op
     except Exception:
         pass
     try:
-        return x.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
+        return xformable.AddTranslateOp(opSuffix=_OFFSET_SUFFIX)
     except Exception:
         return None
 
 
-def _get_or_create_offset_rotate_op(prim: Usd.Prim):
-    x = UsdGeom.Xformable(prim)
-    if not x:
+def _get_or_create_offset_rotate_op(prim: Usd.Prim) -> Optional[UsdGeom.XformOp]:
+    xformable = UsdGeom.Xformable(prim)
+    if xformable is None:
         return None
     try:
-        for op in x.GetOrderedXformOps():
+        ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+        for op in ordered_ops:
+            if op is None:
+                continue
             if op.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ and _OFFSET_SUFFIX in op.GetName():
                 return op
     except Exception:
         pass
     try:
-        return x.AddRotateXYZOp(opSuffix=_OFFSET_SUFFIX)
+        return xformable.AddRotateXYZOp(opSuffix=_OFFSET_SUFFIX)
     except Exception:
         return None
 
@@ -960,7 +966,7 @@ def _get_translate(prim: Usd.Prim) -> Gf.Vec3f:
     # 시퀀서의 MOVE/ROTATE는 타임라인에 덮어써지지 않는 오프셋 op만 사용
     try:
         op = _get_or_create_offset_translate_op(prim)
-        if op:
+        if op is not None:
             v = op.Get()
             return Gf.Vec3f(v[0], v[1], v[2]) if v is not None else Gf.Vec3f(0, 0, 0)
     except Exception:
@@ -974,21 +980,24 @@ def _set_translate(prim: Usd.Prim, v: Gf.Vec3f) -> None:
     try:
         ensure_scale_xform_ops_first(prim)
         op = _get_or_create_offset_translate_op(prim)
-        if op:
+        if op is not None:
             op.Set(Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])))
             return
     except Exception:
         pass
-    x = UsdGeom.Xformable(prim)
-    if not x:
+    xformable = UsdGeom.Xformable(prim)
+    if xformable is None:
         return
     op = None
-    for o in x.GetOrderedXformOps():
+    ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+    for o in ordered_ops:
+        if o is None:
+            continue
         if o.GetOpType() == UsdGeom.XformOp.TypeTranslate:
             op = o
             break
     if op is None:
-        op = x.AddTranslateOp()
+        op = xformable.AddTranslateOp()
     op.Set(Gf.Vec3f(v[0], v[1], v[2]))
 
 
@@ -997,7 +1006,7 @@ def _get_rotate_xyz(prim: Usd.Prim) -> Gf.Vec3f:
         return Gf.Vec3f(0, 0, 0)
     try:
         op = _get_or_create_offset_rotate_op(prim)
-        if op:
+        if op is not None:
             v = op.Get()
             return Gf.Vec3f(v[0], v[1], v[2]) if v is not None else Gf.Vec3f(0, 0, 0)
     except Exception:
@@ -1011,21 +1020,24 @@ def _set_rotate_xyz(prim: Usd.Prim, v: Gf.Vec3f) -> None:
     try:
         ensure_scale_xform_ops_first(prim)
         op = _get_or_create_offset_rotate_op(prim)
-        if op:
+        if op is not None:
             op.Set(Gf.Vec3f(float(v[0]), float(v[1]), float(v[2])))
             return
     except Exception:
         pass
-    x = UsdGeom.Xformable(prim)
-    if not x:
+    xformable = UsdGeom.Xformable(prim)
+    if xformable is None:
         return
     op = None
-    for o in x.GetOrderedXformOps():
+    ordered_ops: List[UsdGeom.XformOp] = list(xformable.GetOrderedXformOps())
+    for o in ordered_ops:
+        if o is None:
+            continue
         if o.GetOpType() == UsdGeom.XformOp.TypeRotateXYZ:
             op = o
             break
     if op is None:
-        op = x.AddRotateXYZOp()
+        op = xformable.AddRotateXYZOp()
     op.Set(Gf.Vec3f(v[0], v[1], v[2]))
 
 
