@@ -419,8 +419,8 @@ class Extension(omni.ext.IExt):
         except Exception as exc:
             print(f"{_PRINT_PREFIX} viewport control HUD attach failed: {exc}", flush=True)
         # --- Viewport orbit gizmo (수동 적용) ---
-        # from .viewport_orbit_gizmo import attach_orbit_gizmo
-        # attach_orbit_gizmo(self, "/World/YourPrim")
+        from .viewport_orbit_gizmo import attach_orbit_gizmo
+        attach_orbit_gizmo(self, "/ebsonoff")
         from .ebs_control_panel_ui import get_sim_ep_count_idx
         from .tbs_ep_port_visibility import (
             ep_count_from_combo_idx,
