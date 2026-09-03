@@ -100,6 +100,52 @@ _PRINT_PREFIX = "[TBS]"
 # on_startup 안의 attach_orbit_gizmo(...) 호출도 함께 주석 해제
 
 
+def _resolve_orbit_gizmo_viewport_api(ext: Any) -> Any:
+    """
+    extension 쪽에서 (분할 화면별) viewport_api를 지정했을 때 orbit gizmo에 주입한다.
+
+    - ext._orbit_gizmo_viewport_api 가 있으면 그대로 사용
+    - ext._orbit_gizmo_viewport_window_name / _orbit_gizmo_viewport_win_name 가 있으면
+      sim_multi_view split 조회 로직을 사용해 viewport_api를 찾는다.
+    - 지정값이 없으면 None (=> attach_orbit_gizmo 내부 기본 viewport 사용)
+    """
+    try:
+        direct = getattr(ext, "_orbit_gizmo_viewport_api", None)
+        if direct is not None:
+            return direct
+    except Exception:
+        pass
+
+    wn = ""
+    try:
+        wn = str(
+            getattr(ext, "_orbit_gizmo_viewport_window_name", None)
+            or getattr(ext, "_orbit_gizmo_viewport_win_name", None)
+            or ""
+        ).strip()
+    except Exception:
+        wn = ""
+
+    if not wn:
+        return None
+
+    # split viewport 지원(Widget/Workspace 모두 커버)
+    try:
+        from .sim_multi_view import _split_viewport_api  # type: ignore
+
+        return _split_viewport_api(str(wn))
+    except Exception:
+        pass
+
+    # fallback: omni 기본 유틸
+    try:
+        from omni.kit.viewport.utility import get_viewport_from_window_name  # type: ignore
+
+        return get_viewport_from_window_name(str(wn))
+    except Exception:
+        return None
+
+
 def _start_with_dual_screen_enabled() -> bool:
     """앱 시작 시 2분할로 시작할지 (``sim_control_defaults.START_WITH_DUAL_SCREEN``)."""
     try:
@@ -418,9 +464,7 @@ class Extension(omni.ext.IExt):
             attach_tbs_viewport_control_hud(self)
         except Exception as exc:
             print(f"{_PRINT_PREFIX} viewport control HUD attach failed: {exc}", flush=True)
-        # --- Viewport orbit gizmo (수동 적용) ---
-        from .viewport_orbit_gizmo import attach_orbit_gizmo
-        attach_orbit_gizmo(self, "/ebsonoff")
+        # Orbit gizmo 는 USD 로드 완료 후 _on_master_opened_for_ep 에서 attach
         from .ebs_control_panel_ui import get_sim_ep_count_idx
         from .tbs_ep_port_visibility import (
             ep_count_from_combo_idx,
@@ -465,6 +509,21 @@ class Extension(omni.ext.IExt):
                             hud.sync_toggle_hotspot(delay_frames=12)
             except Exception:
                 pass
+
+            # --- Orbit gizmo: USD 로드 완료 후 viewport 안정화 뒤 attach ---
+            try:
+                from .viewport_orbit_gizmo import attach_orbit_gizmo, PanelInsets
+
+                attach_orbit_gizmo(
+                    "/ebsonoff",
+                    "/Camera",
+                    _resolve_orbit_gizmo_viewport_api(self),
+                    panel_anchor="right_top",
+                    panel_insets=PanelInsets(top=100, right=10),
+                    delay_frames=30,  # USD 로드 직후 viewport 안정화 대기
+                )
+            except Exception as exc:
+                print(f"{_PRINT_PREFIX} orbit gizmo attach failed: {exc}", flush=True)
 
         if _start_with_dual_screen_enabled():
             try:
@@ -650,7 +709,7 @@ class Extension(omni.ext.IExt):
         try:
             from .viewport_orbit_gizmo import destroy_orbit_gizmo
 
-            destroy_orbit_gizmo(self)
+            destroy_orbit_gizmo()
         except Exception:
             pass
         if self._control_window is not None:

@@ -43,7 +43,7 @@ from pxr import Gf, Sdf, Usd, UsdGeom  # type: ignore
 # 수정 가이드: 패널 크기/위치 → PANEL_*, PANEL_ANCHOR, PANEL_MARGIN
 #              뷰큐브 축 모양 → CUBE_*, AXIS_*, BULB_*, RING_*
 #              orbit/줌/애니 → ANIM_SEC, DRAG_SENS, ZOOM_STEP, FRAME_*
-#              기본 Camera 경로 → ORBIT_GIZMO_CAMERA_PRIM_PATH
+#              기본 Camera 경로 → extension.py 의 _orbit_gizmo_camera_path 변수
 
 _PRINT_PREFIX = "[TBS/OrbitGizmo]"
 PRINT_PREFIX = _PRINT_PREFIX
@@ -54,19 +54,17 @@ COI_ATTR = _COI_ATTR
 _KIT_PERSP_PATH = "/OmniverseKit_Persp"
 KIT_PERSP_PATH = _KIT_PERSP_PATH
 
-# 조작 대상 Camera prim · orbit 타깃 (UI 노출 없음)
-ORBIT_GIZMO_CAMERA_PRIM_PATH: str = "/Camera"
+# 조작 대상 orbit 타깃 (Camera 경로는 호출측에서 전달)
+_DEFAULT_CAMERA_PATH: str = "/Camera"   # 내부 폴백 전용 — 외부에서 직접 참조 금지
 ORBIT_GIZMO_DEFAULT_TARGET_PRIM_PATH: str = ""
 ORBIT_GIZMO_START_IN_CAMERA_MODE: bool = True
 
-# 패널 레이아웃
-PANEL_WIDTH: int = 180
-PANEL_HEIGHT: int = 198
+# 패널 레이아웃 — 상/하 버튼 행 숨김 후 축 gizmo 영역만
+PANEL_WIDTH: int = 120        # gizmo 전용 (버튼 행 없음)
+PANEL_HEIGHT: int = 120       # 정사각형
 PANEL_MARGIN: int = 10
-PANEL_BG: int = 0xDD1A1D22
+PANEL_BG: int = 0xBB1A1D22
 PANEL_RADIUS: int = 8
-# 하위 호환 — mount_panel 미사용 시 우측 여백
-PANEL_MARGIN_RIGHT: int = PANEL_MARGIN
 
 # 패널 앵커: left_top, left_center, left_bottom,
 #           center_top, center_center, center_bottom,
@@ -74,11 +72,11 @@ PANEL_MARGIN_RIGHT: int = PANEL_MARGIN
 PANEL_ANCHOR: str = "right_center"
 
 # 뷰큐브 (SceneView)
-CUBE_HEIGHT: int = 108
-AXIS_LEN: float = 0.52
-AXIS_NEG_LEN: float = 0.34
-BULB_RADIUS: float = 0.17
-RING_RADIUS: float = 0.12
+CUBE_HEIGHT: int = 120        # 패널과 같은 높이
+AXIS_LEN: float = 0.8         # 양/음 축 길이 통일
+AXIS_NEG_LEN: float = 0.8
+BULB_RADIUS: float = 0.18
+RING_RADIUS: float = 0.18     # 반대축도 같은 크기
 DRAG_ARC_R: float = 0.92
 LABEL_SIZE: int = 16
 
@@ -105,10 +103,13 @@ CUBE_SCREEN_SCALE: float = 0.46
 AXIS_CLICK_DEBUG: bool = True
 
 # 축 색 (RGBA 0..1)
-COL_X = (0.90, 0.25, 0.25, 1.0)
-COL_Y = (0.25, 0.82, 0.38, 1.0)
-COL_Z = (0.30, 0.50, 0.95, 1.0)
-COL_NEG = (0.70, 0.72, 0.76, 0.85)
+COL_X  = (0.90, 0.25, 0.25, 1.0)
+COL_Y  = (0.25, 0.82, 0.38, 1.0)
+COL_Z  = (0.30, 0.50, 0.95, 1.0)
+# 반대축: 동일 색상이지만 ~70% 투명
+COL_BX = (0.90, 0.25, 0.25, 0.30)   # -x
+COL_BY = (0.25, 0.82, 0.38, 0.30)   # -y
+COL_BZ = (0.30, 0.50, 0.95, 0.30)   # -z
 COL_CENTER = (0.95, 0.96, 0.98, 1.0)
 
 AXIS_SNAP = {
@@ -141,6 +142,31 @@ class PanelAnchor(str, Enum):
     RIGHT_TOP = "right_top"
     RIGHT_CENTER = "right_center"
     RIGHT_BOTTOM = "right_bottom"
+
+
+@dataclass
+class PanelInsets:
+    """패널 여백 (픽셀). PanelAnchor 에 추가되는 오프셋."""
+
+    top: int = 0
+    left: int = 0
+    right: int = 0
+    bottom: int = 0
+
+    @classmethod
+    def uniform(cls, v: int) -> "PanelInsets":
+        return cls(top=v, left=v, right=v, bottom=v)
+
+    @classmethod
+    def from_value(cls, v: Any) -> "PanelInsets":
+        """int / tuple / PanelInsets 를 모두 수용."""
+        if isinstance(v, PanelInsets):
+            return v
+        if isinstance(v, int):
+            return cls.uniform(v)
+        if isinstance(v, (tuple, list)) and len(v) >= 4:
+            return cls(int(v[0]), int(v[1]), int(v[2]), int(v[3]))
+        return cls.uniform(int(v) if v else 0)
 
 
 @dataclass
@@ -297,7 +323,7 @@ def try_pick_axis_at_screen(
     parts: List[str] = []
     best_axis: Optional[str] = None
     best_dist = float(AXIS_PICK_RADIUS) + 1.0
-    for axis in ("+x", "+y", "+z"):
+    for axis in ("+x", "-x", "+y", "-y", "+z", "-z"):
         sx, sy = project_axis_tip_to_screen(cube_m, axis, width, height)
         d = math.hypot(float(local_x) - sx, float(local_y) - sy)
         parts.append(f"{axis}=({sx:.0f},{sy:.0f}) d={d:.0f}")
@@ -494,7 +520,7 @@ def prim_radius(stage: Usd.Stage, path: str, fb: float = 1.0) -> float:
 
 
 def create_camera_prim(path: str, ctx: str = "") -> bool:
-    """``ORBIT_GIZMO_CAMERA_PRIM_PATH`` 가 없으면 stage 에 Camera prim 생성."""
+    """지정 경로에 Camera prim 이 없으면 stage 에 생성."""
     stage = get_stage(ctx)
     raw = str(path or "").strip()
     if not stage or not raw:
@@ -625,6 +651,20 @@ def get_viewport_window() -> Any:
     return None
 
 
+def get_viewport_window_from_api(api: Any) -> Any:
+    """viewport_api 기준으로 mount_panel에 쓸 수 있는 frame container를 찾는다."""
+    if not api:
+        return None
+    for a in ("viewport_window", "window", "_viewport_window", "_window"):
+        try:
+            w = getattr(api, a, None)
+            if w and callable(getattr(w, "get_frame", None)):
+                return w
+        except Exception:
+            pass
+    return None
+
+
 def get_context_name(api: Any) -> str:
     if not api:
         return ""
@@ -717,43 +757,68 @@ def draw_center_dot(sc: Any) -> None:
     )
 
 
-def draw_axis_arms(sc: Any, on_axis_click: Callable[[str], None]) -> None:
-    """X/Y/Z 축 — +축 원(Arc) 자체에 ClickGesture."""
+def draw_axis_arms(
+    sc: Any,
+    on_axis_click: Callable[[str], None],
+    cube_matrix: Optional[Gf.Matrix4d] = None,
+) -> None:
+    """X/Y/Z ±축 — 깊이 순서로 정렬 후 원(Arc) 자체에 ClickGesture.
+
+    카메라에서 멀리 있는 축(음수축) 먼저 그리고, 가까운 축(양수축) 나중에 그려
+    앞쪽 원이 위에 렌더링된다.  cube_matrix 가 주어지면 Z 깊이를 계산해 정렬.
+    """
     import omni.ui as ui  # type: ignore
 
     origin = (0.0, 0.0, 0.0)
-    specs: List[Tuple[str, float, Tuple, str, bool]] = [
-        ("-x", AXIS_NEG_LEN, COL_NEG, "", False),
-        ("-y", AXIS_NEG_LEN, COL_NEG, "", False),
-        ("-z", AXIS_NEG_LEN, COL_NEG, "", False),
-        ("+x", AXIS_LEN, COL_X, "x", True),
-        ("+y", AXIS_LEN, COL_Y, "y", True),
-        ("+z", AXIS_LEN, COL_Z, "z", True),
-    ]
-    for axis, length, col, label, solid in specs:
-        tip = axis_vec(axis, length)
-        sc.Line(origin, tip, color=col, thickness=4 if solid else 3, intersection_thickness=0)
-        r = BULB_RADIUS if solid else RING_RADIUS
-        arc_kw = dict(
-            begin=0.0,
-            end=math.pi * 2,
-            thickness=10 if solid else 3,
-            color=col,
-            wireframe=not solid,
-            sector=solid,
-            intersection_thickness=AXIS_HIT if solid else 0,
+
+    # axis → (length, color, label_text, line_thickness, arc_thickness, sector, hit)
+    axis_defs: dict = {
+        "+x": (AXIS_LEN,     COL_X,  "x",  4, 10, True,  AXIS_HIT),
+        "-x": (AXIS_NEG_LEN, COL_BX, "",   2,  3, False, AXIS_HIT),
+        "+y": (AXIS_LEN,     COL_Y,  "y",  4, 10, True,  AXIS_HIT),
+        "-y": (AXIS_NEG_LEN, COL_BY, "",   2,  3, False, AXIS_HIT),
+        "+z": (AXIS_LEN,     COL_Z,  "z",  4, 10, True,  AXIS_HIT),
+        "-z": (AXIS_NEG_LEN, COL_BZ, "",   2,  3, False, AXIS_HIT),
+    }
+
+    # 뷰 공간 Z 깊이 계산 (카메라 방향 = +Z in view)
+    def _depth(axis: str) -> float:
+        if cube_matrix is None:
+            return 0.0
+        v = Gf.Vec4d(*axis_vec(axis, 1.0), 0.0)
+        tv = cube_matrix.Transform(Gf.Vec3d(*axis_vec(axis, 1.0)))
+        # 카메라는 -Z 방향을 바라봄 → tv.z 가 클수록 카메라에 가까움
+        return float(tv[2])
+
+    # 깊이 내림차순 정렬 → 뒤쪽부터 그려야 앞쪽이 위에 덮임
+    ordered = sorted(axis_defs.keys(), key=_depth)
+
+    def _make_arc(sc: Any, axis_name: str, r: float, at: int, col_draw: tuple, hit: int) -> None:
+        """클로저 격리: axis_name 이 루프 변수에 묶이지 않도록 별도 함수로 분리."""
+        def _tap(_sender=None):
+            _axis_dbg(f"ClickGesture {axis_name}")
+            on_axis_click(axis_name)
+        sc.Arc(
+            r,
+            begin=0.0, end=math.pi * 2,
+            thickness=at, color=col_draw,
+            wireframe=False, sector=True,
+            intersection_thickness=hit,
+            gesture=sc.ClickGesture(on_ended_fn=_tap),
         )
+
+    for axis in ordered:
+        length, col, label, lt, at, sector, hit = axis_defs[axis]
+        tip = axis_vec(axis, length)
+        sc.Line(origin, tip, color=col, thickness=lt, intersection_thickness=0)
+        r = BULB_RADIUS if sector else RING_RADIUS
+        col_draw = col if sector else (col[0], col[1], col[2], 0.30)
+
         with sc.Transform(
             transform=sc.Matrix44.get_translation_matrix(*tip),
             look_at=sc.Transform.LookAt.CAMERA,
         ):
-            if solid:
-                def _tap(_sender=None, a=axis):
-                    on_axis_click(a)
-
-                sc.Arc(r, **arc_kw, gesture=sc.ClickGesture(on_ended_fn=_tap))
-            else:
-                sc.Arc(r, **arc_kw)
+            _make_arc(sc, axis, r, at, col_draw, hit)
             if label:
                 with sc.Transform(scale_to=sc.Space.SCREEN):
                     sc.Label(label, size=LABEL_SIZE, color=(1, 1, 1, 1), alignment=ui.Alignment.CENTER)
@@ -796,7 +861,11 @@ def build_view_cube_scene(
             root_tf = sc.Transform()
             with root_tf:
                 draw_center_dot(sc)
-                draw_axis_arms(sc, on_axis)
+                draw_axis_arms(
+                    sc,
+                    on_axis,
+                    cube_matrix=ctrl.view_cube_matrix if ctrl else None,
+                )
         wire_cube_scene_input(
             sv,
             ctrl,
@@ -852,18 +921,12 @@ class ViewCubeWidget:
         self._update_drag_arc(0.0, 0.0, False)
 
     def _update_drag_arc(self, ddx: float, ddy: float, dragging: bool) -> None:
+        """드래그 방향 표시 arc — 항상 숨김 (UI 단순화)."""
         arc = self._drag_arc
         if not arc:
             return
         try:
-            if not dragging or (abs(ddx) < 0.5 and abs(ddy) < 0.5):
-                arc.visible = False
-                return
-            mag = math.hypot(ddx, ddy)
-            span = min(1.4, 0.08 + mag * 0.018)
-            c = math.atan2(ddy, ddx)
-            arc.visible = True
-            arc.begin, arc.end = c - span * 0.5, c + span * 0.5
+            arc.visible = False
         except Exception:
             pass
 
@@ -1142,37 +1205,22 @@ def build_gizmo_panel(
         )
 
     root = ui.ZStack(width=PANEL_WIDTH, height=PANEL_HEIGHT)
-    mode_lbl = None
+    mode_lbl = None  # 버튼 행 숨김 — 라벨 미사용
     with root:
         bg = ui.Rectangle(style={"background_color": PANEL_BG, "border_radius": PANEL_RADIUS})
         wire(bg)
-        with ui.VStack(spacing=3, height=PANEL_HEIGHT):
-            mode_lbl, mode_row = build_mode_button_row(
-                ui,
-                on_cam=on_mode_cam,
-                on_persp=on_mode_persp,
-                ctrl=ctrl,
-            )
-            wire(mode_row)
-            _, _root_tf, _drag_arc, cube = build_view_cube_scene(
-                sc,
-                on_axis=lambda a: _wire_axis_click(ctrl, on_axis, a),
-                on_press=on_press or (lambda: None),
-                on_drag=on_drag,
-                on_drag_end=on_drag_end,
-                on_wheel=on_zoom,
-                ctrl=ctrl,
-            )
-            cube_out.clear()
-            cube_out.append(cube)
-            zoom_row = build_zoom_button_row(
-                ui,
-                on_zoom_out=lambda: on_zoom(ZOOM_STEP),
-                on_zoom_in=lambda: on_zoom(1.0 / ZOOM_STEP),
-                on_frame=on_frame,
-                ctrl=ctrl,
-            )
-            wire(zoom_row)
+        # 상단 Cam/Persp 행 · 하단 -/+/Frame 행 숨김: SceneView 만 표시
+        _, _root_tf, _drag_arc, cube = build_view_cube_scene(
+            sc,
+            on_axis=lambda a: _wire_axis_click(ctrl, on_axis, a),
+            on_press=on_press or (lambda: None),
+            on_drag=on_drag,
+            on_drag_end=on_drag_end,
+            on_wheel=on_zoom,
+            ctrl=ctrl,
+        )
+        cube_out.clear()
+        cube_out.append(cube)
     wire(root)
     if ctrl:
         wire_viewport_input_guard(root, ctrl)
@@ -1210,38 +1258,86 @@ def mount_panel(
     build_panel_fn: Callable[[], Any],
     *,
     anchor: PanelAnchor | str = PANEL_ANCHOR,
-    margin: int = PANEL_MARGIN,
+    margin: Any = PANEL_MARGIN,
+    insets: Optional[PanelInsets] = None,
 ) -> None:
-    """Viewport frame 내 지정 앵커에 고정 크기 패널을 배치한다."""
+    """Viewport frame 내 지정 앵커에 고정 크기 패널을 배치한다.
+
+    ``mount`` 는 ``get_frame(slot)`` 을 지원하는 객체이면 어떤 것이든 사용 가능.
+    dock 방식과 widget(viewport_api) 방식 모두 지원한다.
+    ``insets`` 가 주어지면 top/left/right/bottom 각각 독립 여백 적용.
+    ``margin`` 은 PanelInsets 생성 편의 인자 (int 또는 PanelInsets).
+    """
     import omni.ui as ui  # type: ignore
 
     anchor = _parse_panel_anchor(anchor)
-    margin = max(0, int(margin))
-    h_side = anchor.value.split("_", 1)[0]
-    v_side = anchor.value.rsplit("_", 1)[-1]
+
+    # 여백 통합 — insets 우선, margin 은 fallback
+    if insets is None:
+        insets = PanelInsets.from_value(margin)
+    else:
+        insets = PanelInsets.from_value(insets)
+
+    h_side = anchor.value.split("_", 1)[0]   # left / center / right
+    v_side = anchor.value.rsplit("_", 1)[-1]  # top  / center / bottom
+
+    # PanelInsets 는 앵커 기준 추가 오프셋:
+    #   top    → 앵커 위치에서 아래로 N px 더 이동  (top/center 앵커)
+    #   bottom → 앵커 위치에서 위로  N px 더 이동  (bottom/center 앵커)
+    #   left   → 앵커 위치에서 오른쪽으로 N px 더 이동  (left/center 앵커)
+    #   right  → 앵커 위치에서 왼쪽으로  N px 더 이동  (right/center 앵커)
 
     clear_mount_slot(mount)
     with mount.get_frame(FRAME_SLOT):
         with ui.ZStack(width=ui.Percent(100), height=ui.Percent(100)):
             with ui.VStack(width=ui.Percent(100), height=ui.Percent(100)):
-                if v_side == "center":
-                    ui.Spacer()
-                elif v_side == "top":
-                    ui.Spacer(height=margin)
-                with ui.HStack(width=ui.Percent(100)):
-                    if h_side in ("center", "right"):
-                        ui.Spacer()
-                    if h_side == "left":
-                        ui.Spacer(width=margin)
-                    build_panel_fn()
-                    if h_side in ("center", "left"):
-                        ui.Spacer()
-                    if h_side == "right":
-                        ui.Spacer(width=margin)
-                if v_side == "center":
-                    ui.Spacer()
+
+                # ── 위쪽 spacer ────────────────────────────────────────────
+                if v_side == "top":
+                    # 상단에서 아래로: top 오프셋만큼 고정 여백
+                    ui.Spacer(height=insets.top)
+                elif v_side == "center":
+                    # 중앙에서: top 오프셋이면 아래로 편중, bottom 오프셋이면 위로 편중
+                    # flexible + 고정 오프셋으로 구현
+                    ui.Spacer()   # 위쪽 flexible (중앙 기준점)
+                    if insets.top > 0:
+                        ui.Spacer(height=insets.top)
                 elif v_side == "bottom":
-                    ui.Spacer(height=margin)
+                    ui.Spacer()   # 위쪽 전부 flexible
+
+                with ui.HStack(width=ui.Percent(100)):
+
+                    # ── 왼쪽 spacer ────────────────────────────────────────
+                    if h_side == "left":
+                        ui.Spacer(width=insets.left)   # 좌측 기준 + 오른쪽 오프셋
+                    elif h_side == "center":
+                        ui.Spacer()
+                        if insets.left > 0:
+                            ui.Spacer(width=insets.left)
+                    elif h_side == "right":
+                        ui.Spacer()                    # 왼쪽 전부 flexible
+
+                    build_panel_fn()
+
+                    # ── 오른쪽 spacer ──────────────────────────────────────
+                    if h_side == "right":
+                        ui.Spacer(width=insets.right)  # 우측 기준 + 왼쪽 오프셋
+                    elif h_side == "center":
+                        if insets.right > 0:
+                            ui.Spacer(width=insets.right)
+                        ui.Spacer()
+                    elif h_side == "left":
+                        ui.Spacer()                    # 오른쪽 전부 flexible
+
+                # ── 아래쪽 spacer ──────────────────────────────────────────
+                if v_side == "bottom":
+                    ui.Spacer(height=insets.bottom)    # 하단 기준 + 위쪽 오프셋
+                elif v_side == "center":
+                    if insets.bottom > 0:
+                        ui.Spacer(height=insets.bottom)
+                    ui.Spacer()   # 아래쪽 flexible (중앙 기준점)
+                elif v_side == "top":
+                    ui.Spacer()   # 아래쪽 전부 flexible
 
 
 def mount_panel_right_center(mount: Any, build_panel_fn: Callable[[], Any]) -> None:
@@ -1602,22 +1698,27 @@ class OrbitGizmoController:
 
     def __init__(
         self,
-        ext: Any,
         target: str,
         camera: str,
         *,
         panel_anchor: PanelAnchor | str = PANEL_ANCHOR,
-        panel_margin: int = PANEL_MARGIN,
+        panel_margin: Any = PANEL_MARGIN,
+        panel_insets: Optional[PanelInsets] = None,
+        viewport_api: Any = None,
+        ext: Any = None,           # 선택 — lifecycle 플래그 전파용
     ) -> None:
         self.ext = ext
         self.target_path = target.strip()
         self.camera_path = camera.strip()
         self.panel_anchor = _parse_panel_anchor(panel_anchor)
-        self.panel_margin = max(0, int(panel_margin))
+        self.panel_insets: PanelInsets = (
+            PanelInsets.from_value(panel_insets) if panel_insets is not None
+            else PanelInsets.from_value(panel_margin)
+        )
         self.mode = ViewMode.CAMERA if ORBIT_GIZMO_START_IN_CAMERA_MODE else ViewMode.PERSPECTIVE
         self.orbit: Optional[OrbitState] = None
         self.saved_persp: Optional[ViewSnap] = None
-        self.api: Any = None
+        self.api: Any = viewport_api
         self.ctx = ""
         self.mount: Any = None
         self.mode_label: Any = None
@@ -1657,10 +1758,11 @@ class OrbitGizmoController:
         mount = self.mount or get_viewport_window()
         if mount:
             clear_mount_slot(mount)
-        try:
-            self.ext._orbit_gizmo_mounted = False
-        except Exception:
-            pass
+        if self.ext is not None:
+            try:
+                self.ext._orbit_gizmo_mounted = False
+            except Exception:
+                pass
 
     def sync_mount(self, delay_frames: int = 12) -> None:
         self.sched += 1
@@ -1669,6 +1771,15 @@ class OrbitGizmoController:
         def try_mount(n: int) -> None:
             if tok != self.sched:
                 return
+            if self.api is not None:
+                # widget 방식: viewport_api 자체가 get_frame 을 가지면 직접 사용
+                if callable(getattr(self.api, "get_frame", None)):
+                    self._on_mount(self.api, tok)
+                    return
+                mount = get_viewport_window_from_api(self.api)
+                if mount:
+                    self._on_mount(mount, tok)
+                    return
             w = get_viewport_window()
             if w:
                 self._on_mount(w, tok)
@@ -1687,7 +1798,8 @@ class OrbitGizmoController:
         if tok != self.sched:
             return
         self.mount = mount
-        self.api = get_viewport_api()
+        if self.api is None:
+            self.api = get_viewport_api()
         self.ctx = get_context_name(self.api)
         self.saved_persp = None
         pair = read_viewport_pose(self.api)
@@ -1700,12 +1812,18 @@ class OrbitGizmoController:
             )
         self._build_panel()
         self._start_poll()
-        apply_view_mode(self, self.mode, silent=True, force=True)
+        # attach 시점에 항상 Camera 모드로 강제 전환
+        self.mode = ViewMode.CAMERA
+        apply_view_mode(self, ViewMode.CAMERA, silent=False, force=True)
+        # viewport 초기화 타이밍 문제로 look_through 가 묻히는 경우를 대비해
+        # 몇 프레임 후 재적용
+        self._schedule_camera_mode_retry(retries=5, interval=6)
         schedule_target_retry(self, 40)
-        try:
-            self.ext._orbit_gizmo_mounted = True
-        except Exception:
-            pass
+        if self.ext is not None:
+            try:
+                self.ext._orbit_gizmo_mounted = True
+            except Exception:
+                pass
         print(f"{_PRINT_PREFIX} mounted target={self.target_path!r} camera={self.camera_path!r}", flush=True)
 
     def _build_panel(self) -> None:
@@ -1730,7 +1848,7 @@ class OrbitGizmoController:
             self.mount,
             _build,
             anchor=self.panel_anchor,
-            margin=self.panel_margin,
+            insets=self.panel_insets,
         )
         self.cube = self.cube_holder[0] if self.cube_holder else None
         refresh_view_cube(self)
@@ -1758,6 +1876,37 @@ class OrbitGizmoController:
                 pass
         self.poll_sub = None
 
+    def _schedule_camera_mode_retry(self, retries: int = 5, interval: int = 6) -> None:
+        """viewport 초기화 경쟁 조건 대비: Camera 모드를 몇 프레임 후 재적용."""
+        if retries <= 0:
+            return
+        count = [retries]
+
+        def _retry(*_) -> None:
+            count[0] -= 1
+            if self.mode != ViewMode.CAMERA:
+                return  # 사용자가 이미 다른 모드로 바꿨으면 중단
+            try:
+                look_through_camera(self.api, self.camera_path)
+            except Exception:
+                pass
+            if count[0] > 0:
+                try:
+                    import omni.kit.app  # type: ignore
+                    for _ in range(interval):
+                        omni.kit.app.get_app().post_update(_retry)
+                        break
+                except Exception:
+                    pass
+
+        try:
+            import omni.kit.app  # type: ignore
+            for _ in range(interval):
+                omni.kit.app.get_app().post_update(_retry)
+                break
+        except Exception:
+            pass
+
     def _set_mode(self, mode: ViewMode, *, silent: bool = False, force: bool = False) -> None:
         if mode == self.mode and not force:
             return
@@ -1769,46 +1918,110 @@ class OrbitGizmoController:
 # =============================================================================
 # 수정 가이드: 확장 attach/destroy → attach_orbit_gizmo, destroy_orbit_gizmo
 
+# 모듈 레벨 컨트롤러 레지스트리 (ext 없이 호출할 때 사용)
+_GLOBAL_CONTROLLERS: dict = {}
+
+
+def _get_ctrl_registry(ext: Any) -> dict:
+    """ext 가 있으면 ext._orbit_gizmo_controllers, 없으면 전역 dict."""
+    if ext is not None:
+        ctrls = getattr(ext, "_orbit_gizmo_controllers", None)
+        if not isinstance(ctrls, dict):
+            ctrls = {}
+            try:
+                ext._orbit_gizmo_controllers = ctrls
+            except Exception:
+                pass
+        return ctrls
+    return _GLOBAL_CONTROLLERS
+
+
 def attach_orbit_gizmo(
-    ext: Any,
     target_prim_path: str,
+    camera_prim_path: str = _DEFAULT_CAMERA_PATH,
+    viewport_api: Any = None,
+    keep_existing: bool = False,
     *,
+    ext: Any = None,
     delay_frames: int = 12,
     panel_anchor: PanelAnchor | str = PANEL_ANCHOR,
-    panel_margin: int = PANEL_MARGIN,
+    panel_margin: Any = PANEL_MARGIN,
+    panel_insets: Optional[PanelInsets] = None,
 ) -> None:
-    """메인 Viewport 에 Blender 스타일 뷰큐브 패널을 붙인다."""
+    """지정 viewport에 Blender 스타일 뷰큐브 패널을 붙인다.
+
+    ext 없이 독립 호출 가능.  ext 를 넘기면 lifecycle 플래그(_orbit_gizmo_mounted 등)
+    를 ext 에 전파한다.
+
+    - `viewport_api` 를 넘기지 않으면 기본 viewport 를 사용한다.
+    - `keep_existing=False` 이면 다른 viewport 의 컨트롤러를 삭제하고 새로 1개만 만든다.
+    - 동일 `viewport_api`(또는 default)면 `keep_existing` 과 무관하게 항상 재생성한다.
+    """
     tgt = str(ORBIT_GIZMO_DEFAULT_TARGET_PRIM_PATH or target_prim_path or "").strip()
-    cam = str(ORBIT_GIZMO_CAMERA_PRIM_PATH or "").strip()
-    if not tgt or not cam:
-        print(f"{_PRINT_PREFIX} attach skipped — empty target or camera path", flush=True)
+    cam = str(camera_prim_path or _DEFAULT_CAMERA_PATH).strip()
+    if not tgt:
+        print(f"{_PRINT_PREFIX} attach skipped — empty target path", flush=True)
         return
-    destroy_orbit_gizmo(ext)
+    if not cam:
+        cam = _DEFAULT_CAMERA_PATH
+
+    vp_key = "default" if viewport_api is None else id(viewport_api)
+    ctrls = _get_ctrl_registry(ext)
+
+    # 동일 viewport면 항상 재생성
+    old = ctrls.get(vp_key)
+    if old is not None:
+        try:
+            old.destroy()
+        except Exception:
+            pass
+        ctrls.pop(vp_key, None)
+
+    if not keep_existing:
+        for k, v in list(ctrls.items()):
+            if k == vp_key:
+                continue
+            try:
+                v.destroy()
+            except Exception:
+                pass
+            ctrls.pop(k, None)
+
     ctrl = OrbitGizmoController(
-        ext, tgt, cam,
+        tgt,
+        cam,
         panel_anchor=panel_anchor,
         panel_margin=panel_margin,
+        panel_insets=panel_insets,
+        viewport_api=viewport_api,
+        ext=ext,
     )
-    try:
-        ext._orbit_gizmo_controller = ctrl
-    except Exception:
-        pass
+    ctrls[vp_key] = ctrl
     ctrl.sync_mount(delay_frames=delay_frames)
 
 
-def destroy_orbit_gizmo(ext: Any) -> None:
-    """확장에서 orbit gizmo 를 제거한다."""
-    ctrl = getattr(ext, "_orbit_gizmo_controller", None)
-    if ctrl is not None:
+def destroy_orbit_gizmo(ext: Any = None) -> None:
+    """orbit gizmo 를 모든 viewport 에서 제거한다.
+
+    ext 없이 호출하면 전역 레지스트리를 정리한다.
+    """
+    ctrls = _get_ctrl_registry(ext)
+    for _k, v in list(ctrls.items()):
         try:
-            ctrl.destroy()
+            v.destroy()
         except Exception:
             pass
     try:
-        ext._orbit_gizmo_controller = None
-        ext._orbit_gizmo_mounted = False
+        ctrls.clear()
     except Exception:
         pass
+    if ext is not None:
+        # 레거시 필드도 같이 정리
+        try:
+            ext._orbit_gizmo_controller = None
+            ext._orbit_gizmo_mounted = False
+        except Exception:
+            pass
 
 
 __all__ = [
@@ -1817,6 +2030,7 @@ __all__ = [
     "mount_panel",
     "mount_panel_right_center",
     "PanelAnchor",
+    "PanelInsets",
     "PANEL_ANCHOR",
     "PANEL_MARGIN",
 ]
