@@ -262,11 +262,23 @@ class SequenceRunner(_LegacySequenceRunner):
                             self._last_usd_context_name,
                             diag_reason="lam_run_end",
                         )
+                        # SSOT 재생: 종료 drain 이 길면 다음 JSON 이 수 초 지연된다.
+                        _drain_max = 4.0
+                        try:
+                            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                            _dext = getattr(self, "_diag_ext", None)
+                            if bool(SIM_PRERUN_PLAN_SSOT) and bool(
+                                getattr(_dext, "_sim_playback_started", False)
+                            ):
+                                _drain_max = 0.12
+                        except Exception:
+                            _drain_max = 4.0
                         drain_channel_motion_complete(
                             self._last_usd_context_name,
                             self._tbs_registry,
-                            max_sec=4.0,
-                            stable_ticks=2,
+                            max_sec=float(_drain_max),
+                            stable_ticks=1 if float(_drain_max) < 0.5 else 2,
                         )
                 except Exception:
                     pass

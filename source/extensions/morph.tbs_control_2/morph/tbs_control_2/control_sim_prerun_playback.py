@@ -1095,14 +1095,72 @@ class SimTimelinePlayer:
             self._skipped_by_screen[scr] = set()
             self._playing = True
 
-    def advance_sim_clock(self) -> None:
-        """wall-clock 기준으로 ``sim_now`` 만 전진 (emit 없음)."""
+    def advance_sim_clock(self, ext: Any = None) -> None:
+        """wall-clock 기준으로 ``sim_now`` 만 전진 (emit 없음).
+
+        SSOT: JSON 실행 중에는 해당 애니의 ``anim_play_end`` 를 넘기지 않는다.
+        (시계·진행현황이 다음 공정으로 앞서가고 화면은 이전 JSON 인 싱크 붕괴 방지)
+        """
         now_wall = time.perf_counter()
         sp = 1.0
         try:
             sp = max(0.05, float(self._speed()))
         except Exception:
             sp = 1.0
+        caps: Dict[int, float] = {}
+        if ext is not None:
+            try:
+                from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+                from .control_sim_playback_gate import is_json_sequence_busy
+
+                if bool(SIM_PRERUN_PLAN_SSOT):
+                    active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+                    if isinstance(active_by, dict):
+                        for _k, act in list(active_by.items()):
+                            if not isinstance(act, dict) or not act:
+                                continue
+                            if not bool(act.get("_json_sequence_started")):
+                                continue
+                            try:
+                                scr_a = int(
+                                    str(act.get("tbs_sim_screen") or "").strip() or "0"
+                                )
+                            except Exception:
+                                scr_a = 0
+                            if scr_a < 1:
+                                try:
+                                    from .sim_parallel_rails import screen_from_state_key
+
+                                    scr_a = int(screen_from_state_key(_k))
+                                except Exception:
+                                    continue
+                            if not is_json_sequence_busy(ext, scr_a):
+                                continue
+                            end_s = 0.0
+                            try:
+                                end_s = float(
+                                    str(act.get("anim_play_end_sim_time") or "").strip()
+                                    or "0"
+                                )
+                            except Exception:
+                                end_s = 0.0
+                            if end_s <= 1e-9:
+                                try:
+                                    t0a = float(act.get("_json_run_start_sim") or 0.0)
+                                    asec = float(act.get("anim_sec") or 0.0)
+                                    if asec > 1e-9:
+                                        end_s = t0a + asec
+                                except Exception:
+                                    end_s = 0.0
+                            if end_s > 1e-9:
+                                prev = caps.get(scr_a)
+                                caps[scr_a] = (
+                                    float(end_s)
+                                    if prev is None
+                                    else min(float(prev), float(end_s))
+                                )
+            except Exception:
+                caps = {}
         with self._lock:
             if not self._playing:
                 return
@@ -1111,6 +1169,9 @@ class SimTimelinePlayer:
                 dt = max(0.0, now_wall - last_w)
                 t_sim = float(self._sim_now_by_screen.get(scr, 0.0)) + float(dt) * float(sp)
                 t_sim = min(float(res.final_sim_time), float(t_sim))
+                cap = caps.get(int(scr))
+                if cap is not None and t_sim > float(cap) + 1e-9:
+                    t_sim = float(cap)
                 self._sim_now_by_screen[scr] = float(t_sim)
                 self._last_wall_by_screen[scr] = float(now_wall)
 
@@ -1143,6 +1204,14 @@ class SimTimelinePlayer:
         ):
             return False
         return True
+
+    @staticmethod
+    def _payload_is_port_occ_refresh(payload: Any) -> bool:
+        """포트·막대 SSOT 키프레임 — JSON wall freeze 와 독립 emit."""
+        if not isinstance(payload, dict):
+            return False
+        seq = str(payload.get("seq") or payload.get("event") or "").strip().upper()
+        return seq == "PORT_OCC_REFRESH"
 
     @staticmethod
     def _is_foup_timeline_payload(payload: Any) -> bool:
@@ -1216,7 +1285,8 @@ class SimTimelinePlayer:
         gated 이벤트(JSON dispatch)가 러너 busy 로 막히면 커서를 고정하되, 그 뒤의
         non-gated 이벤트 중 **FOUP_PROCESS_*** 및 FOUP progress 는 다른 EP 이면
         JSON wall 과 무관하게 자기 sim 시각에 내보낸다(이미 EP 에 있는 FOUP 공정).
-        PORT_OCC_REFRESH 등 그 외 non-gated 는 기존처럼 freeze_t 이하만.
+        **PORT_OCC_REFRESH** 도 freeze 중 ``sim_now`` 도달 시 emit (renewal 키프레임).
+        직렬에서 뒤쪽 gated 는 스킵하고 위 non-gated 스캔을 끊지 않는다.
 
         병렬 모드: oht/move 레일별로 gated emit 1개까지 동일 tick 허용 (A∥B).
         **금지:** gate 로 막힌 gated 보다 **뒤 인덱스** 의 다른 레일 gated
@@ -1277,10 +1347,6 @@ class SimTimelinePlayer:
                         if rail is None and needs_gate:
                             rail = "oht"
                     if needs_gate:
-                        if not (parallel and rail):
-                            # 직렬: 미emit gated 뒤 인덱스 gated 선행 금지
-                            if freeze_at is not None and j > int(freeze_at):
-                                break
                         if parallel and rail:
                             rail_blocked = False
                             if rail in gated_emitted_rails:
@@ -1299,7 +1365,7 @@ class SimTimelinePlayer:
                                 cursor_frozen = True
                                 j = _skip_same_t_progress(items, j + 1, float(it.t))
                                 continue
-                            # 같은 레일의 앞선 freeze 이면 중단(후순위 같은 레일 A/B 직렬)
+                            # 같은 레일의 앞선 freeze 이면 이 레일만 스킵 (PORT_OCC 스캔 유지)
                             if freeze_at is not None and j > int(freeze_at):
                                 try:
                                     fr_it = items[int(freeze_at)]
@@ -1317,10 +1383,16 @@ class SimTimelinePlayer:
                                 except Exception:
                                     fr_rail = None
                                 if fr_rail and str(fr_rail) == str(rail):
-                                    break
+                                    j = _skip_same_t_progress(items, j + 1, float(it.t))
+                                    continue
                         else:
-                            if cursor_frozen or event_emitted_this_tick:
+                            # 직렬: 이번 tick 이미 gated emit 했으면 추가 gated 금지
+                            if event_emitted_this_tick:
                                 break
+                            # freeze 중 뒤쪽 gated 는 스킵하고 PORT_OCC_REFRESH 스캔 계속
+                            if freeze_at is not None and j > int(freeze_at):
+                                j = _skip_same_t_progress(items, j + 1, float(it.t))
+                                continue
                             if not self._gate_open(int(scr), it.payload):
                                 cursor_frozen = True
                                 if freeze_at is None:
@@ -1357,10 +1429,13 @@ class SimTimelinePlayer:
                         continue
                     # non-gated 이벤트 (FOUP_*/READY*/PORT_OCC_REFRESH)
                     if freeze_at is not None and freeze_t is not None:
+                        allow_port_kf = self._payload_is_port_occ_refresh(it.payload)
                         allow_foup = self._foup_allowed_during_gate_freeze(
                             it, freeze_t=freeze_t, frozen_payload=freeze_payload
                         )
-                        if not allow_foup:
+                        # PORT_OCC_REFRESH: JSON wall 중에도 sim_now 도달 시 emit
+                        # (renewal 키프레임 = 포트·막대 SSOT; freeze_t 이후여도 허용)
+                        if not allow_port_kf and not allow_foup:
                             try:
                                 if float(it.t) > float(freeze_t) + 1e-9:
                                     break

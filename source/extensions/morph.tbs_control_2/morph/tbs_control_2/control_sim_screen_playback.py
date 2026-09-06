@@ -58,8 +58,10 @@ class ScreenPlaybackSession:
     def advance_clock_only(self, ext: Any = None) -> None:
         if not self.is_playing():
             return
-        self.player.advance_sim_clock()
-        del ext
+        try:
+            self.player.advance_sim_clock(ext)
+        except TypeError:
+            self.player.advance_sim_clock()
 
     def emit_due_and_sync(
         self,
@@ -243,12 +245,17 @@ class SimPlaybackRuntime:
         try:
             from .control_window import (
                 _drain_playback_json_job_queues,
+                _drain_sim_anim_pending_when_idle,
                 _poll_playback_sim_aligned_json_starts,
                 _try_release_all_playback_json_walls,
             )
 
             try:
                 _poll_playback_sim_aligned_json_starts(ext)
+            except Exception:
+                pass
+            try:
+                _drain_sim_anim_pending_when_idle(ext)
             except Exception:
                 pass
             if multi:
@@ -258,6 +265,10 @@ class SimPlaybackRuntime:
                     pass
                 try:
                     _poll_playback_sim_aligned_json_starts(ext)
+                except Exception:
+                    pass
+                try:
+                    _drain_sim_anim_pending_when_idle(ext)
                 except Exception:
                     pass
         except Exception:

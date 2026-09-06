@@ -222,13 +222,21 @@ def _process_to_items(p: PlanProcess) -> List[SimTimelineItem]:
         play_fields["anim_play_start_sim_time"] = f"{float(p.t_anim_start):.2f}"
     if p.t_anim_end is not None:
         play_fields["anim_play_end_sim_time"] = f"{float(p.t_anim_end):.2f}"
+
+    # JSON dispatch = 프리런 anim_play_start (시간표 SSOT).
+    # 공정 progress 는 t0 — 예전처럼 t0 에 JSON 을 넣으면 런타임 큐가
+    # 플랜 직렬 큐와 이중으로 겹쳐 화면 애니가 수 초 늦는다.
+    t_json = float(t0)
+    if p.needs_anim and p.t_anim_start is not None:
+        t_json = float(p.t_anim_start)
+
     items.append(
         SimTimelineItem(
-            t=t0,
+            t=t_json,
             kind="event",
             payload={
                 "seq": seq,
-                "sim_time": f"{t0:.2f}",
+                "sim_time": f"{t_json:.2f}",
                 "event_start_sim_time": f"{t0:.2f}",
                 "from_port_id": p.from_port,
                 "to_port_id": p.to_port,
@@ -427,19 +435,8 @@ def enrich_ssot_playback_progress(
         return
 
     t = float(tnow)
-    # 표시용: 실제 재생 파일명 (스케줄 재계산에는 쓰지 않음)
+    # 단일 SSOT: sim_now 플랜 창만 (live 러너 파일명으로 공정/배너 결정 금지)
     playing_bn = ""
-    try:
-        from .progress_step_state import get_anim_runtime, sync_anim_runtime_from_ext, _basename_json
-
-        sync_anim_runtime_from_ext(ext, int(screen))
-        ar = get_anim_runtime(ext, int(screen))
-        if str(getattr(ar, "phase", "") or "") == "playing":
-            playing_bn = _basename_json(str(getattr(ar, "current_file", "") or ""))
-    except Exception:
-        playing_bn = ""
-
-    # 플랜 시각 창만으로 재생 중 공정 결정 (live 파일명으로 스케줄 덮지 않음)
     playing_proc = None
     waiting: List[str] = []
     try:
@@ -460,6 +457,8 @@ def enrich_ssot_playback_progress(
             label = linked or f"{getattr(a, 'kind', '')}_{getattr(a, 'port', '')}"
             if playing_proc is None and a0 - 1e-9 <= t < a1 - 1e-12:
                 playing_proc = p
+                if linked:
+                    playing_bn = linked.replace("\\", "/").split("/")[-1]
             if t + 1e-9 < a0:
                 waiting.append(f"{label} @{a0:.1f}s")
         waiting = waiting[:8]
@@ -554,6 +553,7 @@ def enrich_ssot_playback_progress(
             pass
 
     conc_lines: List[str] = []
+    conc_flags: List[str] = []
     try:
         for p in list(getattr(plan, "processes", None) or []):
             t0 = float(getattr(p, "t_start", 0.0) or 0.0)
@@ -571,15 +571,28 @@ def enrich_ssot_playback_progress(
             fr = str(getattr(p, "from_port", "") or "")
             to = str(getattr(p, "to_port", "") or getattr(p, "port", "") or "")
             route = f"{fr}->{to}" if fr or to else str(getattr(p, "port", "") or "")
+            anim_playing = False
+            a0 = getattr(p, "t_anim_start", None)
+            a1 = getattr(p, "t_anim_end", None)
+            if a0 is not None and a1 is not None:
+                if float(a0) - 1e-9 <= t < float(a1) - 1e-12:
+                    anim_playing = True
             conc_lines.append(f"· {kind} {lot} {route} {pct}% ({el:.1f}/{span:.1f}s)")
+            conc_flags.append("1" if anim_playing else "0")
     except Exception:
         conc_lines = []
+        conc_flags = []
 
     if conc_lines:
         payload["concurrent_summary"] = "\n".join(conc_lines)
         payload["concurrent_count"] = str(len(conc_lines))
+        # 줄 단위 애니재생 여부 (UI 녹색 강조) — "1,0,0"
+        if len(conc_flags) == len(conc_lines):
+            payload["concurrent_anim_playing_flags"] = ",".join(conc_flags)
     if playing_bn or (playing_proc is not None and getattr(playing_proc, "linked_json", "")):
-        payload["anim_playing_json"] = playing_bn or str(getattr(playing_proc, "linked_json", "") or "")
+        payload["anim_playing_json"] = playing_bn or str(
+            getattr(playing_proc, "linked_json", "") or ""
+        )
     if waiting:
         payload["anim_queue_waiting"] = " | ".join(waiting)
         qdel = str(payload.get("anim_queue_delay_sec") or "").strip()

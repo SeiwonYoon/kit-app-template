@@ -204,12 +204,24 @@ def apply_engine_progress_payload(ext: Any, screen: int, payload: Dict[str, Any]
 
     FOUP_PROCESS·timeline_only·playback_time_tick 은 False (메인 단계 미변경).
     병렬 모드: sim_rail=move 는 보조(주=OHT ARRIVED/REMOVED) ProgressStepState 에 기록.
+
+    SSOT 재생: 본문·배너는 ``enrich_ssot_playback_progress(plan@sim_now)`` 만 —
+    타임라인 progress / 러너 bind 로 단계를 덮지 않는다.
     """
     p = payload if isinstance(payload, dict) else {}
     if str(p.get("timeline_only", "")).strip().lower() in ("1", "true", "on"):
         return False
     if str(p.get("playback_time_tick", "")).strip().lower() in ("1", "true", "on"):
         return False
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT) and bool(
+            getattr(ext, "_sim_playback_started", False)
+        ):
+            return False
+    except Exception:
+        pass
     ev_u = str(p.get("event_seq") or p.get("sequence_name") or "").strip().upper()
     if ev_u == "FOUP_PROCESS":
         return False
@@ -267,7 +279,17 @@ def bind_linked_anim_on_dispatch(
     """JSON 매핑·큐 적재·시작 시점 — progress emit 전에도 연계 파일명을 고정한다.
 
     병렬: MOVE 레일은 secondary ProgressStepState 에 bind (주 슬롯 오염 방지).
+    SSOT 재생: 러너 파일명으로 ProgressStepState 를 덮지 않음 (플랜@sim_now 만).
     """
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT) and bool(
+            getattr(ext, "_sim_playback_started", False)
+        ):
+            return
+    except Exception:
+        pass
     bn = _basename_json(file_name)
     if not bn:
         return

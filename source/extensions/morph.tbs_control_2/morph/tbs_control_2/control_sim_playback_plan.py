@@ -245,11 +245,9 @@ def _active_json_process_cap_sim(ext: Any, screen: int) -> Optional[float]:
 
 
 def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
-    """plan·막대 lookup — wall 매핑 + gated cap(proc_gate·active job) + renewal cap.
+    """plan·막대 lookup = ``sim_now`` (단일 시계).
 
-    ``SIM_PRERUN_PLAN_SSOT``: 기본은 sim_now 그대로.
-    다만 renewal wall 이 이미 적용됐으면 sync_t floor 유지
-    (sim_now 가 sync 이전이어도 포트·막대가 갱신 전으로 되감기지 않게).
+    SSOT: renewal floor / wall remap 없이 프리런 키프레임을 ``t`` 그대로 조회.
     """
     t = float(t_sim)
     if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
@@ -258,11 +256,6 @@ def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
         from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
 
         if bool(SIM_PRERUN_PLAN_SSOT):
-            if _renewal_wall_applied_for_screen(ext, int(screen)):
-                sync_t = _renewal_stored_sync_t(ext, int(screen))
-                if sync_t is not None and float(sync_t) > 1e-9:
-                    if t + 1e-6 < float(sync_t):
-                        return float(sync_t)
             return float(t)
     except Exception:
         pass
@@ -2193,8 +2186,8 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
 
     scr = int(screen)
 
-    # SSOT: renewal wall → plan 키프레임을 sync_t 에 explicit 적용 + floor
-    # (sim_now 만 쓰면 JSON renewal 순간보다 시계가 늦어 포트·막대가 안 바뀜)
+    # SSOT: renewal wall 은 failsafe 만 — 포트는 ``sim_now`` 키프레임(PORT_OCC)이 1차.
+    # sim_now 가 sync 이전이면 early explicit 로 앞당기지 않는다.
     try:
         from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
 
@@ -2212,36 +2205,25 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
             sync_t = _resolve_renewal_sync_t_for_wall(ext, scr, src_r)
             if sync_t is None or float(sync_t) <= 1e-9:
                 sync_t = _resolve_renewal_sync_t_for_playback(ext, scr, src_r)
-            snap = ensure_plan_snapshot(ext, scr)
-            if snap is None:
-                snap = rebuild_plan_snapshot_for_screen(ext, scr)
-            pre_occ = _last_panel_occ(ext, scr)
-            lookup_t = (
-                float(sync_t)
-                if sync_t is not None and float(sync_t) > 1e-9
-                else float(_sim_now_for_screen(ext, scr, None))
-            )
-            if snap is not None and (not any(str(v or "").strip() for v in pre_occ.values())):
-                try:
-                    pre_occ = _ensure_panel_occ_keys(
-                        dict(snap.ports_at(max(0.0, float(lookup_t) - 1e-3)))
-                    )
-                except Exception:
-                    pass
+            sim_now = float(_sim_now_for_screen(ext, scr, None))
+            # 시계가 sync 에 도달했을 때만 패널 갱신 (조기 wipe 금지)
+            if sync_t is not None and float(sync_t) > 1e-9 and sim_now + 1e-6 < float(sync_t):
+                return True
+            lookup_t = float(sim_now)
             mark_playback_renewal_wall_applied(
                 ext,
                 scr,
                 dict(src),
-                sync_t=float(lookup_t) if float(lookup_t) > 1e-9 else None,
+                sync_t=float(sync_t) if sync_t is not None and float(sync_t) > 1e-9 else None,
                 delta=None,
-                pre_occ=pre_occ,
+                pre_occ=_last_panel_occ(ext, scr),
             )
             refresh_playback_display_at_sim(
                 ext,
                 scr,
                 float(lookup_t),
                 force=True,
-                explicit=True,
+                explicit=False,
             )
             return True
     except Exception:

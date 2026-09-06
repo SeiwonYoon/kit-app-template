@@ -181,7 +181,11 @@ def _runner_for_screen(ext: Any, screen: int) -> Any:
 def is_screen_runner_busy(
     ext: Any, screen: int, rail: Optional[str] = None
 ) -> bool:
-    """SequenceRunner 가 LAM/drain/legacy tick 중이면 True."""
+    """SequenceRunner 가 LAM/drain/legacy tick 중이면 True.
+
+    주의: ``SequenceRunner.is_running()`` 은 FOUP 등 **채널 motion** 까지
+    True 로 본다. JSON 슬롯 점유 판정에는 ``is_json_sequence_busy`` 를 쓴다.
+    """
     try:
         from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
 
@@ -213,6 +217,54 @@ def is_screen_runner_busy(
         return bool(getattr(rr, "is_running", lambda: False)())
     except Exception:
         return False
+
+
+def is_json_sequence_busy(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> bool:
+    """JSON 시퀀스(LAM thread / legacy ``_running``)만 Busy.
+
+    FOUP translate 등 채널 motion 은 여기 넣지 않는다.
+    (넣으면 SSOT 에서 다음 JSON 이 전부 QUEUE 되고 on_done 배수구가 없어 영구 정지)
+    """
+    scr = max(1, int(screen))
+    runners: list = []
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
+
+        if parallel_moves_enabled():
+            by = getattr(ext, "_sim_runners_by_screen_rail", None)
+            if isinstance(by, dict):
+                if rail:
+                    rr = by.get(rail_queue_key(scr, str(rail)))
+                    if rr is not None:
+                        runners.append(rr)
+                else:
+                    for rk in (
+                        rail_queue_key(scr, "oht"),
+                        rail_queue_key(scr, "move"),
+                    ):
+                        rr = by.get(rk)
+                        if rr is not None:
+                            runners.append(rr)
+    except Exception:
+        pass
+    if not runners:
+        rr = _runner_for_screen(ext, scr)
+        if rr is not None:
+            runners.append(rr)
+    for rr in runners:
+        try:
+            if bool(getattr(rr, "_lam_running", False)):
+                return True
+            th = getattr(rr, "_lam_thread", None)
+            if th is not None and bool(getattr(th, "is_alive", lambda: False)()):
+                return True
+            if bool(getattr(rr, "_running", False)):
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def clear_playback_anim_slots(
@@ -297,17 +349,14 @@ def clear_playback_anim_slots(
 def is_json_anim_slot_held(
     ext: Any, screen: int, rail: Optional[str] = None
 ) -> bool:
-    """러너 실행 중이거나, 유효한 lead 대기(active + run_fn) 중이면 True.
+    """JSON 슬롯 점유 — 시퀀스 실행 중·예약(run_fn/lead)이면 True.
 
-    SSOT 에서 emit 이 열려 있어도 lead 대기 중 runner 는 idle 이라 다음 job 이
-    active 를 덮어쓰면 첫 애니 이후 큐가 붕괴한다. dispatch 는 이 값을 보고 QUEUE.
-
-    잔류: ``_json_pending_sim_start`` 만 있고 ``_json_run_fn`` 이 없으면 stale —
-    슬롯을 비우고 False (애니 영구 미기동 방지).
+    FOUP 등 채널 motion 은 점유로 보지 않는다.
+    ``_json_slot_reserved`` 단독(run_fn 없음)은 stale 로 보고 점유 아님.
     """
     scr = max(1, int(screen))
     r = str(rail or "").strip().lower() or None
-    if is_screen_runner_busy(ext, scr, rail=r):
+    if is_json_sequence_busy(ext, scr, rail=r):
         return True
     try:
         active_by = getattr(ext, "_sim_anim_active_by_screen", None)
@@ -346,22 +395,19 @@ def is_json_anim_slot_held(
                     continue
             except Exception:
                 pass
-            pending = bool(act.get("_json_pending_sim_start")) and not bool(
-                act.get("_json_sequence_started")
-            )
-            if pending:
-                run_fn = act.get("_json_run_fn")
-                if not callable(run_fn):
-                    # stale lead — 슬롯 해제
-                    try:
-                        active_by[k] = {}
-                    except Exception:
-                        pass
-                    continue
+            if bool(act.get("_json_sequence_started")):
                 return True
-            # 실행 중 점유는 is_screen_runner_busy 가 담당.
-            # sequence_started 만으로 hold 하면 on_done 전에 runner idle 이 되어
-            # pending 다음 job / drain 이 영구 차단된다.
+            if callable(act.get("_json_run_fn")):
+                return True
+            # reserved 만 있고 run_fn 없음 = 중단된 설정 — stale 제거
+            if bool(act.get("_json_slot_reserved")) and not callable(
+                act.get("_json_run_fn")
+            ):
+                try:
+                    active_by[k] = {}
+                except Exception:
+                    pass
+                continue
     except Exception:
         pass
     return False
@@ -728,6 +774,7 @@ __all__ = [
     "compute_json_effective_speed",
     "get_proc_gate_end",
     "is_json_anim_slot_held",
+    "is_json_sequence_busy",
     "is_json_wall_busy",
     "is_proc_wait_blocking",
     "is_rail_json_occupying",
