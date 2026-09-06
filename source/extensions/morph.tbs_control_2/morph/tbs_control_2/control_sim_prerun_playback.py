@@ -1398,13 +1398,25 @@ class SimTimelinePlayer:
                     continue
                 # log / progress
                 if freeze_at is not None and freeze_t is not None:
+                    allow_done_prog = False
+                    try:
+                        if (
+                            kind == "progress"
+                            and isinstance(it.payload, dict)
+                            and str(it.payload.get("status") or "").strip().upper() == "DONE"
+                        ):
+                            # 다음 gated 가 막혀도 이미 시작된 공정의 DONE 은 통과
+                            # (BP→EP 잔상 RUNNING / REMOVE 미표시 착시 방지)
+                            allow_done_prog = True
+                    except Exception:
+                        allow_done_prog = False
                     allow_foup_prog = (
                         kind == "progress"
                         and self._foup_allowed_during_gate_freeze(
                             it, freeze_t=freeze_t, frozen_payload=freeze_payload
                         )
                     )
-                    if not allow_foup_prog:
+                    if not allow_foup_prog and not allow_done_prog:
                         try:
                             if float(it.t) > float(freeze_t) + 1e-9:
                                 break
@@ -1487,9 +1499,32 @@ def prerun_engine_to_timeline(
     max_tick_steps: int = 2000000,
 ) -> SimPreRunResult:
     """
-    주어진 TBSSimulationEngine 인스턴스를 가능한 빠르게 끝까지 tick() 하며,
-    on_log/on_event/on_progress로 올라오는 payload를 시뮬 시간 기준으로 수집한다.
+    프리런 타임라인 수집.
+
+    ``SIM_PRERUN_PLAN_SSOT``(기본 True): 오프라인 플래너만 사용 (엔진 tick 없음).
+    False: 레거시 엔진 tick 수집.
     """
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            from .prerun_plan_adapt import prerun_ssot_to_timeline
+
+            return prerun_ssot_to_timeline(screen=int(screen), engine=engine)
+    except Exception:
+        pass
+    return _prerun_engine_to_timeline_legacy(
+        screen=screen, engine=engine, max_tick_steps=max_tick_steps
+    )
+
+
+def _prerun_engine_to_timeline_legacy(
+    *,
+    screen: int,
+    engine: Any,
+    max_tick_steps: int = 2000000,
+) -> SimPreRunResult:
+    """레거시: 엔진 tick 으로 타임라인 수집 (``SIM_PRERUN_PLAN_SSOT=False``)."""
     items: List[SimTimelineItem] = []
 
     def _t_from_payload(payload: Any) -> float:

@@ -826,6 +826,8 @@ def build_playback_tick_payload(
     st.elapsed = str(p3.get("elapsed", st.elapsed))
     st.total = str(p3.get("total", st.total))
     st.percent = str(p3.get("percent", st.percent))
+    if str(p3.get("status") or "").strip():
+        st.status = str(p3.get("status") or st.status)
     p3["label"] = st.label
     p3["detail"] = st.detail
     p3["status"] = st.status
@@ -835,6 +837,13 @@ def build_playback_tick_payload(
     p3["anim_sec"] = st.anim_sec
     p3["process_time_priority"] = st.process_time_priority
     p3["event_start_sim_time"] = st.event_start_sim_time
+    # SSOT: 동시 공정·애니 대기큐를 프리런 플랜에서 채움
+    try:
+        from .prerun_plan_adapt import enrich_ssot_playback_progress
+
+        enrich_ssot_playback_progress(ext, scr, p3, float(tnow))
+    except Exception:
+        pass
     # 병렬 보조(MOVE) % — 직렬형 본문 + 하단에 JSON|%만
     try:
         from .sim_parallel_rails import parallel_moves_enabled
@@ -887,15 +896,20 @@ def _linked_json_exists_label(hint: str) -> str:
 
 
 def format_progress_anim_footer(ext: Any, screen: int) -> str:
-    """이벤트 연계 JSON + 애니 런타임 보조 줄 — ProgressStepState 단일 출처."""
+    """이벤트 연계 JSON + 애니 런타임 — **실제 재생 중 파일**을 우선 표기."""
     sync_anim_runtime_from_ext(ext, int(screen))
     st = get_progress_step(ext, int(screen))
     ar = get_anim_runtime(ext, int(screen))
+    playing = _basename_json(ar.current_file) if ar.phase == "playing" else ""
     hint = _basename_json(st.linked_anim_json)
     if not hint:
         hint = _basename_json(
             str((st.payload_snapshot or {}).get("linked_anim_json", "") or "")
         )
+    # 본문과 불일치하면 재생 중 파일을 연계 JSON 으로 표시
+    if playing:
+        hint = playing
+
     if not hint:
         if ar.phase == "playing" and ar.current_file:
             lines = [f"애니메이션 파일(재생 중): {ar.current_file}"]
@@ -911,26 +925,16 @@ def format_progress_anim_footer(ext: Any, screen: int) -> str:
     parts: list[str] = []
     ex_lbl = _linked_json_exists_label(hint)
     parts.append(f"이벤트 연계 JSON: {hint} ({ex_lbl})")
-
-    hint_key = hint.lower()
-    cur_key = ar.current_file.lower() if ar.current_file else ""
-    next_key = ar.next_file.lower() if ar.next_file else ""
-
-    if cur_key == hint_key and ar.phase == "playing":
+    if ar.phase == "playing" and ar.current_file:
         parts.append(f"애니메이션 파일(재생 중): {ar.current_file}")
         if ar.queue_len > 0 and ar.next_file:
             parts.append(f"대기열: {ar.queue_len}건 (다음 {ar.next_file})")
-    elif ar.queue_len > 0 and next_key == hint_key:
+    elif ar.queue_len > 0 and ar.next_file:
         parts.append(
             "애니메이션: 대기 — 다음 "
             + ar.next_file
             + (f" (큐 {ar.queue_len}건)" if ar.queue_len > 1 else "")
         )
-    elif ar.phase == "playing" and ar.current_file and cur_key != hint_key:
-        parts.append(f"애니메이션 파일(재생 중): {ar.current_file}")
-        if ar.queue_len > 0 and ar.next_file:
-            parts.append(f"대기열: {ar.queue_len}건 (다음 {ar.next_file})")
-
     return "\n".join(parts)
 
 

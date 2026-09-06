@@ -215,6 +215,158 @@ def is_screen_runner_busy(
         return False
 
 
+def clear_playback_anim_slots(
+    ext: Any, *, screens: Optional[Any] = None
+) -> None:
+    """재생 직전/리셋 — JSON 애니 슬롯(active·pending) 잔류를 제거한다.
+
+    SSOT 에서 ``is_json_anim_slot_held`` 가 lead(``_json_pending_sim_start``) 도
+    점유로 본다. 이전 재생의 pending active 가 남으면 **모든 새 job 이 QUEUE 만
+    되고 애니가 한 번도 기동되지 않는다**.
+    """
+    scoped: Optional[set] = None
+    if screens is not None:
+        scoped = set()
+        try:
+            for s in screens:
+                try:
+                    scoped.add(int(s))
+                except Exception:
+                    continue
+        except Exception:
+            scoped = None
+        if scoped is not None and not scoped:
+            scoped = None
+
+    def _screen_of_key(k: Any) -> Optional[int]:
+        try:
+            from .sim_parallel_rails import screen_from_state_key
+
+            return int(screen_from_state_key(k))
+        except Exception:
+            pass
+        try:
+            return int(str(k).split(":", 1)[0])
+        except Exception:
+            return None
+
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(active_by, dict):
+            if scoped is None:
+                active_by.clear()
+            else:
+                for k in list(active_by.keys()):
+                    sk = _screen_of_key(k)
+                    if sk is not None and int(sk) in scoped:
+                        active_by.pop(k, None)
+    except Exception:
+        pass
+    try:
+        pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+        if isinstance(pending_by, dict):
+            if scoped is None:
+                pending_by.clear()
+            else:
+                for k in list(pending_by.keys()):
+                    sk = _screen_of_key(k)
+                    if sk is not None and int(sk) in scoped:
+                        pending_by.pop(k, None)
+                    elif str(k) in {str(s) for s in scoped}:
+                        pending_by.pop(k, None)
+    except Exception:
+        pass
+    try:
+        if scoped is None or (1 in scoped):
+            ext._sim_anim_active = {}
+            ext._sim_anim_pending = []
+    except Exception:
+        pass
+    try:
+        byq = getattr(ext, "_sim_playback_json_jobs_by_screen", None)
+        if isinstance(byq, dict):
+            if scoped is None:
+                byq.clear()
+            else:
+                for s in scoped:
+                    byq.pop(str(int(s)), None)
+    except Exception:
+        pass
+
+
+def is_json_anim_slot_held(
+    ext: Any, screen: int, rail: Optional[str] = None
+) -> bool:
+    """러너 실행 중이거나, 유효한 lead 대기(active + run_fn) 중이면 True.
+
+    SSOT 에서 emit 이 열려 있어도 lead 대기 중 runner 는 idle 이라 다음 job 이
+    active 를 덮어쓰면 첫 애니 이후 큐가 붕괴한다. dispatch 는 이 값을 보고 QUEUE.
+
+    잔류: ``_json_pending_sim_start`` 만 있고 ``_json_run_fn`` 이 없으면 stale —
+    슬롯을 비우고 False (애니 영구 미기동 방지).
+    """
+    scr = max(1, int(screen))
+    r = str(rail or "").strip().lower() or None
+    if is_screen_runner_busy(ext, scr, rail=r):
+        return True
+    try:
+        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+        if not isinstance(active_by, dict):
+            return False
+        keys: list = []
+        try:
+            from .sim_parallel_rails import (
+                anim_state_key,
+                parallel_moves_enabled,
+                screen_from_state_key,
+            )
+
+            if r in ("oht", "move"):
+                keys.append(anim_state_key(scr, r))
+            elif parallel_moves_enabled():
+                keys.extend(
+                    [
+                        anim_state_key(scr, "oht"),
+                        anim_state_key(scr, "move"),
+                        str(scr),
+                    ]
+                )
+            else:
+                keys.append(str(scr))
+        except Exception:
+            keys = [str(scr)]
+        for k in keys:
+            act = active_by.get(k)
+            if not isinstance(act, dict) or not act:
+                continue
+            try:
+                if screen_from_state_key(k) != scr and str(
+                    act.get("tbs_sim_screen") or ""
+                ).strip() not in ("", str(scr)):
+                    continue
+            except Exception:
+                pass
+            pending = bool(act.get("_json_pending_sim_start")) and not bool(
+                act.get("_json_sequence_started")
+            )
+            if pending:
+                run_fn = act.get("_json_run_fn")
+                if not callable(run_fn):
+                    # stale lead — 슬롯 해제
+                    try:
+                        active_by[k] = {}
+                    except Exception:
+                        pass
+                    continue
+                return True
+            # 실행 중 점유는 is_screen_runner_busy 가 담당.
+            # sequence_started 만으로 hold 하면 on_done 전에 runner idle 이 되어
+            # pending 다음 job / drain 이 영구 차단된다.
+    except Exception:
+        pass
+    return False
+
+
 def _usd_context_for_screen(ext: Any, screen: int) -> Any:
     scr = max(1, int(screen))
     if scr <= 1:
@@ -296,29 +448,57 @@ def _json_hold_reason_active_or_queued(
                         continue
                 except Exception:
                     pass
-                # lead 대기 또는 JSON 시퀀스 실행 중 — wall 유지
+                # lead 대기 — wall 유지 (run_fn 있는 유효 lead 만)
                 if bool(act.get("_json_pending_sim_start")) and not bool(
                     act.get("_json_sequence_started")
                 ):
-                    return True
-                if bool(act.get("_json_sequence_started")):
-                    return True
+                    if callable(act.get("_json_run_fn")):
+                        return True
+                    try:
+                        active_by[k] = {}
+                    except Exception:
+                        pass
+                    continue
+                # 실행 중: runner busy 가 따로 본다. sequence_started 잔상만으로 wall 고정 금지.
     except Exception:
         pass
     try:
         by = getattr(ext, "_sim_playback_json_jobs_by_screen", None)
         q = by.get(str(scr)) if isinstance(by, dict) else None
-        if q is None:
-            return False
-        if not rail:
-            return len(q) > 0
-        from .sim_parallel_rails import rail_from_job_or_payload
+        if q is not None:
+            if not rail:
+                if len(q) > 0:
+                    return True
+            else:
+                from .sim_parallel_rails import rail_from_job_or_payload
 
-        for job in list(q):
-            if not isinstance(job, dict):
-                continue
-            if str(rail_from_job_or_payload(job) or "").lower() == str(rail).lower():
-                return True
+                for job in list(q):
+                    if not isinstance(job, dict):
+                        continue
+                    if str(rail_from_job_or_payload(job) or "").lower() == str(rail).lower():
+                        return True
+    except Exception:
+        pass
+    # 직렬 애니 pending 큐
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
+
+        pend_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+        if isinstance(pend_by, dict):
+            keys_p = [str(scr)]
+            if parallel_moves_enabled():
+                if rail:
+                    keys_p = [rail_queue_key(scr, str(rail))]
+                else:
+                    keys_p = [
+                        rail_queue_key(scr, "oht"),
+                        rail_queue_key(scr, "move"),
+                        str(scr),
+                    ]
+            for pk in keys_p:
+                plst = pend_by.get(pk)
+                if isinstance(plst, list) and len(plst) > 0:
+                    return True
     except Exception:
         pass
     return False
@@ -392,9 +572,19 @@ def can_emit_timeline_event(
     - **proc_wait**: 직전 gated 이벤트 ``t_proc_end`` 전 → 금지
     - 병렬: ``rail`` 단위 게이트로 A∥B 동시 emit
     - 동일 EPn 은 ``rail_ep_conflict_blocks_emit`` / ``make_playback_event_gate`` 에서 추가 차단
+
+    ``SIM_PRERUN_PLAN_SSOT`` 재생: 공정 emit 은 프리런 시각대로 허용.
+    JSON 충돌은 ``is_json_anim_slot_held`` → pending 큐로 직렬화 (덮어쓰기 금지).
     """
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return True
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            return True
+    except Exception:
+        pass
     scr = max(1, int(screen))
     if is_json_wall_busy(ext, scr, rail=rail):
         return False
@@ -531,11 +721,13 @@ def clear_proc_gates(ext: Any) -> None:
 
 __all__ = [
     "can_emit_timeline_event",
+    "clear_playback_anim_slots",
     "clear_playback_gate_state",
     "clear_proc_gate_end",
     "clear_proc_gates",
     "compute_json_effective_speed",
     "get_proc_gate_end",
+    "is_json_anim_slot_held",
     "is_json_wall_busy",
     "is_proc_wait_blocking",
     "is_rail_json_occupying",

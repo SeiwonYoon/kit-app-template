@@ -105,6 +105,43 @@ def _step_json_has_renewal_marker(step: PlaybackScheduledStep) -> bool:
         return bool(step.has_renewal)
 
 
+def _collect_port_occ_refresh_milestones(
+    sorted_items: Tuple[SimTimelineItem, ...],
+    port_keys: Sequence[str],
+) -> List[Tuple[float, int, Dict[str, str]]]:
+    """``PORT_OCC_REFRESH`` 전체 맵만 수집 (프리런 SSOT 키프레임)."""
+    out: List[Tuple[float, int, Dict[str, str]]] = []
+    seq_i = 0
+    last_sig = ""
+    for it in sorted_items or ():
+        if str(it.kind or "").strip().lower() != "event" or not isinstance(it.payload, dict):
+            continue
+        p = dict(it.payload)
+        seq_u = str(p.get("seq") or "").strip().upper()
+        if seq_u != "PORT_OCC_REFRESH":
+            continue
+        try:
+            t_ev = float(getattr(it, "t", 0.0) or 0.0)
+        except Exception:
+            t_ev = 0.0
+        occ_d = _normalize_occ_payload(p.get("ports_occupancy"), port_keys)
+        if not occ_d:
+            continue
+        # 전체 패널 키 채움 (누락 키 = 빈 포트)
+        full = {str(k).strip().upper(): "" for k in port_keys if str(k).strip()}
+        for k, v in occ_d.items():
+            ku = str(k).strip().upper()
+            if ku in full:
+                full[ku] = str(v or "")
+        sig = f"{t_ev:.4f}|{sorted(full.items())}"
+        if sig == last_sig:
+            continue
+        last_sig = sig
+        out.append((float(t_ev), int(seq_i), dict(full)))
+        seq_i += 1
+    return out
+
+
 def _collect_engine_port_occ_changes(
     sorted_items: Tuple[SimTimelineItem, ...],
     port_keys: Sequence[str],
@@ -119,8 +156,18 @@ def _collect_engine_port_occ_changes(
     - FOUP·READYTO*·progress 틱: 스킵.
       (FOUP progress 는 공정 중에도 엔진 전체 스냅샷을 실어, 다른 포트/미래 LOT 이
        포트 패널에 잠깐 뜨는 버그의 원인이 됨. 점유 변경은 JSON step milestone 만.)
+    - ``PORT_OCC_REFRESH``: 프리런 SSOT 키프레임 → 수집 (아래 build 에서 schedule 보다 우선).
     """
     from .control_sim_prerun_playback import _normalize_anim_event_seq
+
+    # SSOT 프리런: refresh 키프레임만 포트 SSOT
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            return _collect_port_occ_refresh_milestones(sorted_items, port_keys)
+    except Exception:
+        pass
 
     anim_json_windows = _schedule_anim_json_occ_block_windows(schedule)
     try:
@@ -191,6 +238,42 @@ def _step_playback_sync_t(
         renewal_playback_port_sync_for_step,
         step_json_has_renewal_marker,
     )
+
+    # SSOT: 프리런에 박힌 sync / playback sync 만 (lead 재계산 금지)
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            p = step.progress_payload if isinstance(step.progress_payload, dict) else {}
+            try:
+                pst = float(str(p.get("port_sync_sim_time") or "").strip() or "0")
+            except Exception:
+                pst = 0.0
+            if pst > 1e-9:
+                return float(pst)
+            if step.t_playback_port_sync is not None:
+                return float(step.t_playback_port_sync)
+            if is_renewal or step_json_has_renewal_marker(step):
+                sync_t = renewal_playback_port_sync_for_step(step)
+                if sync_t is not None:
+                    return float(sync_t)
+                run_start = step.t_json_run_start_sim
+                off = 0.0
+                try:
+                    if step.renewal_offset_sec is not None and float(step.renewal_offset_sec) > 1e-9:
+                        off = float(step.renewal_offset_sec)
+                except Exception:
+                    off = 0.0
+                if run_start is not None and float(run_start) > 1e-9:
+                    return float(run_start) + float(off)
+            if step.t_playback_json_end is not None:
+                return float(step.t_playback_json_end)
+            try:
+                return float(step.t_proc_end)
+            except Exception:
+                return None
+    except Exception:
+        pass
 
     if is_renewal or step_json_has_renewal_marker(step):
         sync_t = renewal_playback_port_sync_for_step(step)
@@ -555,7 +638,16 @@ def build_playback_ui_milestones(
 
     init = dict(initial_occ or {})
     engine_changes = _collect_engine_port_occ_changes(sorted_items, keys, schedule=schedule)
-    schedule_points = _collect_schedule_port_occ_points(schedule, initial_occ=init)
+    # 프리런 SSOT: PORT_OCC_REFRESH 키프레임이 포트·막대 SSOT. schedule predict 는 병렬에서 EP를 비움.
+    schedule_points: List[Tuple[float, int, Dict[str, str]]] = []
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        use_refresh_ssot = bool(SIM_PRERUN_PLAN_SSOT) and bool(engine_changes)
+    except Exception:
+        use_refresh_ssot = False
+    if not use_refresh_ssot:
+        schedule_points = _collect_schedule_port_occ_points(schedule, initial_occ=init)
     occ_full = _merge_occ_timeline_to_full_milestones(
         port_keys=keys,
         initial_occ=init,

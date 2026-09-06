@@ -463,7 +463,18 @@ def build_playback_schedule(
         anim = _f(progress_p, "anim_sec", 0.0)
         if proc <= 1e-9 and anim > 1e-9:
             proc = anim
-        proc_end = t0 + max(0.01, proc) if proc > 1e-9 else t0
+        # NEW: 애니 큐로 wall 이 늘어난 경우 DONE/RUNNING 의 wall_sec 우선
+        wall_sec = _f(progress_p, "wall_sec", 0.0)
+        queue_delay = _f(progress_p, "anim_queue_delay_sec", 0.0)
+        end_t = _f(progress_p, "event_end_sim_time", 0.0)
+        if wall_sec > 1e-9:
+            proc_end = t0 + max(0.01, wall_sec)
+        elif end_t > t0 + 1e-9:
+            proc_end = float(end_t)
+        else:
+            proc_end = t0 + max(0.01, proc) if proc > 1e-9 else t0
+            if queue_delay > 1e-9:
+                proc_end = float(proc_end) + float(queue_delay)
 
         linked = _s(progress_p, "linked_anim_json")
         step_kind = _classify_event(seq_u)
@@ -531,32 +542,88 @@ def build_playback_schedule(
                     timing_from_progress,
                 )
 
-                if json_path:
-                    has_renewal, renewal_off = renewal_info_from_json_path(json_path)
-                if parsed_steps is not None:
-                    hr, ro = renewal_info_from_steps(parsed_steps)
-                    if hr:
+                # SSOT: 프리런 play/sync 가 있으면 lead·JSON파싱·predict 재계산 금지
+                _ssot_bake = False
+                try:
+                    from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                    _ssot_bake = bool(SIM_PRERUN_PLAN_SSOT)
+                except Exception:
+                    _ssot_bake = False
+                play_start = _f(progress_p, "anim_play_start_sim_time", 0.0)
+                play_end = _f(progress_p, "anim_play_end_sim_time", 0.0)
+                port_sync_ssot = _f(progress_p, "port_sync_sim_time", 0.0)
+                if _ssot_bake and play_start > 1e-9:
+                    t_json_start = float(play_start)
+                    lead = max(0.0, float(play_start) - float(t0))
+                    if play_end > 1e-9:
+                        t_json_end = float(play_end)
+                    else:
+                        t_json_end = float(play_start) + max(0.0, float(anim))
+                    if float(t_json_end) > float(proc_end):
+                        proc_end = float(t_json_end)
+                    if progress_p.get("has_renewal") is True or str(
+                        progress_p.get("has_renewal") or ""
+                    ).strip().lower() in ("1", "true", "yes"):
                         has_renewal = True
-                        renewal_off = ro
-                proc_pb, anim_pb = resolve_playback_proc_anim(
-                    proc, anim, json_est_sec=float(json_est)
-                )
-                tm = timing_from_progress(
-                    progress_p,
-                    json_path=json_path,
-                    steps=parsed_steps,
-                    json_est_sec=float(json_est),
-                )
-                t_json_start = float(tm.get("t_json_start", t0))
-                t_json_end = float(tm.get("t_json_end", proc_end))
-                t_port_sync = tm.get("t_port_sync")
-                has_renewal = bool(tm.get("has_renewal", has_renewal))
-                renewal_off = tm.get("renewal_offset_sec", renewal_off)
-                lead = float(tm.get("json_lead_sec", 0.0))
-                proc = float(proc_pb)
-                anim = float(anim_pb)
-                if float(t_json_end) > float(t0) + 1e-9:
-                    proc_end = float(t_json_end)
+                        try:
+                            renewal_off = float(
+                                str(progress_p.get("renewal_offset_sec") or "0").strip() or "0"
+                            )
+                        except Exception:
+                            renewal_off = None
+                    if port_sync_ssot > 1e-9:
+                        t_port_sync = float(port_sync_ssot)
+                        t_playback_sync = float(port_sync_ssot)
+                    ports_panel = ()
+                    ports_panel_renewal = ()
+                    ports_after = ()
+                    ports_panel_json_end = ()
+                else:
+                    if json_path:
+                        has_renewal, renewal_off = renewal_info_from_json_path(json_path)
+                    if parsed_steps is not None:
+                        hr, ro = renewal_info_from_steps(parsed_steps)
+                        if hr:
+                            has_renewal = True
+                            renewal_off = ro
+                    proc_pb, anim_pb = resolve_playback_proc_anim(
+                        proc, anim, json_est_sec=float(json_est)
+                    )
+                    tm = timing_from_progress(
+                        progress_p,
+                        json_path=json_path,
+                        steps=parsed_steps,
+                        json_est_sec=float(json_est),
+                    )
+                    t_json_start = float(tm.get("t_json_start", t0))
+                    t_json_end = float(tm.get("t_json_end", proc_end))
+                    t_port_sync = tm.get("t_port_sync")
+                    has_renewal = bool(tm.get("has_renewal", has_renewal))
+                    renewal_off = tm.get("renewal_offset_sec", renewal_off)
+                    lead = float(tm.get("json_lead_sec", 0.0))
+                    proc = float(proc_pb)
+                    anim = float(anim_pb)
+                    if play_start > 1e-9:
+                        t_json_start = float(play_start)
+                        lead = max(0.0, float(play_start) - float(t0))
+                        if play_end > 1e-9:
+                            t_json_end = float(play_end)
+                        else:
+                            t_json_end = float(play_start) + max(0.0, float(anim))
+                        if float(t_json_end) > float(proc_end):
+                            proc_end = float(t_json_end)
+                    else:
+                        qd = float(queue_delay)
+                        if qd <= 1e-9:
+                            qd = _f(progress_p, "anim_queue_delay_sec", 0.0)
+                        if qd > 1e-9:
+                            t_json_start = float(t_json_start) + qd
+                            t_json_end = float(t_json_end) + qd
+                            if float(t_json_end) > float(proc_end):
+                                proc_end = float(t_json_end)
+                    if float(t_json_end) > float(t0) + 1e-9:
+                        proc_end = float(t_json_end)
             except Exception:
                 pass
 
@@ -591,7 +658,25 @@ def build_playback_schedule(
                 )
                 from .control_sim_prerun_playback import panel_occ_tuple_from_dict
 
-                if bool(has_renewal):
+                # SSOT: 포트는 PORT_OCC_REFRESH 만 — schedule predict 생략
+                _skip_pred = False
+                try:
+                    from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                    _skip_pred = bool(SIM_PRERUN_PLAN_SSOT) and (
+                        _f(progress_p, "anim_play_start_sim_time", 0.0) > 1e-9
+                        or _f(progress_p, "port_sync_sim_time", 0.0) > 1e-9
+                    )
+                except Exception:
+                    _skip_pred = False
+                if _skip_pred:
+                    if t_playback_sync is None and _f(progress_p, "port_sync_sim_time", 0.0) > 1e-9:
+                        t_playback_sync = _f(progress_p, "port_sync_sim_time", 0.0)
+                    ports_panel = ()
+                    ports_panel_renewal = ()
+                    ports_after = ()
+                    ports_panel_json_end = ()
+                elif bool(has_renewal):
                     # renewal sim·occ — step append 직전 _apply_renewal_fields_for_json_step 에서 확정
                     t_playback_sync = None
                     t_playback_json_end = None
@@ -724,7 +809,12 @@ def build_playback_schedule(
                 ports_after = ()
                 ports_panel_json_end = ()
 
-        t_json_run_start_sim = float(t0) + float(lead)
+        # 프리런 anim_play_start 가 있으면 그 시각이 JSON 기동 SSOT
+        play_start_f = _f(progress_p, "anim_play_start_sim_time", 0.0)
+        if play_start_f > 1e-9:
+            t_json_run_start_sim = float(play_start_f)
+        else:
+            t_json_run_start_sim = float(t0) + float(lead)
 
         src_ev_final = _post_anim_src_from_progress_and_event(progress_p, event_p)
         json_path, json_bn = _resolve_json_path_for_schedule(

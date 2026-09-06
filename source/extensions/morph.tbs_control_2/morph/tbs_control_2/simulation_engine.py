@@ -82,6 +82,10 @@ import threading
 
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS as _SIM_DEF
 from .sim_control_defaults import SIM_PARALLEL_NONCONFLICTING_MOVES as _SIM_PARALLEL_MOVES
+try:
+    from .sim_control_defaults import SIM_PROC_PARALLEL_ANIM_SERIAL as _SIM_PROC_PARALLEL_ANIM_SERIAL
+except Exception:
+    _SIM_PROC_PARALLEL_ANIM_SERIAL = False
 from .sim_lot_fix_proc import LotFixProcEntry, format_lot_id_display
 
 
@@ -441,6 +445,8 @@ class TBSSimulationEngine:
         self._process_time_priority = bool(getattr(self._init_cfg, "process_time_priority", False))
         # sim_control_defaults.SIM_PARALLEL_NONCONFLICTING_MOVES — False 면 완전 직렬(기존 동일).
         self._parallel_nonconflicting_moves = bool(_SIM_PARALLEL_MOVES)
+        # NEW: 공정 병렬 + 애니 직렬 (플래그 True 시 2레일/직렬보다 우선)
+        self._proc_parallel_anim_serial = bool(_SIM_PROC_PARALLEL_ANIM_SERIAL)
         # True 모드 2레일: A=ARRIVED/REMOVED(_oht_path_inflight), B=MOVE(_move_rail_inflight).
         # _bp_to_ep_inflight 는 하위 호환 alias (B 레일과 동일).
         self._oht_path_inflight = False
@@ -449,6 +455,14 @@ class TBSSimulationEngine:
         self._move_rail_inflight = False
         self._b_rail_ep: str = ""
         self._bp_to_ep_inflight = False
+        # NEW multi: 동시에 진행 중인 OHT→EP 대상 EP 집합 / INOUT 투입 중
+        self._oht_ep_inflight: set = set()
+        self._oht_inout_inflight = False
+        self._bp_ep_inflight_eps: set = set()
+        self._inout_bp_inflight = False
+        # 진행현황 다중 슬롯 (key → payload snapshot)
+        self._active_progress: Dict[str, Dict[str, str]] = {}
+        self._anim_play_holder: Optional[str] = None  # 현재 애니 Resource 점유 슬롯
         self._interrupt_anim_cb: Optional[Callable[[], None]] = None
         self._faulty_ports_supplier: Optional[Callable[[], Set[str]]] = None
         self._idle_sec: Dict[str, float] = {}
@@ -460,6 +474,15 @@ class TBSSimulationEngine:
             self._ep_foup_process_res = simpy.Resource(self.env, capacity=1) if (simpy and self.env is not None) else None
         except Exception:
             self._ep_foup_process_res = None
+        # 애니 재생 전역 1큐 (공정 병렬 시 wall 연장 SSOT)
+        try:
+            self._anim_play_res = (
+                simpy.Resource(self.env, capacity=1)
+                if (simpy and self.env is not None and self._proc_parallel_anim_serial)
+                else None
+            )
+        except Exception:
+            self._anim_play_res = None
         # FOUP 공정 플래토(+Y 1초 완료 후 ~ END 직전): UI 가시성 갱신 시 +Y320 재스냅(옵션 A)용
         self._foup_proc_active_ep: str = ""
         # - 누적은 _accumulate_sim_stats()에서 매 tick(경과 dt)마다 갱신된다.
@@ -1032,7 +1055,24 @@ class TBSSimulationEngine:
         """병렬 SSOT: 우선순위 wave 1회 + 오케스트레이터 kick.
 
         FOUP 종료·티켓 타이머·A/B 레일 free 등 모든 경로가 여기만 호출한다.
+        NEW(``SIM_PROC_PARALLEL_ANIM_SERIAL``) 이면 multi-wave 사용.
         """
+        if bool(getattr(self, "_proc_parallel_anim_serial", False)):
+            started = False
+            try:
+                started = bool(self._start_proc_parallel_anim_serial_wave())
+            except Exception:
+                started = False
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
+            if reason and started:
+                try:
+                    self._log(f"[wave] started reason={reason}")
+                except Exception:
+                    pass
+            return bool(started)
         if not self._parallel_enabled():
             try:
                 self._kick_serial_flow()
@@ -1417,20 +1457,41 @@ class TBSSimulationEngine:
         """
         메인 오케스트레이터. 실행 순서/우선순위는 여기(+ parallel wave)만 바꾼다.
 
-        우선순위 SSOT (가능하면 위에서부터 1건):
+        우선순위 SSOT (가능하면 위에서부터):
         1) BP→EP  2) OHT→EP  3) REMOVED  4) INOUT→BP  5) OHT→INOUT  6) idle
+
+        ``SIM_PROC_PARALLEL_ANIM_SERIAL`` (우선):
+        - 공정은 포트 잠금 기준으로 다중 기동(병렬 타이머).
+        - 애니는 ``_anim_play_res`` 1큐 — 대기 시 공정 wall 연장.
 
         ``SIM_PARALLEL_NONCONFLICTING_MOVES``:
         - False: ``_step_*`` yield-until-complete (FOUP만 백그라운드).
         - True: 동일 SSOT 순 nofollow wave. A∥B, 동일 EPn 금지.
         """
         yield self.env.timeout(0.1)
-        parallel = bool(getattr(self, "_parallel_nonconflicting_moves", False))
-        mode_txt = "병렬(2레일)" if parallel else "직렬"
+        proc_par = bool(getattr(self, "_proc_parallel_anim_serial", False))
+        parallel = bool(getattr(self, "_parallel_nonconflicting_moves", False)) and not proc_par
+        if proc_par:
+            mode_txt = "공정병렬+애니직렬"
+        elif parallel:
+            mode_txt = "병렬(2레일)"
+        else:
+            mode_txt = "직렬"
         self._log(f"[시작] OHT 추가 LOT 목표={self._max_oht_lots} | 오케스트레이터={mode_txt}")
 
         while self._running and len(self.completed_lots) < self._total_lots:
             self._log_heartbeat_if_due()
+
+            if proc_par:
+                started = self._start_proc_parallel_anim_serial_wave()
+                busy = self._proc_parallel_any_busy()
+                if started or busy:
+                    yield self.env.timeout(0.05)
+                    continue
+                if len(self.completed_lots) >= self._total_lots:
+                    break
+                yield from self._step_idle_wait()
+                continue
 
             if parallel:
                 started = self._start_parallel_nonconflicting_wave()
@@ -1488,6 +1549,295 @@ class TBSSimulationEngine:
                 f"| done={self.completed_lots}"
             )
             self._log_final_summary()
+
+    def _proc_parallel_any_busy(self) -> bool:
+        """NEW 모드: 이송/회수 공정이 하나라도 진행 중이면 True."""
+        if bool(getattr(self, "_oht_ep_inflight", None)):
+            return True
+        if bool(getattr(self, "_oht_inout_inflight", False)):
+            return True
+        if bool(getattr(self, "_bp_ep_inflight_eps", None)):
+            return True
+        if bool(getattr(self, "_inout_bp_inflight", False)):
+            return True
+        if bool(getattr(self, "_pickup_inflight", False)):
+            return True
+        if bool(getattr(self, "_active_progress", None)):
+            return True
+        return False
+
+    def _has_any_inout_or_bp_lot(self) -> bool:
+        """INOUT 또는 버퍼(BP)에 LOT이 하나라도 있으면 True."""
+        try:
+            if self.ports.get(INOUT_PORT) is not None:
+                return True
+        except Exception:
+            pass
+        for p in list(getattr(self, "_buffer_ports", ()) or ()):
+            try:
+                if self.ports.get(p) is not None:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _start_proc_parallel_anim_serial_wave(self) -> bool:
+        """공정 병렬 wave — 가능하면 여러 건을 기동만 하고 완료는 기다리지 않음.
+
+        우선순위: BP→EP(빈 EP마다) → OHT→EP(버퍼측 LOT 없을 때만) → REMOVED
+        → INOUT→BP → OHT→INOUT
+        """
+        started = False
+        # 1) BP→EP: 빈 EP·BP LOT 있는 동안 반복 기동
+        for _ in range(8):
+            if not self._try_start_buffer_to_ep_multi():
+                break
+            started = True
+        # 2) OHT→EP: 빈 EP마다 (INOUT/BP LOT 없으면)
+        for _ in range(8):
+            if not self._try_start_oht_to_ep_multi():
+                break
+            started = True
+        # 3) REMOVED
+        if self._try_start_pickup_multi():
+            started = True
+        # 4) INOUT→BP
+        if self._try_start_inout_to_bp_multi():
+            started = True
+        # 5) OHT→INOUT
+        if self._try_start_oht_to_inout_multi():
+            started = True
+        return started
+
+    def _try_start_buffer_to_ep_multi(self) -> bool:
+        """NEW: BP→EP — 전역 move 레일 잠금 없이 포트 잠금만으로 기동."""
+        if not self._ebs_enabled:
+            return False
+        ep = self._find_empty_ep()
+        bp = self._find_oldest_bp()
+        if not ep or not bp:
+            return False
+        if ep in getattr(self, "_bp_ep_inflight_eps", set()):
+            return False
+        if self._is_port_locked(ep) or self._is_port_locked(bp):
+            return False
+        lot = self.ports.get(bp)
+        if lot is None:
+            return False
+        self._bp_ep_inflight_eps.add(ep)
+        self._dispatching_to_ep[ep] = True
+        self._lock_port(bp)
+        self._lock_port(ep)
+        self.env.process(self._move_bp_to_ep_multi(bp, ep, lot))
+        return True
+
+    def _move_bp_to_ep_multi(self, bp_port: str, ep_port: str, lot: Lot):
+        try:
+            yield self.env.process(self._move_bp_to_ep(bp_port, ep_port, lot))
+        finally:
+            self._dispatching_to_ep[ep_port] = False
+            self._unlock_port(ep_port)
+            self._unlock_port(bp_port)
+            try:
+                self._bp_ep_inflight_eps.discard(ep_port)
+            except Exception:
+                pass
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
+
+    def _try_start_oht_to_ep_multi(self) -> bool:
+        """NEW: OHT→EP — 여러 EP 동시 공정 타이머 허용 (애니만 Resource 직렬)."""
+        if not self._oht_queue_head_ready():
+            return False
+        if not (self._oht_input_queue and self._can_load_to_ep_direct()):
+            return False
+        ep_target = self._find_empty_ep()
+        if not ep_target:
+            return False
+        if ep_target in getattr(self, "_oht_ep_inflight", set()):
+            return False
+        if ep_target in getattr(self, "_bp_ep_inflight_eps", set()):
+            return False
+        if self._is_port_locked(ep_target):
+            return False
+        lot = self._oht_input_queue.pop(0)
+        self._log(f"{lot.lot_id} | 직접투입→{ep_target} | q={len(self._oht_input_queue)}")
+        self._oht_ep_inflight.add(ep_target)
+        self._dispatching_to_ep[ep_target] = True
+        self._lock_port(ep_target)
+        self.env.process(self._load_lot_to_ep_direct_multi(lot, ep_target))
+        return True
+
+    def _load_lot_to_ep_direct_multi(self, lot: Lot, ep_port: str):
+        try:
+            yield self.env.process(self._load_lot_to_ep_direct(lot, ep_port))
+        finally:
+            self._dispatching_to_ep[ep_port] = False
+            self._unlock_port(ep_port)
+            try:
+                self._oht_ep_inflight.discard(ep_port)
+            except Exception:
+                pass
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
+
+    def _try_start_oht_to_inout_multi(self) -> bool:
+        if bool(getattr(self, "_oht_inout_inflight", False)):
+            return False
+        # NEW: REMOVE 와 공정 병렬 — 애니만 Resource 직렬. 구 직렬 홀드 적용 안 함.
+        if not bool(getattr(self, "_proc_parallel_anim_serial", False)):
+            if self._should_hold_for_removed():
+                return False
+        if not self._oht_queue_head_ready():
+            return False
+        if not (self._ebs_enabled and self._oht_input_queue and self._can_load_to_bp1()):
+            return False
+        if self._is_port_locked(INOUT_PORT):
+            return False
+        lot = self._oht_input_queue.pop(0)
+        self._log(f"{lot.lot_id} | OHT→IN/OUT 투입 | q={len(self._oht_input_queue)}")
+        self._oht_inout_inflight = True
+        self.env.process(self._load_lot_to_inout_multi(lot))
+        return True
+
+    def _load_lot_to_inout_multi(self, lot: Lot):
+        try:
+            yield self.env.process(self._load_lot_to_inout(lot))
+        finally:
+            self._oht_inout_inflight = False
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
+
+    def _bp_has_any_lot(self, *, include_locked: bool = True) -> bool:
+        """버퍼에 LOT이 하나라도 있으면 True. include_locked=False 면 잠금 포트 제외."""
+        for p in list(getattr(self, "_buffer_ports", ()) or ()):
+            try:
+                if self.ports.get(p) is None:
+                    continue
+                if (not include_locked) and self._is_port_locked(p):
+                    continue
+                if self._port_faulty(p):
+                    continue
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _has_empty_ep_slot(self, *, include_locked: bool = False) -> bool:
+        """비어 있는 EP가 있으면 True. include_locked=False 면 잠금/배정중 제외(기본)."""
+        for ep in list(getattr(self, "_ep_ports", ()) or ()):
+            try:
+                if self._port_faulty(ep):
+                    continue
+                if self.ports.get(ep) is not None:
+                    continue
+                if not include_locked:
+                    if self._is_port_locked(ep) or self._dispatching_to_ep.get(ep, False):
+                        continue
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _should_prefer_bp_to_ep_over_inout(self) -> bool:
+        """빈 EP + (잠금 포함) BP LOT → INOUT→BP 보류, BP→EP 우선."""
+        if not self._ebs_enabled:
+            return False
+        # EP 가 비어 있고(잠금 중이어도 '채울 EP 슬롯'이 있음) BP 에 LOT 이 있으면 우선
+        empty_ep = False
+        for ep in list(getattr(self, "_ep_ports", ()) or ()):
+            try:
+                if self._port_faulty(ep):
+                    continue
+                if self.ports.get(ep) is None:
+                    empty_ep = True
+                    break
+            except Exception:
+                pass
+        if not empty_ep:
+            return False
+        return self._bp_has_any_lot(include_locked=True)
+
+    def _try_start_inout_to_bp_multi(self) -> bool:
+        if not self._ebs_enabled:
+            return False
+        if bool(getattr(self, "_inout_bp_inflight", False)):
+            return False
+        if bool(getattr(self, "_oht_loading_bp1", False)):
+            return False
+        if self._is_port_locked(INOUT_PORT):
+            return False
+        if self.ports.get(INOUT_PORT) is None:
+            return False
+        if not self._find_oldest_empty_buffer():
+            return False
+        # BP→EP 우선: 빈 EP + BP LOT(이동 중 잠금 포함)이면 INOUT→BP 금지
+        if self._should_prefer_bp_to_ep_over_inout():
+            return False
+        # NEW: REMOVE 와 병렬 가능. 구 직렬만 회수 홀드.
+        if not bool(getattr(self, "_proc_parallel_anim_serial", False)):
+            if self._should_hold_for_removed():
+                return False
+        self._inout_bp_inflight = True
+        self.env.process(self._move_inout_to_bp_multi())
+        return True
+
+    def _move_inout_to_bp_multi(self):
+        try:
+            if self.ports.get(INOUT_PORT) is None:
+                return
+            if not self._find_oldest_empty_buffer():
+                return
+            yield self.env.process(self._move_bp1_to_buffer())
+        finally:
+            self._inout_bp_inflight = False
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
+
+    def _try_start_pickup_multi(self) -> bool:
+        """NEW: FOUP 종료 직후 awaiting 이 있으면 티켓 없어도 chain 발급 후 즉시 REMOVED."""
+        if bool(getattr(self, "_pickup_inflight", False)):
+            return False
+        if len(self.completed_lots) >= self._total_lots:
+            return False
+        if self._pickup_tickets <= 0:
+            try:
+                self._grant_chain_pickup_ticket_if_needed()
+            except Exception:
+                pass
+        if self._pickup_tickets <= 0:
+            return False
+        ep_pick = self._find_ep_awaiting_pickup()
+        if not ep_pick:
+            return False
+        if self._is_port_locked(ep_pick):
+            return False
+        self._pickup_tickets -= 1
+        self._pickup_inflight = True
+        self.env.process(self._execute_pickup_multi(ep_pick))
+        return True
+
+    def _execute_pickup_multi(self, ep_pick: str):
+        try:
+            yield self.env.process(self._execute_pickup(ep_pick))
+            try:
+                self._grant_chain_pickup_ticket_if_needed()
+            except Exception:
+                pass
+        finally:
+            self._pickup_inflight = False
+            try:
+                self._kick_serial_flow()
+            except Exception:
+                pass
 
     def _ep_target_token(self, *ports: str) -> str:
         try:
@@ -1641,7 +1991,9 @@ class TBSSimulationEngine:
         return self._find_ep_awaiting_pickup() is not None
 
     def _should_defer_inout_to_bp(self) -> bool:
-        """INOUT→BP 보류: BP→EP 가능이거나 REMOVED 대기/진행."""
+        """INOUT→BP 보류: BP→EP 우선이거나 REMOVED 대기/진행."""
+        if self._should_prefer_bp_to_ep_over_inout():
+            return True
         if self._can_start_buffer_to_ep_now():
             return True
         return self._should_hold_for_removed()
@@ -1954,9 +2306,9 @@ class TBSSimulationEngine:
         """OHT LOT을 IN/OUT에 넣을 수 있는지: IN/OUT 비어 있고 버퍼에 빈 슬롯이 있으며 적재 중 아님.
 
         직렬(기본): 버퍼가 **이미 EMPTY** 인 슬롯이 있어야 함.
-        병렬(``SIM_PARALLEL_NONCONFLICTING_MOVES``): BP→EP 이송 중(잠금+점유)인 버퍼는
-        완료 시 EMPTY 가 되므로, OHT→INOUT 를 BP→EP 와 동시에 기동할 수 있게 허용한다.
-        (예: BP4→EP3 진행 중 arrived_inout — 기기 비충돌)
+        병렬(``SIM_PARALLEL_NONCONFLICTING_MOVES`` / ``SIM_PROC_PARALLEL_ANIM_SERIAL``):
+        BP→EP 이송 중(잠금+점유)인 버퍼는 완료 시 EMPTY 가 되므로,
+        OHT→INOUT 를 BP→EP 와 동시에 기동할 수 있게 허용한다.
         """
         if not self._ebs_enabled:
             return False
@@ -1966,10 +2318,10 @@ class TBSSimulationEngine:
         any_buffer_empty = any(
             self.ports[p] is None and not self._port_faulty(p) for p in self._buffer_ports
         )
-        if (
-            not any_buffer_empty
-            and bool(getattr(self, "_parallel_nonconflicting_moves", False))
-        ):
+        allow_soon_empty = bool(getattr(self, "_parallel_nonconflicting_moves", False)) or bool(
+            getattr(self, "_proc_parallel_anim_serial", False)
+        )
+        if not any_buffer_empty and allow_soon_empty:
             # BP→EP 진행 중: 점유는 유지되지만 잠금되어 완료 후 비워짐 → 곧 빈 슬롯
             any_buffer_empty = any(
                 self._is_port_locked(p)
@@ -1980,8 +2332,13 @@ class TBSSimulationEngine:
         return bp1_empty and any_buffer_empty and not self._oht_loading_bp1
 
     def _can_load_to_ep_direct(self) -> bool:
-        """OHT 대기열 LOT을 EP로 직접 넣을 수 있는지(빈 EP 존재 + BP1 적재 중 아님)."""
+        """OHT 대기열 LOT을 EP로 직접 넣을 수 있는지.
+
+        INOUT/BP 에 LOT이 하나라도 있으면 OHT→EP 금지 (BP→EP / INOUT→BP 우선).
+        """
         if self._ebs_enabled and self._oht_loading_bp1:
+            return False
+        if self._ebs_enabled and self._has_any_inout_or_bp_lot():
             return False
         return self._find_empty_ep() is not None
 
@@ -2497,7 +2854,14 @@ class TBSSimulationEngine:
                 self._ep_ready_since[ep_port] = float(self.env.now)
             except Exception:
                 pass
-            # 병렬 SSOT: awaiting 등록 후 wave 1곳 (INOUT→BP 는 awaiting 중 보류)
+            # NEW: FOUP 끝 → 즉시 REMOVED 티켓 + wave (다른 공정과 병렬, 애니만 직렬)
+            try:
+                if bool(getattr(self, "_proc_parallel_anim_serial", False)):
+                    self._grant_chain_pickup_ticket_if_needed()
+                    self._start_proc_parallel_anim_serial_wave()
+            except Exception:
+                pass
+            # 병렬 SSOT / 직렬 kick
             try:
                 self._parallel_schedule_wave(reason="foup_end")
             except Exception:
@@ -2710,6 +3074,45 @@ class TBSSimulationEngine:
             return ", ".join(applied)
         return "(없음)"
 
+    def _estimate_anim_sec_from_json_name(self, json_name: str) -> float:
+        """``data/sim_sequences/<name>`` 길이 추정. gate anim=0 폴백용."""
+        name = str(json_name or "").strip()
+        if not name:
+            return 0.0
+        try:
+            from pathlib import Path
+
+            from .playback_schedule import _estimate_json_sec
+
+            base = Path(__file__).resolve().parent.parent / "data" / "sim_sequences"
+            path = base / name
+            if not path.is_file() and not name.lower().endswith(".json"):
+                path = base / f"{name}.json"
+            if path.is_file():
+                return max(0.0, float(_estimate_json_sec(path)))
+        except Exception:
+            pass
+        return 0.0
+
+    def _progress_slot_key(
+        self,
+        *,
+        event_seq: str,
+        lot_id: str,
+        port_id: str,
+        label: str,
+        event_start: str,
+    ) -> str:
+        return "|".join(
+            [
+                str(event_seq or "").strip(),
+                str(lot_id or "").strip(),
+                str(port_id or "").strip().upper(),
+                str(label or "").strip(),
+                str(event_start or "").strip(),
+            ]
+        )
+
     def _wait_with_progress(
         self,
         total_sec: float,
@@ -2732,13 +3135,11 @@ class TBSSimulationEngine:
         """
         공정 대기 시간을 simpy timeout으로 소모하고 진행률을 낸다.
 
-        정책:
-        - progress_interval <= 0: 중간 진행 출력 없이 DONE만 emit (기존 동작)
-        - progress_interval > 0: 텍스트 로그([PROGRESS])는 누적하지 않고, on_progress(UI)만 주기적으로 갱신
-          (요구사항: 설정한 초마다 %만 반영되도록)
-        - linked_anim_json: UI 진행현황에 표시할 ``data/sim_sequences`` 기준 파일명(로그 anim_line 과 동일).
-        - port_hint: UI 가 진행 라벨을 포트별로 분리해 표시할 때 라우팅 키로 쓰는 포트 ID(예: "EP1").
-          비어 있어도 동작에는 영향이 없다.
+        ``SIM_PROC_PARALLEL_ANIM_SERIAL``:
+        - lead = max(0, proc − anim_wall) 대기
+        - ``_anim_play_res`` 획득(큐 대기 시 wall 연장)
+        - anim_wall 재생 구간 후 해제
+        - DONE 에 wall_sec / anim_queue_delay_sec / event_end_sim_time 기록
         """
         total = max(0.01, float(total_sec))
         interval = self._progress_emit_policy.normalize_interval(float(progress_interval))
@@ -2752,6 +3153,15 @@ class TBSSimulationEngine:
         psec = max(0.0, float(proc_sec))
         asec = max(0.0, float(anim_sec))
         _pex = dict(progress_extra or {})
+        use_anim_serial = bool(getattr(self, "_proc_parallel_anim_serial", False)) and getattr(
+            self, "_anim_play_res", None
+        ) is not None
+        # gate 가 0을 주면 JSON 길이로 폴백 — 포트 sync/애니 큐의 SSOT
+        if asec <= 1e-9 and str(linked_anim_json or "").strip():
+            try:
+                asec = float(self._estimate_anim_sec_from_json_name(str(linked_anim_json)))
+            except Exception:
+                asec = 0.0
 
         def _pl(core: Dict[str, str]) -> Dict[str, str]:
             if not _pex:
@@ -2764,91 +3174,180 @@ class TBSSimulationEngine:
             event_start_sim_time = f"{float(self.env.now):.2f}" if self.env is not None else "0.00"
         except Exception:
             event_start_sim_time = "0.00"
+
+        slot_key = self._progress_slot_key(
+            event_seq=ev, lot_id=lot, port_id=pid or ph, label=label, event_start=event_start_sim_time
+        )
+
+        def _base_running(**extra: str) -> Dict[str, str]:
+            d = {
+                "label": label,
+                "detail": detail,
+                "event_seq": ev,
+                "linked_anim_json": aj,
+                "port_id": ph,
+                "from_port_id": fr,
+                "to_port_id": to,
+                "lot_id": lot,
+                "event_port_id": pid,
+                "event_start_sim_time": event_start_sim_time,
+                "proc_sec": self._progress_emit_policy.format_sec_1(psec),
+                "anim_sec": self._progress_emit_policy.format_sec_1(asec),
+                "process_time_priority": "1" if self._process_time_priority else "0",
+                "status": "RUNNING",
+                "progress_slot": slot_key,
+                "elapsed": "0.0",
+                "total": self._progress_emit_policy.format_sec_1(total),
+                "percent": "0",
+            }
+            d.update(extra)
+            return _pl(d)
+
         # UI 표시용: 공정/애니 시간을 각각 제공한다.
-        # total_sec은 호출자가 (공정시간우선 ON이면 공정, OFF면 max(공정,애니)) 규칙으로 이미 결정한다.
-        self._emit_progress(_pl({
-            "label": label,
-            "detail": detail,
-            "event_seq": ev,
-            "linked_anim_json": aj,
-            "port_id": ph,
-            "from_port_id": fr,
-            "to_port_id": to,
-            "lot_id": lot,
-            "event_port_id": pid,
-            "event_start_sim_time": event_start_sim_time,
-            "proc_sec": self._progress_emit_policy.format_sec_1(psec),
-            "anim_sec": self._progress_emit_policy.format_sec_1(asec),
-            "process_time_priority": "1" if self._process_time_priority else "0",
-            "status": "RUNNING",
-            "elapsed": "0.0",
-            "total": self._progress_emit_policy.format_sec_1(total),
-            "percent": "0",
-        }))
-        if interval <= 0.0:
-            # 로그 주기 0: 단계 완료 전에는 진행 로그를 출력하지 않음
-            yield self.env.timeout(total)
-            self._emit_progress(_pl({
-                "label": label,
-                "detail": detail,
-                "event_seq": ev,
-                "linked_anim_json": aj,
-                "port_id": ph,
-                "from_port_id": fr,
-                "to_port_id": to,
-                "lot_id": lot,
-                "event_port_id": pid,
-                "event_start_sim_time": event_start_sim_time,
-                "proc_sec": self._progress_emit_policy.format_sec_1(psec),
-                "anim_sec": self._progress_emit_policy.format_sec_1(asec),
-                "process_time_priority": "1" if self._process_time_priority else "0",
-                "status": "DONE",
-                "elapsed": self._progress_emit_policy.format_sec_1(total),
-                "total": self._progress_emit_policy.format_sec_1(total),
-                "percent": "100",
-            }))
-            self._log_wait_step_done(label, total)
-            # 공정시간우선 ON이고 공정이 애니보다 짧으면, 100% 시점에 애니를 즉시 중단/초기화한다.
-            if self._process_time_priority and asec > psec + 1e-6:
-                cb = getattr(self, "_interrupt_anim_cb", None)
-                if cb is not None:
-                    try:
-                        cb(self._event_tags)  # type: ignore[misc]
-                    except TypeError:
-                        try:
-                            cb()
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
-            return
-        elapsed = 0.0
-        while elapsed + 1e-9 < total:
-            step = min(interval, total - elapsed)
-            yield self.env.timeout(step)
-            elapsed += step
-            remain = max(0.0, total - elapsed)
-            pct = (elapsed / total) * 100.0
-            self._emit_progress(_pl({
-                "label": label,
-                "detail": detail,
-                "event_seq": ev,
-                "linked_anim_json": aj,
-                "port_id": ph,
-                "from_port_id": fr,
-                "to_port_id": to,
-                "lot_id": lot,
-                "event_port_id": pid,
-                "event_start_sim_time": event_start_sim_time,
-                "proc_sec": self._progress_emit_policy.format_sec_1(psec),
-                "anim_sec": self._progress_emit_policy.format_sec_1(asec),
-                "process_time_priority": "1" if self._process_time_priority else "0",
-                "status": "DONE" if remain <= 1e-9 else "RUNNING",
-                "elapsed": self._progress_emit_policy.format_sec_1(elapsed),
-                "total": self._progress_emit_policy.format_sec_1(total),
-                "percent": self._progress_emit_policy.format_percent(pct),
-            }))
-        self._log_wait_step_done(label, total)
+        self._emit_progress(_base_running())
+
+        anim_wall = 0.0
+        lead = 0.0
+        queue_delay = 0.0
+        if use_anim_serial and asec > 1e-9:
+            # anim_wall = min(anim, proc) — proc < anim 이면 배속으로 proc 안에 맞춤(엔진 wall)
+            anim_wall = min(asec, psec) if psec > 1e-9 else asec
+            if anim_wall <= 1e-9:
+                anim_wall = min(asec, total)
+            lead = max(0.0, (psec if psec > 1e-9 else total) - anim_wall)
+        else:
+            # 기존: 고정 total 한 번에 소모
+            lead = total
+            anim_wall = 0.0
+
+        # --- lead 구간 ---
+        if lead > 1e-9:
+            if interval <= 0.0:
+                yield self.env.timeout(lead)
+            else:
+                elapsed_lead = 0.0
+                while elapsed_lead + 1e-9 < lead:
+                    step = min(interval, lead - elapsed_lead)
+                    yield self.env.timeout(step)
+                    elapsed_lead += step
+                    planned = lead + anim_wall
+                    pct = (elapsed_lead / max(planned, 0.01)) * 100.0
+                    self._emit_progress(
+                        _base_running(
+                            elapsed=self._progress_emit_policy.format_sec_1(elapsed_lead),
+                            total=self._progress_emit_policy.format_sec_1(planned),
+                            percent=self._progress_emit_policy.format_percent(pct),
+                            anim_phase="lead",
+                        )
+                    )
+
+        # --- 애니 큐 + 재생 ---
+        if use_anim_serial and anim_wall > 1e-9:
+            res = self._anim_play_res
+            t_req = float(self.env.now)
+            req = res.request()
+            yield req
+            queue_delay = max(0.0, float(self.env.now) - t_req)
+            try:
+                self._anim_play_holder = slot_key
+            except Exception:
+                pass
+            self._emit_progress(
+                _base_running(
+                    elapsed=self._progress_emit_policy.format_sec_1(lead + queue_delay),
+                    total=self._progress_emit_policy.format_sec_1(lead + queue_delay + anim_wall),
+                    percent=self._progress_emit_policy.format_percent(
+                        ((lead + queue_delay) / max(lead + queue_delay + anim_wall, 0.01)) * 100.0
+                    ),
+                    anim_phase="playing",
+                    anim_queue_delay_sec=self._progress_emit_policy.format_sec_1(queue_delay),
+                    anim_play_start_sim_time=f"{float(self.env.now):.2f}",
+                )
+            )
+            if interval <= 0.0:
+                yield self.env.timeout(anim_wall)
+            else:
+                elapsed_a = 0.0
+                while elapsed_a + 1e-9 < anim_wall:
+                    step = min(interval, anim_wall - elapsed_a)
+                    yield self.env.timeout(step)
+                    elapsed_a += step
+                    wall_so_far = lead + queue_delay + elapsed_a
+                    wall_tot = lead + queue_delay + anim_wall
+                    pct = (wall_so_far / max(wall_tot, 0.01)) * 100.0
+                    self._emit_progress(
+                        _base_running(
+                            elapsed=self._progress_emit_policy.format_sec_1(wall_so_far),
+                            total=self._progress_emit_policy.format_sec_1(wall_tot),
+                            percent=self._progress_emit_policy.format_percent(pct),
+                            anim_phase="playing",
+                            anim_queue_delay_sec=self._progress_emit_policy.format_sec_1(queue_delay),
+                        )
+                    )
+            try:
+                res.release(req)
+            except Exception:
+                pass
+            try:
+                if getattr(self, "_anim_play_holder", None) == slot_key:
+                    self._anim_play_holder = None
+            except Exception:
+                pass
+            actual_total = lead + queue_delay + anim_wall
+        elif not use_anim_serial:
+            # 레거시: 남은 total 소모 (lead 가 이미 total)
+            if interval <= 0.0:
+                pass  # already waited lead==total
+            else:
+                pass  # lead loop already covered total
+            actual_total = total
+            if abs(lead - total) > 1e-6:
+                # should not happen
+                rem = max(0.0, total - lead)
+                if rem > 1e-9:
+                    yield self.env.timeout(rem)
+                actual_total = total
+        else:
+            # anim_serial but no anim: lead only (or leftover)
+            rem = max(0.0, total - lead)
+            if rem > 1e-9:
+                yield self.env.timeout(rem)
+            actual_total = max(total, lead + queue_delay)
+
+        try:
+            event_end_sim_time = f"{float(self.env.now):.2f}"
+        except Exception:
+            event_end_sim_time = event_start_sim_time
+
+        self._emit_progress(
+            _pl(
+                {
+                    "label": label,
+                    "detail": detail,
+                    "event_seq": ev,
+                    "linked_anim_json": aj,
+                    "port_id": ph,
+                    "from_port_id": fr,
+                    "to_port_id": to,
+                    "lot_id": lot,
+                    "event_port_id": pid,
+                    "event_start_sim_time": event_start_sim_time,
+                    "event_end_sim_time": event_end_sim_time,
+                    "proc_sec": self._progress_emit_policy.format_sec_1(psec),
+                    "anim_sec": self._progress_emit_policy.format_sec_1(asec),
+                    "wall_sec": self._progress_emit_policy.format_sec_1(actual_total),
+                    "anim_queue_delay_sec": self._progress_emit_policy.format_sec_1(queue_delay),
+                    "process_time_priority": "1" if self._process_time_priority else "0",
+                    "status": "DONE",
+                    "progress_slot": slot_key,
+                    "elapsed": self._progress_emit_policy.format_sec_1(actual_total),
+                    "total": self._progress_emit_policy.format_sec_1(actual_total),
+                    "percent": "100",
+                    "anim_phase": "done",
+                }
+            )
+        )
+        self._log_wait_step_done(label, actual_total)
         if self._process_time_priority and asec > psec + 1e-6:
             cb = getattr(self, "_interrupt_anim_cb", None)
             if cb is not None:
@@ -2861,6 +3360,7 @@ class TBSSimulationEngine:
                         pass
                 except Exception:
                     pass
+        return
 
     def _log_brief_step(self, lot_id: str, route: str, proc_sec: float, anim_sec: float) -> None:
         """이력용 한 줄 요약(진행현황 detail과 동일 톤)."""
@@ -2963,7 +3463,9 @@ class TBSSimulationEngine:
             payload["foup_proc_active_ep"] = str(getattr(self, "_foup_proc_active_ep", "") or "").strip().upper()
         except Exception:
             payload["foup_proc_active_ep"] = ""
-        if bool(getattr(self, "_parallel_nonconflicting_moves", False)):
+        if bool(getattr(self, "_parallel_nonconflicting_moves", False)) or bool(
+            getattr(self, "_proc_parallel_anim_serial", False)
+        ):
             try:
                 from .sim_parallel_rails import classify_sim_rail
 
@@ -2975,6 +3477,78 @@ class TBSSimulationEngine:
                     payload["sim_rail"] = rail
             except Exception:
                 pass
+
+        # 다중 공정 진행현황: 활성 슬롯 유지 + 요약 문자열
+        try:
+            st = str(payload.get("status") or "").strip().upper()
+            # 막대 heartbeat(timeline_only) / EP 타임라인 라벨은 동시공정에 넣지 않음
+            if str(payload.get("timeline_only") or "").strip().lower() in (
+                "1",
+                "true",
+                "on",
+            ):
+                pass  # skip concurrent bookkeeping below via flag
+            elif "타임라인" in str(payload.get("label") or ""):
+                pass
+            else:
+                sk = str(payload.get("progress_slot") or "").strip()
+                if not sk:
+                    sk = self._progress_slot_key(
+                        event_seq=str(payload.get("event_seq") or ""),
+                        lot_id=str(payload.get("lot_id") or ""),
+                        port_id=str(payload.get("event_port_id") or payload.get("port_id") or ""),
+                        label=str(payload.get("label") or ""),
+                        event_start=str(payload.get("event_start_sim_time") or ""),
+                    )
+                    payload["progress_slot"] = sk
+                active = getattr(self, "_active_progress", None)
+                if not isinstance(active, dict):
+                    active = {}
+                    self._active_progress = active
+                if st == "DONE":
+                    active.pop(sk, None)
+                elif st == "RUNNING" and sk:
+                    active[sk] = {
+                        "label": str(payload.get("label") or ""),
+                        "percent": str(payload.get("percent") or "0"),
+                        "event_seq": str(payload.get("event_seq") or ""),
+                        "linked_anim_json": str(payload.get("linked_anim_json") or ""),
+                        "anim_phase": str(payload.get("anim_phase") or ""),
+                        "lot_id": str(payload.get("lot_id") or ""),
+                        "from_port_id": str(payload.get("from_port_id") or ""),
+                        "to_port_id": str(payload.get("to_port_id") or ""),
+                    }
+                lines: List[str] = []
+                for _k, snap in list(active.items()):
+                    if not isinstance(snap, dict):
+                        continue
+                    lab = str(snap.get("label") or "").strip() or "?"
+                    if "타임라인" in lab:
+                        continue
+                    pct = str(snap.get("percent") or "0").strip()
+                    phase = str(snap.get("anim_phase") or "").strip()
+                    aj = str(snap.get("linked_anim_json") or "").strip()
+                    bit = f"· {lab} {pct}%"
+                    if phase == "playing" and aj:
+                        bit += f" | 애니재생:{aj}"
+                    elif phase == "lead" and aj:
+                        bit += f" | 애니대기:{aj}"
+                    elif aj:
+                        bit += f" | {aj}"
+                    lines.append(bit)
+                holder = str(getattr(self, "_anim_play_holder", "") or "")
+                playing_aj = ""
+                if holder and holder in active:
+                    playing_aj = str(active[holder].get("linked_anim_json") or "").strip()
+                payload["concurrent_count"] = str(len(lines))
+                payload["concurrent_summary"] = "\n".join(lines) if lines else ""
+                if playing_aj:
+                    payload["anim_playing_json"] = playing_aj
+                elif str(payload.get("anim_phase") or "") == "playing":
+                    payload["anim_playing_json"] = str(payload.get("linked_anim_json") or "")
+        except Exception:
+            pass
+
         if self._on_progress:
             try:
                 merged = dict(payload or {})

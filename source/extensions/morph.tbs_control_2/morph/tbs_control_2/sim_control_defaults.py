@@ -42,12 +42,12 @@ class SimControlDefaults:
     foup_proc_y_lift: float = 30.0
 
     # OHT → EP 직접 투입 (레거시 키명 oht_to_bp1 / 스냅샷 oht_bp1_*)
-    oht_to_bp1_min: float = 5.0
-    oht_to_bp1_max: float = 10.0
+    oht_to_bp1_min: float = 30.0
+    oht_to_bp1_max: float = 35.0
 
     # OHT → IN/OUT 안착 (웹·스냅샷: oht_inout_* ; 없으면 oht_bp1_* 폴백)
-    oht_to_inout_min: float = 5.0
-    oht_to_inout_max: float = 10.0
+    oht_to_inout_min: float = 30.0
+    oht_to_inout_max: float = 35.0
 
     # IN/OUT → BP(버퍼)
     bp1_to_bp_min: float = 30.0
@@ -199,6 +199,23 @@ SIM_BAR_PREVIEW_DEFAULT: bool = True
 SIM_PARALLEL_NONCONFLICTING_MOVES: bool = False
 
 # ---------------------------------------------------------------------------
+# 공정 병렬 + 애니 직렬 (NEW — docs/tbs_control_2_proc_parallel_anim_serial_changelog_ko.md)
+# ---------------------------------------------------------------------------
+# True(기본): 빈 포트마다 공정 타이머 병렬 시작. 애니만 전역 1큐 직렬.
+#   **레거시 엔진 tick 프리런** (`SIM_PRERUN_PLAN_SSOT=False`) 에서만 의미 있음.
+#   SSOT 프리런이 기본이므로 False — 엔진 multi-wave 는 더 이상 프리런에 쓰이지 않음.
+# False: 기존 _run_serial_flow 완전 직렬 (1건 yield-until-complete).
+SIM_PROC_PARALLEL_ANIM_SERIAL: bool = False
+
+# ---------------------------------------------------------------------------
+# 프리런 SSOT 플래너 (docs/tbs_control_2_prerun_ssot_plan_ko.md)
+# ---------------------------------------------------------------------------
+# True: ``prerun_plan_ssot`` 오프라인 일정 + ``prerun_plan_adapt`` → 재생.
+#   공정별 ``data/sim_sequences/*.json`` 길이를 프리런에 반영.
+# False: 기존 엔진 tick ``prerun_engine_to_timeline`` (레거시).
+SIM_PRERUN_PLAN_SSOT: bool = True
+
+# ---------------------------------------------------------------------------
 # Extract 결과 캐시 (data/preextract/)
 # ---------------------------------------------------------------------------
 # False: 지금과 같이 Extract(Flatten) 후 인스턴스별 layer 를 data/preextract/ 에
@@ -266,6 +283,8 @@ __all__ = [
     "SIM_PRERUN_EXPORT_JSON",
     "SIM_BAR_PREVIEW_DEFAULT",
     "SIM_PARALLEL_NONCONFLICTING_MOVES",
+    "SIM_PROC_PARALLEL_ANIM_SERIAL",
+    "SIM_PRERUN_PLAN_SSOT",
     "USE_PREEXTRACTED_LAYERS",
     "USE_PRESTRIPPED_OPEN_STAGE",
     "SIM_CAMERA_MODE_ENABLED",

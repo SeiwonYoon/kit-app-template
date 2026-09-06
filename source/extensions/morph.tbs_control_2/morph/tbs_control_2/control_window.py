@@ -1206,7 +1206,19 @@ def _execute_mapped_sequence_stub(
             except Exception:
                 est_total_f = 0.0
             parsed_steps = job.get("parsed", []) or []
-            if est_total_f <= 1e-9 and isinstance(parsed_steps, list) and parsed_steps:
+            # SSOT 재생: 프리런 anim_sec 가 있으면 JSON 재추정으로 덮지 않음
+            _skip_json_est = False
+            try:
+                from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                if bool(SIM_PRERUN_PLAN_SSOT) and bool(_playback):
+                    _pas = float(str(job.get("anim_sec") or "").strip() or "0")
+                    if _pas > 1e-9:
+                        est_total_f = float(_pas)
+                        _skip_json_est = True
+            except Exception:
+                _skip_json_est = False
+            if (not _skip_json_est) and est_total_f <= 1e-9 and isinstance(parsed_steps, list) and parsed_steps:
                 try:
                     est_total_f = float(
                         _estimate_sequence_total_duration_sec_for_log(parsed_steps, speed_scale=1.0) or 0.0
@@ -1228,36 +1240,119 @@ def _execute_mapped_sequence_stub(
                     proc_sec_job = float(_tm_ps.get("proc") or proc_sec_job)
                 except Exception:
                     pass
-            eff_sp = compute_json_effective_speed(sp, proc_sec_job, est_total_f)
-            json_wall_sec = json_wall_duration_sec(est_total_f, eff_sp)
 
             has_renewal = bool(job.get("has_renewal"))
             renewal_off = job.get("renewal_offset_sec")
             json_lead = 0.0
             try:
-                from .json_playback_timing import json_lead_sec, renewal_info_from_steps
-
-                if not has_renewal:
-                    has_renewal, renewal_off = renewal_info_from_steps(list(parsed_steps))
-                json_lead = json_lead_sec(proc_sec_job, est_total_f)
+                t0_sim = float(
+                    str(
+                        job.get("event_start_sim_time")
+                        or job.get("t")
+                        or job.get("sim_time")
+                        or "0"
+                    ).strip()
+                    or "0"
+                )
             except Exception:
-                pass
+                t0_sim = 0.0
+
+            # SSOT 재생: 프리런 anim_play_start / anim_sec 만 사용 (lead·길이 재계산 금지)
+            _ssot_play = False
+            try:
+                from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                _ssot_play = bool(SIM_PRERUN_PLAN_SSOT) and bool(_playback)
+            except Exception:
+                _ssot_play = False
+
+            prerun_anim_play = 0.0
+            try:
+                prerun_anim_play = float(
+                    str(job.get("anim_play_start_sim_time") or "").strip() or "0"
+                )
+            except Exception:
+                prerun_anim_play = 0.0
+            prerun_anim_sec = 0.0
+            try:
+                prerun_anim_sec = float(str(job.get("anim_sec") or "").strip() or "0")
+            except Exception:
+                prerun_anim_sec = 0.0
+
+            if _ssot_play:
+                if prerun_anim_sec > 1e-9:
+                    est_total_f = float(prerun_anim_sec)
+                if prerun_anim_play > 1e-9:
+                    json_run_start_sim = float(prerun_anim_play)
+                    json_lead = max(0.0, float(prerun_anim_play) - float(t0_sim))
+                else:
+                    # 플랜에 시작 시각이 없으면 즉시(리드 0) — 재계산하지 않음
+                    json_run_start_sim = float(t0_sim)
+                    json_lead = 0.0
+                # renewal: job 에 실린 프리런 값만 (JSON steps 재파싱 금지)
+                try:
+                    if job.get("has_renewal") is True or str(job.get("has_renewal") or "").strip().lower() in (
+                        "1",
+                        "true",
+                        "yes",
+                    ):
+                        has_renewal = True
+                    ro = job.get("renewal_offset_sec")
+                    if ro is not None and str(ro).strip() not in ("", "None"):
+                        renewal_off = float(str(ro).strip())
+                except Exception:
+                    pass
+            else:
+                try:
+                    from .json_playback_timing import json_lead_sec, renewal_info_from_steps
+
+                    if not has_renewal:
+                        has_renewal, renewal_off = renewal_info_from_steps(list(parsed_steps))
+                    json_lead = json_lead_sec(proc_sec_job, est_total_f)
+                except Exception:
+                    pass
+                json_run_start_sim = float(t0_sim) + float(json_lead)
+
+            # SSOT: eff_sp 압축 기준은 원본 proc 이 아니라 wall/anim 창.
+            # (짧은 proc 로 압축하면 renewal wall 이 port_sync_sim_time 보다 앞서
+            #  포트·막대가 애니 renewal 과 어긋남)
+            span_for_eff = float(proc_sec_job)
+            if _ssot_play:
+                try:
+                    end_s = float(str(job.get("event_end_sim_time") or "").strip() or "0")
+                    wall_s = float(str(job.get("wall_sec") or "").strip() or "0")
+                    if end_s > float(t0_sim) + 1e-9:
+                        span_for_eff = max(span_for_eff, float(end_s) - float(t0_sim))
+                    elif wall_s > 1e-9:
+                        span_for_eff = max(span_for_eff, float(wall_s))
+                    play_end = float(
+                        str(job.get("anim_play_end_sim_time") or "").strip() or "0"
+                    )
+                    if play_end > float(t0_sim) + 1e-9:
+                        span_for_eff = max(span_for_eff, float(play_end) - float(t0_sim))
+                    elif prerun_anim_play > 1e-9 and prerun_anim_sec > 1e-9:
+                        span_for_eff = max(
+                            span_for_eff,
+                            float(prerun_anim_play)
+                            - float(t0_sim)
+                            + float(prerun_anim_sec),
+                        )
+                except Exception:
+                    pass
+            eff_sp = compute_json_effective_speed(sp, span_for_eff, est_total_f)
+            json_wall_sec = json_wall_duration_sec(est_total_f, eff_sp)
 
             started_wall = time.monotonic()
             lead_wall = max(0.0, float(json_lead)) / max(0.1, float(sp))
             json_run_start_wall = float(started_wall) + float(lead_wall)
             total_wall_busy = float(lead_wall) + float(json_wall_sec)
-            try:
-                t0_sim = float(str(job.get("t") or job.get("sim_time") or "0").strip() or "0")
-            except Exception:
-                t0_sim = 0.0
-            json_run_start_sim = float(t0_sim) + float(json_lead)
             active = dict(job)
             active["proc_sec"] = float(proc_sec_job)
             active["anim_sec"] = float(est_total_f)
             active["_event_start_sim"] = float(t0_sim)
             active["_json_run_start_sim"] = float(json_run_start_sim)
-            active["_json_pending_sim_start"] = bool(_playback)
+            # pending 은 _json_run_fn 연결 후에만 True (중간에 slot_held 가 stale 로 지우는 것 방지)
+            active["_json_pending_sim_start"] = False
             active["_json_sequence_started"] = False
             active["_started_wall"] = started_wall
             active["_eff_sp"] = float(eff_sp)
@@ -1266,6 +1361,7 @@ def _execute_mapped_sequence_stub(
             active["json_lead_sec"] = float(json_lead)
             active["_json_lead_wall_sec"] = float(lead_wall)
             active["_json_run_start_wall"] = float(json_run_start_wall)
+            active["_ssot_prerun_anim_start"] = bool(_ssot_play and prerun_anim_play > 1e-9)
             _set_renewal_port_defer(ext, scr_i, bool(has_renewal))
             _set_renewal_json_guard(ext, scr_i, bool(has_renewal))
             _active_store_key = str(scr_i)
@@ -1395,89 +1491,27 @@ def _execute_mapped_sequence_stub(
                             _flush_pending_post_anim_port_applies(ext, int(scr_i))
                         except Exception:
                             pass
-                    # 화면별(또는 병렬 레일별) pending 큐에서 다음 job만 이어서 실행
-                    pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
-                    pending = []
-                    _pq_key = str(scr_i)
-                    try:
-                        from .sim_parallel_rails import (
-                            parallel_moves_enabled,
-                            rail_from_job_or_payload,
-                            rail_queue_key,
-                        )
-
-                        if parallel_moves_enabled():
-                            _pq_key = rail_queue_key(
-                                scr_i, rail_from_job_or_payload(job)
-                            )
-                    except Exception:
-                        _pq_key = str(scr_i)
-                    if isinstance(pending_by, dict):
-                        pending = pending_by.get(_pq_key, []) or []
-                    if isinstance(pending, list) and pending:
-                        try:
-                            pending.sort(
-                                key=lambda j: int((j or {}).get("_priority", 10)) if isinstance(j, dict) else 10
-                            )
-                        except Exception:
-                            pass
-                        nxt = pending.pop(0)
-                        if isinstance(pending_by, dict):
-                            pending_by[_pq_key] = pending
-                        try:
-                            from . import sim_multi_diag as _mdiag
-
-                            _mdiag.log_anim_done(
-                                ext,
-                                screen=scr_i,
-                                file_name=str((job or {}).get("file", "") or ""),
-                                pending_left=len(pending),
-                                next_file=str((nxt or {}).get("file", "") or ""),
-                            )
-                        except Exception:
-                            pass
-                        _dispatch_json_anim_job(ext, nxt)
-                        return
-                    try:
-                        from . import sim_multi_diag as _mdiag
-
-                        _mdiag.log_anim_done(
-                            ext,
-                            screen=scr_i,
-                            file_name=str((job or {}).get("file", "") or ""),
-                            pending_left=0,
-                            next_file="",
-                        )
-                    except Exception:
-                        pass
-                    if pause_evt is not None:
-                        try:
-                            pause_evt.clear()
-                        except Exception:
-                            pass
-                    try:
-                        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
-                        if isinstance(until_by, dict):
-                            until_by[str(scr_i)] = None
-                    except Exception:
-                        pass
+                    # 1) 현재 슬롯 먼저 해제 — 다음에 pending/timeline 이 START 가능해야 함
                     try:
                         active_by = getattr(ext, "_sim_anim_active_by_screen", None)
                         if isinstance(active_by, dict):
-                            # 병렬: 끝난 레일만 비움 — 타 레일 active 유지
                             try:
                                 active_by[_active_store_key] = {}
                             except Exception:
                                 active_by[str(scr_i)] = {}
                     except Exception:
                         pass
-                    if bool((job or {}).get("has_renewal")):
-                        try:
-                            src_by = getattr(ext, "_sim_post_anim_src_by_screen", None)
-                            if isinstance(src_by, dict):
-                                src_by.pop(str(scr_i), None)
-                        except Exception:
-                            pass
+                    try:
+                        if pause_evt is not None:
+                            pause_evt.clear()
+                    except Exception:
+                        pass
+                    try:
+                        until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
+                        if isinstance(until_by, dict):
+                            until_by[str(scr_i)] = None
+                    except Exception:
+                        pass
                     _done_rail = None
                     try:
                         from .sim_parallel_rails import (
@@ -1507,6 +1541,83 @@ def _execute_mapped_sequence_stub(
                         notify_anim_finished(ext, int(scr_i))
                     except Exception:
                         pass
+
+                    # 2) pending 다음 job 기동 (슬롯 해제 후이므로 START 가능)
+                    pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                    pending = []
+                    _pq_key = str(scr_i)
+                    try:
+                        from .sim_parallel_rails import (
+                            parallel_moves_enabled,
+                            rail_from_job_or_payload,
+                            rail_queue_key,
+                        )
+
+                        if parallel_moves_enabled():
+                            _pq_key = rail_queue_key(
+                                scr_i, rail_from_job_or_payload(job)
+                            )
+                    except Exception:
+                        _pq_key = str(scr_i)
+                    if isinstance(pending_by, dict):
+                        pending = pending_by.get(_pq_key, []) or []
+                    if isinstance(pending, list) and pending:
+                        try:
+                            pending.sort(
+                                key=lambda j: int((j or {}).get("_priority", 10))
+                                if isinstance(j, dict)
+                                else 10
+                            )
+                        except Exception:
+                            pass
+                        nxt = pending.pop(0)
+                        if isinstance(pending_by, dict):
+                            pending_by[_pq_key] = pending
+                        try:
+                            from . import sim_multi_diag as _mdiag
+
+                            _mdiag.log_anim_done(
+                                ext,
+                                screen=scr_i,
+                                file_name=str((job or {}).get("file", "") or ""),
+                                pending_left=len(pending),
+                                next_file=str((nxt or {}).get("file", "") or ""),
+                            )
+                        except Exception:
+                            pass
+                        # start_job_impl 직행 — 슬롯 이미 비움
+                        _fn = getattr(ext, "_sim_json_start_fn", None)
+                        if callable(_fn):
+                            try:
+                                _fn(dict(nxt) if isinstance(nxt, dict) else nxt)
+                            except Exception:
+                                pass
+                        else:
+                            _dispatch_json_anim_job(ext, nxt)
+                        try:
+                            _refresh_sim_progress_from_last(ext, int(scr_i))
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        from . import sim_multi_diag as _mdiag
+
+                        _mdiag.log_anim_done(
+                            ext,
+                            screen=scr_i,
+                            file_name=str((job or {}).get("file", "") or ""),
+                            pending_left=0,
+                            next_file="",
+                        )
+                    except Exception:
+                        pass
+                    if bool((job or {}).get("has_renewal")):
+                        try:
+                            src_by = getattr(ext, "_sim_post_anim_src_by_screen", None)
+                            if isinstance(src_by, dict):
+                                src_by.pop(str(scr_i), None)
+                        except Exception:
+                            pass
                     try:
                         _refresh_sim_progress_from_last(ext, int(scr_i))
                     except Exception:
@@ -1557,6 +1668,9 @@ def _execute_mapped_sequence_stub(
                         "parsed",
                         "has_renewal",
                         "renewal_offset_sec",
+                        "port_sync_sim_time",
+                        "anim_play_start_sim_time",
+                        "anim_play_end_sim_time",
                         "lot_id",
                         "from_port_id",
                         "to_port_id",
@@ -1572,6 +1686,19 @@ def _execute_mapped_sequence_stub(
                         src_r["has_renewal"] = bool(job.get("has_renewal"))
                     if src_r.get("renewal_offset_sec") is None:
                         src_r["renewal_offset_sec"] = job.get("renewal_offset_sec")
+                    if not str(src_r.get("port_sync_sim_time") or "").strip():
+                        if job.get("port_sync_sim_time") is not None:
+                            src_r["port_sync_sim_time"] = job.get("port_sync_sim_time")
+                    if not str(src_r.get("anim_play_start_sim_time") or "").strip():
+                        if job.get("anim_play_start_sim_time") is not None:
+                            src_r["anim_play_start_sim_time"] = job.get(
+                                "anim_play_start_sim_time"
+                            )
+                        elif active_r.get("_json_run_start_sim") is not None:
+                            src_r["anim_play_start_sim_time"] = str(
+                                active_r.get("_json_run_start_sim")
+                            )
+                            src_r["_json_run_start_sim"] = active_r.get("_json_run_start_sim")
                 src_r["event"] = _normalize_anim_event_seq(
                     str(src_r.get("event") or src_r.get("event_seq") or "")
                 )
@@ -1811,6 +1938,13 @@ def _execute_mapped_sequence_stub(
                         pass
 
             active["_json_run_fn"] = _run_json_sequence
+            # run_fn 준비됨 → lead/즉시 기동 슬롯 점유 확정
+            active["_json_pending_sim_start"] = bool(_playback)
+            try:
+                if isinstance(active_by, dict):
+                    active_by[_active_store_key] = active
+            except Exception:
+                pass
 
             # 배속>1일 때: 단일 화면에서만 애니·sim tick 동기를 위해 pause 사용.
             # 분할 N>1에서는 한 화면 애니가 다른 화면 엔진 틱까지 멈추어 공정시간·막대가 끊겨 보이므로 적용하지 않는다.
@@ -1862,6 +1996,22 @@ def _execute_mapped_sequence_stub(
             "est_total": float(est_total) if isinstance(est_total, (float, int)) else None,
             # simulation_engine 이벤트 payload의 공정시간(=proc_sec) — JSON이 더 길면 여기 기반으로 배속 처리한다.
             "proc_sec": str(payload.get("proc_sec", "") or "").strip(),
+            "anim_sec": str(payload.get("anim_sec", "") or "").strip(),
+            # 프리런 SSOT: 애니 시작/종료 시각 (재생 시 lead 재계산 금지)
+            "anim_play_start_sim_time": str(
+                payload.get("anim_play_start_sim_time", "") or ""
+            ).strip(),
+            "anim_play_end_sim_time": str(
+                payload.get("anim_play_end_sim_time", "") or ""
+            ).strip(),
+            "event_start_sim_time": str(
+                payload.get("event_start_sim_time", "") or sim_time or ""
+            ).strip(),
+            "wall_sec": str(payload.get("wall_sec", "") or "").strip(),
+            "event_end_sim_time": str(payload.get("event_end_sim_time", "") or "").strip(),
+            "anim_queue_delay_sec": str(
+                payload.get("anim_queue_delay_sec", "") or ""
+            ).strip(),
             "runner": runner,
             "rule": rule_name or "-",
             "lot_id": lot_id,
@@ -1877,9 +2027,36 @@ def _execute_mapped_sequence_stub(
         try:
             from .json_playback_timing import renewal_info_from_steps
 
-            _has_r, _r_off = renewal_info_from_steps(parsed)
-            job["has_renewal"] = bool(_has_r)
-            job["renewal_offset_sec"] = _r_off
+            # SSOT: 프리런 has_renewal / renewal_offset / port_sync 우선 (JSON 재파싱 금지)
+            _ssot_job = False
+            try:
+                from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                _ssot_job = bool(SIM_PRERUN_PLAN_SSOT)
+            except Exception:
+                _ssot_job = False
+            _hr_pl = payload.get("has_renewal")
+            _ro_pl = payload.get("renewal_offset_sec")
+            if _ssot_job and (
+                _hr_pl is True
+                or str(_hr_pl or "").strip().lower() in ("1", "true", "yes")
+                or (str(_ro_pl or "").strip() not in ("", "0", "0.0", "0.00"))
+            ):
+                job["has_renewal"] = True
+                try:
+                    job["renewal_offset_sec"] = float(str(_ro_pl).strip() or "0")
+                except Exception:
+                    job["renewal_offset_sec"] = None
+            elif _ssot_job and str(payload.get("port_sync_sim_time") or "").strip():
+                # port_sync 만 있고 renewal 플래그 없으면 애니 종료 sync (재파싱 없이)
+                job["has_renewal"] = False
+                job["renewal_offset_sec"] = None
+            else:
+                _has_r, _r_off = renewal_info_from_steps(parsed)
+                job["has_renewal"] = bool(_has_r)
+                job["renewal_offset_sec"] = _r_off
+            if str(payload.get("port_sync_sim_time") or "").strip():
+                job["port_sync_sim_time"] = str(payload.get("port_sync_sim_time")).strip()
         except Exception:
             job["has_renewal"] = False
             job["renewal_offset_sec"] = None
@@ -1930,12 +2107,15 @@ def _execute_mapped_sequence_stub(
         except Exception:
             pass
         # 화면별(또는 병렬 시 레일별) runner busy
+        # SSOT: anim_play_start lead 대기도 슬롯 점유 — runner idle 이라도 덮어쓰기 금지
         runner_busy = False
         _pending_key = str(_scr)
+        _slot_rail = None
         try:
             from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
 
             if parallel_moves_enabled() and job.get("sim_rail"):
+                _slot_rail = str(job.get("sim_rail") or "").strip().lower() or None
                 _pending_key = rail_queue_key(_scr, str(job.get("sim_rail")))
                 runners_r = getattr(ext, "_sim_runners_by_screen_rail", None)
                 rr = runners_r.get(_pending_key) if isinstance(runners_r, dict) else None
@@ -1948,6 +2128,14 @@ def _execute_mapped_sequence_stub(
                 runner_busy = bool(rr is not None and getattr(rr, "is_running", lambda: False)())
         except Exception:
             runner_busy = False
+        if not runner_busy:
+            try:
+                from .control_sim_playback_gate import is_json_anim_slot_held
+
+                if is_json_anim_slot_held(ext, int(_scr), rail=_slot_rail):
+                    runner_busy = True
+            except Exception:
+                pass
         if runner_busy:
             try:
                 from . import sim_multi_diag as _mdiag
@@ -2734,7 +2922,7 @@ def _ensure_sim_monitor_window_shell(ext: Any, screen: int) -> None:
     foup_inners = _screen_dict(ext, "_sim_foup_inner_stack_by_screen")
     split_hosts = _screen_dict(ext, "_sim_monitor_split_host_by_screen")
 
-    win = ui.Window(title, width=650, height=620)
+    win = ui.Window(title, width=650, height=760)
     with win.frame:
         with ui.VStack(spacing=0, height=ui.Fraction(1.0)):
             with ui.Frame(style={"background_color": 0xFF1E2530}, height=ui.Fraction(1.0)):
@@ -3370,9 +3558,47 @@ def _ep_occ_timeline_layout_dims(ext: Any) -> Tuple[int, int, int, int, int]:
 
 
 _BAR_GRAPH_COPY_ROW_H = 26
-# 진행현황 패널 — 직렬형 본문 + 보조공정·애니 footer 가 스크롤 없이 들어가도록
-_SIM_PROGRESS_FRAME_H = 248
-_SIM_PROGRESS_LABEL_H = 236
+# 진행현황 패널 — 동시공정·애니대기큐 등 본문이 스크롤 없이 보이도록
+_SIM_PROGRESS_FRAME_H = 360
+_SIM_PROGRESS_LABEL_H = 348
+_SIM_PROGRESS_PLAYING_H = 40
+# 재생 중 애니 강조 (FOUP RUNNING 과 동일 계열)
+_PROGRESS_PLAYING_COLOR = 0xFF7CFC00
+_PROGRESS_PLAYING_IDLE_COLOR = 0xFF6A7380
+
+
+def _set_channel_progress_playing_label(ch: Dict[str, Any], playing_text: str) -> None:
+    """진행현황 상단 — 재생 중 애니 녹색 라벨."""
+    if not isinstance(ch, dict):
+        return
+    lbl = ch.get("progress_playing_label")
+    if lbl is None:
+        return
+    txt = str(playing_text or "").strip()
+    try:
+        if txt:
+            lbl.text = txt
+            lbl.style = {"color": int(_PROGRESS_PLAYING_COLOR), "font_size": 13}
+        else:
+            lbl.text = ""
+            lbl.style = {"color": int(_PROGRESS_PLAYING_IDLE_COLOR), "font_size": 12}
+    except Exception:
+        try:
+            lbl.text = txt
+        except Exception:
+            pass
+
+
+def _channel_progress_playing_text(ch: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(ch, dict):
+        return ""
+    lbl = ch.get("progress_playing_label")
+    if lbl is None:
+        return ""
+    try:
+        return str(lbl.text or "").strip()
+    except Exception:
+        return ""
 
 
 def _sim_channel_upper_height(ext: Any) -> int:
@@ -3570,12 +3796,25 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
                     },
                 )
                 with ch["progress_frame"]:
-                    ch["progress_label"] = ui.Label(
-                        "",
-                        word_wrap=True,
-                        height=int(_SIM_PROGRESS_LABEL_H),
-                        style={"color": 0xFFFFFFFF},
-                    )
+                    with ui.VStack(spacing=2):
+                        ch["progress_playing_label"] = ui.Label(
+                            "",
+                            word_wrap=True,
+                            height=int(_SIM_PROGRESS_PLAYING_H),
+                            style={
+                                "color": int(_PROGRESS_PLAYING_IDLE_COLOR),
+                                "font_size": 13,
+                            },
+                        )
+                        ch["progress_label"] = ui.Label(
+                            "",
+                            word_wrap=True,
+                            height=max(
+                                80,
+                                int(_SIM_PROGRESS_LABEL_H) - int(_SIM_PROGRESS_PLAYING_H) - 4,
+                            ),
+                            style={"color": 0xFFFFFFFF},
+                        )
                     ch["progress_ep_timeline_host"] = None
                     ch["progress_ep_timeline_widget"] = None
     try:
@@ -3587,6 +3826,7 @@ def _create_sim_monitor_channel_column(ext: Any, screen: int) -> Dict[str, Any]:
     except Exception:
         pass
     ch["progress_label"].text = "[진행현황] 없음" if screen == 1 else f"[진행현황·화면{screen}] 없음"
+    _set_channel_progress_playing_label(ch, "")
     return ch
 
 
@@ -4505,21 +4745,18 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
     if bool(getattr(ext, "_sim_playback_started", False)):
         if not bool(getattr(ext, "_sim_playback_plan_panel_apply", False)):
             return
-    # 중요(포트상태 "전부 비어버림" 방지):
-    # occ가 빈 dict로 들어오면 _port_cell_text 기본값이 "-"가 되어 포트상태가 통째로 비어 보인다.
-    # 타임라인 재생/프리런 플레이백에서 간헐적으로 occ가 누락/빈 값이 들어올 수 있으므로,
-    # 이 경우에는 마지막 스냅샷으로 폴백하고, 폴백도 없으면 UI를 덮어쓰지 않는다.
-    if not occ:
-        try:
-            by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-            if isinstance(by_prev, dict):
-                occ_prev = by_prev.get(str(int(screen) if int(screen) > 0 else 1))
-                if isinstance(occ_prev, dict) and occ_prev:
-                    occ = dict(occ_prev)
-        except Exception:
-            pass
-        if not occ:
-            return
+    # SSOT: 항상 완전 맵으로 그린다 (누락 키 → '-' 로 EP/BP 가 사라지는 버그 방지)
+    occ = _coerce_full_port_occ(ext, scr_i, occ)
+    if not any(str(v or "").strip() for v in occ.values()) and not occ:
+        return
+    try:
+        by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_last_ports_occupancy_by_screen = by
+        by[str(scr_i)] = dict(occ)
+    except Exception:
+        pass
     ch: Optional[Dict[str, Any]] = None
     chans = getattr(ext, "_sim_monitor_channels", None)
     if isinstance(chans, list) and len(chans) > 0:
@@ -4603,6 +4840,64 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
 
 
 _PANEL_PORT_KEYS = ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")
+
+
+def _blank_full_port_occ() -> Dict[str, str]:
+    return {str(k): "" for k in _PANEL_PORT_KEYS}
+
+
+def _coerce_full_port_occ(ext: Any, screen: int, occ: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """포트 패널 SSOT용 완전 맵.
+
+    누락 키를 '-'로 그리지 않도록, 항상 INOUT~EP3 키를 채운다.
+    우선순위: 입력 occ 값 → 화면 last 스냅샷 → 빈 문자열.
+    """
+    out = _blank_full_port_occ()
+    scr = max(1, int(screen))
+    try:
+        by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        prev = by_prev.get(str(scr)) if isinstance(by_prev, dict) else None
+        if isinstance(prev, dict):
+            for k in _PANEL_PORT_KEYS:
+                raw = prev.get(k)
+                if raw is None:
+                    raw = prev.get(k.lower()) if hasattr(k, "lower") else None
+                s = str(raw or "").strip()
+                if s.upper() in ("EMPTY", "-", "NONE"):
+                    out[k] = ""
+                else:
+                    out[k] = s
+    except Exception:
+        pass
+    if isinstance(occ, dict):
+        for k, v in occ.items():
+            try:
+                ck = _canonical_sim_port_key(str(k or ""))
+            except Exception:
+                ck = str(k or "").strip().upper()
+            if ck not in out:
+                continue
+            s = str(v or "").strip()
+            if s.upper() in ("EMPTY", "-", "NONE"):
+                out[ck] = ""
+            else:
+                out[ck] = s
+    return out
+
+
+def _store_full_port_occ(ext: Any, screen: int, occ: Dict[str, Any]) -> Dict[str, str]:
+    """완전 맵을 last 스냅샷에 저장하고 반환."""
+    scr = max(1, int(screen))
+    full = _coerce_full_port_occ(ext, scr, occ if isinstance(occ, dict) else {})
+    try:
+        by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_last_ports_occupancy_by_screen = by
+        by[str(scr)] = dict(full)
+    except Exception:
+        pass
+    return full
 
 
 def _ports_occ_is_complete_snapshot(occ: Dict[str, Any]) -> bool:
@@ -4753,6 +5048,7 @@ def _apply_playback_bar_to_channel(
     state: Any,
     *,
     t_fallback: float = 0.0,
+    honor_explicit: bool = False,
 ) -> None:
     """재생 막대 — ``PlaybackUIState`` 또는 legacy fallback 으로 채널에 렌더."""
     try:
@@ -4772,7 +5068,7 @@ def _apply_playback_bar_to_channel(
                 ch,
                 dict(getattr(state, "ports", {}) or {}),
                 f"{float(state.axes.t_display):.2f}",
-                honor_explicit_sim_time=False,
+                honor_explicit_sim_time=bool(honor_explicit),
                 playback_ui_state=state,
             )
             if ch.get("ep_timeline_widget") is not None:
@@ -4790,7 +5086,7 @@ def _apply_playback_bar_to_channel(
             ch,
             {},
             f"{float(t_fallback):.2f}",
-            honor_explicit_sim_time=False,
+            honor_explicit_sim_time=bool(honor_explicit),
             playback_ui_state=None,
         )
     except Exception:
@@ -4893,13 +5189,9 @@ def _sync_port_panel_from_engine_occ(
     )
     if not occ_m or not any((k in occ_m) for k in _PANEL_PORT_KEYS):
         return
+    occ_full = _store_full_port_occ(ext, scr, occ_m)
     try:
-        if isinstance(by_prev, dict):
-            by_prev[str(scr)] = dict(occ_m)
-    except Exception:
-        pass
-    try:
-        _update_port_occupancy_panel(ext, occ_m, str(sim_time or ""), screen=scr)
+        _update_port_occupancy_panel(ext, occ_full, str(sim_time or ""), screen=scr)
     except Exception:
         pass
 
@@ -6539,6 +6831,16 @@ def _prepare_playback_emit_environment(
             _clear_playback_json_job_queues(ext)
     except Exception:
         pass
+    # JSON 애니 슬롯(active lead·pending) — 잔류 시 전 job QUEUE 고착
+    try:
+        from .control_sim_playback_gate import clear_playback_anim_slots
+
+        if scope_screens_only and scoped:
+            clear_playback_anim_slots(ext, screens=scoped)
+        else:
+            clear_playback_anim_slots(ext)
+    except Exception:
+        pass
     try:
         if scope_screens_only and scoped:
             foup_by = getattr(ext, "_sim_foup_playback_last_by_screen", None)
@@ -6631,6 +6933,7 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
             # 재생 포트는 프리런 plan SSOT — rail hold 로 plan 을 덮지 않는다
             # (live 보정은 BP↔INOUT 점프 원인이었음)
             # proc_wait: JSON wall 이 먼저 풀려도 공정 종료 전 다음 gated emit 금지
+            # SSOT: wall_sec / event_end 우선 (애니 큐로 wall 이 proc 보다 길 수 있음)
             try:
                 t0 = float(
                     str(
@@ -6642,11 +6945,26 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
                     or "0"
                 )
                 proc = float(str(pl.get("proc_sec") or "0").strip() or "0")
-                if proc > 1e-9:
+                gate_end = float(t0) + float(proc) if proc > 1e-9 else 0.0
+                try:
+                    from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                    if bool(SIM_PRERUN_PLAN_SSOT):
+                        end_s = float(
+                            str(pl.get("event_end_sim_time") or "").strip() or "0"
+                        )
+                        wall_s = float(str(pl.get("wall_sec") or "").strip() or "0")
+                        if end_s > 1e-9:
+                            gate_end = float(end_s)
+                        elif wall_s > 1e-9:
+                            gate_end = float(t0) + float(wall_s)
+                except Exception:
+                    pass
+                if gate_end > 1e-9:
                     try:
-                        set_proc_gate_end(ext, scr, float(t0) + float(proc), rail=_rail)
+                        set_proc_gate_end(ext, scr, float(gate_end), rail=_rail)
                     except TypeError:
-                        set_proc_gate_end(ext, scr, float(t0) + float(proc))
+                        set_proc_gate_end(ext, scr, float(gate_end))
             except Exception:
                 pass
         try:
@@ -6686,6 +7004,23 @@ def _deliver_playback_timeline_emit(ext: Any, kind: str, payload: Any, screen: i
                                         break
                     except Exception:
                         queued_json = False
+                    # 직렬 애니 pending (_sim_anim_pending_by_screen) 도 wall 유지
+                    if not queued_json:
+                        try:
+                            from .sim_parallel_rails import (
+                                parallel_moves_enabled,
+                                rail_queue_key,
+                            )
+
+                            pend_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                            pk = str(scr)
+                            if bool(parallel_moves_enabled()) and _rail:
+                                pk = rail_queue_key(scr, str(_rail))
+                            plst = pend_by.get(pk) if isinstance(pend_by, dict) else None
+                            if isinstance(plst, list) and len(plst) > 0:
+                                queued_json = True
+                        except Exception:
+                            pass
                     _par_wall = False
                     try:
                         _par_wall = bool(parallel_moves_enabled()) and bool(_rail)
@@ -6914,6 +7249,40 @@ def _apply_playback_step_progress_from_sim(
             pass
     if proc <= 1e-9:
         return
+    # SSOT: sim_now - t0 만으로 보간 (wall remap 금지). end>t0 일 때만 DONE.
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            end_s = 0.0
+            try:
+                end_s = float(str(p3.get("event_end_sim_time") or "").strip() or "0")
+            except Exception:
+                end_s = 0.0
+            if end_s <= float(t0) + 1e-6:
+                try:
+                    wall_s = float(str(p3.get("wall_sec") or "").strip() or "0")
+                except Exception:
+                    wall_s = 0.0
+                if wall_s > 1e-9:
+                    end_s = float(t0) + float(wall_s)
+            wall_span = max(float(proc), max(0.0, float(end_s) - float(t0)) if end_s > float(t0) else float(proc))
+            if end_s > float(t0) + 1e-6 and float(tnow) + 1e-6 >= float(end_s):
+                p3["elapsed"] = f"{wall_span:.1f}"
+                p3["total"] = f"{wall_span:.1f}"
+                p3["percent"] = "100"
+                p3["status"] = "DONE"
+                p3["sim_time"] = f"{float(tnow):.2f}"
+                return
+            el = max(0.0, min(float(wall_span), float(tnow) - float(t0)))
+            pct = min(100.0, 100.0 * el / float(wall_span)) if wall_span > 1e-9 else 0.0
+            p3["elapsed"] = f"{el:.1f}"
+            p3["total"] = f"{wall_span:.1f}"
+            p3["percent"] = str(int(pct))
+            p3["status"] = "RUNNING"
+            return
+    except Exception:
+        pass
     t_prog = float(tnow)
     try:
         from .json_playback_timing import (
@@ -7066,9 +7435,17 @@ def _should_apply_playback_timeline_progress(
     재생 중 타임라인 progress emit — JSON wall 이 켜진 레일에서는 active job 만 반영.
 
     ``sim_now`` 선행으로 arrived_inout progress 가 arrived_ep2 JSON 중에 덮어쓰는 것을 막는다.
+    ``SIM_PRERUN_PLAN_SSOT``: 프리런 progress 는 시각대로 모두 반영 (wall 매칭 재게이트 금지).
     """
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return True
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            return True
+    except Exception:
+        pass
     ev_u = str(payload.get("event_seq") or payload.get("sequence_name") or "").strip().upper()
     if ev_u == "FOUP_PROCESS":
         return True
@@ -7174,9 +7551,11 @@ def _sim_ui_sink_progress(ext: Any, payload: Dict[str, Any]) -> None:
     _update_sim_progress(ext, p)
     if playback_tick:
         return
-    # progress payload의 ports_occupancy — 재생(plan) 중에는 sim milestone replay 만.
+    # progress payload의 ports_occupancy — 포트 패널 SSOT 는 애니 milestone 만.
     occ = p.get("ports_occupancy", {})
-    _skip_prog_occ = bool(_renewal_json_guard_active(ext, scr))
+    _skip_prog_occ = bool(_skip_progress_ports_occ_for_panel(ext, p if isinstance(p, dict) else {}))
+    if not _skip_prog_occ:
+        _skip_prog_occ = bool(_renewal_json_guard_active(ext, scr))
     if bool(getattr(ext, "_sim_playback_started", False)):
         try:
             from .control_sim_playback_plan import playback_plan_active
@@ -7447,8 +7826,50 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
                 occ = dict(occ_prev)
     except Exception:
         pass
-    # PORT_OCC_REFRESH: 재생 중에는 last-occ 도 쓰지 않음(잘못된 screen 오염 방지). live 만 반영.
+    # PORT_OCC_REFRESH: 재생 중에는 live occ 로 패널을 덮지 않고 plan lookup 만.
     if seq_u == "PORT_OCC_REFRESH" and bool(getattr(ext, "_sim_playback_started", False)):
+        try:
+            from .control_sim_playback_plan import (
+                mark_playback_renewal_wall_applied,
+                playback_plan_active,
+                refresh_playback_display_at_sim,
+            )
+
+            if playback_plan_active(ext, scr):
+                t_ev = 0.0
+                try:
+                    t_ev = float(str(p.get("sim_time") or "").strip() or "0")
+                except Exception:
+                    t_ev = 0.0
+                # active renewal JSON 의 port_sync 키프레임이면 floor 유지
+                try:
+                    act = _screen_active_json_job(ext, scr)
+                    if isinstance(act, dict) and bool(act.get("has_renewal")) and t_ev > 1e-9:
+                        pst = 0.0
+                        try:
+                            pst = float(str(act.get("port_sync_sim_time") or "").strip() or "0")
+                        except Exception:
+                            pst = 0.0
+                        if pst > 1e-9 and abs(float(t_ev) - float(pst)) <= 0.51:
+                            mark_playback_renewal_wall_applied(
+                                ext,
+                                scr,
+                                dict(act),
+                                sync_t=float(pst),
+                                delta=None,
+                                pre_occ=None,
+                            )
+                except Exception:
+                    pass
+                refresh_playback_display_at_sim(
+                    ext,
+                    scr,
+                    float(t_ev) if t_ev > 1e-9 else None,
+                    force=True,
+                    explicit=bool(t_ev > 1e-9),
+                )
+        except Exception:
+            pass
         return
     try:
         if (
@@ -7462,7 +7883,7 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
         pass
 
     if seq_u == "PORT_OCC_REFRESH":
-        # 프리런 재생: 포트·visibility 는 plan milestone replay 만.
+        # 프리런 재생: 위에서 plan refresh 후 return.
         if bool(getattr(ext, "_sim_playback_started", False)):
             return
         # renewal JSON: renewal 시점에만 갱신 — 공정 종료 PORT_OCC_REFRESH 는 생략.
@@ -7503,26 +7924,10 @@ def _sim_ui_sink_anim_event(ext: Any, payload: Dict[str, Any], panel_mode: SimLo
         _update_port_occupancy_panel(ext, occ, str(p.get("sim_time", "")), screen=scr)
         return
 
-    # 일반 애니: JSON 매핑·실행 후 renewal 이 아니면 패널만 동기화(visibility 는 renewal/종료 시)
+    # 일반 애니: JSON 매핑·실행. 포트 패널은 애니 milestone(renewal/json-end)만 —
+    # 이벤트 emit 시점 엔진 occ 로 패널을 덮지 않는다 (LOT 깜빡임/소실 원인).
     verbose = panel_mode != SimLogPanelMode.PROGRESS_ONLY
     handle_sim_event_for_animation(ext, p, verbose=verbose)
-    if (
-        _is_anim_port_event(seq_u)
-        and (not _should_defer_port_occ_sync_for_renewal(ext, scr))
-        and (not _anim_mapped_json_has_renewal(ext, p, seq_u))
-        and (not bool(getattr(ext, "_sim_playback_started", False)))
-    ):
-        try:
-            _sync_port_panel_from_engine_occ(
-                ext,
-                scr,
-                occ,
-                str(p.get("sim_time", "") or ""),
-                allow_post_anim_block=False,
-                seq_u=seq_u,
-            )
-        except Exception:
-            pass
     try:
         _sync_all_ep_occ_timelines_from_engines(ext)
     except Exception:
@@ -7879,6 +8284,44 @@ def _is_anim_port_event(ev: str) -> bool:
     return _normalize_anim_event_seq(ev) in _ANIM_PORT_UPDATE_SEQS
 
 
+def _skip_progress_ports_occ_for_panel(ext: Any, p: Dict[str, Any]) -> bool:
+    """포트 패널 SSOT: 애니 milestone(renewal/json-end/plan)만 반영.
+
+    공정 병렬·프리런 SSOT 모드에서는 RUNNING progress 의 ports_occupancy 가
+    mid-process/시작시점 스냅샷으로 패널을 덮어 깜빡임/소실이 난다 → 항상 skip.
+    linked_anim 이 있는 RUNNING 도 동일(애니 종료/renewal 에서만 갱신).
+    """
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            return True
+    except Exception:
+        pass
+    try:
+        from .sim_control_defaults import SIM_PROC_PARALLEL_ANIM_SERIAL
+
+        if bool(SIM_PROC_PARALLEL_ANIM_SERIAL):
+            return True
+    except Exception:
+        pass
+    try:
+        if str(p.get("linked_anim_json") or "").strip() and str(p.get("status") or "").upper() == "RUNNING":
+            return True
+    except Exception:
+        pass
+    try:
+        if bool(getattr(ext, "_sim_playback_started", False)):
+            from .control_sim_playback_plan import playback_plan_active
+
+            scr = _resolve_payload_sim_screen(ext, p if isinstance(p, dict) else {})
+            if scr is not None and playback_plan_active(ext, int(scr)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _anim_mapped_json_has_renewal(ext: Any, payload: Dict[str, Any], seq_u: str) -> bool:
     """이벤트에 매핑된 JSON 에 renewal 마커가 있으면 True."""
     try:
@@ -7999,7 +8442,10 @@ def _json_playback_wall_started(ext: Any, screen: int) -> bool:
 
 
 def _poll_playback_sim_aligned_json_starts(ext: Any) -> None:
-    """프리런 재생 — ``sim_now >= t0+json_lead`` 일 때 JSON 러너를 시작한다 (wall Timer 대신)."""
+    """프리런 재생 — ``sim_now >= _json_run_start_sim`` 일 때 JSON 러너 시작.
+
+    SSOT: ``_json_run_start_sim`` = 프리런 ``anim_play_start_sim_time`` (재계산 없음).
+    """
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return
     active_by = getattr(ext, "_sim_anim_active_by_screen", None)
@@ -8369,27 +8815,20 @@ def _try_apply_port_state_after_json_anim(
         return False
 
     last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-    occ_now: Dict[str, Any] = {}
-    if isinstance(last_by, dict) and isinstance(last_by.get(str(scr)), dict):
-        occ_now = dict(last_by.get(str(scr)) or {})
-
+    # SSOT: last 완전 맵을 베이스로, 애니 from/to 델타만 적용 (sparse 덮어쓰기 금지)
+    occ_now = _coerce_full_port_occ(ext, scr, {})
     by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
     lp = by_lp.get(str(scr)) if isinstance(by_lp, dict) else None
     sim_t = str((lp or {}).get("sim_time", "") or "") if isinstance(lp, dict) else str(src.get("sim_time", "") or "")
     active_ep = _remember_foup_active_ep(ext, scr, lp if isinstance(lp, dict) else src)
-    occ_pred = _predict_ports_occupancy_after_anim(occ_now, src)
-
-    try:
-        if isinstance(last_by, dict):
-            last_by[str(scr)] = dict(occ_pred)
-    except Exception:
-        pass
+    occ_pred = _predict_ports_occupancy_after_anim(dict(occ_now), src)
+    occ_full = _store_full_port_occ(ext, scr, occ_pred)
 
     try:
         _apply_sim_event_state_only(
             ext,
             {
-                "ports_occupancy": dict(occ_pred),
+                "ports_occupancy": dict(occ_full),
                 "sim_time": sim_t,
                 "foup_proc_active_ep": active_ep,
             },
@@ -8608,16 +9047,109 @@ def _refresh_foup_playback_heartbeat(ext: Any, screen: int, tnow: float) -> None
     프리런 재생 heartbeat — 타임라인 FOUP progress 항목 사이에서 EP별 FOUP 라벨을 sim_now 로 보간.
 
     FOUP 공정 시간(설정 proc_sec·단계별 +Y/-Y)은 **현재 MOVE/ARRIVED 이벤트와 별개**이다.
+    SSOT: 플랜 wall_end 지나면 즉시 대기(완료)로 되돌린다.
     """
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return
+    scr = max(1, int(screen))
+    t = float(tnow)
+
+    # SSOT: 플랜 기준 EP별 FOUP 라벨
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+        from .prerun_plan_adapt import get_prerun_plan_for_screen
+
+        if bool(SIM_PRERUN_PLAN_SSOT):
+            plan = get_prerun_plan_for_screen(ext, scr)
+            if plan is not None:
+                chans = getattr(ext, "_sim_monitor_channels", None)
+                if isinstance(chans, list) and 0 < scr <= len(chans):
+                    ch = chans[scr - 1]
+                    if isinstance(ch, dict):
+                        labels = ch.get("foup_progress_labels") or {}
+                        if not _foup_labels_mounted(labels if isinstance(labels, dict) else {}):
+                            labels = _foup_progress_labels_for_screen(ext, ch, scr)
+                        screen_num = int(ch.get("screen", scr) or scr)
+                        active_eps: set = set()
+                        for p in list(getattr(plan, "processes", None) or []):
+                            if str(getattr(p, "kind", "") or "") != "FOUP":
+                                continue
+                            ep = str(getattr(p, "port", "") or "").strip().upper()
+                            if not ep:
+                                continue
+                            t0 = float(getattr(p, "t_start", 0.0) or 0.0)
+                            we = getattr(p, "t_wall_end", None)
+                            if we is None:
+                                we = t0 + float(getattr(p, "proc_sec", 0.0) or 0.0)
+                            we = float(we)
+                            if t + 1e-9 < t0:
+                                continue
+                            if t >= we - 1e-12:
+                                # 완료 → 대기
+                                lbl = labels.get(ep) if isinstance(labels, dict) else None
+                                if lbl is not None:
+                                    _set_foup_progress_label(
+                                        ch,
+                                        ep,
+                                        lbl,
+                                        _foup_label_idle_text(screen_num, ep),
+                                        {"color": 0xFF888888},
+                                    )
+                                _forget_foup_playback_progress(ext, scr, ep)
+                                continue
+                            active_eps.add(ep)
+                            span = max(1e-6, we - t0)
+                            el = max(0.0, min(span, t - t0))
+                            pct = int(min(100.0, 100.0 * el / span))
+                            lot = str(getattr(p, "lot_id", "") or "")
+                            txt = (
+                                f"{ep} FOUP 공정: 진행 | RUNNING {pct}% "
+                                f"({el:.1f}/{span:.1f}) | t={t:.1f} lot={lot}"
+                            )
+                            lbl = labels.get(ep) if isinstance(labels, dict) else None
+                            if lbl is not None:
+                                _set_foup_progress_label(
+                                    ch, ep, lbl, txt, {"color": 0xFF7CFC00}
+                                )
+                            _remember_foup_playback_progress(
+                                ext,
+                                scr,
+                                ep,
+                                {
+                                    "status": "RUNNING",
+                                    "event_seq": "FOUP_PROCESS",
+                                    "port_id": ep,
+                                    "lot_id": lot,
+                                    "event_start_sim_time": f"{t0:.2f}",
+                                    "proc_sec": f"{span:.2f}",
+                                    "elapsed": f"{el:.1f}",
+                                    "percent": str(pct),
+                                    "label": f"FOUP {ep}",
+                                    "sim_time": f"{t:.2f}",
+                                },
+                            )
+                        # 활성 아닌 EP 는 대기
+                        if isinstance(labels, dict):
+                            for ep, lbl in list(labels.items()):
+                                epu = str(ep or "").strip().upper()
+                                if epu and epu not in active_eps and lbl is not None:
+                                    _set_foup_progress_label(
+                                        ch,
+                                        epu,
+                                        lbl,
+                                        _foup_label_idle_text(screen_num, epu),
+                                        {"color": 0xFF888888},
+                                    )
+                        return
+    except Exception:
+        pass
+
     by = getattr(ext, "_sim_foup_playback_last_by_screen", None)
     if not isinstance(by, dict):
         return
-    slot = by.get(str(max(1, int(screen))))
+    slot = by.get(str(scr))
     if not isinstance(slot, dict) or not slot:
         return
-    scr = max(1, int(screen))
     for _ep_id, lp in list(slot.items()):
         if not isinstance(lp, dict):
             continue
@@ -8630,6 +9162,39 @@ def _refresh_foup_playback_heartbeat(ext: Any, screen: int, tnow: float) -> None
         p["sim_time"] = f"{float(tnow):.2f}"
         p["event_seq"] = "FOUP_PROCESS"
         p["_foup_heartbeat_tick"] = "1"
+        # proc 끝났으면 DONE → 라벨 대기로
+        try:
+            t0 = float(str(p.get("event_start_sim_time") or "0").strip() or "0")
+            proc = float(str(p.get("proc_sec") or p.get("total") or "0").strip() or "0")
+        except Exception:
+            t0, proc = 0.0, 0.0
+        if proc > 1e-9 and float(tnow) + 1e-6 >= t0 + proc:
+            p["status"] = "DONE"
+            p["percent"] = "100"
+            p["elapsed"] = f"{proc:.1f}"
+            _update_sim_progress(ext, p)
+            ep = str(_ep_id or "").strip().upper()
+            if ep:
+                try:
+                    chans = getattr(ext, "_sim_monitor_channels", None)
+                    if isinstance(chans, list) and 0 < scr <= len(chans):
+                        ch = chans[scr - 1]
+                        if isinstance(ch, dict):
+                            labels = ch.get("foup_progress_labels") or {}
+                            lbl = labels.get(ep) if isinstance(labels, dict) else None
+                            if lbl is not None:
+                                screen_num = int(ch.get("screen", scr) or scr)
+                                _set_foup_progress_label(
+                                    ch,
+                                    ep,
+                                    lbl,
+                                    _foup_label_idle_text(screen_num, ep),
+                                    {"color": 0xFF888888},
+                                )
+                except Exception:
+                    pass
+                _forget_foup_playback_progress(ext, scr, ep)
+            continue
         if st == "DONE":
             _update_sim_progress(ext, p)
             continue
@@ -9657,6 +10222,7 @@ _RESTART_BUNDLE_ATTRS = (
     "_sim_playback_schedule_by_screen",
     "_sim_playback_plan_by_screen",
     "_sim_playback_plan_initial_occ_by_screen",
+    "_sim_prerun_plan_by_screen",
 )
 
 
@@ -10496,7 +11062,13 @@ def _drain_playback_json_job_queues(ext: Any) -> None:
         except Exception:
             continue
         if not _par:
-            if is_screen_runner_busy(ext, scr):
+            try:
+                from .control_sim_playback_gate import is_json_anim_slot_held
+
+                _held = bool(is_json_anim_slot_held(ext, scr))
+            except Exception:
+                _held = bool(is_screen_runner_busy(ext, scr))
+            if _held:
                 continue
             try:
                 job = q.popleft()
@@ -10521,7 +11093,13 @@ def _drain_playback_json_job_queues(ext: Any) -> None:
             if not isinstance(job, dict):
                 continue
             rail = str(rail_from_job_or_payload(job) or "oht").lower()
-            if rail in started_rails or is_screen_runner_busy(ext, scr, rail=rail):
+            try:
+                from .control_sim_playback_gate import is_json_anim_slot_held
+
+                _rail_held = bool(is_json_anim_slot_held(ext, scr, rail=rail))
+            except Exception:
+                _rail_held = bool(is_screen_runner_busy(ext, scr, rail=rail))
+            if rail in started_rails or _rail_held:
                 rest.append(job)
                 continue
             try:
@@ -11154,6 +11732,20 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
         pass
     proc_sec = str(payload.get("proc_sec", "")).strip()
     anim_sec = str(payload.get("anim_sec", "")).strip()
+    # 애니 초가 0/비어 있으면 linked JSON 길이로 보강 (모니터 표기)
+    try:
+        anim_f = float(str(anim_sec or "0").strip() or "0")
+    except Exception:
+        anim_f = 0.0
+    if anim_f <= 1e-9 and linked_anim:
+        try:
+            from .sim_sequence_duration import estimate_json_file_duration_sec
+
+            est_a = float(estimate_json_file_duration_sec(linked_anim) or 0.0)
+            if est_a > 1e-9:
+                anim_sec = f"{est_a:.2f}"
+        except Exception:
+            pass
     proc_pri = str(payload.get("process_time_priority", "")).strip()
     ep_occ = payload.get("ep_occ", {})
     all_ep_empty = str(payload.get("all_ep_empty", "")).strip()
@@ -11351,6 +11943,9 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                 str(payload.get("sim_total_est_sec", "") or "").strip(),
                 str(payload.get("secondary_label", "") or "").strip(),
                 str(payload.get("secondary_percent", "") or "").strip(),
+                str(payload.get("concurrent_summary", "") or "").strip(),
+                str(payload.get("anim_playing_json", "") or "").strip(),
+                str(payload.get("anim_queue_delay_sec", "") or "").strip(),
             )
             if (
                 not force_ui
@@ -11412,6 +12007,75 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                     aux_line = f"\n[보조공정] {sec_json} | {sec_pct or '0'}%"
     except Exception:
         aux_line = ""
+    concurrent_block = ""
+    playing = ""
+    try:
+        # SSOT: heartbeat 외 경로에서도 동시공정·애니큐 보강
+        try:
+            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+            from .prerun_plan_adapt import enrich_ssot_playback_progress
+
+            if bool(SIM_PRERUN_PLAN_SSOT):
+                t_en = float(str(sim_time or "0").strip() or "0")
+                enrich_ssot_playback_progress(ext, int(panel_slot), payload if isinstance(payload, dict) else {}, t_en)
+        except Exception:
+            pass
+        conc = str(payload.get("concurrent_summary") or "").strip()
+        playing = str(payload.get("anim_playing_json") or "").strip()
+        qdel = str(payload.get("anim_queue_delay_sec") or "").strip()
+        qwait = str(payload.get("anim_queue_waiting") or "").strip()
+        wall = str(payload.get("wall_sec") or "").strip()
+        bits: list = []
+        if conc:
+            bits.append("[동시공정]\n" + conc)
+        # [재생중애니] 는 상단 녹색 라벨로만 표시 (본문 중복 제거)
+        if qwait:
+            bits.append(f"[애니대기큐] {qwait}")
+        elif qdel and qdel not in ("0", "0.0", "0.00"):
+            bits.append(f"[애니큐대기] {qdel}s")
+        if wall and wall not in ("0", "0.0", "0.00"):
+            bits.append(f"[공정wall] {wall}s")
+        if bits:
+            concurrent_block = "\n" + "\n".join(bits)
+    except Exception:
+        concurrent_block = ""
+        playing = ""
+    # 재생 중 애니 — 상단 녹색 강조
+    playing_banner = ""
+    try:
+        playing_name = str(playing or "").strip()
+        if not playing_name:
+            # footer / 런타임에서 보강
+            try:
+                from .progress_step_state import get_anim_runtime, sync_anim_runtime_from_ext
+
+                sync_anim_runtime_from_ext(ext, int(panel_slot))
+                ar = get_anim_runtime(ext, int(panel_slot))
+                if ar.phase == "playing" and ar.current_file:
+                    playing_name = str(ar.current_file or "").strip()
+            except Exception:
+                pass
+        if playing_name:
+            bn = playing_name.replace("\\", "/").split("/")[-1]
+            playing_banner = f"▶ 재생중애니: {bn}"
+    except Exception:
+        playing_banner = ""
+    # 본문 footer 에서 「재생 중」 줄은 녹색 배너로 옮김
+    anim_footer_body = str(anim_footer or "")
+    if playing_banner and anim_footer_body:
+        try:
+            lines_af = [
+                ln
+                for ln in anim_footer_body.splitlines()
+                if "재생 중" not in ln and "(재생 중)" not in ln
+            ]
+            anim_footer_body = "\n".join(lines_af).strip()
+            if anim_footer_body:
+                anim_footer_body = anim_footer_body + "\n"
+            else:
+                anim_footer_body = ""
+        except Exception:
+            pass
     text = (
         f"{head}{total_head} | t(sim)={sim_time}s\n"
         f"{ev_line}"
@@ -11420,8 +12084,9 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
         f"진행률: {percent}% ({elapsed} / {total}s)\n"
         f"{detail}\n"
         f"---\n"
-        f"{anim_footer}"
+        f"{anim_footer_body}"
         f"{aux_line}"
+        f"{concurrent_block}"
     )
     try:
         ext._sim_progress_last_payload = dict(payload)
@@ -11438,6 +12103,7 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
             chp = chans2[pslot_i - 1]
             if isinstance(chp, dict) and chp.get("progress_label") is not None:
                 chp["progress_label"].text = text
+                _set_channel_progress_playing_label(chp, playing_banner)
                 try:
                     _update_progress_ep_timeline_widget(ext, chp, payload if isinstance(payload, dict) else {})
                 except Exception:
@@ -11446,6 +12112,7 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
             chp0 = chans2[0]
             if isinstance(chp0, dict) and chp0.get("progress_label") is not None:
                 chp0["progress_label"].text = text
+                _set_channel_progress_playing_label(chp0, playing_banner)
                 try:
                     _update_progress_ep_timeline_widget(ext, chp0, payload if isinstance(payload, dict) else {})
                 except Exception:
@@ -11455,14 +12122,27 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
     try:
         chans3 = getattr(ext, "_sim_monitor_channels", None)
         if not (isinstance(chans3, list) and len(chans3) > 1) or str(panel_slot or "1").strip() in ("", "1"):
-            ext._sim_progress_text.set_value(text)
+            ext._sim_progress_text.set_value(
+                ((playing_banner + "\n") if playing_banner else "") + text
+            )
     except Exception:
         try:
-            ext._sim_progress_text.set_value(text)
+            ext._sim_progress_text.set_value(
+                ((playing_banner + "\n") if playing_banner else "") + text
+            )
         except Exception:
             pass
     if getattr(ext, "_sim_progress_label", None) is not None:
         ext._sim_progress_label.text = text
+        try:
+            ch0 = None
+            chans_l = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chans_l, list) and chans_l and isinstance(chans_l[0], dict):
+                ch0 = chans_l[0]
+            if ch0 is not None:
+                _set_channel_progress_playing_label(ch0, playing_banner)
+        except Exception:
+            pass
 
 
 def _update_progress_ep_timeline_widget(ext: Any, ch: Dict[str, Any], payload: Dict[str, Any]) -> None:
@@ -12792,6 +13472,10 @@ def on_sim_start_clicked(ext: Any) -> None:
                 pass
             if pl is not None:
                 pl.text = pt
+            try:
+                _set_channel_progress_playing_label(ch, "")
+            except Exception:
+                pass
             if phdr is not None:
                 phdr.text = ph
             cells = ch.get("port_cells") or {}
@@ -12832,6 +13516,12 @@ def on_sim_start_clicked(ext: Any) -> None:
                     pass
             if getattr(ext, "_sim_progress_label", None) is not None:
                 ext._sim_progress_label.text = "[진행현황] 초기화 (시뮬레이션 시작 대기)"
+                try:
+                    chans_p = getattr(ext, "_sim_monitor_channels", None)
+                    if isinstance(chans_p, list) and chans_p and isinstance(chans_p[0], dict):
+                        _set_channel_progress_playing_label(chans_p[0], "")
+                except Exception:
+                    pass
             if getattr(ext, "_sim_port_state_label", None) is not None:
                 ext._sim_port_state_label.text = "[포트상태] 초기화 (이벤트 대기)"
             if getattr(ext, "_sim_port_state_header_label", None) is not None:
@@ -12970,19 +13660,34 @@ def on_sim_start_clicked(ext: Any) -> None:
         pass
     if partial_startup:
         try:
-            active_by = getattr(ext, "_sim_anim_active_by_screen", None)
-            pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
-            for sc in target_screens:
-                sk = str(int(sc))
-                if isinstance(active_by, dict):
-                    active_by[sk] = {}
-                if isinstance(pending_by, dict):
-                    pending_by[sk] = []
+            from .control_sim_playback_gate import clear_playback_anim_slots
+
+            clear_playback_anim_slots(ext, screens=target_screens)
         except Exception:
-            pass
+            try:
+                active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+                pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                for sc in target_screens:
+                    sk = str(int(sc))
+                    if isinstance(active_by, dict):
+                        active_by[sk] = {}
+                    if isinstance(pending_by, dict):
+                        pending_by[sk] = []
+            except Exception:
+                pass
     else:
-        ext._sim_anim_active = {}
-        ext._sim_anim_pending = []
+        try:
+            from .control_sim_playback_gate import clear_playback_anim_slots
+
+            clear_playback_anim_slots(ext)
+        except Exception:
+            ext._sim_anim_active = {}
+            ext._sim_anim_pending = []
+            try:
+                ext._sim_anim_active_by_screen = {}
+                ext._sim_anim_pending_by_screen = {}
+            except Exception:
+                pass
 
     def _interrupt_anim_for_proc_priority(screen: Optional[str] = None) -> None:
         """
@@ -13258,9 +13963,23 @@ def on_sim_start_clicked(ext: Any) -> None:
                 by["1"] = float(te0)
             except Exception:
                 pass
-        if not engine.start():
-            _append_sim_log(ext, "[SIM] 시작 실패")
-            return
+        _ssot_prerun = False
+        try:
+            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+            _ssot_prerun = bool(SIM_PRERUN_PLAN_SSOT)
+        except Exception:
+            _ssot_prerun = False
+        # SSOT 프리런은 엔진 tick 불필요 — start() 생략 (사이드·메모리 절약)
+        if not _ssot_prerun:
+            if not engine.start():
+                _append_sim_log(ext, "[SIM] 시작 실패")
+                return
+        else:
+            try:
+                _append_sim_log(ext, "[SIM] 프리런 SSOT 모드 (엔진 tick 생략)")
+            except Exception:
+                pass
     else:
         from .ebs_case_models import snapshots_for_startup_channels
 
@@ -13358,8 +14077,18 @@ def on_sim_start_clicked(ext: Any) -> None:
             pass
 
         started: List[Any] = []
+        _ssot_prerun_m = False
+        try:
+            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+            _ssot_prerun_m = bool(SIM_PRERUN_PLAN_SSOT)
+        except Exception:
+            _ssot_prerun_m = False
         for eng in engines:
             if eng is None:
+                continue
+            if _ssot_prerun_m:
+                started.append(eng)
                 continue
             if not eng.start():
                 for e2 in started:
@@ -13375,6 +14104,11 @@ def on_sim_start_clicked(ext: Any) -> None:
                 _append_sim_log(ext, "[SIM] 멀티 채널 시작 실패")
                 return
             started.append(eng)
+        if _ssot_prerun_m:
+            try:
+                _append_sim_log(ext, "[SIM] 프리런 SSOT 모드 (멀티 엔진 tick 생략)")
+            except Exception:
+                pass
         # 화면별 EP 타임라인 스케일(총 예상 시간) 선주입
         try:
             by = getattr(ext, "_sim_last_total_est_by_screen", None)
@@ -13578,6 +14312,14 @@ def on_sim_start_clicked(ext: Any) -> None:
                 try:
                     res = prerun_engine_to_timeline(screen=scr, engine=eng)
                     results[int(scr)] = res
+                    try:
+                        from .prerun_plan_adapt import store_prerun_plan_on_ext
+
+                        store_prerun_plan_on_ext(
+                            ext, int(scr), getattr(eng, "_prerun_plan_ssot", None)
+                        )
+                    except Exception:
+                        pass
                 except Exception:
                     continue
             if not partial_set:
@@ -13629,107 +14371,6 @@ def on_sim_start_clicked(ext: Any) -> None:
     ext._sim_thread = th_pr
     th_pr.start()
     return
-
-    def _tick_loop():
-        """
-        단일 스레드 시뮼 tick 루프(분할 1 또는 레거시 경로).
-
-        - ``ext._sim_engines`` 가 비어 있지 않으면 모든 엔진에 동일 ``scaled`` 로 순차 ``tick``(구조상 한 스레드).
-        - ``_sim_tick_pause_event`` 가 켜지면 **전역**으로 tick 을 멈출 수 있다(멀티 N>1 은 별도 worker 사용).
-        - ``confirm_each`` + ``_sim_gate_pause_event`` 이면 게이트 확인 전까지 이 루프가 대기한다.
-        """
-        try:
-            print("[SIM] tick thread 시작", flush=True)
-            last = time.perf_counter()
-            while not stop_evt.is_set():
-                # 애니메이션이 재생 중이면 sim tick을 일시정지
-                pause_evt = getattr(ext, "_sim_tick_pause_event", None)
-                gate_pause_evt = getattr(ext, "_sim_gate_pause_event", None)
-                try:
-                    confirm_each = bool(getattr(ext, "_sim_confirm_each_step_model", None) is not None and ext._sim_confirm_each_step_model.get_value_as_bool())
-                except Exception:
-                    confirm_each = False
-                if not confirm_each and gate_pause_evt is not None and gate_pause_evt.is_set():
-                    try:
-                        gate_pause_evt.clear()
-                    except Exception:
-                        pass
-                if confirm_each and gate_pause_evt is not None and gate_pause_evt.is_set():
-                    time.sleep(0.02)
-                    continue
-                if (not _is_multi_viewport_sim(ext)) and pause_evt is not None and pause_evt.is_set():
-                    # 원칙: JSON 애니메이션이 실제로 진행 중이면(sim 모듈의 활성 상태가 있으면) 절대 tick 재개하지 않는다.
-                    try:
-                        anim_running = bool(
-                            is_translate_animation_running()
-                            or is_rotate_animation_running()
-                            or is_curve_animation_running()
-                            or (getattr(ext, "_sim_runner", None) is not None and getattr(ext._sim_runner, "is_running", lambda: False)())
-                        )
-                    except Exception:
-                        anim_running = True
-                    if anim_running:
-                        time.sleep(0.02)
-                        continue
-
-                    # fail-safe: 추정 시간이 남아있으면 최소한 그동안은 pause 유지
-                    until_wall = getattr(ext, "_sim_tick_pause_until_wall", None)
-                    if isinstance(until_wall, (float, int)) and time.monotonic() < float(until_wall):
-                        time.sleep(0.02)
-                        continue
-
-                    time.sleep(0.02)
-                    continue
-                eng_list = getattr(ext, "_sim_engines", None)
-                if isinstance(eng_list, list) and len(eng_list) > 0:
-                    now = time.perf_counter()
-                    dt = now - last
-                    last = now
-                    dt = max(0.001, min(dt, 0.1))
-                    scaled = dt * speed_value
-                    for sim in eng_list:
-                        if sim is not None:
-                            try:
-                                sim.tick(scaled)
-                            except Exception:
-                                pass
-                    tick_state["count"] += 1
-                    if tick_state["count"] == 1:
-                        print("[SIM] tick 동작 확인 (first tick, multi)", flush=True)
-                    if all(getattr(s, "is_done", False) for s in eng_list if s is not None):
-                        print("[SIM] 멀티 종료 감지", flush=True)
-                        _enqueue_control_action(ext, SimUiControlAction.EXPORT_XLSX.value)
-                        break
-                else:
-                    sim = getattr(ext, "_sim_engine", None)
-                    if sim is None:
-                        break
-                    now = time.perf_counter()
-                    dt = now - last
-                    last = now
-                    dt = max(0.001, min(dt, 0.1))
-                    sim.tick(dt * speed_value)
-                    tick_state["count"] += 1
-                    if tick_state["count"] == 1:
-                        print("[SIM] tick 동작 확인 (first tick)", flush=True)
-                    if sim.is_done:
-                        print("[SIM] 종료 감지", flush=True)
-                        _enqueue_control_action(ext, SimUiControlAction.EXPORT_XLSX.value)
-                        break
-                time.sleep(0.02)
-        except Exception as err:
-            # 원인 파악을 위해 traceback까지 출력한다.
-            try:
-                import traceback
-
-                print(f"[SIM] tick thread 예외: {err}", flush=True)
-                print(traceback.format_exc(), flush=True)
-            except Exception:
-                print(f"[SIM] tick thread 예외: {err}", flush=True)
-
-    th = threading.Thread(target=_tick_loop, name="morph.tbs_control_2.sim_tick", daemon=True)
-    ext._sim_thread = th
-    th.start()
 
 
 def _reset_sim_motion_before_json_run(
@@ -14525,19 +15166,24 @@ def on_sim_stop_clicked(
     except Exception:
         pass
     try:
-        pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
-        if isinstance(pending_by, dict):
-            for k in list(pending_by.keys()):
-                pending_by[k] = []
+        from .control_sim_playback_gate import clear_playback_anim_slots
+
+        clear_playback_anim_slots(ext)
     except Exception:
-        pass
-    try:
-        active_by = getattr(ext, "_sim_anim_active_by_screen", None)
-        if isinstance(active_by, dict):
-            for k in list(active_by.keys()):
-                active_by[k] = {}
-    except Exception:
-        pass
+        try:
+            pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+            if isinstance(pending_by, dict):
+                for k in list(pending_by.keys()):
+                    pending_by[k] = []
+        except Exception:
+            pass
+        try:
+            active_by = getattr(ext, "_sim_anim_active_by_screen", None)
+            if isinstance(active_by, dict):
+                for k in list(active_by.keys()):
+                    active_by[k] = {}
+        except Exception:
+            pass
     try:
         until_by = getattr(ext, "_sim_tick_pause_until_wall_by_screen", None)
         if isinstance(until_by, dict):
@@ -14882,6 +15528,10 @@ def on_sim_reset_clicked(ext: Any) -> None:
                 pass
             if pl is not None:
                 pl.text = pt
+            try:
+                _set_channel_progress_playing_label(ch, "")
+            except Exception:
+                pass
             if phdr is not None:
                 phdr.text = ph
             cells = ch.get("port_cells") or {}
@@ -14925,6 +15575,12 @@ def on_sim_reset_clicked(ext: Any) -> None:
                 pass
         if getattr(ext, "_sim_progress_label", None) is not None:
             ext._sim_progress_label.text = "[진행현황] 없음"
+            try:
+                chans_p = getattr(ext, "_sim_monitor_channels", None)
+                if isinstance(chans_p, list) and chans_p and isinstance(chans_p[0], dict):
+                    _set_channel_progress_playing_label(chans_p[0], "")
+            except Exception:
+                pass
         if getattr(ext, "_sim_port_state_header_label", None) is not None:
             ext._sim_port_state_header_label.text = "[포트상태] 없음"
         cells = getattr(ext, "_sim_port_cells", {}) or {}
@@ -15097,6 +15753,9 @@ def on_copy_sim_progress(ext: Any) -> None:
             hl = ch.get("history_label")
             if pl is not None:
                 pt = str(pl.text or "").strip()
+                play_t = _channel_progress_playing_text(ch)
+                if play_t:
+                    pt = (play_t + "\n" + pt).strip() if pt else play_t
                 if pt:
                     pb.append(f"=== 화면{si} 진행현황 ===\n{pt}")
             if hl is not None:
@@ -15108,6 +15767,14 @@ def on_copy_sim_progress(ext: Any) -> None:
     else:
         if getattr(ext, "_sim_progress_label", None) is not None:
             progress = ext._sim_progress_label.text or ""
+        try:
+            chans_s = getattr(ext, "_sim_monitor_channels", None)
+            if isinstance(chans_s, list) and chans_s and isinstance(chans_s[0], dict):
+                play_t = _channel_progress_playing_text(chans_s[0])
+                if play_t:
+                    progress = (play_t + "\n" + (progress or "")).strip()
+        except Exception:
+            pass
         if not progress.strip() and getattr(ext, "_sim_progress_text", None):
             progress = ext._sim_progress_text.as_string or ""
         if getattr(ext, "_sim_history_label", None) is not None:
