@@ -273,17 +273,7 @@ class SimPlaybackRuntime:
                     pass
         except Exception:
             pass
-        now_wall = time.perf_counter()
-        if multi:
-            for sess in playing:
-                sess.refresh_playback_ui(
-                    ext,
-                    now_wall=now_wall,
-                    progress_sink=progress_sink,
-                    timeline_only_sink=timeline_only_sink,
-                    build_prog_payload=build_prog_payload,
-                    prog_hb_interval=prog_iv,
-                )
+        # 1화면·N화면 동일: emit 후 UI 갱신 (멀티에서 UI 선행 → 막대/포트가 한 틱 늦는 문제 방지)
         for sess in playing:
             sess.emit_due_and_sync(
                 max_emits=max_emits_per_screen,
@@ -296,17 +286,16 @@ class SimPlaybackRuntime:
             _try_release_all_playback_json_walls(ext)
         except Exception:
             pass
-        if not multi:
-            now_wall = time.perf_counter()
-            for sess in playing:
-                sess.refresh_playback_ui(
-                    ext,
-                    now_wall=now_wall,
-                    progress_sink=progress_sink,
-                    timeline_only_sink=timeline_only_sink,
-                    build_prog_payload=build_prog_payload,
-                    prog_hb_interval=prog_iv,
-                )
+        now_wall = time.perf_counter()
+        for sess in playing:
+            sess.refresh_playback_ui(
+                ext,
+                now_wall=now_wall,
+                progress_sink=progress_sink,
+                timeline_only_sink=timeline_only_sink,
+                build_prog_payload=build_prog_payload,
+                prog_hb_interval=prog_iv,
+            )
         if on_after_tick is not None:
             try:
                 on_after_tick(ext)
@@ -345,7 +334,13 @@ def get_sim_playback_player(ext: Any, screen: int) -> Optional[SimTimelinePlayer
             return by.get(int(screen))
         except Exception:
             return None
-    return getattr(ext, "_sim_playback_player", None)
+    # 레거시 단일 플레이어는 화면1 전용 — 화면2+ 에 빌려주면 sim_now/막대가 섞임
+    try:
+        if int(screen) == 1:
+            return getattr(ext, "_sim_playback_player", None)
+    except Exception:
+        return getattr(ext, "_sim_playback_player", None)
+    return None
 
 
 def is_multi_playback_instances(ext: Any) -> bool:

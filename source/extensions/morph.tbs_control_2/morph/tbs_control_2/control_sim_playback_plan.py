@@ -2485,7 +2485,11 @@ def refresh_playback_display_at_sim(
                 pass
 
     try:
-        from .control_window import _apply_playback_bar_to_channel, _render_ep_bar_prerun_at_t
+        from .control_window import (
+            _apply_playback_bar_to_channel,
+            _render_ep_bar_prerun_at_t,
+            _resolve_monitor_channel_for_screen,
+        )
 
         _apply_playback_bar_to_channel(
             ext,
@@ -2494,11 +2498,9 @@ def refresh_playback_display_at_sim(
             t_fallback=float(t_use),
             honor_explicit=bool(explicit),
         )
-        chans = getattr(ext, "_sim_monitor_channels", None)
-        if isinstance(chans, list) and 0 < int(scr) <= len(chans):
-            ch = chans[int(scr) - 1]
-            if isinstance(ch, dict) and ch.get("ep_timeline_widget") is None:
-                _render_ep_bar_prerun_at_t(ext, ch, float(t_use))
+        ch = _resolve_monitor_channel_for_screen(ext, int(scr))
+        if isinstance(ch, dict) and ch.get("ep_timeline_widget") is None:
+            _render_ep_bar_prerun_at_t(ext, ch, float(t_use))
     except Exception:
         pass
 

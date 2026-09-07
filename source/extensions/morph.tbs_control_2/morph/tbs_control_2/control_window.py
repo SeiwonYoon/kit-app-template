@@ -3549,6 +3549,35 @@ def _refresh_all_foup_playback_heartbeats(ext: Any) -> None:
         pass
 
 
+def _refresh_all_ep_bar_playback_heartbeats(ext: Any) -> None:
+    """N>1 재생 — 화면마다 EP 막대/포트 plan replay (화면2만 멈춘 것처럼 보이는 누락 방지)."""
+    if not bool(getattr(ext, "_sim_playback_started", False)):
+        return
+    try:
+        from .control_sim_playback_plan import playback_plan_active, refresh_playback_display_at_sim
+        from .control_sim_screen_playback import iter_sim_playback_players
+
+        for scr, player in iter_sim_playback_players(ext):
+            if player is None:
+                continue
+            si = int(scr)
+            try:
+                if not playback_plan_active(ext, si):
+                    continue
+            except Exception:
+                continue
+            try:
+                tnow = float(player.sim_now(si))
+            except Exception:
+                tnow = 0.0
+            try:
+                refresh_playback_display_at_sim(ext, si, float(tnow))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _rebind_foup_labels_to_channels(ext: Any, channels: List[Dict[str, Any]]) -> None:
     """기존 FOUP 위젯 참조만 채널 dict 에 연결(위젯 재생성·clear 없음)."""
     by = getattr(ext, "_sim_foup_labels_by_screen", None)
@@ -4108,6 +4137,32 @@ def _sim_ui_shell_rebuild_allowed(ext: Any) -> bool:
     return not timetable_rows_locked(ext)
 
 
+def _resolve_monitor_channel_for_screen(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
+    """모니터 채널을 ``ch['screen']`` 으로 찾는다 (위치 인덱스 ``chans[n-1]`` 금지).
+
+    per-screen 창에서 host 누락으로 리스트가 비거나 순서가 어긋나면
+    ``chans[scr-1]`` 은 화면2 막대/포트를 화면1에 쓰거나 갱신을 스킵한다.
+    """
+    try:
+        si = int(screen)
+    except Exception:
+        return None
+    if si <= 0:
+        return None
+    chans = getattr(ext, "_sim_monitor_channels", None)
+    if not isinstance(chans, list):
+        return None
+    for ch in chans:
+        if not isinstance(ch, dict):
+            continue
+        try:
+            if int(ch.get("screen", 0) or 0) == si:
+                return ch
+        except Exception:
+            continue
+    return None
+
+
 def _resolve_timetable_channel_for_screen(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
     """타임테이블 전용 창에 실제로 붙어 있는 채널 dict 를 찾는다."""
     try:
@@ -4119,11 +4174,9 @@ def _resolve_timetable_channel_for_screen(ext: Any, screen: int) -> Optional[Dic
         ch = by.get(str(si))
         if isinstance(ch, dict) and ch.get("timetable_host") is not None:
             return ch
-    chans = getattr(ext, "_sim_monitor_channels", None)
-    if isinstance(chans, list) and 0 < si <= len(chans):
-        cand = chans[si - 1]
-        if isinstance(cand, dict) and cand.get("timetable_host") is not None:
-            return cand
+    cand = _resolve_monitor_channel_for_screen(ext, si)
+    if isinstance(cand, dict) and cand.get("timetable_host") is not None:
+        return cand
     return None
 
 
@@ -5028,15 +5081,7 @@ def _update_port_occupancy_panel(ext: Any, occ: Dict[str, Any], sim_time: str = 
         by[str(scr_i)] = dict(occ)
     except Exception:
         pass
-    ch: Optional[Dict[str, Any]] = None
-    chans = getattr(ext, "_sim_monitor_channels", None)
-    if isinstance(chans, list) and len(chans) > 0:
-        try:
-            si = int(screen)
-        except Exception:
-            si = 1
-        si = max(1, min(len(chans), si))
-        ch = chans[si - 1] if isinstance(chans[si - 1], dict) else None
+    ch = _resolve_monitor_channel_for_screen(ext, scr_i)
     inout = _port_cell_text(occ, "INOUT")
     bp1 = _port_cell_text(occ, "BP1")
     bp2 = _port_cell_text(occ, "BP2")
@@ -5326,10 +5371,7 @@ def _apply_playback_bar_to_channel(
         scr = max(1, int(screen))
     except Exception:
         return
-    chans = getattr(ext, "_sim_monitor_channels", None)
-    if not isinstance(chans, list) or not (0 < scr <= len(chans)):
-        return
-    ch = chans[scr - 1]
+    ch = _resolve_monitor_channel_for_screen(ext, scr)
     if not isinstance(ch, dict):
         return
     if state is not None:
@@ -5400,10 +5442,7 @@ def _flush_renewal_bar_legacy(
 ) -> None:
     """라이브(비-재생) renewal — plan 없을 때 막대만 갱신."""
     scr = max(1, int(screen))
-    chans = getattr(ext, "_sim_monitor_channels", None)
-    if not isinstance(chans, list) or not (0 < scr <= len(chans)):
-        return
-    ch = chans[scr - 1]
+    ch = _resolve_monitor_channel_for_screen(ext, scr)
     if not isinstance(ch, dict):
         return
     occ: Dict[str, Any] = {}
@@ -6836,12 +6875,17 @@ def _sync_all_ep_occ_timelines_from_engines(ext: Any) -> None:
     if not isinstance(last_by, dict):
         last_by = {}
     empty_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
-    for i, ch in enumerate(chans):
+    for ch in chans:
         if not isinstance(ch, dict):
             continue
-        si = i + 1
+        try:
+            si = int(ch.get("screen", 0) or 0)
+        except Exception:
+            continue
+        if si <= 0:
+            continue
         sk = str(si)
-        eng = engs[i] if i < len(engs) else None
+        eng = engs[si - 1] if 0 < si <= len(engs) else None
         if eng is None or bool(getattr(eng, "is_done", False)):
             continue
         t_now = _resolve_ep_timeline_sim_time(ext, si, "")
@@ -8381,17 +8425,17 @@ def _on_sim_bar_preview_toggled(ext: Any) -> None:
     except Exception:
         pass
     try:
-        chans = getattr(ext, "_sim_monitor_channels", None)
         last_by = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-        if not isinstance(chans, list) or not chans:
-            return
         empty_occ = {k: "" for k in ("INOUT", "BP1", "BP2", "BP3", "BP4", "EP1", "EP2", "EP3")}
-        for i, ch in enumerate(chans):
-            if not isinstance(ch, dict):
-                continue
-            si = i + 1
-            player = get_sim_playback_player(ext, si)
+        for scr, player in iter_sim_playback_players(ext):
             if player is None:
+                continue
+            try:
+                si = int(scr)
+            except Exception:
+                continue
+            ch = _resolve_monitor_channel_for_screen(ext, si)
+            if not isinstance(ch, dict):
                 continue
             try:
                 tnow = float(player.sim_now(si))
@@ -10423,8 +10467,8 @@ def _finalize_prerun_ui_assets(
                     rendered = True
                 except Exception:
                     pass
-            if isinstance(chans, list) and 0 < int(si) <= len(chans):
-                ch0 = chans[int(si) - 1]
+            if isinstance(chans, list):
+                ch0 = _resolve_monitor_channel_for_screen(ext, int(si))
                 if isinstance(ch0, dict) and ch0.get("ep_timeline_widget") is None:
                     try:
                         if _render_ep_bar_prerun_at_t(ext, ch0, 0.0, init):
@@ -11068,6 +11112,10 @@ def _tick_playback_timeline(ext: Any) -> None:
     def _after_tick(e: Any) -> None:
         try:
             refresh_all_timetable_highlights(e)
+        except Exception:
+            pass
+        try:
+            _refresh_all_ep_bar_playback_heartbeats(e)
         except Exception:
             pass
         try:
@@ -11838,20 +11886,18 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
                         except Exception:
                             pass
                         try:
-                            chans_tl = getattr(ext, "_sim_monitor_channels", None)
-                            if isinstance(chans_tl, list) and 0 < int(si_tl) <= len(chans_tl):
-                                ch_tl = chans_tl[int(si_tl) - 1]
-                                if isinstance(ch_tl, dict) and ch_tl.get("ep_timeline_widget") is None:
-                                    occ_fb: Dict[str, Any] = {}
-                                    try:
-                                        last_by_fb = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-                                        if isinstance(last_by_fb, dict) and isinstance(
-                                            last_by_fb.get(str(si_tl)), dict
-                                        ):
-                                            occ_fb = dict(last_by_fb.get(str(si_tl)) or {})
-                                    except Exception:
-                                        pass
-                                    _render_ep_bar_prerun_at_t(ext, ch_tl, float(t_bar), occ_fb)
+                            ch_tl = _resolve_monitor_channel_for_screen(ext, int(si_tl))
+                            if isinstance(ch_tl, dict) and ch_tl.get("ep_timeline_widget") is None:
+                                occ_fb: Dict[str, Any] = {}
+                                try:
+                                    last_by_fb = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+                                    if isinstance(last_by_fb, dict) and isinstance(
+                                        last_by_fb.get(str(si_tl)), dict
+                                    ):
+                                        occ_fb = dict(last_by_fb.get(str(si_tl)) or {})
+                                except Exception:
+                                    pass
+                                _render_ep_bar_prerun_at_t(ext, ch_tl, float(t_bar), occ_fb)
                         except Exception:
                             pass
                         try:

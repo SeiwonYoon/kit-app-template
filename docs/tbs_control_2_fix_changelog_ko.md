@@ -13,7 +13,7 @@
 | 2 | 프리런/웹 데이터: 공정 시작 행 + JSON 시작 행(`{EVENT} 동작중`). 기본·`_temp`·웹 slim 동일 |
 | 3 | 첫 JSON 앞 공백 제거 플래그 (미착수) |
 | 4 | INOUT 점유 시 BP→EP 미진행이면 INOUT→BP 즉시 / 공정 즉시·애니만 직렬 (미착수) |
-| 5 | 화면1·2 막대 싱크 (미착수) |
+| 5 | 화면1·2 막대 싱크 |
 | 6 | REMOVE wall 시간 설명/기대 정리 (미착수) |
 | 7 | 위치 초기화 완료 후 애니 시작 (미착수) |
 
@@ -95,9 +95,32 @@ OHT→INOUT port_sync 에서 `_inout_reserved=False` 복구 (INOUT→BP 가 rene
 
 ---
 
+## 2026-09-07 — #5 화면1·2 막대 싱크
+
+### 요구
+분할 시 **화면1·화면2 모두** 막대그래프가 각자 `sim_now`/포트와 동일 규칙으로 싱크. (실무: 화면1만 맞고 화면2 어긋남)
+
+### 원인
+1. 모니터 채널을 `chans[scr-1]` 위치 인덱스로만 조회 → per-screen 창에서 리스트가 비거나 어긋나면 화면2 막대/포트가 스킵·오타깃
+2. 멀티 `tick_all` 이 UI를 **emit 전에** 갱신 → 1화면(emit 후 UI)과 계약이 다름
+3. `get_sim_playback_player` 레거시 폴백이 화면2에도 화면1 플레이어를 빌려줌
+4. FOUP 만 전화면 after_tick 보정, EP 막대는 없음
+
+### 수정
+- `_resolve_monitor_channel_for_screen`: `ch['screen']` 키 조회 (막대·포트·프리런 paint·timeline_only)
+- `tick_all`: 1·N 화면 모두 **emit → refresh**
+- 플레이어 조회: 레거시 단일 플레이어는 **화면1만**
+- `_refresh_all_ep_bar_playback_heartbeats` after_tick (FOUP 과 대칭)
+
+### 파일
+- `control_window.py`
+- `control_sim_screen_playback.py`
+- `control_sim_playback_plan.py`
+
+---
+
 ## 다음 예정
 
 - #3 첫 JSON 공백 제거 플래그  
-- #5 화면2 막대 싱크  
 - #6 wall 표시 기대 정리  
 - #7 리셋 후 애니  
