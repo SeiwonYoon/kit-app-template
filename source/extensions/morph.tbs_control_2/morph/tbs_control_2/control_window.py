@@ -2013,24 +2013,22 @@ def _execute_mapped_sequence_stub(
                         by_src[str(scr_i)] = snap_live
                 except Exception:
                     pass
-                # 위치·TBS_OFFSET·TIMESAMPLES — JSON **시작** 시점 (back-align lead 이후).
-                # halt 를 reset 앞에 두면 end-pose 가 남아 초기화가 무효화될 수 있다.
+                # #7: JSON 시작 전 위치초기화 필수 (연달아 시작·큐 연속 포함).
+                # reset 완료 후에만 run. reset 뒤 halt 금지(방금 맞춘 자세를 다시 건드림).
                 try:
-                    _reset_sim_motion_before_json_run(ext, job, runner_obj=runner_obj)
+                    _ok_reset = bool(
+                        _reset_sim_motion_before_json_run(
+                            ext, job, runner_obj=runner_obj
+                        )
+                    )
+                    if not _ok_reset:
+                        print(
+                            f"[TBS/SIM] pre-json motion reset incomplete "
+                            f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
+                            flush=True,
+                        )
                 except Exception as exc:
                     print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
-                if not _playback:
-                    try:
-                        _halt_screen_json_anim(
-                            ext, scr_i, join_sec=3.0, rail=_job_rail
-                        )
-                    except TypeError:
-                        try:
-                            _halt_screen_json_anim(ext, scr_i, join_sec=3.0)
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
                 try:
                     from . import sim_multi_diag as _mdiag
 
@@ -14688,7 +14686,7 @@ def _reset_sim_motion_before_json_run(
     job: Dict[str, Any],
     *,
     runner_obj: Any = None,
-) -> None:
+) -> bool:
     """시뮬 중 **새 JSON** 직전 — **이 JSON의 prim 만** 애니 중지·TBS_OFFSET 초기화.
 
     규칙
@@ -14696,6 +14694,12 @@ def _reset_sim_motion_before_json_run(
     - 동일 레일 직전 JSON end-pose 정리용으로 해당 runner ``_lam_last_steps`` 도 포함.
     - 병렬: peer 레일 runner / 채널 전체 / 타 화면 runner 경로는 **절대 넣지 않음**.
     - peer 와 공유 prim 이어도 **이번 JSON 시작 prim 은 초기화** (자기 JSON 정상 시작 우선).
+    - 연달아 시작(on_done→다음 JSON)에서도 restore 가 끝난 뒤에만 True.
+
+    Returns
+    -------
+    bool
+        위치 초기화(+dispatch settle) 완료면 True.
     """
     try:
         scr_i = int(str((job or {}).get("tbs_sim_screen", "1") or "1").strip() or "1")
@@ -14730,15 +14734,23 @@ def _reset_sim_motion_before_json_run(
         except Exception:
             pass
 
+    on_main = False
+    try:
+        on_main = threading.current_thread() is threading.main_thread()
+    except Exception:
+        on_main = False
+
     runner_was_running = False
     if runner_obj is not None:
         try:
             runner_was_running = bool(getattr(runner_obj, "is_running", lambda: False)())
         except Exception:
             runner_was_running = False
-    if runner_obj is not None:
-        try:
-            if runner_was_running:
+    if runner_obj is not None and runner_was_running:
+        # 연속 JSON: on_done 이 main 대기 중이면 LAM 스레드가 아직 alive →
+        # main 에서 pause+join 하면 교착/초기화 누락. restore 만 강제.
+        if not on_main:
+            try:
                 runner_obj.pause(cancel_all_move_rotate=not preserve_channel)
                 th = getattr(runner_obj, "_lam_thread", None)
                 if th is not None and getattr(th, "is_alive", lambda: False)():
@@ -14746,10 +14758,16 @@ def _reset_sim_motion_before_json_run(
                         th.join(timeout=3.0)
                     except Exception:
                         pass
-        except Exception:
+            except Exception:
+                try:
+                    if getattr(runner_obj, "is_running", lambda: False)():
+                        runner_obj.pause(cancel_all_move_rotate=not preserve_channel)
+                except Exception:
+                    pass
+        else:
             try:
-                if getattr(runner_obj, "is_running", lambda: False)():
-                    runner_obj.pause(cancel_all_move_rotate=not preserve_channel)
+                # 시퀀스 플래그만 내려 새 run 과 겹치지 않게 (스레드 join 금지)
+                setattr(runner_obj, "_lam_running", False)
             except Exception:
                 pass
     try:
@@ -14767,21 +14785,51 @@ def _reset_sim_motion_before_json_run(
     except Exception:
         pass
     active_ep = _resolve_foup_proc_active_ep(ext, scr_i, dict(job or {}))
-    _restore_sim_prim_motion_to_initial(
-        ext,
-        extra_steps=extra if extra else None,
-        usd_context_name=ctx,
-        preserve_foup_offsets=True,
-        foup_proc_active_ep=active_ep,
-        motion_only=True,
-        include_registry_paths=False,
-        preserve_peer_channel=preserve_channel,
-        # 병렬: 자기 JSON(+동일 레일 직전)만. peer runner/_sim_runner 경로 미포함
-        extra_steps_only=bool(parallel_rail),
-        # peer path 로 자기 JSON prim 을 빼지 않음 (위치초기화 누락 회귀 방지)
-        peer_exclude_screen=0,
-        peer_exclude_rail="",
-    )
+    try:
+        _restore_sim_prim_motion_to_initial(
+            ext,
+            extra_steps=extra if extra else None,
+            usd_context_name=ctx,
+            preserve_foup_offsets=True,
+            foup_proc_active_ep=active_ep,
+            motion_only=True,
+            include_registry_paths=False,
+            preserve_peer_channel=preserve_channel,
+            # 병렬: 자기 JSON(+동일 레일 직전)만. peer runner/_sim_runner 경로 미포함
+            extra_steps_only=bool(parallel_rail),
+            # peer path 로 자기 JSON prim 을 빼지 않음 (위치초기화 누락 회귀 방지)
+            peer_exclude_screen=0,
+            peer_exclude_rail="",
+        )
+    except Exception as exc:
+        print(f"[TBS/SIM] pre-json restore failed: {exc}", flush=True)
+        return False
+    # USD write / dispatch 잔여가 비울 때까지 대기 — 끝나기 전 run 금지
+    try:
+        from .tbs_main_dispatch import wait_context_dispatch_idle
+
+        if not bool(wait_context_dispatch_idle(ctx, max_sec=1.5)):
+            print(
+                f"[TBS/SIM] pre-json dispatch settle timeout ctx={ctx!r}",
+                flush=True,
+            )
+            return False
+    except Exception:
+        pass
+    # peer 보호 중이면 채널 전체 drain 은 하지 않음(타 레일 공정 간섭 금지)
+    if not preserve_channel:
+        try:
+            from .sim_channel_scope import drain_channel_motion_complete
+            from .tbs_split_composed_loader import get_split_runtime_for_screen
+
+            rt = get_split_runtime_for_screen(ext, scr_i)
+            reg = rt.registry if rt is not None else None
+            drain_channel_motion_complete(
+                ctx, reg, max_sec=0.35, stable_ticks=1
+            )
+        except Exception:
+            pass
+    return True
 
 
 def _restore_all_sim_channels_prim_motion(ext: Any, **kwargs: Any) -> None:
