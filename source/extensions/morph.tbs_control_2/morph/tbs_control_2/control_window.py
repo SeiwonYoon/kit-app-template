@@ -10533,121 +10533,34 @@ def _restore_prerun_restart_bundle(ext: Any) -> Optional[Dict[int, Any]]:
 
 def _build_prerun_timetable_text(results_by_screen: Any) -> Dict[int, str]:
     """
-    프리런 결과(SimPreRunResult.items)를 **JSON 라인 형식의 타임테이블**로 만든다.
+    프리런 결과 → 타임테이블 텍스트.
 
-    출력 정책(요구사항):
-    - 한 줄에 한 JSON 객체. 각 줄은 두 종류 중 하나.
-        ┌─ kind="event": 시뮬 이벤트 발생 시점(ARRIVED/MOVE_*/REMOVED/FOUP_PROCESS_START/END 등)
-        └─ kind="step":  공정/애니 동작 시작 시점(progress 의 RUNNING 첫 emit, elapsed=0.0)
-    - 같은 시각이면 event → step 순서로 정렬.
-    - port_id 등은 문자열("EP1", "BP3" 등)로 그대로 유지(시뮬 내부 표기와 일치).
-    - 동작 라인(step)에는 anim 파일명/공정시간/애니시간/동작 설명/공정시간우선 등을 함께 동봉.
-
-    출력 헤더는 ``"[SIM] 타임테이블(프리런) — 화면N"`` 으로 두어, ``_append_sim_log`` 의
-    "타임테이블만 표시" 필터(timetable_only)를 그대로 통과한다.
+    행 SSOT 는 ``build_timetable_row_metas`` (공정 시작 event + JSON ``… 동작중``).
+    export / ``_temp`` / 웹 slim 과 동일 규칙.
     """
     out: Dict[int, str] = {}
     if not isinstance(results_by_screen, dict):
         return out
-
-    def _f(x: Any, d: float = 0.0) -> float:
-        try:
-            return float(str(x).strip() or d)
-        except Exception:
-            return float(d)
-
-    def _s(v: Any) -> str:
-        try:
-            return str(v).strip() if v is not None else ""
-        except Exception:
-            return ""
 
     for scr, res in results_by_screen.items():
         try:
             si = int(scr)
         except Exception:
             continue
-        items = getattr(res, "items", None)
-        if not isinstance(items, (list, tuple)):
+        if res is None:
             continue
-
-        rows: List[Dict[str, Any]] = []
-        for it in items:
-            try:
-                kind = str(getattr(it, "kind", "") or "").strip().lower()
-                p = getattr(it, "payload", None)
-                t_val = round(_f(getattr(it, "t", 0.0), 0.0), 2)
-
-                # 1) 시뮬 이벤트 라인 (kind="event")
-                if kind == "event" and isinstance(p, dict):
-                    seq = _s(p.get("seq")).upper()
-                    if not seq:
-                        continue
-                    row: Dict[str, Any] = {
-                        "t": t_val,
-                        "screen": si,
-                        "kind": "event",
-                        "event": seq,
-                    }
-                    # 있으면 동봉(없으면 키 자체 생략 → JSON 한 줄을 깔끔하게)
-                    for k in ("port_id", "from_port_id", "to_port_id", "lot_id", "foup_id", "lot_seq"):
-                        v = _s(p.get(k))
-                        if v:
-                            row[k] = v
-                    rows.append(row)
-
-                # 2) 동작 시작 라인 (kind="step") = progress.RUNNING 첫 emit (elapsed=0.0)
-                elif kind == "progress" and isinstance(p, dict):
-                    st = _s(p.get("status")).upper()
-                    el = _f(p.get("elapsed", 0.0), 0.0)
-                    if st != "RUNNING" or abs(el) > 1e-9:
-                        continue
-                    ev = _s(p.get("event_seq") or p.get("sequence_name")).upper()
-                    if not ev:
-                        continue
-                    row = {
-                        "t": t_val,
-                        "screen": si,
-                        "kind": "step",
-                        "event": ev,
-                    }
-                    pid = _s(p.get("port_id"))
-                    if pid:
-                        row["port_id"] = pid
-                    label = _s(p.get("label"))
-                    if label:
-                        row["label"] = label
-                    # anim 파일명: 비어 있어도 명시적으로 빈 문자열로 둔다(필드 존재 자체가 의미)
-                    row["anim"] = _s(p.get("linked_anim_json"))
-                    row["proc_sec"] = round(_f(p.get("proc_sec", 0.0), 0.0), 2)
-                    row["anim_sec"] = round(_f(p.get("anim_sec", 0.0), 0.0), 2)
-                    detail = _s(p.get("detail"))
-                    if detail:
-                        row["detail"] = detail
-                    ptp = _s(p.get("process_time_priority"))
-                    if ptp:
-                        row["process_time_priority"] = ptp
-                    rows.append(row)
-            except Exception:
-                continue
-
-        # 같은 시각이면 event 를 먼저, step 을 다음에
-        kind_prio = {"event": 0, "step": 1}
         try:
-            rows.sort(key=lambda r: (
-                float(r.get("t", 0.0)),
-                int(kind_prio.get(str(r.get("kind", "")), 9)),
-            ))
+            metas = build_timetable_row_metas(res)
         except Exception:
-            pass
-
+            metas = []
         lines: List[str] = []
         lines.append(f"[SIM] 타임테이블(프리런) — 화면{si}")
-        if not rows:
+        if not metas:
             lines.append('{"kind":"info","message":"표시할 event/step 항목 없음"}')
-        for r in rows:
+        for m in metas:
             try:
-                lines.append(json.dumps(r, ensure_ascii=False))
+                row = dict(m.json_obj) if isinstance(m.json_obj, dict) else {}
+                lines.append(json.dumps(row, ensure_ascii=False))
             except Exception:
                 continue
         out[si] = "\n".join(lines).strip()

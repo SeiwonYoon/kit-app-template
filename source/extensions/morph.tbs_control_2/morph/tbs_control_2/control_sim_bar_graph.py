@@ -1667,9 +1667,34 @@ def build_prerun_export_document_web_slim(doc: Dict[str, Any]) -> Dict[str, Any]
                     continue
                 kind = str(jo.get("kind", "") or "").strip().lower()
                 ev = str(jo.get("event", "") or "").strip()
+                ev_u = ev.upper()
                 keep = False
-                if kind == "event" and ev in ("FOUP_PROCESS_START", "FOUP_PROCESS_END"):
+                if kind == "event" and ev_u in ("FOUP_PROCESS_START", "FOUP_PROCESS_END"):
                     keep = True
+                elif kind == "event":
+                    # 공정 시작(ARRIVED 등) + JSON 시작(ARRIVED 동작중)
+                    try:
+                        from .control_sim_prerun_playback import (
+                            _ANIM_PORT_UPDATE_SEQS,
+                            is_json_playing_event_label,
+                            strip_json_playing_event_label,
+                        )
+
+                        if is_json_playing_event_label(ev):
+                            keep = True
+                        else:
+                            base = strip_json_playing_event_label(ev)
+                            if base in _ANIM_PORT_UPDATE_SEQS:
+                                keep = True
+                    except Exception:
+                        if ev.endswith("동작중") or ev_u in (
+                            "ARRIVED",
+                            "REMOVED",
+                            "MOVE_TRANSFERING",
+                            "MOVE_REQ",
+                            "MOVE",
+                        ):
+                            keep = True
                 elif kind == "step" and bool(str(jo.get("anim", "") or "").strip()):
                     keep = True
                 if not keep:

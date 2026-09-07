@@ -298,6 +298,62 @@ _ANIM_PORT_UPDATE_SEQS = frozenset({
     "REMOVED",
 })
 
+# 타임테이블/웹 export: JSON 실제 재생 시작 행 표기 (예: ``ARRIVED 동작중``)
+_JSON_PLAYING_EVENT_SUFFIX = " 동작중"
+
+
+def format_json_playing_event_label(seq: str) -> str:
+    """공정 이벤트명 → JSON 재생 중 표기. 예: ``ARRIVED`` → ``ARRIVED 동작중``."""
+    base = _normalize_anim_event_seq(str(seq or "").strip()) or str(seq or "").strip().upper()
+    if not base:
+        return ""
+    if base.endswith(_JSON_PLAYING_EVENT_SUFFIX.strip()):
+        return base
+    # 이미 ``… 동작중`` 이면 중복 붙이지 않음
+    if str(seq or "").strip().endswith(_JSON_PLAYING_EVENT_SUFFIX.strip()):
+        return str(seq or "").strip()
+    return f"{base}{_JSON_PLAYING_EVENT_SUFFIX}"
+
+
+def strip_json_playing_event_label(event_label: str) -> str:
+    """``ARRIVED 동작중`` → ``ARRIVED``."""
+    s = str(event_label or "").strip()
+    suf = _JSON_PLAYING_EVENT_SUFFIX.strip()
+    if s.endswith(suf):
+        s = s[: -len(suf)].strip()
+    return _normalize_anim_event_seq(s) or s.upper()
+
+
+def is_json_playing_event_label(event_label: str) -> bool:
+    s = str(event_label or "").strip()
+    return bool(s) and s.endswith(_JSON_PLAYING_EVENT_SUFFIX.strip())
+
+
+def _progress_has_linked_json_anim(p: Dict[str, Any]) -> bool:
+    """RUNNING progress 가 JSON 애니를 갖는 공정인지."""
+    if _f_val(p.get("anim_sec", 0.0), 0.0) > 1e-9:
+        return True
+    if _s_val(p.get("linked_anim_json")):
+        return True
+    if _f_val(p.get("anim_play_start_sim_time", 0.0), 0.0) > 1e-9:
+        return True
+    return False
+
+
+def _event_payload_is_json_anim_dispatch(seq: str, p: Dict[str, Any]) -> bool:
+    """타임라인 event 가 JSON dispatch(애니 기동) 인지."""
+    ev = _normalize_anim_event_seq(seq) or str(seq or "").strip().upper()
+    if ev not in _ANIM_PORT_UPDATE_SEQS:
+        return False
+    if _s_val(p.get("linked_anim_json")):
+        return True
+    if _f_val(p.get("anim_sec", 0.0), 0.0) > 1e-9:
+        return True
+    if _f_val(p.get("anim_play_start_sim_time", 0.0), 0.0) > 1e-9:
+        return True
+    # SSOT: seq 자체가 애니 포트 이벤트면 dispatch 로 본다
+    return True
+
 
 def _normalize_anim_event_seq(ev: str) -> str:
     """짧은 이름 또는 EAPEIS 정식명 → 짧은 이름."""
@@ -817,8 +873,13 @@ def _initial_bar_ep_at_t0(
 
 def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
     """
-    ``_build_prerun_timetable_text`` 와 동일 필터·정렬로 UI 행 메타를 만든다.
-    각 행은 ``through_item_index`` 로 Fast-apply 범위를 지정한다.
+    `_build_prerun_timetable_text` 와 동일 필터·정렬로 UI 행 메타를 만든다.
+    각 행은 `through_item_index` 로 Fast-apply 범위를 지정한다.
+
+    JSON 애니 공정:
+      - 공정 시작(t0): `event=ARRIVED` (등)
+      - JSON 시작(play_start): `event=ARRIVED 동작중`
+    → 기본 export / `_temp` / 웹 slim 이 동일 metas 를 소비한다.
     """
     si = int(res.screen)
     items = res.items
@@ -844,33 +905,84 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
         p = it.payload
         t_val = round(_f_val(it.t, 0.0), 2)
         if kind == "event" and isinstance(p, dict):
-            seq = _s_val(p.get("seq")).upper()
-            if not seq:
+            seq_raw = _s_val(p.get("seq")).upper()
+            if not seq_raw:
                 continue
-            row: Dict[str, Any] = {"t": t_val, "screen": si, "kind": "event", "event": seq}
+            seq_n = _normalize_anim_event_seq(seq_raw) or seq_raw
+            if _event_payload_is_json_anim_dispatch(seq_n, p):
+                display_ev = format_json_playing_event_label(seq_n)
+            else:
+                display_ev = seq_n
+            row: Dict[str, Any] = {
+                "t": t_val,
+                "screen": si,
+                "kind": "event",
+                "event": display_ev,
+            }
             for k in (
                 "port_id",
                 "from_port_id",
                 "to_port_id",
                 "lot_id",
                 "lot_id_display",
-                "lot_fix_label",
+                "lot_form_label",
                 "foup_id",
                 "lot_seq",
-                "fix_oht_ep",
-                "fix_ep_oht",
+                "form_oht_ep",
+                "form_ep_oht",
             ):
                 v = _s_val(p.get(k))
                 if v:
                     row[k] = v
+            anim = _s_val(p.get("linked_anim_json"))
+            if anim:
+                row["anim"] = anim
+            proc_s = _f_val(p.get("proc_sec", 0.0), 0.0)
+            anim_s = _f_val(p.get("anim_sec", 0.0), 0.0)
+            if proc_s > 1e-9:
+                row["proc_sec"] = round(proc_s, 2)
+            if anim_s > 1e-9:
+                row["anim_sec"] = round(anim_s, 2)
             rows_data.append(row)
         elif kind == "progress" and isinstance(p, dict):
             st = _s_val(p.get("status")).upper()
             el = _f_val(p.get("elapsed", 0.0), 0.0)
             if st != "RUNNING" or abs(el) > 1e-9:
                 continue
-            ev = _s_val(p.get("event_seq") or p.get("sequence_name")).upper()
+            ev = _normalize_anim_event_seq(
+                _s_val(p.get("event_seq") or p.get("sequence_name"))
+            ) or _s_val(p.get("event_seq") or p.get("sequence_name")).upper()
             if not ev:
+                continue
+            if _progress_has_linked_json_anim(p) and (
+                ev in _ANIM_PORT_UPDATE_SEQS or _s_val(p.get("linked_anim_json"))
+            ):
+                row = {
+                    "t": t_val,
+                    "screen": si,
+                    "kind": "event",
+                    "event": ev,
+                }
+                lid = _s_val(p.get("lot_id"))
+                if lid:
+                    row["lot_id"] = lid
+                pid = _s_val(p.get("port_id"))
+                if pid:
+                    row["port_id"] = pid
+                for pk in ("from_port_id", "to_port_id"):
+                    pv = _s_val(p.get(pk))
+                    if pv:
+                        row[pk] = pv
+                anim = _s_val(p.get("linked_anim_json"))
+                if anim:
+                    row["anim"] = anim
+                row["proc_sec"] = round(_f_val(p.get("proc_sec", 0.0), 0.0), 2)
+                row["anim_sec"] = round(_f_val(p.get("anim_sec", 0.0), 0.0), 2)
+                for fk in ("lot_id_display", "lot_form_label", "form_oht_ep", "form_ep_oht"):
+                    fv = _s_val(p.get(fk))
+                    if fv:
+                        row[fk] = fv
+                rows_data.append(row)
                 continue
             row = {"t": t_val, "screen": si, "kind": "step", "event": ev}
             lid = _s_val(p.get("lot_id"))
@@ -891,7 +1003,7 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
             ptp = _s_val(p.get("process_time_priority"))
             if ptp:
                 row["process_time_priority"] = ptp
-            for fk in ("lot_id_display", "lot_fix_label", "fix_oht_ep", "fix_ep_oht"):
+            for fk in ("lot_id_display", "lot_form_label", "form_oht_ep", "form_ep_oht"):
                 fv = _s_val(p.get(fk))
                 if fv:
                     row[fk] = fv
@@ -901,22 +1013,40 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
         return []
 
     kind_prio = {"event": 0, "step": 1}
-    rows_data.sort(
-        key=lambda r: (
+
+    def _row_sort_key(r: Dict[str, Any]) -> Tuple[float, int, int, str]:
+        ev = _s_val(r.get("event"))
+        playing = 1 if is_json_playing_event_label(ev) else 0
+        return (
             float(r.get("t", 0.0)),
             int(kind_prio.get(str(r.get("kind", "")), 9)),
+            int(playing),
+            ev,
         )
-    )
+
+    rows_data.sort(key=_row_sort_key)
 
     metas: List[TimetableRowMeta] = []
     for ri, r in enumerate(rows_data):
         t_val = float(r.get("t", 0.0))
         kind = str(r.get("kind", ""))
-        ev = _s_val(r.get("event")).upper()
-        key = (round(t_val, 4), kind, ev)
-        through = int(item_by_key.get(key, -1))
+        ev_label = _s_val(r.get("event"))
+        base_ev = strip_json_playing_event_label(ev_label)
+        through = -1
+        if is_json_playing_event_label(ev_label):
+            through = int(item_by_key.get((round(t_val, 4), "event", base_ev), -1))
+        elif kind == "event" and base_ev in _ANIM_PORT_UPDATE_SEQS:
+            through = int(item_by_key.get((round(t_val, 4), "step", base_ev), -1))
+            if through < 0:
+                through = int(item_by_key.get((round(t_val, 4), "event", base_ev), -1))
+        else:
+            through = int(
+                item_by_key.get((round(t_val, 4), kind, base_ev or ev_label.upper()), -1)
+            )
         if through < 0:
-            through = _find_through_item_index(items, t_val, kind, ev, ri, rows_data)
+            through = _find_through_item_index(
+                items, t_val, kind, base_ev or ev_label.upper(), ri, rows_data
+            )
         metas.append(
             TimetableRowMeta(
                 row_index=int(ri),
@@ -930,6 +1060,7 @@ def build_timetable_row_metas(res: SimPreRunResult) -> List[TimetableRowMeta]:
     return metas
 
 
+
 def _find_through_item_index(
     items: Tuple[SimTimelineItem, ...],
     t_val: float,
@@ -940,20 +1071,27 @@ def _find_through_item_index(
 ) -> int:
     """item_by_key 미스 시 행 순서 기준으로 through 인덱스 추정."""
     best = -1
+    base_ev = strip_json_playing_event_label(ev) if is_json_playing_event_label(ev) else (
+        _normalize_anim_event_seq(ev) or str(ev or "").strip().upper()
+    )
     for idx, it in enumerate(items):
         if float(it.t) > float(t_val) + 1e-6:
             break
         ik = str(it.kind or "").strip().lower()
         p = it.payload
         if ik == "event" and isinstance(p, dict) and kind == "event":
-            if _s_val(p.get("seq")).upper() == ev and abs(float(it.t) - t_val) <= 1e-3:
+            seq = _normalize_anim_event_seq(_s_val(p.get("seq"))) or _s_val(p.get("seq")).upper()
+            if seq == base_ev and abs(float(it.t) - t_val) <= 1e-3:
                 best = idx
-        elif ik == "progress" and isinstance(p, dict) and kind == "step":
+        elif ik == "progress" and isinstance(p, dict):
+            # 공정 시작 event 행도 progress RUNNING 에 through 연결
             st = _s_val(p.get("status")).upper()
             el = _f_val(p.get("elapsed", 0.0), 0.0)
             if st == "RUNNING" and abs(el) <= 1e-9:
-                ev2 = _s_val(p.get("event_seq") or p.get("sequence_name")).upper()
-                if ev2 == ev and abs(float(it.t) - t_val) <= 1e-3:
+                ev2 = _normalize_anim_event_seq(
+                    _s_val(p.get("event_seq") or p.get("sequence_name"))
+                ) or _s_val(p.get("event_seq") or p.get("sequence_name")).upper()
+                if ev2 == base_ev and abs(float(it.t) - t_val) <= 1e-3:
                     best = idx
     if best >= 0:
         return best
