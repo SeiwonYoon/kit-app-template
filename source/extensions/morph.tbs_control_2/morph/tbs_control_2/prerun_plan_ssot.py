@@ -201,6 +201,24 @@ class _Planner:
                 rows.append((bp, lot))
         return rows
 
+    def _reconcile_reservations(self) -> None:
+        """
+        활성 공정과 예약 잠금을 맞춘다.
+
+        종료·선점 등으로 uid 예약만 남으면 REMOVE / INOUT→BP 가
+        조건이 되어도 영구 보류되는 구조적 데드락이 난다.
+        """
+        active_uids = set(self._active.keys())
+        self._ep_reserved = {
+            ep: uid for ep, uid in list(self._ep_reserved.items()) if uid in active_uids
+        }
+        self._bp_reserved = {
+            bp: uid for bp, uid in list(self._bp_reserved.items()) if uid in active_uids
+        }
+        inout_kinds = (KIND_INOUT_TO_BP, KIND_OHT_TO_INOUT)
+        if not any(p.kind in inout_kinds for p in self._active.values()):
+            self._inout_reserved = False
+
     def _resolve_anim(self, kind: str, from_port: str, to_port: str, port: str) -> tuple:
         fb = float(self.cfg.anim_sec_fallback)
         if not bool(self.cfg.anim_from_json):
@@ -260,7 +278,19 @@ class _Planner:
         return p
 
     def _try_start_all(self, t: float) -> None:
+        """
+        조건이 된 공정은 즉시 기동. 애니만 `_schedule_anims_through` 직렬 큐.
+
+        우선순위(기동 시도 순):
+          BP→EP → OHT→EP → REMOVE → INOUT→BP → OHT→INOUT → FOUP
+        규칙:
+          · 빈 EP + BP LOT → 먼저 BP→EP (같은 틱에 빈 BP 남으면 INOUT→BP 도 기동)
+          · EP 가득 + INOUT LOT + 빈 BP → INOUT→BP 즉시
+          · FOUP 종료 `_awaiting_remove` → 같은 틱 REMOVE
+          · 예약은 활성 공정과 reconcile (유령 예약으로 기동 금지 방지)
+        """
         cfg = self.cfg
+        self._reconcile_reservations()
         # 1) BP→EP
         if cfg.ebs_on:
             for ep in list(self._empty_eps()):
@@ -297,7 +327,7 @@ class _Planner:
                     t=t,
                 )
                 self._ep_reserved[ep] = p.uid
-        # 3) REMOVE
+        # 3) REMOVE — FOUP 완료·회수대기면 즉시 (예약 누수로 스킵되지 않게 reconcile 후)
         for ep, lot in list(self._awaiting_remove.items()):
             if ep in self._ep_reserved:
                 continue
@@ -313,11 +343,12 @@ class _Planner:
             )
             self._ep_reserved[ep] = p.uid
             del self._awaiting_remove[ep]
-        # 4) INOUT→BP (빈 EP + BP LOT 있으면 보류)
-        prefer_bp = bool(cfg.ebs_on and self._empty_eps() and self._bp_with_lot())
+        # 4) INOUT→BP
+        # BP→EP 는 위에서 이미 빈 EP+BP LOT 을 선점함.
+        # EP 가 가득 차 있거나, BP→EP 후 빈 BP 가 남으면 INOUT→BP 공정 즉시 기동
+        # (애니는 직렬 큐). 별도 prefer 보류 없음 — 조건 충족 = 기동.
         if (
             cfg.ebs_on
-            and not prefer_bp
             and not self._inout_reserved
             and str(self.ports.get("INOUT") or "").strip()
         ):
@@ -491,12 +522,26 @@ class _Planner:
     def _on_foup_end(self, p: PlanProcess, t: float) -> None:
         ep = p.port
         lot = p.lot_id
-        # FOUP 종료 → REMOVE 대기
+        # FOUP 종료 → REMOVE 대기 → 같은 시각에 기동될 수 있게 표시
         if str(self.ports.get(ep) or "") == lot:
             self._awaiting_remove[ep] = lot
 
     def _finish_process(self, p: PlanProcess) -> None:
-        self._active.pop(p.uid, None)
+        uid = p.uid
+        self._active.pop(uid, None)
+        # 포트 반영 전에 종료되어도 예약이 남지 않게 정리 (기동 데드락 방지)
+        self._ep_reserved = {
+            ep: u for ep, u in list(self._ep_reserved.items()) if u != uid
+        }
+        self._bp_reserved = {
+            bp: u for bp, u in list(self._bp_reserved.items()) if u != uid
+        }
+        if p.kind in (KIND_INOUT_TO_BP, KIND_OHT_TO_INOUT):
+            if not any(
+                x.kind in (KIND_INOUT_TO_BP, KIND_OHT_TO_INOUT)
+                for x in self._active.values()
+            ):
+                self._inout_reserved = False
 
     def run(self) -> PrerunPlan:
         t = 0.0
@@ -767,6 +812,86 @@ def assert_example_lot3_schedule(plan: Optional[PrerunPlan] = None) -> None:
         raise AssertionError(f"BP→EP LOT003 start want 90 got {bp_ep[:1]}")
 
 
+def assert_process_start_rules() -> None:
+    """
+    #4 공정 즉시 기동 규칙:
+      · EP 가득 + INOUT LOT + 빈 BP → INOUT→BP 즉시 (prefer 보류 금지)
+      · 빈 EP + BP LOT → BP→EP 우선, INOUT→BP 보류
+      · stale ep_reserved 가 있어도 FOUP 대기 REMOVE 기동
+    """
+    # --- A) EP full, INOUT occupied, empty BP → INOUT→BP ---
+    pl = _Planner(
+        PrerunPlanConfig(
+            lot_count=0,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=10.0,
+            proc_inout_to_bp=30.0,
+        )
+    )
+    pl.remaining_lots = []
+    pl.ports["EP1"] = "LOT001"
+    pl.ports["EP2"] = "LOT002"
+    pl.ports["INOUT"] = "LOT003"
+    pl.ports["BP1"] = ""
+    pl.ports["BP2"] = ""
+    pl.ports["BP3"] = ""
+    # 유령 예약 — reconcile 로 풀려야 함
+    pl._inout_reserved = True
+    pl._ep_reserved["EP1"] = "GONE_UID"
+    pl._try_start_all(100.0)
+    ib = [p for p in pl.processes if p.kind == KIND_INOUT_TO_BP]
+    if not ib or abs(ib[0].t_start - 100.0) > 1e-6:
+        raise AssertionError(f"EP-full INOUT→BP want @100 got {ib[:1]}")
+    if any(p.kind == KIND_BP_TO_EP for p in pl.processes):
+        raise AssertionError("EP-full 에서는 BP→EP 가 기동되면 안 됨")
+
+    # --- B) empty EP + BP lot → BP→EP 는 반드시 기동 (같은 틱 INOUT→BP 는 빈 BP 있으면 병렬 OK) ---
+    pl2 = _Planner(
+        PrerunPlanConfig(
+            lot_count=0,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=10.0,
+        )
+    )
+    pl2.remaining_lots = []
+    pl2.ports["EP1"] = ""
+    pl2.ports["EP2"] = "LOT002"
+    pl2.ports["INOUT"] = "LOT003"
+    pl2.ports["BP1"] = "LOT004"
+    pl2.ports["BP2"] = ""
+    pl2._try_start_all(50.0)
+    if not any(p.kind == KIND_BP_TO_EP and p.lot_id == "LOT004" for p in pl2.processes):
+        raise AssertionError("empty EP+BP LOT → BP→EP 필수")
+    # 빈 EP 를 BP→EP 가 선점한 뒤에도 빈 BP2 가 있으면 INOUT→BP 병렬 기동은 허용
+    if not any(p.kind == KIND_INOUT_TO_BP and p.lot_id == "LOT003" for p in pl2.processes):
+        raise AssertionError("빈 BP 남으면 INOUT→BP 도 같은 틱 기동")
+
+    # --- C) stale reserve 가 REMOVE 를 막지 않음 ---
+    pl3 = _Planner(
+        PrerunPlanConfig(
+            lot_count=0,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=10.0,
+            proc_remove=30.0,
+        )
+    )
+    pl3.remaining_lots = []
+    pl3.ports["EP1"] = "LOT009"
+    pl3.ports["EP2"] = "LOT002"
+    pl3._awaiting_remove["EP1"] = "LOT009"
+    pl3._ep_reserved["EP1"] = "STALE_REMOVE_BLOCKER"
+    pl3._try_start_all(70.0)
+    rem = [p for p in pl3.processes if p.kind == KIND_REMOVE and p.lot_id == "LOT009"]
+    if not rem or abs(rem[0].t_start - 70.0) > 1e-6:
+        raise AssertionError(f"FOUP대기 REMOVE want @70 got {rem[:1]}")
+
+
 __all__ = [
     "PrerunPlanConfig",
     "PlanProcess",
@@ -776,6 +901,7 @@ __all__ = [
     "build_prerun_plan",
     "format_plan_timetable",
     "assert_example_lot3_schedule",
+    "assert_process_start_rules",
     "KIND_OHT_TO_EP",
     "KIND_OHT_TO_INOUT",
     "KIND_INOUT_TO_BP",

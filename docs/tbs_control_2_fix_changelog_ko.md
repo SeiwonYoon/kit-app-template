@@ -65,10 +65,39 @@ REMOVED hold가 `공정시작+anim`으로 붕괴 → renewal 전에 hold 만료 
 
 ---
 
+## 2026-09-07 — #4 공정 즉시 기동 (예약 정합 + INOUT→BP / REMOVE)
+
+### 요구
+- 빈 EP + BP LOT → BP→EP 먼저 (유지)
+- EP가 안 비었는데도 INOUT→BP가 안 뜨는 문제 수정
+- FOUP 완료 → 해당 EP REMOVE가 바로 기동되어야 함
+- 조건 충족 공정은 즉시 기동, 애니만 직렬
+
+### 원인
+포트 `_ep_reserved` / `_bp_reserved` / `_inout_reserved` 가 **이미 끝난 공정 uid**에 묶인 채로 남으면,  
+REMOVE·INOUT→BP 조건이 되어도 `reserved` 때문에 영구 스킵됨.
+
+### 수정 (`prerun_plan_ssot.py` 만)
+- `_reconcile_reservations()`: `_try_start_all` 진입 시 활성 공정과 예약 동기화
+- `_finish_process`: 해당 uid 예약 해제 + INOUT 예약 정리
+- INOUT→BP: 사후 `prefer_bp` 보류 제거 (BP→EP는 이미 위에서 선점; 남은 빈 BP면 공정 병렬 기동)
+- `assert_process_start_rules()` 회귀 테스트 추가
+
+### 비고
+SSOT 프리런 플래너만 변경. 레거시 `simulation_engine` 경로는 건드리지 않음.
+
+---
+
+## 2026-09-07 — #4 보완 철회: OHT→INOUT→INOUT→BP 는 다시 renewal 기동
+
+후속 공정은 **renewal(`port_sync`) 후 `_try_start_all`** 이 기존 모델로 유지.
+OHT→INOUT port_sync 에서 `_inout_reserved=False` 복구 (INOUT→BP 가 renewal 에 기동).
+
+---
+
 ## 다음 예정
 
 - #3 첫 JSON 공백 제거 플래그  
-- #4 공정 즉시 / INOUT→BP 규칙  
 - #5 화면2 막대 싱크  
 - #6 wall 표시 기대 정리  
 - #7 리셋 후 애니  
