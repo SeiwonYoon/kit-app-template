@@ -1724,11 +1724,14 @@ def _execute_mapped_sequence_stub(
                             )
                         except Exception:
                             pass
-                        # start_job_impl 직행 — 슬롯 이미 비움
+                        # 연속 JSON: 즉시 기동 (tick poll 대기로 한 프레임 밀리지 않게)
                         _fn = getattr(ext, "_sim_json_start_fn", None)
+                        if isinstance(nxt, dict):
+                            nxt = dict(nxt)
+                            nxt["_start_json_now"] = True
                         if callable(_fn):
                             try:
-                                _fn(dict(nxt) if isinstance(nxt, dict) else nxt)
+                                _fn(nxt)
                             except Exception:
                                 pass
                         else:
@@ -2104,14 +2107,20 @@ def _execute_mapped_sequence_stub(
                 except Exception:
                     pass
 
-            if _playback:
+            # 프리런: emit 틱 안에서 즉시 run 하면 reset 이 UI 갱신보다 앞서
+            # 진행현황이 끊긴다. tick_all 이 UI 후 poll 하도록 pending 만 켠다.
+            # on_done 연속 기동(_start_json_now)만 즉시 run (큐 밀림 방지).
+            _force_now = bool((job or {}).get("_start_json_now"))
+            if _playback and (not _force_now):
+                active["_json_pending_sim_start"] = True
                 try:
-                    _pl = get_sim_playback_player(ext, scr_i)
-                    if _pl is not None and float(_pl.sim_now(scr_i)) + 1e-9 >= float(json_run_start_sim):
-                        _run_json_sequence()
-                    elif not bool(_need_lead):
-                        # SSOT: play_start emit 직후 — 시계가 이미 도달한 것으로 보고 즉시
-                        _run_json_sequence()
+                    if isinstance(active_by, dict):
+                        active_by[_active_store_key] = active
+                except Exception:
+                    pass
+            elif _playback and _force_now:
+                try:
+                    _run_json_sequence()
                 except Exception:
                     pass
             elif lead_wall > 1e-6:
@@ -14804,31 +14813,17 @@ def _reset_sim_motion_before_json_run(
     except Exception as exc:
         print(f"[TBS/SIM] pre-json restore failed: {exc}", flush=True)
         return False
-    # USD write / dispatch 잔여가 비울 때까지 대기 — 끝나기 전 run 금지
+    # 메인에서 sleep settle 하면 UI·진행현황이 멈춤 + 애니 체감 지연.
+    # 메인: restore 가 이미 동기 완료 → 즉시 run 가능.
+    # 백그라운드: dispatch_main_wait 로 restore 한 뒤 큐만 짧게 확인.
+    if on_main:
+        return True
     try:
         from .tbs_main_dispatch import wait_context_dispatch_idle
 
-        if not bool(wait_context_dispatch_idle(ctx, max_sec=1.5)):
-            print(
-                f"[TBS/SIM] pre-json dispatch settle timeout ctx={ctx!r}",
-                flush=True,
-            )
-            return False
+        wait_context_dispatch_idle(ctx, max_sec=0.2)
     except Exception:
         pass
-    # peer 보호 중이면 채널 전체 drain 은 하지 않음(타 레일 공정 간섭 금지)
-    if not preserve_channel:
-        try:
-            from .sim_channel_scope import drain_channel_motion_complete
-            from .tbs_split_composed_loader import get_split_runtime_for_screen
-
-            rt = get_split_runtime_for_screen(ext, scr_i)
-            reg = rt.registry if rt is not None else None
-            drain_channel_motion_complete(
-                ctx, reg, max_sec=0.35, stable_ticks=1
-            )
-        except Exception:
-            pass
     return True
 
 

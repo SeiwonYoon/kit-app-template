@@ -242,38 +242,8 @@ class SimPlaybackRuntime:
         prog_iv = _HB_PROG_INTERVAL_MULTI if multi else _HB_PROG_INTERVAL
         for sess in playing:
             sess.advance_clock_only(ext)
-        try:
-            from .control_window import (
-                _drain_playback_json_job_queues,
-                _drain_sim_anim_pending_when_idle,
-                _poll_playback_sim_aligned_json_starts,
-                _try_release_all_playback_json_walls,
-            )
-
-            try:
-                _poll_playback_sim_aligned_json_starts(ext)
-            except Exception:
-                pass
-            try:
-                _drain_sim_anim_pending_when_idle(ext)
-            except Exception:
-                pass
-            if multi:
-                try:
-                    _drain_playback_json_job_queues(ext)
-                except Exception:
-                    pass
-                try:
-                    _poll_playback_sim_aligned_json_starts(ext)
-                except Exception:
-                    pass
-                try:
-                    _drain_sim_anim_pending_when_idle(ext)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # 1화면·N화면 동일: emit 후 UI 갱신 (멀티에서 UI 선행 → 막대/포트가 한 틱 늦는 문제 방지)
+        # UI 먼저: emit → 진행현황/막대 갱신 후 JSON start.
+        # (이전에 poll 이 앞에 있으면 reset 이 메인에서 UI 틱을 가로채 진행현황이 끊김)
         for sess in playing:
             sess.emit_due_and_sync(
                 max_emits=max_emits_per_screen,
@@ -296,6 +266,45 @@ class SimPlaybackRuntime:
                 build_prog_payload=build_prog_payload,
                 prog_hb_interval=prog_iv,
             )
+        try:
+            from .control_window import (
+                _drain_playback_json_job_queues,
+                _drain_sim_anim_pending_when_idle,
+                _poll_playback_sim_aligned_json_starts,
+            )
+
+            # UI 이후: pending → active 로 올린 뒤 같은 틱에서 run_fn 기동
+            try:
+                _poll_playback_sim_aligned_json_starts(ext)
+            except Exception:
+                pass
+            try:
+                _drain_sim_anim_pending_when_idle(ext)
+            except Exception:
+                pass
+            try:
+                _poll_playback_sim_aligned_json_starts(ext)
+            except Exception:
+                pass
+            if multi:
+                try:
+                    _drain_playback_json_job_queues(ext)
+                except Exception:
+                    pass
+                try:
+                    _poll_playback_sim_aligned_json_starts(ext)
+                except Exception:
+                    pass
+                try:
+                    _drain_sim_anim_pending_when_idle(ext)
+                except Exception:
+                    pass
+                try:
+                    _poll_playback_sim_aligned_json_starts(ext)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if on_after_tick is not None:
             try:
                 on_after_tick(ext)
