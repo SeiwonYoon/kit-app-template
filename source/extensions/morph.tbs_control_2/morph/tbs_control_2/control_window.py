@@ -1475,6 +1475,7 @@ def _execute_mapped_sequence_stub(
                 ext._sim_anim_active = active
             # REMOVED: JSON 시작 시점에 prim hide-hold 선등록
             # (renewal EMPTY 가 wall 등록보다 먼저 와도 한 프레임 숨김 방지)
+            # hide_end SSOT = anim_play_end / schedule t_json_end (공정시작+anim 금지)
             try:
                 _ev_h = _normalize_anim_event_seq(
                     str(active.get("event") or active.get("event_seq") or "")
@@ -1488,10 +1489,46 @@ def _execute_mapped_sequence_stub(
                     _src_h = dict(active)
                     _src_h["event_start_sim_time"] = str(
                         active.get("_event_start_sim")
+                        or active.get("event_start_sim_time")
                         or active.get("t")
                         or active.get("sim_time")
                         or ""
                     ).strip()
+                    if not str(_src_h.get("anim_play_start_sim_time") or "").strip():
+                        if active.get("_json_run_start_sim") is not None:
+                            _src_h["anim_play_start_sim_time"] = str(
+                                active.get("_json_run_start_sim")
+                            )
+                        elif active.get("t") is not None:
+                            _src_h["anim_play_start_sim_time"] = str(active.get("t"))
+                    if not str(_src_h.get("anim_play_end_sim_time") or "").strip():
+                        try:
+                            _ps = float(
+                                str(
+                                    _src_h.get("anim_play_start_sim_time")
+                                    or active.get("_json_run_start_sim")
+                                    or active.get("t")
+                                    or "0"
+                                ).strip()
+                                or "0"
+                            )
+                            _as = float(str(active.get("anim_sec") or "0").strip() or "0")
+                            _es = float(
+                                str(active.get("est_total") or active.get("anim_sec") or "0").strip()
+                                or "0"
+                            )
+                            _dur = _as if _as > 1e-9 else _es
+                            if _ps > 1e-9 and _dur > 1e-9:
+                                _src_h["anim_play_end_sim_time"] = f"{_ps + _dur:.2f}"
+                        except Exception:
+                            pass
+                    if not str(_src_h.get("port_id") or "").strip():
+                        _src_h["port_id"] = (
+                            active.get("from_port_id")
+                            or active.get("port_id")
+                            or active.get("to_port_id")
+                            or ""
+                        )
                     _sched_h = get_stored_playback_schedule_for_screen(ext, int(scr_i))
                     _register_removed_prim_hide_hold_for_renewal(
                         ext, int(scr_i), _src_h, _sched_h

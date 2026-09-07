@@ -1205,6 +1205,131 @@ def capture_pre_ports_for_event_delta(
 
 # ── REMOVED JSON: 포트 패널은 renewal, 3D prim 숨김만 JSON 종료까지 보류 ─────
 
+def _f_src_sim(src: Dict[str, Any], *keys: str, default: float = 0.0) -> float:
+    for k in keys:
+        try:
+            raw = src.get(k)
+            if raw is None or str(raw).strip() == "":
+                continue
+            return float(str(raw).strip())
+        except Exception:
+            continue
+    return float(default)
+
+
+def _resolve_removed_prim_hide_end_sim(
+    src: Optional[Dict[str, Any]],
+    step: Any = None,
+) -> Optional[float]:
+    """
+    REMOVED 3D prim 숨김 시각 SSOT = **JSON 실제 종료**.
+
+    우선순위:
+      1) schedule ``t_json_end`` / ``t_playback_json_end``
+      2) src ``anim_play_end_sim_time``
+      3) ``anim_play_start``(또는 ``t_json_start``) + ``anim_sec``
+      4) 최후: process t0 + max(anim,proc) — lead/큐가 없을 때만 근사
+
+    금지: ``event_start(process) + anim`` 단독 (lead/애니큐 시 renewal 전에 hold 만료 → 조기 소실).
+    """
+    hide_end = 0.0
+    json_start = 0.0
+    anim = 0.0
+    proc = 0.0
+    play_end = 0.0
+
+    if step is not None:
+        for attr in ("t_json_end", "t_playback_json_end"):
+            try:
+                v = float(getattr(step, attr, 0.0) or 0.0)
+            except Exception:
+                v = 0.0
+            if v > 1e-9:
+                hide_end = v
+                break
+        try:
+            json_start = float(
+                getattr(step, "t_json_start", 0.0)
+                or getattr(step, "t_json_run_start_sim", 0.0)
+                or 0.0
+            )
+        except Exception:
+            json_start = 0.0
+        try:
+            anim = float(getattr(step, "anim_sec", 0.0) or 0.0)
+        except Exception:
+            anim = 0.0
+        try:
+            proc = float(getattr(step, "proc_sec", 0.0) or 0.0)
+        except Exception:
+            proc = 0.0
+        if isinstance(getattr(step, "progress_payload", None), dict):
+            pp = step.progress_payload
+            if play_end <= 1e-9:
+                play_end = _f_src_sim(pp, "anim_play_end_sim_time")
+            if json_start <= 1e-9:
+                json_start = _f_src_sim(pp, "anim_play_start_sim_time", default=json_start)
+            if anim <= 1e-9:
+                anim = _f_src_sim(pp, "anim_sec", default=anim)
+
+    if isinstance(src, dict):
+        if play_end <= 1e-9:
+            play_end = _f_src_sim(src, "anim_play_end_sim_time")
+        if json_start <= 1e-9:
+            json_start = _f_src_sim(
+                src,
+                "anim_play_start_sim_time",
+                "_json_run_start_sim",
+            )
+        if anim <= 1e-9:
+            anim = _f_src_sim(src, "anim_sec", default=anim)
+        if proc <= 1e-9:
+            proc = _f_src_sim(src, "proc_sec", default=proc)
+
+    if hide_end <= 1e-9 and play_end > 1e-9:
+        hide_end = float(play_end)
+    if hide_end <= 1e-9 and json_start > 1e-9 and anim > 1e-9:
+        hide_end = float(json_start) + float(anim)
+    if hide_end <= 1e-9 and isinstance(src, dict):
+        # 최후 근사 — process t0 가 아니라 play_start 후보를 다시 시도
+        t_proc = _f_src_sim(
+            src,
+            "event_start_sim_time",
+            "_event_start_sim",
+        )
+        # play 정보가 전혀 없고 lead 도 없을 때만 process+dur
+        if json_start <= 1e-9 and t_proc > 1e-9:
+            dur = anim if anim > 1e-9 else proc
+            if dur > 1e-9:
+                # anim_queue_delay 가 있으면 반영
+                qd = _f_src_sim(src, "anim_queue_delay_sec")
+                hide_end = float(t_proc) + float(dur) + max(0.0, float(qd))
+    if hide_end <= 1e-9:
+        return None
+    # renewal(sync) 보다 hide_end 가 앞서면 안 됨 — JSON 종료 보장
+    sync_t = 0.0
+    if step is not None:
+        try:
+            sync_t = float(
+                getattr(step, "t_port_sync", None)
+                or getattr(step, "t_playback_port_sync", None)
+                or 0.0
+            )
+        except Exception:
+            sync_t = 0.0
+    if isinstance(src, dict) and sync_t <= 1e-9:
+        sync_t = _f_src_sim(src, "port_sync_sim_time")
+    if sync_t > 1e-9 and float(hide_end) + 1e-6 < float(sync_t):
+        # sync 이후에 JSON 이 더 도는 게 정상. sync 를 hide 로 쓰면 조기 소실.
+        if play_end > float(sync_t) + 1e-6:
+            hide_end = float(play_end)
+        elif json_start > 1e-9 and anim > 1e-9:
+            hide_end = max(float(hide_end), float(json_start) + float(anim))
+        else:
+            hide_end = float(sync_t) + max(0.05, float(anim) * 0.1 if anim > 1e-9 else 0.5)
+    return float(hide_end)
+
+
 def _removed_prim_hide_holds(ext: Any, screen: int) -> Dict[str, Dict[str, Any]]:
     by = getattr(ext, "_sim_playback_removed_prim_hold_by_screen", None)
     if not isinstance(by, dict):
@@ -1223,7 +1348,7 @@ def _ensure_removed_prim_hide_holds_from_schedule(ext: Any, screen: int) -> None
     재생 plan EMPTY(renewal sync) 가 wall hold 등록보다 먼저 와도
     prim 이 한 프레임 꺼지지 않도록, 활성 REMOVED step 에 대해 hold 를 선등록한다.
 
-    hold 구간: ``t_event <= sim_now < t_json_end`` (숨김 = JSON 종료).
+    hold 구간: ``process/json 시작 부근 <= sim_now < t_json_end`` (숨김 = JSON 종료).
     """
     if not bool(getattr(ext, "_sim_playback_started", False)):
         return
@@ -1256,23 +1381,27 @@ def _ensure_removed_prim_hide_holds_from_schedule(ext: Any, screen: int) -> None
             )
             if ev != "REMOVED":
                 continue
-            t0 = float(getattr(step, "t_event", 0.0) or 0.0)
-            hide_end = 0.0
-            for attr in ("t_json_end", "t_anim_end", "t_proc_end", "t_playback_json_end"):
-                try:
-                    v = float(getattr(step, attr, 0.0) or 0.0)
-                except Exception:
-                    v = 0.0
-                if v > 1e-9:
-                    hide_end = v
-                    break
-            if hide_end <= 1e-9:
+            hide_end = _resolve_removed_prim_hide_end_sim(dict(p), step)
+            if hide_end is None or float(hide_end) <= 1e-9:
                 continue
-            # JSON 시작 전부터 선등록하면 조기 EMPTY 에도 버팀. JSON 끝나면 만료.
+            # 공정 시작(progress t0) 또는 JSON 시작 중 이른 쪽부터 선등록
+            try:
+                t_proc = float(
+                    _f_src_sim(dict(p), "event_start_sim_time", default=0.0)
+                    or getattr(step, "t_event", 0.0)
+                    or 0.0
+                )
+            except Exception:
+                t_proc = float(getattr(step, "t_event", 0.0) or 0.0)
+            try:
+                t_json = float(getattr(step, "t_json_start", 0.0) or 0.0)
+            except Exception:
+                t_json = 0.0
+            candidates_arm = [x for x in (t_proc, t_json) if float(x) > 1e-9]
+            t_arm = min(candidates_arm) if candidates_arm else 0.0
             if float(sim_now) + 1e-6 >= float(hide_end):
                 continue
-            if float(sim_now) + 0.05 < float(t0):
-                # 아직 해당 REMOVED 이벤트 전이면 스킵 (너무 이른 선등록 방지)
+            if t_arm > 1e-9 and float(sim_now) + 0.05 < float(t_arm):
                 continue
             port = _canon_port(
                 p.get("port_id")
@@ -1280,11 +1409,20 @@ def _ensure_removed_prim_hide_holds_from_schedule(ext: Any, screen: int) -> None
                 or p.get("to_port_id")
                 or getattr(step, "port_id", None)
             )
-            lot = str(p.get("lot_id") or getattr(step, "lot_id", "") or "").strip()
+            ep = getattr(step, "event_payload", None)
+            if (not port) and isinstance(ep, dict):
+                port = _canon_port(
+                    ep.get("port_id") or ep.get("to_port_id") or ep.get("from_port_id")
+                )
+            lot = str(
+                p.get("lot_id")
+                or (ep.get("lot_id") if isinstance(ep, dict) else "")
+                or getattr(step, "lot_id", "")
+                or ""
+            ).strip()
             if not port or not lot:
                 continue
             prev = holds.get(str(port))
-            # 더 긴(정확한) hide_end 로 갱신
             if isinstance(prev, dict):
                 try:
                     prev_end = float(prev.get("proc_end_t", 0.0) or 0.0)
@@ -1292,7 +1430,11 @@ def _ensure_removed_prim_hide_holds_from_schedule(ext: Any, screen: int) -> None
                     prev_end = 0.0
                 if prev_end + 1e-6 >= float(hide_end) and str(prev.get("lot") or "") == lot:
                     continue
-            holds[str(port)] = {"lot": lot, "proc_end_t": float(hide_end)}
+            holds[str(port)] = {
+                "lot": lot,
+                "proc_end_t": float(hide_end),
+                "hide_end_src": "schedule_json_end",
+            }
         except Exception:
             continue
 
@@ -1345,57 +1487,54 @@ def _register_removed_prim_hide_hold_for_renewal(
     ev = _normalize_anim_event_seq(_s_val(src.get("event") or src.get("event_seq") or src.get("seq")))
     if ev != "REMOVED":
         return
-    port = _canon_port(src.get("port_id") or src.get("event_port_id") or src.get("to_port_id"))
+    port = _canon_port(
+        src.get("port_id")
+        or src.get("event_port_id")
+        or src.get("from_port_id")
+        or src.get("to_port_id")
+    )
     lot = str(src.get("lot_id") or "").strip()
     if not port or not lot:
         return
-    hide_end: Optional[float] = None
+    step = None
     if sched is not None:
         try:
             from .playback_schedule import find_scheduled_step_for_anim_src
 
             step = find_scheduled_step_for_anim_src(sched, dict(src))
-            if step is not None:
-                # JSON 종료 우선 (요구: 객체 숨김 = json end)
-                for attr in ("t_json_end", "t_anim_end", "t_proc_end"):
-                    try:
-                        v = float(getattr(step, attr, 0.0) or 0.0)
-                    except Exception:
-                        v = 0.0
-                    if v > 1e-9:
-                        hide_end = v
-                        break
         except Exception:
-            hide_end = None
-    if hide_end is None or hide_end <= 1e-9:
+            step = None
+    hide_end = _resolve_removed_prim_hide_end_sim(dict(src), step)
+    if hide_end is None or float(hide_end) <= 1e-9:
+        # 아주 짧게라도 hold (renewal 직후 즉시 hide 방지)
         try:
-            t0 = float(
-                str(
-                    src.get("event_start_sim_time")
-                    or src.get("_event_start_sim")
-                    or src.get("t")
-                    or src.get("sim_time")
-                    or "0"
-                ).strip()
-                or "0"
+            t0 = _f_src_sim(
+                src,
+                "anim_play_start_sim_time",
+                "_json_run_start_sim",
+                "event_start_sim_time",
+                "t",
             )
-            anim = float(str(src.get("anim_sec") or "0").strip() or "0")
-            proc = float(str(src.get("proc_sec") or "0").strip() or "0")
-            # json/애니 길이 우선, 없으면 공정 길이
-            dur = anim if anim > 1e-9 else proc
-            if dur > 1e-9:
-                hide_end = float(t0) + float(dur)
+            hide_end = float(t0) + 1.0 if t0 > 1e-9 else None
         except Exception:
             hide_end = None
-    if hide_end is None or hide_end <= 1e-9:
-        # fallback: 아주 짧게라도 hold (renewal 직후 즉시 hide 방지)
-        try:
-            t0 = float(str(src.get("event_start_sim_time") or src.get("t") or "0").strip() or "0")
-            hide_end = float(t0) + 1.0
-        except Exception:
-            return
+    if hide_end is None or float(hide_end) <= 1e-9:
+        return
     holds = _removed_prim_hide_holds(ext, int(screen))
-    holds[str(port).strip().upper()] = {"lot": str(lot), "proc_end_t": float(hide_end)}
+    prev = holds.get(str(port).strip().upper())
+    if isinstance(prev, dict):
+        try:
+            prev_end = float(prev.get("proc_end_t", 0.0) or 0.0)
+        except Exception:
+            prev_end = 0.0
+        # 더 긴(정확한 JSON end) 만 채택 — 짧은 fallback 으로 덮어쓰지 않음
+        if prev_end + 1e-6 >= float(hide_end) and str(prev.get("lot") or "") == lot:
+            return
+    holds[str(port).strip().upper()] = {
+        "lot": str(lot),
+        "proc_end_t": float(hide_end),
+        "hide_end_src": "removed_json_end",
+    }
 
 
 def prim_occ_for_playback_visibility(

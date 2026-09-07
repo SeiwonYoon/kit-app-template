@@ -156,6 +156,15 @@ def _apply_renewal_fields_for_json_step(
             jp,
         )
 
+    # 프리런 SSOT 가 이미 sync 를 넣었으면 재계산으로 덮지 않음.
+    # (재계산은 process t0+offset 이라 lead/큐 시 renewal 이 JSON 시작 전으로 당겨짐)
+    ssot_sync_keep = None
+    try:
+        if t_playback_sync is not None and float(t_playback_sync) > 1e-9:
+            ssot_sync_keep = float(t_playback_sync)
+    except Exception:
+        ssot_sync_keep = None
+
     try:
         from .json_playback_timing import playback_port_sync_sim_time
         from .control_sim_prerun_playback import panel_occ_tuple_from_dict
@@ -183,13 +192,16 @@ def _apply_renewal_fields_for_json_step(
         # renewal 마커는 확정됐으나 offset 산출 실패/0 → JSON 시작(t0+lead)에 적용.
         # None 으로 milestone 을 비우면 MOVE/REMOVED 가 한 박자 밀리므로 0 으로 보정한다.
         off = 0.0 if (renewal_off is None or float(renewal_off) <= 1e-9) else float(renewal_off)
-        t_playback_sync = playback_port_sync_sim_time(
-            float(t0),
-            float(proc),
-            float(anim),
-            has_renewal=True,
-            renewal_offset_sec=off,
-        )
+        if ssot_sync_keep is not None:
+            t_playback_sync = float(ssot_sync_keep)
+        else:
+            t_playback_sync = playback_port_sync_sim_time(
+                float(t0),
+                float(proc),
+                float(anim),
+                has_renewal=True,
+                renewal_offset_sec=off,
+            )
         t_playback_json_end = None
         ports_panel_json_end = ()
         if not ports_panel_renewal:
@@ -204,7 +216,8 @@ def _apply_renewal_fields_for_json_step(
                 if str(k).strip()
             )
     except Exception:
-        pass
+        if ssot_sync_keep is not None:
+            t_playback_sync = float(ssot_sync_keep)
 
     return (
         True,
@@ -282,6 +295,126 @@ def _s(payload: Dict[str, Any], key: str) -> str:
         return str(payload.get(key, "") or "").strip()
     except Exception:
         return ""
+
+
+def _progress_running_at_start(pp: Dict[str, Any]) -> bool:
+    if _s(pp, "status").upper() != "RUNNING":
+        return False
+    return abs(_f(pp, "elapsed", 0.0)) <= 1e-6
+
+
+def _find_paired_progress_for_event(
+    items: Tuple[SimTimelineItem, ...],
+    *,
+    event_idx: int,
+    t_ev: float,
+    event_p: Dict[str, Any],
+    seq_u: str,
+) -> Tuple[Dict[str, Any], int]:
+    """
+    event 와 같은 공정의 RUNNING(elapsed≈0) progress 를 찾는다.
+
+    SSOT 타임라인은 progress=@process_t0, JSON event=@anim_play_start 로
+    t 가 갈라질 수 있다. 같은 t 페어링만 쓰면 play_* / port_sync 가 빠지고
+    REMOVED prim hide_end 가 공정시작+anim 으로 붕괴한다.
+    """
+    n = len(items)
+    # 1) legacy: 바로 다음 item 이 같은 t 의 RUNNING progress
+    j = event_idx + 1
+    if j < n:
+        nxt = items[j]
+        if str(nxt.kind or "").strip().lower() == "progress" and isinstance(nxt.payload, dict):
+            pp = dict(nxt.payload)
+            if abs(float(nxt.t) - float(t_ev)) <= 1e-4 and _progress_running_at_start(pp):
+                return pp, j + 1
+
+    seq_n = _normalize_anim_event_seq(seq_u)
+    ev_t0 = _f(event_p, "event_start_sim_time", 0.0)
+    play_s = _f(event_p, "anim_play_start_sim_time", float(t_ev))
+    lot = _s(event_p, "lot_id")
+    port = (
+        _s(event_p, "port_id")
+        or _s(event_p, "to_port_id")
+        or _s(event_p, "from_port_id")
+    ).upper()
+
+    best: Optional[Tuple[float, int, Dict[str, Any]]] = None
+    for k, it in enumerate(items):
+        if str(it.kind or "").strip().lower() != "progress" or not isinstance(it.payload, dict):
+            continue
+        pp = dict(it.payload)
+        if not _progress_running_at_start(pp):
+            continue
+        p_seq = _normalize_anim_event_seq(_s(pp, "event_seq") or _s(pp, "sequence_name"))
+        if seq_n and p_seq and p_seq != seq_n:
+            continue
+        p_t0 = _f(pp, "event_start_sim_time", float(getattr(it, "t", 0.0) or 0.0))
+        p_play = _f(pp, "anim_play_start_sim_time", 0.0)
+        # 동일 공정: process t0 일치, 또는 event 시각이 해당 play_start
+        same_proc = False
+        if ev_t0 > 1e-9 and abs(p_t0 - ev_t0) <= 0.05:
+            same_proc = True
+        elif p_play > 1e-9 and abs(p_play - float(t_ev)) <= 0.05:
+            same_proc = True
+        elif abs(float(getattr(it, "t", 0.0) or 0.0) - float(t_ev)) <= 1e-4:
+            same_proc = True
+        if not same_proc:
+            continue
+        if lot:
+            p_lot = _s(pp, "lot_id")
+            if p_lot and p_lot != lot:
+                continue
+        if port:
+            p_port = (
+                _s(pp, "port_id")
+                or _s(pp, "to_port_id")
+                or _s(pp, "event_port_id")
+                or _s(pp, "from_port_id")
+            ).upper()
+            if p_port and p_port != port:
+                continue
+        score = abs(p_t0 - (ev_t0 if ev_t0 > 1e-9 else p_t0))
+        if p_play > 1e-9:
+            score = min(score, abs(p_play - float(t_ev)))
+        if best is None or score < best[0]:
+            best = (float(score), int(k), pp)
+
+    if best is not None:
+        # 소비 커서는 event 다음으로 — 동일 progress 를 다른 event 가 다시 쓰게 두지 않음
+        return best[2], max(event_idx + 1, best[1] + 1)
+
+    return {}, event_idx + 1
+
+
+def _synthetic_progress_from_event(event_p: Dict[str, Any], *, t_ev: float, seq_u: str) -> Dict[str, Any]:
+    """페어링 실패 시 event payload 의 play/sync 필드를 보존한 progress 스텁."""
+    out: Dict[str, Any] = {
+        "event_seq": seq_u,
+        "event_start_sim_time": _s(event_p, "event_start_sim_time") or f"{float(t_ev):.2f}",
+        "proc_sec": _s(event_p, "proc_sec") or "0.0",
+        "anim_sec": _s(event_p, "anim_sec") or "0.0",
+        "status": "RUNNING",
+        "elapsed": "0.0",
+    }
+    for k in (
+        "anim_play_start_sim_time",
+        "anim_play_end_sim_time",
+        "port_sync_sim_time",
+        "has_renewal",
+        "renewal_offset_sec",
+        "wall_sec",
+        "event_end_sim_time",
+        "anim_queue_delay_sec",
+        "linked_anim_json",
+        "lot_id",
+        "port_id",
+        "from_port_id",
+        "to_port_id",
+        "event_port_id",
+    ):
+        if k in event_p and event_p.get(k) is not None and str(event_p.get(k) or "").strip() != "":
+            out[k] = event_p.get(k)
+    return out
 
 
 def _needs_json_gate(seq_u: str) -> bool:
@@ -427,34 +560,36 @@ def build_playback_schedule(
             continue
 
         t_ev = float(it.t)
-        progress_p: Dict[str, Any] = {}
-        j = idx + 1
-        if j < len(items):
-            nxt = items[j]
-            if str(nxt.kind or "").strip().lower() == "progress" and isinstance(nxt.payload, dict):
-                pp = dict(nxt.payload)
-                if abs(float(nxt.t) - t_ev) <= 1e-4 and _s(pp, "status").upper() == "RUNNING":
-                    if abs(_f(pp, "elapsed", 0.0)) <= 1e-6:
-                        progress_p = pp
-                        idx = j + 1
-                    else:
-                        idx += 1
-                else:
-                    idx += 1
-            else:
-                idx += 1
-        else:
-            idx += 1
-
+        progress_p, idx = _find_paired_progress_for_event(
+            items,
+            event_idx=idx,
+            t_ev=float(t_ev),
+            event_p=event_p,
+            seq_u=seq_u,
+        )
         if not progress_p:
-            progress_p = {
-                "event_seq": seq_u,
-                "event_start_sim_time": f"{t_ev:.2f}",
-                "proc_sec": _s(event_p, "proc_sec") or "0.0",
-                "anim_sec": "0.0",
-                "status": "RUNNING",
-                "elapsed": "0.0",
-            }
+            progress_p = _synthetic_progress_from_event(
+                event_p, t_ev=float(t_ev), seq_u=seq_u
+            )
+        else:
+            # event 에만 있는 SSOT play/sync 필드를 progress 에 보강
+            for k in (
+                "anim_play_start_sim_time",
+                "anim_play_end_sim_time",
+                "port_sync_sim_time",
+                "has_renewal",
+                "renewal_offset_sec",
+                "wall_sec",
+                "event_end_sim_time",
+                "anim_queue_delay_sec",
+            ):
+                if (
+                    (k not in progress_p or str(progress_p.get(k) or "").strip() == "")
+                    and k in event_p
+                    and event_p.get(k) is not None
+                    and str(event_p.get(k) or "").strip() != ""
+                ):
+                    progress_p[k] = event_p.get(k)
 
         t0 = _f(progress_p, "event_start_sim_time", t_ev)
         if t0 <= 1e-9:
@@ -550,9 +685,21 @@ def build_playback_schedule(
                     _ssot_bake = bool(SIM_PRERUN_PLAN_SSOT)
                 except Exception:
                     _ssot_bake = False
-                play_start = _f(progress_p, "anim_play_start_sim_time", 0.0)
-                play_end = _f(progress_p, "anim_play_end_sim_time", 0.0)
-                port_sync_ssot = _f(progress_p, "port_sync_sim_time", 0.0)
+                play_start = _f(
+                    progress_p,
+                    "anim_play_start_sim_time",
+                    _f(event_p, "anim_play_start_sim_time", 0.0),
+                )
+                play_end = _f(
+                    progress_p,
+                    "anim_play_end_sim_time",
+                    _f(event_p, "anim_play_end_sim_time", 0.0),
+                )
+                port_sync_ssot = _f(
+                    progress_p,
+                    "port_sync_sim_time",
+                    _f(event_p, "port_sync_sim_time", 0.0),
+                )
                 if _ssot_bake and play_start > 1e-9:
                     t_json_start = float(play_start)
                     lead = max(0.0, float(play_start) - float(t0))
@@ -672,13 +819,15 @@ def build_playback_schedule(
                 if _skip_pred:
                     if t_playback_sync is None and _f(progress_p, "port_sync_sim_time", 0.0) > 1e-9:
                         t_playback_sync = _f(progress_p, "port_sync_sim_time", 0.0)
+                    if t_playback_sync is None and _f(event_p, "port_sync_sim_time", 0.0) > 1e-9:
+                        t_playback_sync = _f(event_p, "port_sync_sim_time", 0.0)
                     ports_panel = ()
                     ports_panel_renewal = ()
                     ports_after = ()
                     ports_panel_json_end = ()
                 elif bool(has_renewal):
-                    # renewal sim·occ — step append 직전 _apply_renewal_fields_for_json_step 에서 확정
-                    t_playback_sync = None
+                    # renewal 필드 확정은 _apply_renewal_fields_for_json_step.
+                    # 여기선 SSOT sync 를 None 으로 지우지 않음.
                     t_playback_json_end = None
                     ports_panel_json_end = ()
                 elif ev_u in _ANIM_PORT_UPDATE_SEQS:
@@ -1103,7 +1252,18 @@ def find_scheduled_step_for_anim_src(
         step_t0 = _f_src(p, "event_start_sim_time", _f_src(p, "sim_time", float(step.t_event)))
         if step_t0 <= 1e-9:
             step_t0 = float(step.t_event)
+        step_play = _f_src(
+            p,
+            "anim_play_start_sim_time",
+            float(getattr(step, "t_json_start", 0.0) or 0.0),
+        )
+        src_play = _f_src(src, "anim_play_start_sim_time", _f_src(src, "t", 0.0))
         dt = abs(float(step_t0) - float(t0))
+        # SSOT: src.t / emit 시각이 play_start 일 수 있음 → process t0 단독 매칭 실패 보완
+        if dt > 0.05 and step_play > 1e-9 and src_play > 1e-9:
+            dt = min(dt, abs(float(step_play) - float(src_play)))
+        if dt > 0.05 and step_play > 1e-9 and float(t0) > 1e-9:
+            dt = min(dt, abs(float(step_play) - float(t0)))
         if dt > 0.05:
             continue
         step_json = str(step.json_basename or "").strip().lower()
@@ -1118,18 +1278,23 @@ def find_scheduled_step_for_anim_src(
             lot = str(ep.get("lot_id") or p.get("lot_id") or "").strip()
             if lot and lot != src_lot:
                 continue
-        sync_t = step.t_playback_port_sync
-        if sync_t is None:
-            continue
+        # hold/lookup 공용: port_sync 유무로 step 자체를 버리지 않음
         score = float(dt)
         if src_json and step_json and src_json == step_json:
             score -= 1000.0
+        if step.t_playback_port_sync is not None:
+            score -= 10.0
         candidates.append((score, step))
 
     if not candidates:
         return None
     pool = list(candidates)
-    pool.sort(key=lambda x: (float(x[0]), float(x[1].t_playback_port_sync or 0.0)))
+    pool.sort(
+        key=lambda x: (
+            float(x[0]),
+            float(x[1].t_playback_port_sync or x[1].t_json_end or x[1].t_event or 0.0),
+        )
+    )
     return pool[0][1]
 
 
