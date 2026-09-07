@@ -745,9 +745,73 @@ class _Planner:
         )
 
 
+def shift_plan_strip_first_json_lead(plan: PrerunPlan) -> PrerunPlan:
+    """첫 JSON(애니 큐 최초 슬롯) 시작 시각만큼 전체 절대시각을 앞당긴다.
+
+    모든 공정/애니/포트 키프레임/final 에 동일 ``shift`` 를 빼서 상대 간격·직렬 순서는 유지한다.
+    ``shift<=0`` 이면 그대로 반환.
+    """
+    anims = list(getattr(plan, "anims", None) or [])
+    if not anims:
+        return plan
+    try:
+        shift = min(float(a.t_start) for a in anims)
+    except Exception:
+        return plan
+    if shift <= 1e-9:
+        return plan
+
+    def _sub(x: Optional[float]) -> Optional[float]:
+        if x is None:
+            return None
+        return float(x) - float(shift)
+
+    for p in list(getattr(plan, "processes", None) or []):
+        p.t_start = float(getattr(p, "t_start", 0.0) or 0.0) - float(shift)
+        p.t_anim_ready = float(getattr(p, "t_anim_ready", 0.0) or 0.0) - float(shift)
+        p.t_anim_start = _sub(getattr(p, "t_anim_start", None))
+        p.t_anim_end = _sub(getattr(p, "t_anim_end", None))
+        p.t_port_sync = _sub(getattr(p, "t_port_sync", None))
+        p.t_wall_end = _sub(getattr(p, "t_wall_end", None))
+        p.t_hold_end = _sub(getattr(p, "t_hold_end", None))
+
+    plan.anims = [
+        PlanAnimSlot(
+            process_uid=a.process_uid,
+            kind=a.kind,
+            lot_id=a.lot_id,
+            port=a.port,
+            t_start=float(a.t_start) - float(shift),
+            t_end=float(a.t_end) - float(shift),
+        )
+        for a in anims
+    ]
+    plan.port_keyframes = [
+        PortKeyframe(
+            t=float(kf.t) - float(shift),
+            ports=dict(kf.ports or {}),
+            note=str(getattr(kf, "note", "") or ""),
+        )
+        for kf in list(getattr(plan, "port_keyframes", None) or [])
+    ]
+    try:
+        plan.final_sim_time = max(0.0, float(plan.final_sim_time) - float(shift))
+    except Exception:
+        pass
+    return plan
+
+
 def build_prerun_plan(cfg: Optional[PrerunPlanConfig] = None) -> PrerunPlan:
     """설정으로 전체 프리런 일정을 계산한다."""
-    return _Planner(cfg or PrerunPlanConfig()).run()
+    plan = _Planner(cfg or PrerunPlanConfig()).run()
+    try:
+        from .sim_control_defaults import SIM_PRERUN_STRIP_FIRST_JSON_LEAD
+
+        if bool(SIM_PRERUN_STRIP_FIRST_JSON_LEAD):
+            plan = shift_plan_strip_first_json_lead(plan)
+    except Exception:
+        pass
+    return plan
 
 
 def format_plan_timetable(plan: PrerunPlan) -> str:
@@ -1017,6 +1081,43 @@ def assert_process_start_rules() -> None:
     if abs(float(p2.t_wall_end) - 30.0) < 1e-6:
         raise AssertionError("p2 wall 이 proc(30)에 고정되면 직렬 연장이 빠진 것")
 
+    # --- F) 첫 JSON lead 만큼 전체 당김 (플래그 함수) ---
+    pl6 = _Planner(
+        PrerunPlanConfig(
+            lot_count=3,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=10.0,
+            proc_oht_to_ep=30.0,
+            proc_oht_to_inout=30.0,
+            proc_inout_to_bp=30.0,
+            proc_bp_to_ep=30.0,
+            proc_remove=30.0,
+            proc_foup=10.0,
+        )
+    ).run()
+    if not pl6.anims:
+        raise AssertionError("strip-lead 테스트용 anim 없음")
+    first0 = float(pl6.anims[0].t_start)
+    if first0 <= 1e-9:
+        raise AssertionError(f"strip 전 첫 애니 lead 가 있어야 함 got {first0}")
+    rem_before = [
+        p for p in pl6.processes if p.kind == KIND_REMOVE and p.lot_id == "LOT001"
+    ]
+    rem_t0 = float(rem_before[0].t_start) if rem_before else None
+    shift_plan_strip_first_json_lead(pl6)
+    if abs(float(pl6.anims[0].t_start) - 0.0) > 1e-6:
+        raise AssertionError(f"strip 후 첫 애니 want 0 got {pl6.anims[0].t_start}")
+    if rem_t0 is not None and rem_before:
+        rem_after = [
+            p for p in pl6.processes if p.kind == KIND_REMOVE and p.lot_id == "LOT001"
+        ][0]
+        if abs(float(rem_after.t_start) - (rem_t0 - first0)) > 1e-6:
+            raise AssertionError(
+                f"strip 후 REMOVE 당김 실패 before={rem_t0} after={rem_after.t_start} shift={first0}"
+            )
+
 
 __all__ = [
     "PrerunPlanConfig",
@@ -1025,6 +1126,7 @@ __all__ = [
     "PortKeyframe",
     "PrerunPlan",
     "build_prerun_plan",
+    "shift_plan_strip_first_json_lead",
     "format_plan_timetable",
     "assert_example_lot3_schedule",
     "assert_process_start_rules",

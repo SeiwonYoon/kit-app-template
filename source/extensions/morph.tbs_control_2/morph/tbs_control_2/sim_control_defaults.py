@@ -215,6 +215,11 @@ SIM_PROC_PARALLEL_ANIM_SERIAL: bool = False
 # False: 기존 엔진 tick ``prerun_engine_to_timeline`` (레거시).
 SIM_PRERUN_PLAN_SSOT: bool = True
 
+# True: 첫 JSON(애니) 시작 시각만큼 프리런 전체 일정을 앞당김.
+#   시뮬 시작 직후 lead 공백 없이 첫 JSON 부터 재생. 웹/타임테이블도 동일 플랜 사용.
+# False(기본): 기존 back-align lead 유지 (공정 끝에 애니 맞춤).
+SIM_PRERUN_STRIP_FIRST_JSON_LEAD: bool = False
+
 # ---------------------------------------------------------------------------
 # Extract 결과 캐시 (data/preextract/)
 # ---------------------------------------------------------------------------
@@ -285,6 +290,7 @@ __all__ = [
     "SIM_PARALLEL_NONCONFLICTING_MOVES",
     "SIM_PROC_PARALLEL_ANIM_SERIAL",
     "SIM_PRERUN_PLAN_SSOT",
+    "SIM_PRERUN_STRIP_FIRST_JSON_LEAD",
     "USE_PREEXTRACTED_LAYERS",
     "USE_PRESTRIPPED_OPEN_STAGE",
     "SIM_CAMERA_MODE_ENABLED",

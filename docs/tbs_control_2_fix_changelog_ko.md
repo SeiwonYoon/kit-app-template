@@ -11,11 +11,11 @@
 |---|------|
 | 1 | REMOVE만 JSON **종료** 시 prim 숨김/보임. 나머지 JSON은 **renewal** |
 | 2 | 프리런/웹 데이터: 공정 시작 행 + JSON 시작 행(`{EVENT} 동작중`). 기본·`_temp`·웹 slim 동일 |
-| 3 | 첫 JSON 앞 공백 제거 플래그 (미착수) |
+| 3 | 첫 JSON 앞 공백 제거 플래그 |
 | 4 | INOUT 점유 시 BP→EP 미진행이면 INOUT→BP 즉시 / 공정 즉시·애니만 직렬 (미착수) |
 | 5 | 화면1·2 막대 싱크 |
-| 6 | REMOVE wall 시간 설명/기대 정리 (미착수) |
-| 7 | 위치 초기화 완료 후 애니 시작 (미착수) |
+| 6 | REMOVE wall 시간 / 공정 wall 팽창 |
+| 7 | 위치 초기화 완료 후 애니 시작 |
 
 ---
 
@@ -119,8 +119,103 @@ OHT→INOUT port_sync 에서 `_inout_reserved=False` 복구 (INOUT→BP 가 rene
 
 ---
 
+## 2026-09-07 — #6 공정시간 wall 팽창 / 假 애니 큐 점유
+
+### 요구
+빈/없는 JSON fallback 으로 애니 큐가 **假점유**되어 공정이 90초+로 부푸는 것만 제거.  
+**실제 JSON 직렬 대기 → wall 자동 연장은 유지** (기존 정상 동작).
+
+### 원인
+1. 빈/0초 JSON 에도 `anim_sec_fallback`(10초)을 넣어 글로벌 애니 큐를 假점유
+2. (과도 수정, 이후 복구) wall 을 proc 만으로 고정해 실애니 직렬 연장까지 끊김
+
+### 수정 (최종)
+- `resolve_process_anim_sec`: 빈 JSON·파일 없음 → **0초** (fallback 假초 금지). `tbs_control_1` 시퀀스 경로도 탐색
+- 플래너: **`t_wall_end = max(proc_end, anim_end)`** 복구 (실애니 직렬 밀림 시 공정 wall 연장)
+- `t_hold_end = t_wall_end`
+- 회귀 E: 두 OHT→EP 실애니 → 뒤 슬롯 play 가 앞 종료 이후 + wall > proc
+
+### 파일
+- `sim_sequence_duration.py`, `sim_sequence_json.py`
+- `prerun_plan_ssot.py`, `prerun_plan_adapt.py`
+
+---
+
+## 2026-09-07 — #6 후속: 동시공정 hold 누락
+
+### 증상
+공정 wall이 끝난 뒤에도 애니가 재생 중인데 `[동시공정]` 에서 해당 공정이 사라지고, 본문이 `단계 완료`로 고착.
+(과도하게 wall=proc 만 쓰던 동안의 증상; wall 복구 후에도 hold 폴백은 유지)
+
+### 수정
+- 동시공정·본문 RUNNING 판정 = `t_hold_end` / wall (애니 연장 포함)
+- 동시공정 빈 목록이면 payload 잔상 클리어
+
+### 파일
+- `prerun_plan_adapt.py`
+
+---
+
+## 2026-09-07 — #7 JSON 시작 전 위치초기화 (연달아 시작 포함)
+
+### 요구
+JSON이 큐로 밀려 **끝나자마자 다음 JSON**이 바로 시작돼도, 애니는 **위치초기화가 끝난 뒤**에만 시작.
+
+### 원인
+1. `_run_json_sequence` 가 reset **직후** live 경로에서 `_halt_screen_json_anim` 을 다시 호출 → 맞춘 자세를 다시 건드림
+2. 연속 시작(on_done→main→다음 job)에서 runner thread 가 아직 alive 인데 pause+join 시도 → 교착/초기화 누락 위험
+3. restore 직후 dispatch settle 없이 `run` 진입
+
+### 수정 (위치초기화만, 공정/직렬 큐 로직 미변경)
+- reset **이후 halt 제거** — 순서: restore → dispatch settle → (필요 시 짧은 motion drain) → `run`
+- main 스레드 연속 시작: pause/join 생략, `_restore_sim_prim_motion_to_initial` 강제
+- `_reset_sim_motion_before_json_run` → 완료 bool 반환
+
+### 파일
+- `control_window.py`
+
+---
+
+## 2026-09-07 — 진행현황 끊김 / JSON 체감 지연 완화
+
+### 증상
+JSON 시작·종료 타이밍에 진행현황 창이 잠깐 멈추고, 애니가 늦게 붙으며 점프처럼 보임.
+
+### 원인
+1. #7 settle 이 **메인 스레드에서 sleep** (`wait_context_dispatch_idle` 1.5s + drain 0.35s) → UI 틱 정지
+2. 프리런 `tick_all` 이 JSON start(reset) 를 **UI 갱신보다 먼저** 수행
+
+### 수정 (공정/직렬/위치초기화 동작 유지)
+- 메인: restore 동기 완료 후 **sleep settle 제거** (백그라운드만 짧은 dispatch idle)
+- `tick_all`: `emit → UI refresh → JSON poll/drain` 순서
+- emit 경로 프리런: 즉시 run 대신 pending → UI 후 poll 기동
+- `on_done` 연속 JSON: `_start_json_now` 로 즉시 기동 유지
+
+### 파일
+- `control_window.py`, `control_sim_screen_playback.py`
+
+---
+
 ## 다음 예정
 
-- #3 첫 JSON 공백 제거 플래그  
-- #6 wall 표시 기대 정리  
-- #7 리셋 후 애니  
+- (잔여 이슈 없음 — #4 표기 정리 여부는 별도)
+
+---
+
+## 2026-09-07 — #3 첫 JSON lead 공백 제거 플래그
+
+### 요구
+`SIM_PRERUN_STRIP_FIRST_JSON_LEAD=True` 일 때, **첫 JSON 시작 시각**만큼 프리런 전체 일정을 앞당겨
+시뮬 시작과 함께 첫 애니가 나오게 함. False 면 기존 lead(back-align) 유지.
+
+### 수정
+- `sim_control_defaults.SIM_PRERUN_STRIP_FIRST_JSON_LEAD` (기본 **False**)
+- `shift_plan_strip_first_json_lead`: 첫 애니 `t_start` = shift → 공정/애니/포트KF/final 동일 차감
+- `build_prerun_plan` 끝에서 플래그 ON 시 적용 → adapt/웹/재생이 같은 플랜 사용
+- 회귀 F: strip 후 첫 애니@0, REMOVE 등 상대 간격 유지
+
+### 파일
+- `sim_control_defaults.py`, `prerun_plan_ssot.py`
+
+---
+
