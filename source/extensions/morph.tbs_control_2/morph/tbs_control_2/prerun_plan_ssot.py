@@ -68,7 +68,10 @@ class PlanProcess:
     t_anim_end: Optional[float] = None
     # 포트 점유 반영 시각 — renewal offset 있으면 anim_start+offset, 없으면 anim_end
     t_port_sync: Optional[float] = None
+    # 공정 종료(설정 proc) — 애니 큐 밀림으로 팽창하지 않음 (프리런/웹 공정시간 SSOT)
     t_wall_end: Optional[float] = None
+    # 예약 해제·finish — max(공정끝, 애니끝). 내부 전용
+    t_hold_end: Optional[float] = None
     needs_anim: bool = True
 
 
@@ -222,19 +225,22 @@ class _Planner:
     def _resolve_anim(self, kind: str, from_port: str, to_port: str, port: str) -> tuple:
         fb = float(self.cfg.anim_sec_fallback)
         if not bool(self.cfg.anim_from_json):
+            # 문서/회귀용: 고정 fallback 길이
             return fb, ""
         try:
             from .sim_sequence_duration import resolve_process_anim_sec
 
+            # 빈 JSON·파일 없음에 fallback 초를 넣지 않음 — 글로벌 큐 假점유 방지
             return resolve_process_anim_sec(
                 kind=kind,
                 from_port=from_port,
                 to_port=to_port,
                 port=port,
-                fallback_sec=fb,
+                fallback_sec=0.0,
+                apply_fallback_if_missing=False,
             )
         except Exception:
-            return fb, ""
+            return 0.0, ""
 
     def _start_process(
         self,
@@ -253,7 +259,9 @@ class _Planner:
         linked = ""
         if needs_anim:
             anim, linked = self._resolve_anim(kind, from_port, to_port, port)
-            if anim <= 1e-9:
+            # anim_from_json 경로: 0초면 그대로 0 (fallback 으로 10초 슬롯을 만들지 않음).
+            # 0초 슬롯은 포트 sync 만 하고 큐를 막지 않는다.
+            if (not bool(self.cfg.anim_from_json)) and anim <= 1e-9:
                 anim = float(self.cfg.anim_sec_fallback)
         p = PlanProcess(
             uid=uid,
@@ -273,6 +281,7 @@ class _Planner:
             self._anim_waiting.append(uid)
         else:
             p.t_wall_end = float(t) + float(proc_sec)
+            p.t_hold_end = float(p.t_wall_end)
         self.processes.append(p)
         self._active[uid] = p
         return p
@@ -413,6 +422,7 @@ class _Planner:
                 t=start_t,
             )
             p.t_wall_end = start_t + float(self.cfg.proc_foup)
+            p.t_hold_end = float(p.t_wall_end)
             if self.cfg.foup_global_serial:
                 self._foup_free_at = float(p.t_wall_end)
         self._pending_foup = remain
@@ -462,7 +472,12 @@ class _Planner:
                         p.t_port_sync = float(t0) + float(off)
             except Exception:
                 p.t_port_sync = float(t1)
-            p.t_wall_end = max(float(p.t_start) + float(p.proc_sec), t1)
+            # 공정 wall = max(설정 proc, 애니 종료).
+            # 애니 직렬 큐로 play 가 밀리면 wall 도 같이 연장 (기존 정상 동작).
+            # 假 팽창 방지은 anim_sec=0(빈 JSON) 쪽에서 — 0초는 큐를 안 막음.
+            proc_end = float(p.t_start) + float(p.proc_sec)
+            p.t_wall_end = max(float(proc_end), float(t1))
+            p.t_hold_end = float(p.t_wall_end)
             self.anims.append(
                 PlanAnimSlot(
                     process_uid=p.uid,
@@ -559,6 +574,8 @@ class _Planner:
                     pass
                 if p.t_wall_end is not None:
                     times.append(float(p.t_wall_end))
+                if getattr(p, "t_hold_end", None) is not None:
+                    times.append(float(p.t_hold_end))
             if self._anim_waiting:
                 times.append(float(self._anim_free_at))
                 for uid in self._anim_waiting:
@@ -589,10 +606,11 @@ class _Planner:
                 elif (not p.needs_anim) and p.t_wall_end is not None and p.kind != KIND_FOUP:
                     if getattr(p, "_done", False) is not True:
                         events.append((float(p.t_wall_end), "wall_end", p.uid))
-                if p.needs_anim and p.t_wall_end is not None and getattr(p, "_done", False) is not True:
-                    # wall_end 는 포트 반영 이후에만
-                    if getattr(p, "_port_applied", False) is True:
-                        events.append((float(p.t_wall_end), "wall_end", p.uid))
+                if p.needs_anim and getattr(p, "_done", False) is not True:
+                    # finish/예약해제는 hold_end(공정·애니 중 늦은 쪽). 포트 반영 이후만.
+                    hold = p.t_hold_end if p.t_hold_end is not None else p.t_wall_end
+                    if hold is not None and getattr(p, "_port_applied", False) is True:
+                        events.append((float(hold), "wall_end", p.uid))
 
             if not events and not self._anim_waiting and not self._pending_foup and not self._active:
                 # 남은 LOT / 포트 적재 / 회수대기가 있으면 기동 재시도 후 종료 판단
@@ -680,7 +698,8 @@ class _Planner:
                         if not getattr(p, "_settle_done", False):
                             self._queue_post_arrival_foup(p, t)
                             setattr(p, "_settle_done", True)
-                    if p.t_wall_end is not None and abs(float(p.t_wall_end) - t) <= 1e-9:
+                    hold = p.t_hold_end if p.t_hold_end is not None else p.t_wall_end
+                    if hold is not None and abs(float(hold) - t) <= 1e-9:
                         setattr(p, "_done", True)
                         self._finish_process(p)
                 elif typ == "anim_end":
@@ -691,7 +710,8 @@ class _Planner:
                         setattr(p, "_port_applied", True)
                     self._queue_post_arrival_foup(p, t)
                     setattr(p, "_settle_done", True)
-                    if p.t_wall_end is not None and abs(float(p.t_wall_end) - t) <= 1e-9:
+                    hold = p.t_hold_end if p.t_hold_end is not None else p.t_wall_end
+                    if hold is not None and abs(float(hold) - t) <= 1e-9:
                         setattr(p, "_done", True)
                         self._finish_process(p)
                 elif typ == "foup_end":
@@ -711,7 +731,7 @@ class _Planner:
 
         final_t = 0.0
         for p in self.processes:
-            for x in (p.t_wall_end, p.t_anim_end, p.t_start):
+            for x in (p.t_wall_end, p.t_hold_end, p.t_anim_end, p.t_start):
                 if x is not None:
                     final_t = max(final_t, float(x))
         for a in self.anims:
@@ -890,6 +910,112 @@ def assert_process_start_rules() -> None:
     rem = [p for p in pl3.processes if p.kind == KIND_REMOVE and p.lot_id == "LOT009"]
     if not rem or abs(rem[0].t_start - 70.0) > 1e-6:
         raise AssertionError(f"FOUP대기 REMOVE want @70 got {rem[:1]}")
+
+    # --- D) anim_sec=0 슬롯은 글로벌 큐를 막지 않음 (假 fallback 10초 점유 금지) ---
+    pl4 = _Planner(
+        PrerunPlanConfig(
+            lot_count=0,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=10.0,
+            proc_oht_to_ep=30.0,
+            proc_remove=30.0,
+        )
+    )
+    p_a = pl4._start_process(
+        kind=KIND_OHT_TO_EP,
+        lot_id="LOT_A",
+        port="EP1",
+        from_port="OHT",
+        to_port="EP1",
+        proc_sec=30.0,
+        needs_anim=True,
+        t=0.0,
+    )
+    p_b = pl4._start_process(
+        kind=KIND_REMOVE,
+        lot_id="LOT_B",
+        port="EP2",
+        from_port="EP2",
+        to_port="OHT",
+        proc_sec=30.0,
+        needs_anim=True,
+        t=0.0,
+    )
+    # 둘 다 0초 애니로 강제 — 예전 fallback 10 이면 B 가 +10 밀림
+    for p in (p_a, p_b):
+        p.anim_sec = 0.0
+        p.t_anim_ready = _lead_ready(0.0, 30.0, 0.0)
+        p.t_anim_start = None
+        p.t_anim_end = None
+        p.t_wall_end = None
+    pl4._anim_free_at = 0.0
+    pl4._anim_waiting = [p_a.uid, p_b.uid]
+    pl4._schedule_anims_through(1e12)
+    if p_a.t_anim_start is None or p_b.t_anim_start is None:
+        raise AssertionError("0초 애니 미배치")
+    if abs(float(p_a.t_anim_start) - 30.0) > 1e-6 or abs(float(p_b.t_anim_start) - 30.0) > 1e-6:
+        raise AssertionError(
+            f"0초 애니는 둘 다 ready@30 에 배치되어야 함 got A={p_a.t_anim_start} B={p_b.t_anim_start}"
+        )
+    for p in (p_a, p_b):
+        if p.t_wall_end is None or abs(float(p.t_wall_end) - 30.0) > 1e-6:
+            raise AssertionError(f"0초 애니 wall want 30 got {p.kind} {p.t_wall_end}")
+
+    # --- E) 실애니 직렬: 뒤 슬롯 play 밀림 → wall 자동 연장 ---
+    pl5 = _Planner(
+        PrerunPlanConfig(
+            lot_count=0,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=13.0,
+            proc_oht_to_ep=30.0,
+        )
+    )
+    p1 = pl5._start_process(
+        kind=KIND_OHT_TO_EP,
+        lot_id="LOT1",
+        port="EP1",
+        from_port="OHT",
+        to_port="EP1",
+        proc_sec=30.0,
+        needs_anim=True,
+        t=0.0,
+    )
+    p2 = pl5._start_process(
+        kind=KIND_OHT_TO_EP,
+        lot_id="LOT2",
+        port="EP2",
+        from_port="OHT",
+        to_port="EP2",
+        proc_sec=30.0,
+        needs_anim=True,
+        t=0.0,
+    )
+    for p in (p1, p2):
+        p.anim_sec = 13.0
+        p.t_anim_ready = _lead_ready(0.0, 30.0, 13.0)
+        p.t_anim_start = None
+        p.t_anim_end = None
+        p.t_wall_end = None
+    pl5._anim_free_at = 0.0
+    pl5._anim_waiting = [p1.uid, p2.uid]
+    pl5._schedule_anims_through(1e12)
+    if p1.t_anim_end is None or p2.t_anim_start is None:
+        raise AssertionError("실애니 미배치")
+    if float(p2.t_anim_start) + 1e-9 < float(p1.t_anim_end):
+        raise AssertionError(
+            f"애니 직렬 깨짐: p2.start={p2.t_anim_start} < p1.end={p1.t_anim_end}"
+        )
+    # p2 는 큐 대기로 anim_end > proc_end → wall 연장
+    if p2.t_wall_end is None or float(p2.t_wall_end) + 1e-9 < float(p2.t_anim_end):
+        raise AssertionError(
+            f"직렬 밀림 wall 연장 실패 wall={p2.t_wall_end} anim_end={p2.t_anim_end}"
+        )
+    if abs(float(p2.t_wall_end) - 30.0) < 1e-6:
+        raise AssertionError("p2 wall 이 proc(30)에 고정되면 직렬 연장이 빠진 것")
 
 
 __all__ = [

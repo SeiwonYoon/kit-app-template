@@ -174,19 +174,31 @@ def resolve_process_anim_sec(
     to_port: str,
     port: str,
     fallback_sec: float = 0.0,
+    apply_fallback_if_missing: bool = False,
 ) -> tuple[float, str]:
     """
     공정별 JSON 길이를 프리런에 반영.
 
     Returns:
-        (anim_sec, linked_basename) — 파일 없거나 0이면 fallback_sec.
+        (anim_sec, linked_basename)
+
+    - 파일이 있고 길이가 0(빈 JSON 등): **0** (fallback 으로 가짜 초를 넣지 않음)
+    - 파일 없음: ``apply_fallback_if_missing`` 일 때만 fallback_sec, 아니면 0
     """
     bn = linked_json_for_process(kind=kind, from_port=from_port, to_port=to_port, port=port)
     if not bn:
-        return max(0.0, float(fallback_sec)), ""
+        if apply_fallback_if_missing:
+            return max(0.0, float(fallback_sec)), ""
+        return 0.0, ""
+    jp = resolve_sim_sequence_json_path(bn)
+    if jp is None or not jp.is_file():
+        if apply_fallback_if_missing:
+            return max(0.0, float(fallback_sec)), bn
+        return 0.0, bn
     est = estimate_json_file_duration_sec(bn)
+    # 빈 JSON([]) 등 실제 길이 0 — 글로벌 애니 큐를 fallback 초로 假점유하지 않음
     if est <= 1e-9:
-        est = max(0.0, float(fallback_sec))
+        return 0.0, bn
     return float(est), bn
 
 

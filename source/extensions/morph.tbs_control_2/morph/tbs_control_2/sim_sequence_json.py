@@ -13,7 +13,7 @@ from .sequence_renewal import find_first_renewal_index
 
 
 def extension_data_roots() -> Tuple[Path, ...]:
-    """``morph.tbs_control_2/data/sim_sequences`` 를 포함할 수 있는 확장 루트."""
+    """``data/sim_sequences`` 를 찾을 확장 루트 (tbs_control_2 우선, sibling control_1 포함)."""
     here = Path(__file__).resolve()
     roots: List[Path] = []
     seen: set = set()
@@ -31,7 +31,12 @@ def extension_data_roots() -> Tuple[Path, ...]:
 
     # .../source/extensions/morph.tbs_control_2
     _add(here.parents[2])
-    # .../morph.tbs_control_2 (editable install layout)
+    # sibling morph.tbs_control_1 (시퀀스 JSON 이 여기 있는 배포)
+    try:
+        _add(here.parents[2].parent / "morph.tbs_control_1")
+    except Exception:
+        pass
+    # editable / 상위 레이아웃
     if len(here.parents) > 3:
         _add(here.parents[3])
 
@@ -41,6 +46,7 @@ def extension_data_roots() -> Tuple[Path, ...]:
         rt = carb.tokens.get_tokens_interface().resolve("${root}")
         if rt:
             _add(Path(rt) / "source" / "extensions" / "morph.tbs_control_2")
+            _add(Path(rt) / "source" / "extensions" / "morph.tbs_control_1")
     except Exception:
         pass
 

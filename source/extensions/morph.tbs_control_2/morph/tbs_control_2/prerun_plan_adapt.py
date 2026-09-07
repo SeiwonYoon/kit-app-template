@@ -278,9 +278,8 @@ def _process_to_items(p: PlanProcess) -> List[SimTimelineItem]:
     }
     items.append(SimTimelineItem(t=t0, kind="progress", payload=prog))
 
+    # 공정 DONE = t_wall_end (실애니 직렬 밀림 시 max(proc, anim_end) 연장 반영)
     t_done = float(wall)
-    if p.t_anim_end is not None:
-        t_done = max(float(wall), float(p.t_anim_end))
     items.append(
         SimTimelineItem(
             t=t_done,
@@ -413,6 +412,27 @@ def get_prerun_plan_for_screen(ext: Any, screen: int) -> Optional[Any]:
     return None
 
 
+def _plan_proc_wall_end(p: Any) -> float:
+    """공정 wall SSOT = t_wall_end (실애니 직렬 시 max(proc, anim_end))."""
+    t0 = float(getattr(p, "t_start", 0.0) or 0.0)
+    we = getattr(p, "t_wall_end", None)
+    if we is None:
+        return t0 + float(getattr(p, "proc_sec", 0.0) or 0.0)
+    return float(we)
+
+
+def _plan_proc_active_end(p: Any) -> float:
+    """동시공정·진행중 판정 = hold/wall (애니 직렬 연장 포함)."""
+    hold = getattr(p, "t_hold_end", None)
+    if hold is not None:
+        return float(hold)
+    a1 = getattr(p, "t_anim_end", None)
+    we = _plan_proc_wall_end(p)
+    if a1 is not None:
+        return max(we, float(a1))
+    return we
+
+
 def enrich_ssot_playback_progress(
     ext: Any,
     screen: int,
@@ -465,10 +485,8 @@ def enrich_ssot_playback_progress(
         if playing_proc is None:
             for p in procs_by_uid.values():
                 t0 = float(getattr(p, "t_start", 0.0) or 0.0)
-                we = getattr(p, "t_wall_end", None)
-                if we is None:
-                    we = t0 + float(getattr(p, "proc_sec", 0.0) or 0.0)
-                if t0 - 1e-6 <= t < float(we) - 1e-12:
+                active_end = _plan_proc_active_end(p)
+                if t0 - 1e-6 <= t < float(active_end) - 1e-12:
                     playing_proc = p
                     break
     except Exception:
@@ -479,10 +497,8 @@ def enrich_ssot_playback_progress(
         try:
             p = playing_proc
             t0 = float(getattr(p, "t_start", 0.0) or 0.0)
-            we = getattr(p, "t_wall_end", None)
-            if we is None:
-                we = t0 + float(getattr(p, "proc_sec", 0.0) or 0.0)
-            we = float(we)
+            we = _plan_proc_wall_end(p)
+            active_end = _plan_proc_active_end(p)
             proc = max(1e-6, float(getattr(p, "proc_sec", 0.0) or 0.0))
             wall_span = max(proc, max(0.0, we - t0))
             el = max(0.0, min(wall_span, t - t0))
@@ -494,7 +510,8 @@ def enrich_ssot_playback_progress(
             to = str(getattr(p, "to_port", "") or getattr(p, "port", "") or "")
             linked = str(getattr(p, "linked_json", "") or "").strip()
             anim_s = float(getattr(p, "anim_sec", 0.0) or 0.0)
-            payload["status"] = "RUNNING" if t + 1e-9 < we else "DONE"
+            # wall 은 직렬 연장 반영. hold/active 남아 있으면 RUNNING.
+            payload["status"] = "RUNNING" if t + 1e-9 < float(active_end) else "DONE"
             payload["event_seq"] = seq
             payload["sequence_name"] = seq
             payload["label"] = f"{kind} {lot}".strip()
@@ -555,14 +572,19 @@ def enrich_ssot_playback_progress(
     conc_lines: List[str] = []
     conc_flags: List[str] = []
     try:
+        active_procs = []
         for p in list(getattr(plan, "processes", None) or []):
             t0 = float(getattr(p, "t_start", 0.0) or 0.0)
-            we = getattr(p, "t_wall_end", None)
-            if we is None:
-                we = t0 + float(getattr(p, "proc_sec", 0.0) or 0.0)
-            we = float(we)
-            if t + 1e-9 < t0 or t >= we - 1e-12:
+            active_end = _plan_proc_active_end(p)
+            if t + 1e-9 < t0 or t >= float(active_end) - 1e-12:
                 continue
+            active_procs.append(p)
+        # 시작 시각 순 — 화면에서 읽기 쉽게
+        active_procs.sort(key=lambda x: float(getattr(x, "t_start", 0.0) or 0.0))
+        for p in active_procs:
+            t0 = float(getattr(p, "t_start", 0.0) or 0.0)
+            we = _plan_proc_wall_end(p)
+            # 표시 분모 = wall SSOT (실애니 직렬 연장 포함)
             span = max(1e-6, we - t0)
             el = max(0.0, min(span, t - t0))
             pct = int(min(100.0, 100.0 * el / span))
@@ -583,12 +605,13 @@ def enrich_ssot_playback_progress(
         conc_lines = []
         conc_flags = []
 
-    if conc_lines:
-        payload["concurrent_summary"] = "\n".join(conc_lines)
-        payload["concurrent_count"] = str(len(conc_lines))
-        # 줄 단위 애니재생 여부 (UI 녹색 강조) — "1,0,0"
-        if len(conc_flags) == len(conc_lines):
-            payload["concurrent_anim_playing_flags"] = ",".join(conc_flags)
+    # 매 틱 확정 — 빈 목록이면 이전 틱 잔상 제거
+    payload["concurrent_summary"] = "\n".join(conc_lines) if conc_lines else ""
+    payload["concurrent_count"] = str(len(conc_lines))
+    if conc_lines and len(conc_flags) == len(conc_lines):
+        payload["concurrent_anim_playing_flags"] = ",".join(conc_flags)
+    else:
+        payload["concurrent_anim_playing_flags"] = ""
     if playing_bn or (playing_proc is not None and getattr(playing_proc, "linked_json", "")):
         payload["anim_playing_json"] = playing_bn or str(
             getattr(playing_proc, "linked_json", "") or ""
