@@ -145,6 +145,8 @@ class _Planner:
         self._ep_reserved: Dict[str, str] = {}  # ep -> process uid
         self._inout_reserved = False
         self._bp_reserved: Dict[str, str] = {}
+        # BP 적재 시각(sim t) — BP→EP 는 오래된 순(FIFO). INOUT→BP 빈 슬롯 선택과 무관.
+        self._bp_loaded_at: Dict[str, float] = {}
         self._record_ports(0.0, "init")
 
     def _new_uid(self, kind: str) -> str:
@@ -197,11 +199,19 @@ class _Planner:
         return None
 
     def _bp_with_lot(self) -> List[Tuple[str, str]]:
+        """LOT 있는 BP — 적재 시각 오래된 순 (동시면 BP 번호 오름차순)."""
         rows: List[Tuple[str, str]] = []
         for bp in self._bp_list():
             lot = str(self.ports.get(bp) or "").strip()
             if lot and bp not in self._bp_reserved:
                 rows.append((bp, lot))
+        bp_order = {b: i for i, b in enumerate(self._bp_list())}
+        rows.sort(
+            key=lambda row: (
+                float(self._bp_loaded_at.get(row[0], 0.0)),
+                int(bp_order.get(row[0], 99)),
+            )
+        )
         return rows
 
     def _reconcile_reservations(self) -> None:
@@ -508,6 +518,7 @@ class _Planner:
             self.ports["INOUT"] = ""
             bp = p.to_port
             self.ports[bp] = lot
+            self._bp_loaded_at[bp] = float(t)
             self._inout_reserved = False
             self._bp_reserved.pop(bp, None)
             self._record_ports(t, f"move INOUT→{bp} {lot}")
@@ -516,6 +527,7 @@ class _Planner:
             ep = p.to_port
             self.ports[bp] = ""
             self.ports[ep] = lot
+            self._bp_loaded_at.pop(bp, None)
             self._bp_reserved.pop(bp, None)
             self._ep_reserved.pop(ep, None)
             self._record_ports(t, f"move {bp}→{ep} {lot}")
@@ -953,6 +965,36 @@ def assert_process_start_rules() -> None:
     # 빈 EP 를 BP→EP 가 선점한 뒤에도 빈 BP2 가 있으면 INOUT→BP 병렬 기동은 허용
     if not any(p.kind == KIND_INOUT_TO_BP and p.lot_id == "LOT003" for p in pl2.processes):
         raise AssertionError("빈 BP 남으면 INOUT→BP 도 같은 틱 기동")
+
+    # --- B2) BP1·BP2 모두 LOT → 적재가 더 오래된 BP 부터 BP→EP (번호순 BP1 고정 금지) ---
+    pl2b = _Planner(
+        PrerunPlanConfig(
+            lot_count=0,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=10.0,
+            proc_bp_to_ep=30.0,
+        )
+    )
+    pl2b.remaining_lots = []
+    pl2b.ports["EP1"] = ""
+    pl2b.ports["EP2"] = "LOT002"
+    pl2b.ports["INOUT"] = ""
+    pl2b.ports["BP1"] = "LOT_NEW"
+    pl2b.ports["BP2"] = "LOT_OLD"
+    pl2b.ports["BP3"] = ""
+    pl2b._bp_loaded_at["BP2"] = 10.0
+    pl2b._bp_loaded_at["BP1"] = 50.0
+    pl2b._try_start_all(100.0)
+    be = [p for p in pl2b.processes if p.kind == KIND_BP_TO_EP]
+    if not be or be[0].from_port != "BP2" or be[0].lot_id != "LOT_OLD":
+        raise AssertionError(
+            f"BP→EP oldest-first want BP2/LOT_OLD got {[(p.from_port, p.lot_id) for p in be]}"
+        )
+    # INOUT→BP 빈 슬롯은 기존처럼 BP 번호 앞(BP1) — 이 케이스에선 INOUT 비어 기동 없음
+    if any(p.kind == KIND_INOUT_TO_BP for p in pl2b.processes):
+        raise AssertionError("INOUT 비어 있는데 INOUT→BP 기동되면 안 됨")
 
     # --- C) stale reserve 가 REMOVE 를 막지 않음 ---
     pl3 = _Planner(

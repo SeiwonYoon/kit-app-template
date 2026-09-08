@@ -83,6 +83,8 @@ class PlaybackUIState:
     bar_total_est: float
     row_order: Tuple[str, ...]
     preview_full: bool
+    # renewal cap 적용된 막대 truncate 시각 (t_display 와 다를 수 있음)
+    t_bar: float = 0.0
 
 
 def _ensure_panel_occ_keys(occ: Optional[Dict[str, str]]) -> Dict[str, str]:
@@ -107,10 +109,76 @@ def _normalize_sparse_delta(delta: Optional[Mapping[str, str]]) -> Dict[str, str
     return out
 
 
+def _renewal_json_guard_flag(ext: Any, screen: int) -> bool:
+    try:
+        by = getattr(ext, "_sim_renewal_json_guard_by_screen", None)
+        if isinstance(by, dict):
+            return bool(by.get(str(int(screen))))
+    except Exception:
+        pass
+    return False
+
+
+def _active_renewal_job_for_cap(ext: Any, screen: int) -> Optional[Dict[str, Any]]:
+    """막대/plan cap 용 — wall busy 와 무관하게 활성 renewal JSON 을 찾는다."""
+    scr = int(screen)
+
+    def _job_has_renewal(job: Dict[str, Any]) -> bool:
+        if bool(job.get("has_renewal")):
+            return True
+        try:
+            parsed = job.get("parsed")
+            if isinstance(parsed, list) and parsed:
+                from .json_playback_timing import renewal_info_from_steps
+
+                has_r, _ = renewal_info_from_steps(list(parsed))
+                return bool(has_r)
+        except Exception:
+            pass
+        return False
+
+    try:
+        bya = getattr(ext, "_sim_anim_active_by_screen", None)
+        if isinstance(bya, dict):
+            from .sim_parallel_rails import anim_state_key, parallel_moves_enabled
+
+            keys: List[str] = []
+            if parallel_moves_enabled():
+                keys.extend(
+                    [
+                        anim_state_key(scr, "oht"),
+                        anim_state_key(scr, "move"),
+                        str(scr),
+                    ]
+                )
+            else:
+                keys.append(str(scr))
+            # 화면2 병렬: 레일 중 renewal JSON 이 있으면 그 job 으로 cap
+            for k in keys:
+                cand = bya.get(k)
+                if isinstance(cand, dict) and cand and _job_has_renewal(cand):
+                    return dict(cand)
+    except Exception:
+        pass
+    act = _active_gated_event_src(ext, scr)
+    if isinstance(act, dict) and act and _job_has_renewal(act):
+        return dict(act)
+    try:
+        by = getattr(ext, "_sim_post_anim_src_by_screen", None)
+        if isinstance(by, dict):
+            stored = by.get(str(scr))
+            if isinstance(stored, dict) and _job_has_renewal(stored):
+                return dict(stored)
+    except Exception:
+        pass
+    return None
+
+
 def reset_playback_renewal_runtime(ext: Any, screen: int) -> None:
     """다음 gated JSON event 시작·재생 종료 — renewal applied/hold 잔상 제거."""
     scr = int(screen)
     clear_renewal_occ_hold(ext, scr)
+    clear_screen_anim_bar_sim_t(ext, scr)
     sk = str(scr)
     try:
         by = getattr(ext, "_sim_playback_renewal_applied_by_screen", None)
@@ -250,11 +318,118 @@ def _active_json_process_cap_sim(ext: Any, screen: int) -> Optional[float]:
     return float(min(caps))
 
 
-def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
-    """plan·막대 lookup = ``sim_now`` (단일 시계).
+def _set_screen_anim_bar_sim_t(ext: Any, screen: int, t_sim: float) -> None:
+    """해당 화면 JSON 애니가 도달한 sim 시각 — 막대 truncate 상한."""
+    try:
+        by = getattr(ext, "_sim_anim_bar_sim_t_by_screen", None)
+        if not isinstance(by, dict):
+            by = {}
+            ext._sim_anim_bar_sim_t_by_screen = by
+        by[str(int(screen))] = float(max(0.0, float(t_sim)))
+    except Exception:
+        pass
 
-    SSOT: 키프레임 ``t`` + 활성 renewal JSON 의 wall 전 sync cap 만
-    (스케줄 전체 cap/prim freeze 금지 — renewal 반영 지연 원인).
+
+def clear_screen_anim_bar_sim_t(ext: Any, screen: int) -> None:
+    try:
+        by = getattr(ext, "_sim_anim_bar_sim_t_by_screen", None)
+        if isinstance(by, dict):
+            by.pop(str(int(screen)), None)
+    except Exception:
+        pass
+
+
+def _screen_anim_bar_sim_t(ext: Any, screen: int) -> Optional[float]:
+    try:
+        by = getattr(ext, "_sim_anim_bar_sim_t_by_screen", None)
+        if not isinstance(by, dict):
+            return None
+        v = by.get(str(int(screen)))
+        if v is None:
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
+def publish_anim_bar_progress_at_step(
+    ext: Any,
+    screen: int,
+    steps: List[Any],
+    step_idx: int,
+    *,
+    include_current: bool = False,
+) -> None:
+    """
+    LAM 스텝 진행 → 막대용 sim 상한.
+
+    ``play_start + 1배속 누적 duration`` (renewal_offset 과 같은 축).
+    sim_now 가 앞서도 이 화면 애니가 아직 안 간 구간은 막대에 안 그림.
+    """
+    if ext is None:
+        return
+    scr = int(screen)
+    play0 = 0.0
+    try:
+        act = _active_gated_event_src(ext, scr)
+        if isinstance(act, dict) and act:
+            play0 = float(
+                act.get("_json_run_start_sim")
+                or act.get("anim_play_start_sim_time")
+                or 0.0
+            )
+    except Exception:
+        play0 = 0.0
+
+    def _step_1x_sec(step: Any) -> float:
+        if not isinstance(step, dict):
+            return 0.0
+        try:
+            from .sequence_renewal import is_renewal_marker
+
+            if is_renewal_marker(step):
+                return 0.0
+        except Exception:
+            pass
+        t = str(step.get("type") or "").upper()
+        try:
+            if t in ("MOVE", "ROTATE"):
+                if "duration_max" in step:
+                    return max(0.0, float(step.get("duration_max", step.get("duration", 0.0))))
+                return max(0.0, float(step.get("duration", 0.0) or 0.0))
+            if t == "DELAY":
+                return max(0.0, float(step.get("duration", 0.0) or 0.0))
+            if t in ("PRIM_VISIBILITY", "SET_PRIM_VISIBILITY", "PRIM_HIDE", "PRIM_SHOW"):
+                return max(0.0, float(step.get("duration", 0.02) or 0.02))
+            if t in ("USD_TIMELINE", "TIMESAMPLES_REPLAY"):
+                play = step.get("play") or {}
+                if not isinstance(play, dict):
+                    play = {}
+                start = int(play.get("start_frame", step.get("start_frame", 0)) or 0)
+                end = int(play.get("end_frame", step.get("end_frame", 0)) or 0)
+                if end <= start:
+                    return 0.0
+                return max(0.0, float(end - start) / 30.0)
+        except Exception:
+            return 0.0
+        return 0.0
+
+    cum = 0.0
+    try:
+        end = int(step_idx) + (1 if include_current else 0)
+        end = max(0, min(end, len(steps or [])))
+        for i in range(end):
+            cum += _step_1x_sec(steps[i] if i < len(steps) else None)
+    except Exception:
+        return
+    _set_screen_anim_bar_sim_t(ext, scr, float(play0) + float(cum))
+
+
+def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
+    """포트·prim plan lookup = ``sim_now`` + renewal sync cap.
+
+    **막대 전용 애니 진행 상한은 넣지 않음** — 넣으면 renewal wall 직후
+    추정 오차로 포트/prim 이 이전 occ 로 되돌아가 깜빡인다.
     """
     t = float(t_sim)
     if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
@@ -288,13 +463,27 @@ def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
     return float(t)
 
 
+def playback_bar_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
+    """막대 truncate 전용 — plan/renewal cap + **해당 화면 애니 스텝 진행** 상한."""
+    t = float(playback_plan_lookup_sim_t(ext, int(screen), float(t_sim)))
+    try:
+        prog = _screen_anim_bar_sim_t(ext, int(screen))
+        if prog is not None and float(prog) >= 0.0:
+            t = min(float(t), float(prog))
+    except Exception:
+        pass
+    return float(t)
+
+
 def _renewal_plan_lookup_adjust(ext: Any, screen: int, t_lookup: float) -> float:
     """
     renewal plan lookup — **현재 활성 JSON** 만.
 
     · wall 적용 후: sync_t floor
-    · wall 전 + json_wall_busy + has_renewal: sync 직전 cap
-    · 스케줄/대기큐 일괄 cap 금지 (renewal 포트·prim 이 JSON 끝까지 밀림)
+    · wall 전 + has_renewal 활성 job: sync 직전 cap
+      (``is_json_wall_busy`` 필수 조건 제거 — 화면2 레일/키 누락 시
+      cap 이 빠져 막대가 renewal 전에 전진하던 회귀)
+    · 스케줄/대기큐 일괄 cap 금지
     """
     t = float(t_lookup)
     scr = int(screen)
@@ -307,26 +496,8 @@ def _renewal_plan_lookup_adjust(ext: Any, screen: int, t_lookup: float) -> float
             return t
 
     try:
-        from .control_sim_playback_gate import is_json_wall_busy
-
-        if not is_json_wall_busy(ext, scr):
-            return t
-
-        act = _active_gated_event_src(ext, scr)
+        act = _active_renewal_job_for_cap(ext, scr)
         if not isinstance(act, dict) or not act:
-            return t
-
-        has_r = bool(act.get("has_renewal"))
-        if not has_r:
-            try:
-                parsed = act.get("parsed")
-                if isinstance(parsed, list) and parsed:
-                    from .json_playback_timing import renewal_info_from_steps
-
-                    has_r, _ = renewal_info_from_steps(list(parsed))
-            except Exception:
-                has_r = False
-        if not has_r:
             return t
 
         sync_t = _resolve_renewal_sync_t_for_playback(ext, scr, dict(act))
@@ -1944,6 +2115,7 @@ def _apply_plan_ports_to_panel(
     occ: Dict[str, str],
     *,
     t_display: float,
+    from_renewal: bool = False,
 ) -> bool:
     try:
         from .control_window import _apply_sim_event_state_only
@@ -1953,6 +2125,8 @@ def _apply_plan_ports_to_panel(
             "sim_time": f"{float(t_display):.2f}",
             "_from_playback_plan": True,
         }
+        if bool(from_renewal):
+            payload["_from_renewal_step"] = True
         try:
             ext._sim_playback_plan_panel_apply = True
             _apply_sim_event_state_only(ext, payload, screen=int(screen))
@@ -2052,6 +2226,12 @@ def clear_playback_plan_runtime_state(ext: Any) -> None:
         by_fr = getattr(ext, "_sim_renewal_prim_freeze_by_screen", None)
         if isinstance(by_fr, dict):
             by_fr.clear()
+    except Exception:
+        pass
+    try:
+        by_ab = getattr(ext, "_sim_anim_bar_sim_t_by_screen", None)
+        if isinstance(by_ab, dict):
+            by_ab.clear()
     except Exception:
         pass
     clear_runtime_bar_rows(ext)
@@ -2157,6 +2337,11 @@ def resolve_playback_ui_at_sim(
     else:
         t_lookup = playback_plan_lookup_sim_t(ext, scr, float(axes.t_plan))
     ports = _playback_ports_at_sim(ext, snap, scr, float(t_lookup))
+    # 막대만 애니 진행 상한 (포트/prim 과 분리 — renewal 깜빡임 방지)
+    if bool(explicit):
+        t_bar_lookup = float(t_lookup)
+    else:
+        t_bar_lookup = playback_bar_lookup_sim_t(ext, scr, float(axes.t_plan))
 
     preview_full = False
     try:
@@ -2214,7 +2399,7 @@ def resolve_playback_ui_at_sim(
         )
         from .playback_plan import milestones_to_finalize_tuples
 
-        t_bar = float(t_lookup)
+        t_bar = float(t_bar_lookup)
         bar_rows: Dict[str, List[Dict[str, Any]]] = {}
 
         if bar_pre is not None and isinstance(bar_pre.rows, dict) and bar_pre.rows:
@@ -2296,6 +2481,7 @@ def resolve_playback_ui_at_sim(
         bar_total_est=float(bar_total),
         row_order=row_order,
         preview_full=bool(preview_full),
+        t_bar=float(t_bar_lookup),
     )
 
 
@@ -2373,6 +2559,11 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
                 delta=None,
                 pre_occ=_last_panel_occ(ext, scr),
             )
+            # 막대 애니 상한 ≥ sync — wall 직후 포트만 앞서고 막대/상한이 뒤처지지 않게
+            try:
+                _set_screen_anim_bar_sim_t(ext, scr, float(lookup_t))
+            except Exception:
+                pass
             # explicit=True: wall 직후 sync_t occ 를 cap 없이 즉시 포트·prim 반영
             refresh_playback_display_at_sim(
                 ext,
@@ -2380,6 +2571,7 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
                 float(lookup_t),
                 force=True,
                 explicit=True,
+                from_renewal=True,
             )
             return True
     except Exception:
@@ -2440,6 +2632,10 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
         delta=delta if delta else None,
         pre_occ=pre_occ,
     )
+    try:
+        _set_screen_anim_bar_sim_t(ext, scr, float(lookup_t))
+    except Exception:
+        pass
 
     t_refresh: Optional[float] = (
         float(sync_t) if sync_t is not None and float(sync_t) > 1e-9 else None
@@ -2450,6 +2646,7 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
         t_refresh,
         force=True,
         explicit=bool(t_refresh is not None and float(t_refresh) > 1e-9),
+        from_renewal=True,
     )
     return True
 
@@ -2461,6 +2658,7 @@ def refresh_playback_display_at_sim(
     *,
     force: bool = False,
     explicit: bool = False,
+    from_renewal: bool = False,
 ) -> None:
     """
     재생 UI 단일 갱신 — ``resolve_playback_ui_at_sim`` → 포트 + 막대.
@@ -2497,6 +2695,7 @@ def refresh_playback_display_at_sim(
                     int(scr),
                     occ,
                     t_display=float(state.axes.t_display),
+                    from_renewal=bool(from_renewal),
                 )
             except Exception:
                 pass
@@ -2508,6 +2707,8 @@ def refresh_playback_display_at_sim(
             _resolve_monitor_channel_for_screen,
         )
 
+        # 포트 occ 가 같아도 renewal 직후 막대는 반드시 다시 그림
+        # (화면2 에서 패널만 맞고 막대가 다음 heartbeat 까지 남는 회귀 방지)
         _apply_playback_bar_to_channel(
             ext,
             scr,
@@ -2573,6 +2774,8 @@ __all__ = [
     "clear_removed_prim_hide_holds",
     "clear_renewal_occ_hold",
     "clear_runtime_bar_rows",
+    "clear_screen_anim_bar_sim_t",
+    "publish_anim_bar_progress_at_step",
     "ensure_plan_snapshot",
     "ensure_playback_plans_for_results",
     "get_plan_ports_at_sim",
@@ -2586,6 +2789,7 @@ __all__ = [
     "playback_plan_active",
     "playback_plan_frontier_sim",
     "playback_plan_lookup_sim_t",
+    "playback_bar_lookup_sim_t",
     "playback_process_frontier_sim",
     "prim_occ_for_playback_visibility",
     "refresh_playback_display_at_sim",
