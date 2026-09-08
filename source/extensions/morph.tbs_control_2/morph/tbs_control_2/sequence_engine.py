@@ -179,28 +179,39 @@ class SequenceRunner(_LegacySequenceRunner):
         peer_busy = self._peer_rail_busy()
 
         if self._lam_thread is not None and self._lam_thread.is_alive():
+            # on_done → 다음 JSON: 이전 LAM 스레드가 main 대기(dispatch_main_wait) 중일 수 있음.
+            # main 에서 stop+join 하면 교착(~10s) + 방금 기동한 애니까지 끊김.
+            on_main = False
             try:
-                diag_ext = getattr(self, "_diag_ext", None)
-                diag_scr = int(getattr(self, "_diag_screen", 1) or 1)
-                if self._lam_runner is not None:
-                    try:
-                        from . import sim_multi_diag as _mdiag
+                on_main = threading.current_thread() is threading.main_thread()
+            except Exception:
+                on_main = False
+            if on_main:
+                self._lam_running = False
+                self._lam_thread = None
+            else:
+                try:
+                    diag_ext = getattr(self, "_diag_ext", None)
+                    diag_scr = int(getattr(self, "_diag_screen", 1) or 1)
+                    if self._lam_runner is not None:
+                        try:
+                            from . import sim_multi_diag as _mdiag
 
-                        _mdiag.log_runner_preempt(
-                            diag_ext,
-                            screen=diag_scr,
-                            ctx=ctx_nm,
-                        )
+                            _mdiag.log_runner_preempt(
+                                diag_ext,
+                                screen=diag_scr,
+                                ctx=ctx_nm,
+                            )
+                        except Exception:
+                            pass
+                        self._lam_runner.stop(cancel_all_move_rotate=not peer_busy)
+                    try:
+                        self._lam_thread.join(timeout=10.0)
                     except Exception:
                         pass
-                    self._lam_runner.stop(cancel_all_move_rotate=not peer_busy)
-                try:
-                    self._lam_thread.join(timeout=10.0)
+                    self._lam_running = False
                 except Exception:
                     pass
-                self._lam_running = False
-            except Exception:
-                pass
 
         self._lam_last_steps = list(normalized)
         self._steps = list(normalized)

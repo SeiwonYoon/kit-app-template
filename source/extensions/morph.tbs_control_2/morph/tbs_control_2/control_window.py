@@ -1045,8 +1045,8 @@ def _execute_mapped_sequence_stub(
                     _job_rail = rail_from_job_or_payload(job)
             except Exception:
                 _job_rail = None
-            # SSOT: 시간표 play_start 에 도착한 JSON 은 QUEUE 하지 않고 이전을 선점한다.
-            # (QUEUE 하면 플랜 직렬 + 런타임 직렬이 이중으로 겹쳐 수 초~수십 초 지연)
+            # SSOT 재생: 슬롯 busy 면 선점(halt) 금지.
+            # 앞 JSON 완주 후 on_done/_start_json_now 만 다음을 기동한다.
             try:
                 from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
                 from .control_sim_playback_gate import is_json_anim_slot_held
@@ -1054,42 +1054,28 @@ def _execute_mapped_sequence_stub(
                 if bool(SIM_PRERUN_PLAN_SSOT) and bool(
                     getattr(ext, "_sim_playback_started", False)
                 ):
-                    if is_json_anim_slot_held(ext, int(scr_i), rail=_job_rail):
+                    _force_now = bool((job or {}).get("_start_json_now"))
+                    if (not _force_now) and is_json_anim_slot_held(
+                        ext, int(scr_i), rail=_job_rail
+                    ):
                         try:
-                            # 이전 on_done 이 새 job 을 지우지 않게 콜백 해제
-                            runners_x = getattr(ext, "_sim_runners_by_screen", None)
-                            rr_x = (
-                                runners_x.get(str(scr_i))
-                                if isinstance(runners_x, dict)
-                                else None
-                            )
-                            if rr_x is None and int(scr_i) == 1:
-                                rr_x = getattr(ext, "_sim_runner", None)
-                            if rr_x is not None:
-                                rr_x.on_sequence_completed = None
-                        except Exception:
-                            pass
-                        try:
-                            _halt_screen_json_anim(
-                                ext, scr_i, join_sec=0.2, rail=_job_rail
-                            )
-                        except TypeError:
-                            try:
-                                _halt_screen_json_anim(ext, scr_i, join_sec=0.2)
-                            except Exception:
-                                pass
-                        except Exception:
-                            pass
-                        try:
-                            active_by_pre = getattr(ext, "_sim_anim_active_by_screen", None)
-                            if isinstance(active_by_pre, dict):
-                                if _job_rail:
-                                    from .sim_parallel_rails import anim_state_key
+                            pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
+                            if not isinstance(pending_by, dict):
+                                pending_by = {}
+                                ext._sim_anim_pending_by_screen = pending_by
+                            _pk = str(scr_i)
+                            if _job_rail:
+                                from .sim_parallel_rails import rail_queue_key
 
-                                    active_by_pre[anim_state_key(scr_i, str(_job_rail))] = {}
-                                active_by_pre[str(scr_i)] = {}
+                                _pk = rail_queue_key(scr_i, str(_job_rail))
+                            pending = pending_by.get(_pk, [])
+                            if not isinstance(pending, list):
+                                pending = []
+                            pending.append(dict(job) if isinstance(job, dict) else job)
+                            pending_by[_pk] = pending
                         except Exception:
                             pass
+                        return
             except Exception:
                 pass
             try:
@@ -1387,29 +1373,8 @@ def _execute_mapped_sequence_stub(
                     pass
             eff_sp = compute_json_effective_speed(sp, span_for_eff, est_total_f)
 
-            # SSOT: 시작이 플랜보다 늦으면 anim_play_end 에 맞추어 배속 보정
-            # (시계·포트는 플랜대로 가는데 화면 JSON 만 처지는 싱크 붕괴 방지)
-            if _ssot_play and _playback and est_total_f > 1e-9:
-                try:
-                    _pl_now = get_sim_playback_player(ext, scr_i)
-                    _sn = (
-                        float(_pl_now.sim_now(scr_i))
-                        if _pl_now is not None
-                        else float(json_run_start_sim)
-                    )
-                except Exception:
-                    _sn = float(json_run_start_sim)
-                _end = float(play_end_sim)
-                if _end <= float(json_run_start_sim) + 1e-9 and prerun_anim_sec > 1e-9:
-                    _end = float(json_run_start_sim) + float(prerun_anim_sec)
-                if _sn + 1e-6 > float(json_run_start_sim):
-                    remain = max(0.05, float(_end) - float(_sn)) if _end > _sn + 1e-9 else 0.05
-                    try:
-                        catch_sp = float(est_total_f) * float(sp) / float(remain)
-                        if catch_sp > float(eff_sp) + 1e-9:
-                            eff_sp = float(catch_sp)
-                    except Exception:
-                        pass
+            # SSOT: catch-up 배속 금지 — 늦게 시작해도 정상 속도로 완주.
+            # (남은 구간에 맞추어 가속하면 MOVE/TIMESAMPLES 가 끊긴 것처럼 남)
 
             json_wall_sec = json_wall_duration_sec(est_total_f, eff_sp)
 
@@ -2268,16 +2233,8 @@ def _execute_mapped_sequence_stub(
                 pass
         except Exception:
             pass
-        # SSOT 재생: 시간표 시각의 JSON 은 이전을 선점하고 즉시 START (QUEUE 금지)
-        _ssot_preempt = False
-        try:
-            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
-
-            _ssot_preempt = bool(SIM_PRERUN_PLAN_SSOT) and bool(
-                getattr(ext, "_sim_playback_started", False)
-            )
-        except Exception:
-            _ssot_preempt = False
+        # SSOT 재생: busy 면 QUEUE(FIFO). 이전 JSON 선점(halt) 금지 —
+        # 앞 애니 완주 → on_done → 위치초기화 → 다음 애니.
         runner_busy = False
         _pending_key = str(_scr)
         _slot_rail = None
@@ -2295,27 +2252,6 @@ def _execute_mapped_sequence_stub(
                 is_json_sequence_busy(ext, int(_scr), rail=_slot_rail)
             ) or bool(is_json_anim_slot_held(ext, int(_scr), rail=_slot_rail))
         except Exception:
-            runner_busy = False
-        if runner_busy and _ssot_preempt:
-            try:
-                _halt_screen_json_anim(ext, _scr, join_sec=0.2, rail=_slot_rail)
-            except TypeError:
-                try:
-                    _halt_screen_json_anim(ext, _scr, join_sec=0.2)
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            try:
-                active_by_x = getattr(ext, "_sim_anim_active_by_screen", None)
-                if isinstance(active_by_x, dict):
-                    if _slot_rail:
-                        from .sim_parallel_rails import anim_state_key
-
-                        active_by_x[anim_state_key(_scr, str(_slot_rail))] = {}
-                    active_by_x[str(_scr)] = {}
-            except Exception:
-                pass
             runner_busy = False
         if runner_busy:
             try:

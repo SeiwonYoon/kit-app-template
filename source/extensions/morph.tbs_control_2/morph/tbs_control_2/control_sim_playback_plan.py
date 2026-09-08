@@ -118,6 +118,12 @@ def reset_playback_renewal_runtime(ext: Any, screen: int) -> None:
             by.pop(sk, None)
     except Exception:
         pass
+    try:
+        by_fr = getattr(ext, "_sim_renewal_prim_freeze_by_screen", None)
+        if isinstance(by_fr, dict):
+            by_fr.pop(sk, None)
+    except Exception:
+        pass
 
 
 def _proc_gate_plan_cap_sim(ext: Any, screen: int) -> Optional[float]:
@@ -247,7 +253,8 @@ def _active_json_process_cap_sim(ext: Any, screen: int) -> Optional[float]:
 def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
     """plan·막대 lookup = ``sim_now`` (단일 시계).
 
-    SSOT: renewal floor / wall remap 없이 프리런 키프레임을 ``t`` 그대로 조회.
+    SSOT: 키프레임 ``t`` + 활성 renewal JSON 의 wall 전 sync cap 만
+    (스케줄 전체 cap/prim freeze 금지 — renewal 반영 지연 원인).
     """
     t = float(t_sim)
     if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
@@ -256,7 +263,10 @@ def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
         from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
 
         if bool(SIM_PRERUN_PLAN_SSOT):
-            return float(t)
+            try:
+                return float(_renewal_plan_lookup_adjust(ext, int(screen), t))
+            except Exception:
+                return float(t)
     except Exception:
         pass
     try:
@@ -280,11 +290,11 @@ def playback_plan_lookup_sim_t(ext: Any, screen: int, t_sim: float) -> float:
 
 def _renewal_plan_lookup_adjust(ext: Any, screen: int, t_lookup: float) -> float:
     """
-    renewal plan lookup.
+    renewal plan lookup — **현재 활성 JSON** 만.
 
-    · applied 후: sync_t floor — JSON wall 해제·공정 대기 중에도 heartbeat 가 pre-renewal 로
-      되돌리지 않게 (wall 해제 시 reset 하지 않음, 다음 gated event 시작 시 reset).
-    · wall 전: sync_t 미만 cap (renewal 조기 표시 방지)
+    · wall 적용 후: sync_t floor
+    · wall 전 + json_wall_busy + has_renewal: sync 직전 cap
+    · 스케줄/대기큐 일괄 cap 금지 (renewal 포트·prim 이 JSON 끝까지 밀림)
     """
     t = float(t_lookup)
     scr = int(screen)
@@ -2038,6 +2048,12 @@ def clear_playback_plan_runtime_state(ext: Any) -> None:
     except Exception:
         pass
     clear_removed_prim_hide_holds(ext)
+    try:
+        by_fr = getattr(ext, "_sim_renewal_prim_freeze_by_screen", None)
+        if isinstance(by_fr, dict):
+            by_fr.clear()
+    except Exception:
+        pass
     clear_runtime_bar_rows(ext)
 
 
@@ -2325,8 +2341,9 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
 
     scr = int(screen)
 
-    # SSOT: renewal wall 은 failsafe 만 — 포트는 ``sim_now`` 키프레임(PORT_OCC)이 1차.
-    # sim_now 가 sync 이전이면 early explicit 로 앞당기지 않는다.
+    # SSOT: LAM renewal 스텝이 재생되는 순간에 포트·prim 반영.
+    # 시계가 sync 이전이어도 wall 콜백이 권위 — 조기 sim_now 키프레임은
+    # ``_renewal_plan_lookup_adjust`` 가 막고, 여기서 applied 표시 후 갱신한다.
     try:
         from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
 
@@ -2345,10 +2362,9 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
             if sync_t is None or float(sync_t) <= 1e-9:
                 sync_t = _resolve_renewal_sync_t_for_playback(ext, scr, src_r)
             sim_now = float(_sim_now_for_screen(ext, scr, None))
-            # 시계가 sync 에 도달했을 때만 패널 갱신 (조기 wipe 금지)
-            if sync_t is not None and float(sync_t) > 1e-9 and sim_now + 1e-6 < float(sync_t):
-                return True
             lookup_t = float(sim_now)
+            if sync_t is not None and float(sync_t) > 1e-9:
+                lookup_t = max(lookup_t, float(sync_t))
             mark_playback_renewal_wall_applied(
                 ext,
                 scr,
@@ -2357,12 +2373,13 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
                 delta=None,
                 pre_occ=_last_panel_occ(ext, scr),
             )
+            # explicit=True: wall 직후 sync_t occ 를 cap 없이 즉시 포트·prim 반영
             refresh_playback_display_at_sim(
                 ext,
                 scr,
                 float(lookup_t),
                 force=True,
-                explicit=False,
+                explicit=True,
             )
             return True
     except Exception:
