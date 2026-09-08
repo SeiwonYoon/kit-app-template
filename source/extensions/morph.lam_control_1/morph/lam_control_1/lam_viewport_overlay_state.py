@@ -139,6 +139,12 @@ _foup_counted_schedule_keys_by_screen: Dict[int, set[Tuple[Any, ...]]] = {
 _foup_pre_picked_wafers_by_screen: Dict[int, Set[Tuple[int, int]]] = {1: set()}
 # FOUP index → lot_id (파싱·Play 시작 시 갱신) — 화면별
 _foup_lot_id_by_index_by_screen: Dict[int, Dict[int, str]] = {1: {}}
+# lot≥4 순환: takeover 일정·적용 상태 (화면별)
+_foup_lot_takeovers_by_screen: Dict[int, Tuple[Any, ...]] = {1: ()}
+_foup_lot_takeovers_applied_by_screen: Dict[int, set] = {1: set()}
+_foup_lot_takeover_sync_t_by_screen: Dict[int, float] = {1: -1.0}
+# Play 시작 시 초기 FOUP→lot (takeover 이전, 되감기 복구용)
+_foup_lot_id_initial_by_screen: Dict[int, Dict[int, str]] = {1: {}}
 
 
 def _ensure_foup_screen(screen: int) -> Tuple[Dict[int, FoupCounts], set[Tuple[Any, ...]]]:
@@ -1018,6 +1024,26 @@ def set_foup_lot_id_by_index(
         _foup_lot_id_by_index_by_screen[si] = cleaned
 
 
+def patch_foup_lot_id(
+    foup_index: int,
+    lot_id: str,
+    *,
+    screen: int = 1,
+) -> None:
+    """FOUP 하나 lot_id 만 교체 (순환 재사용)."""
+    fi = int(foup_index)
+    if fi not in (1, 2, 3):
+        return
+    text = str(lot_id or "").strip()
+    if not text or text.startswith("__anon_"):
+        return
+    si = max(1, int(screen))
+    with _lock:
+        cur = dict(_foup_lot_id_by_index_by_screen.get(si) or {})
+        cur[fi] = text
+        _foup_lot_id_by_index_by_screen[si] = cur
+
+
 def get_lot_id_for_foup(foup_index: int, *, screen: int = 1) -> str:
     """표시용 lot_id — 없으면 ``FOUP{n}``."""
     fi = int(foup_index)
@@ -1027,6 +1053,171 @@ def get_lot_id_for_foup(foup_index: int, *, screen: int = 1) -> str:
     if lid and not lid.startswith("__anon_"):
         return lid
     return f"FOUP{fi}"
+
+
+def register_foup_lot_takeovers(
+    takeovers: Sequence[Any],
+    *,
+    screen: int = 1,
+) -> None:
+    """Play 시작 — 4번째 이후 lot 순환 일정 등록 (미적용 상태).
+
+    호출 전 ``set_foup_lot_id_by_index`` 로 초기(≤3 lot) 표시가 잡혀 있어야 한다.
+    """
+    si = max(1, int(screen))
+    rows = tuple(takeovers or ())
+    with _lock:
+        _foup_lot_takeovers_by_screen[si] = rows
+        _foup_lot_takeovers_applied_by_screen[si] = set()
+        _foup_lot_takeover_sync_t_by_screen[si] = -1.0
+        _foup_lot_id_initial_by_screen[si] = dict(
+            _foup_lot_id_by_index_by_screen.get(si) or {}
+        )
+
+
+def reset_foup_counts_for_slot(
+    foup_index: int,
+    *,
+    screen: int = 1,
+    total: int = 25,
+) -> None:
+    """한 FOUP 슬롯의 25/진행중/완료·pre-pick·집계 키를 초기화 (순환 재사용)."""
+    fi = int(foup_index)
+    if fi not in (1, 2, 3):
+        return
+    si = max(1, int(screen))
+    t = max(1, int(total))
+    with _lock:
+        counts, counted = _ensure_foup_screen(si)
+        counts[fi] = FoupCounts(total=t, picked_count=0, placed_back_count=0)
+        if si == 1:
+            _foup_counts[fi] = counts[fi]
+        pre = _foup_pre_picked_wafers_by_screen.get(si) or set()
+        _foup_pre_picked_wafers_by_screen[si] = {
+            (f, c) for (f, c) in pre if int(f) != fi
+        }
+        drop_prefix = f"atm_foup{fi}_"
+        kept = set()
+        for key in counted:
+            try:
+                ev = str(key[3] if len(key) > 3 else "")
+            except Exception:
+                ev = ""
+            if drop_prefix in ev.lower():
+                continue
+            kept.add(key)
+        counted.clear()
+        counted.update(kept)
+        if si == 1:
+            global _foup_counted_schedule_keys
+            _foup_counted_schedule_keys = set(counted)
+
+
+def apply_foup_slot_recycle(
+    foup_index: int,
+    lot_id: str,
+    *,
+    screen: int = 1,
+    total: int = 25,
+) -> None:
+    """순환 재사용: lot명·카운트 리셋 + UI 갱신 (애니는 dwell ``foup_index`` 로 이미 대상 맞춤)."""
+    patch_foup_lot_id(foup_index, lot_id, screen=screen)
+    reset_foup_counts_for_slot(foup_index, screen=screen, total=total)
+    notify_foup_counts_ui_refresh(screen=screen)
+    try:
+        from .lam_wafer_viewport_labels import notify_wafer_label_tracker_changed
+
+        notify_wafer_label_tracker_changed(screen)
+    except Exception:
+        pass
+
+
+def sync_foup_lot_takeovers_at_csv_t(
+    csv_t: float,
+    *,
+    screen: int = 1,
+) -> None:
+    """재생 시각 기준 순환 takeover 적용 (전진·seek·되감기)."""
+    si = max(1, int(screen))
+    t = float(csv_t)
+    with _lock:
+        tos = list(_foup_lot_takeovers_by_screen.get(si) or ())
+        applied = set(_foup_lot_takeovers_applied_by_screen.get(si) or set())
+        prev_t = float(_foup_lot_takeover_sync_t_by_screen.get(si, -1.0))
+        initial = dict(_foup_lot_id_initial_by_screen.get(si) or {})
+    if not tos:
+        with _lock:
+            _foup_lot_takeover_sync_t_by_screen[si] = t
+        return
+
+    need_rebuild = prev_t >= 0.0 and t + 1e-9 < prev_t
+    if need_rebuild:
+        with _lock:
+            _foup_lot_id_by_index_by_screen[si] = dict(initial)
+            _foup_lot_takeovers_applied_by_screen[si] = set()
+            applied = set()
+        # 되감기 시 영향 FOUP 카운트 리셋 (정밀 재집계는 후속)
+        touched = {int(getattr(x, "foup_index", 0) or 0) for x in tos}
+        for fi in touched:
+            if fi in (1, 2, 3):
+                reset_foup_counts_for_slot(fi, screen=si)
+
+    due = []
+    for x in tos:
+        try:
+            t0 = float(getattr(x, "t_sec", 0.0) or 0.0)
+            lid = str(getattr(x, "lot_id", "") or "").strip()
+            fi = int(getattr(x, "foup_index", 0) or 0)
+        except Exception:
+            continue
+        if not lid or fi not in (1, 2, 3):
+            continue
+        if t0 <= t + 1e-6 and lid not in applied:
+            due.append((t0, fi, lid))
+
+    due.sort(key=lambda r: (r[0], r[1], r[2]))
+    for _t0, fi, lid in due:
+        apply_foup_slot_recycle(fi, lid, screen=si)
+        applied.add(lid)
+
+    with _lock:
+        _foup_lot_takeovers_applied_by_screen[si] = applied
+        _foup_lot_takeover_sync_t_by_screen[si] = t
+
+
+def maybe_apply_foup_lot_takeover_for_lot(
+    lot_id: str,
+    *,
+    screen: int = 1,
+    csv_t: Optional[float] = None,
+) -> bool:
+    """스케줄 행 시작 — 해당 lot 이 순환 takeover 대상이면 즉시 적용."""
+    lid = str(lot_id or "").strip()
+    if not lid:
+        return False
+    si = max(1, int(screen))
+    with _lock:
+        tos = list(_foup_lot_takeovers_by_screen.get(si) or ())
+        applied = set(_foup_lot_takeovers_applied_by_screen.get(si) or set())
+    if lid in applied:
+        return False
+    hit = None
+    for x in tos:
+        if str(getattr(x, "lot_id", "") or "").strip() == lid:
+            hit = x
+            break
+    if hit is None:
+        return False
+    fi = int(getattr(hit, "foup_index", 0) or 0)
+    if fi not in (1, 2, 3):
+        return False
+    apply_foup_slot_recycle(fi, lid, screen=si)
+    with _lock:
+        applied.add(lid)
+        _foup_lot_takeovers_applied_by_screen[si] = applied
+        if csv_t is not None:
+            _foup_lot_takeover_sync_t_by_screen[si] = float(csv_t)
+    return True
 
 
 def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> None:
@@ -1044,6 +1235,10 @@ def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> N
             _foup_counted_schedule_keys_by_screen.clear()
             _foup_pre_picked_wafers_by_screen.clear()
             _foup_lot_id_by_index_by_screen.clear()
+            _foup_lot_takeovers_by_screen.clear()
+            _foup_lot_takeovers_applied_by_screen.clear()
+            _foup_lot_takeover_sync_t_by_screen.clear()
+            _foup_lot_id_initial_by_screen.clear()
             _foup_counts = dict(blank)
             _foup_counted_schedule_keys = set()
             _ensure_foup_screen(1)
@@ -1053,10 +1248,13 @@ def reset_all_foup_counts(*, total: int = 25, screen: Optional[int] = None) -> N
         _foup_counted_schedule_keys_by_screen[si] = set()
         _foup_pre_picked_wafers_by_screen[si] = set()
         _foup_lot_id_by_index_by_screen[si] = {}
+        _foup_lot_takeovers_by_screen[si] = ()
+        _foup_lot_takeovers_applied_by_screen[si] = set()
+        _foup_lot_takeover_sync_t_by_screen[si] = -1.0
+        _foup_lot_id_initial_by_screen[si] = {}
         if si == 1:
             _foup_counts = dict(blank)
             _foup_counted_schedule_keys = set()
-
 
 def schedule_entry_foup_match_key(sched: Any) -> Tuple[Any, ...]:
     """``simulation_play._schedule_entry_match_key`` 와 동일 규칙 (순환 import 방지)."""
@@ -1257,7 +1455,13 @@ __all__ = [
     "set_foup_counts",
     "get_foup_counts",
     "set_foup_lot_id_by_index",
+    "patch_foup_lot_id",
     "get_lot_id_for_foup",
+    "register_foup_lot_takeovers",
+    "reset_foup_counts_for_slot",
+    "apply_foup_slot_recycle",
+    "sync_foup_lot_takeovers_at_csv_t",
+    "maybe_apply_foup_lot_takeover_for_lot",
     "reset_all_foup_counts",
     "seed_foup_counts_from_non_atm_first",
     "schedule_entry_foup_match_key",

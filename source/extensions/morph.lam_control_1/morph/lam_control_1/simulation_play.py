@@ -1246,6 +1246,7 @@ class ParsedCsvRow:
 
     ``eqp_start_tm`` / ``eqp_end_tm`` 은 ``normalize_csv_timeline()`` 이후 **전역 0초 기준** [s].
     ``lot_id`` 는 등장 순서로 foup1..3 에 매핑 (``foup_index``).
+    4번째 이후 lot 은 FOUP1→2→3 순환 재사용 (≤3 은 기존과 동일).
     """
 
     eqp_id: str
@@ -1395,7 +1396,11 @@ def _parse_csv_time_field(raw: Dict[str, str], primary: str, iso_alt: str = "") 
 
 
 def build_lot_id_to_foup_index(rows: Iterable[ParsedCsvRow]) -> Dict[str, int]:
-    """``eqp_start_tm`` 순 **lot_id 최초 등장** → foup1, foup2, foup3 (최대 3)."""
+    """``eqp_start_tm`` 순 **lot_id 최초 등장** → FOUP 슬롯.
+
+    - 1~3번째 lot → FOUP1, FOUP2, FOUP3 (기존과 동일)
+    - 4번째 → FOUP1, 5번째 → FOUP2, 6번째 → FOUP3, … (순환 재사용)
+    """
     ordered = sorted(rows, key=lambda r: (r.eqp_start_tm, r.cassette_slot, r.module_nm))
     out: Dict[str, int] = {}
     n = 0
@@ -1403,7 +1408,7 @@ def build_lot_id_to_foup_index(rows: Iterable[ParsedCsvRow]) -> Dict[str, int]:
         lid = (r.lot_id or "").strip() or f"__anon_cassette_{r.cassette_slot}"
         if lid not in out:
             n += 1
-            out[lid] = min(3, n)
+            out[lid] = ((n - 1) % 3) + 1
     return out
 
 
@@ -4129,6 +4134,18 @@ def _csv_play_timeline_row_begin_entry(
     soft = _schedule_entry_soft_match_key(sched)
     si = max(1, int(screen if screen is not None else current_csv_play_screen()))
     try:
+        from .lam_viewport_overlay_state import maybe_apply_foup_lot_takeover_for_lot
+
+        cas, lot = _status_wafer_lot_from_schedule_entry(sched)
+        if lot:
+            maybe_apply_foup_lot_takeover_for_lot(
+                lot,
+                screen=si,
+                csv_t=float(getattr(sched, "time_sec", 0.0) or 0.0),
+            )
+    except Exception:
+        pass
+    try:
         from .lam_viewport_overlay_state import record_foup_event_from_schedule_entry
 
         record_foup_event_from_schedule_entry(sched, screen=si)
@@ -4332,6 +4349,12 @@ def _refresh_csv_play_progress_playhead(*, screen: Optional[int] = None) -> floa
     sess = csv_play_screen_session(si)
     with sess.progress_snap_lock:
         sess.progress_snap["csv_t_display"] = float(csv_t)
+    try:
+        from .lam_viewport_overlay_state import sync_foup_lot_takeovers_at_csv_t
+
+        sync_foup_lot_takeovers_at_csv_t(float(csv_t), screen=si)
+    except Exception:
+        pass
     return float(csv_t)
 
 
