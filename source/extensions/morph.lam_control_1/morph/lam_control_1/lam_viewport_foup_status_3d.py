@@ -633,7 +633,7 @@ class LamFoupStatus3dPanel:
                 )
                 with root:
                     with sc.Transform(scale_to=sc.Space.SCREEN):
-                        bg = (0.10, 0.12, 0.15, 0.75)
+                        bg = (48.0 / 255.0, 47.0 / 255.0, 64.0 / 255.0, 0.5)
                         border = (0.45, 0.55, 0.70, 0.90)
                         try:
                             bg = tuple(FOUP_PANEL_BG_RGBA)
@@ -735,7 +735,7 @@ class LamFoupStatus3dPanel:
                 # 표 형태(테두리/연한 배경)로 보이도록 패널을 그림
                 panel_w = _PANEL_W
                 panel_h = _PANEL_H
-                bg = (0.10, 0.12, 0.15, 0.75)  # 연한 배경
+                bg = tuple(FOUP_PANEL_BG_RGBA)
                 border = (0.45, 0.55, 0.70, 0.90)
                 sc.Rectangle(width=panel_w, height=panel_h, color=bg, wireframe=False)
                 sc.Rectangle(width=panel_w, height=panel_h, color=border, wireframe=True)

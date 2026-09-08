@@ -393,7 +393,12 @@ FOUP_PANEL_WIDTH_PX: int = 220
 FOUP_PANEL_HEIGHT_PX: int = 130
 FOUP_PANEL_LINE_HEIGHT_PX: int = 26
 FOUP_PANEL_FONT_SIZE: int = 15
-FOUP_PANEL_BG_RGBA: Tuple[float, float, float, float] = (0.10, 0.12, 0.15, 0.75)
+FOUP_PANEL_BG_RGBA: Tuple[float, float, float, float] = (
+    48.0 / 255.0,
+    47.0 / 255.0,
+    64.0 / 255.0,
+    0.5,
+)
 FOUP_PANEL_BORDER_RGBA: Tuple[float, float, float, float] = (0.45, 0.55, 0.70, 0.90)
 
 
