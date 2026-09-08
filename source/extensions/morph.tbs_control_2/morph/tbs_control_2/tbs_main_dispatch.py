@@ -104,11 +104,14 @@ def _decr_pending_ctx(ctx: Optional[str]) -> None:
         _pending_by_ctx[key] = n
 
 
-def _enqueue_ctx_locked(ctx_key: str, item: _QueueItem) -> None:
+def _enqueue_ctx_locked(ctx_key: str, item: _QueueItem, *, front: bool = False) -> None:
     if ctx_key not in _ctx_queues:
         _ctx_queues[ctx_key] = deque()
         _ctx_keys.append(ctx_key)
-    _ctx_queues[ctx_key].append(item)
+    if front:
+        _ctx_queues[ctx_key].appendleft(item)
+    else:
+        _ctx_queues[ctx_key].append(item)
 
 
 def _dequeue_legacy_batch(max_n: int) -> List[_BatchItem]:
@@ -186,12 +189,26 @@ def _run_on_main_direct(captured_ctx: Optional[str], fn: Callable[[], None]) -> 
             pass
 
 
-def dispatch_main(fn: Callable[[], None]) -> None:
+def dispatch_main(
+    fn: Callable[[], None],
+    *,
+    usd_context_name: Optional[str] = None,
+    priority: bool = False,
+) -> None:
+    """메인 스레드 FIFO. ``priority=True`` 면 해당 컨텍스트 큐 **맨 앞**.
+
+    renewal 포트·막대처럼 애니와 같은 호흡이 필요한 UI 는 priority 로
+    MOVE/USD write 뒤에 수 초 밀리지 않게 한다(특히 화면2 aux context).
+    """
     from .tbs_usd_stage_context import get_current_usd_context_name
 
-    captured_ctx = get_current_usd_context_name()
+    if usd_context_name is not None:
+        captured_ctx = str(usd_context_name).strip() or None
+    else:
+        captured_ctx = get_current_usd_context_name()
     done_evt = threading.Event()
     err_holder: List[Optional[BaseException]] = [None]
+    front = bool(priority)
 
     with _lock:
         multi = bool(_multi_instance_mode)
@@ -199,11 +216,14 @@ def dispatch_main(fn: Callable[[], None]) -> None:
         ctx_key = _ctx_key(captured_ctx)
         _incr_pending_ctx(captured_ctx)
         with _lock:
-            _enqueue_ctx_locked(ctx_key, (fn, done_evt, err_holder))
+            _enqueue_ctx_locked(ctx_key, (fn, done_evt, err_holder), front=front)
     else:
         _incr_pending_legacy()
         with _lock:
-            _legacy_queue.append((captured_ctx, fn, done_evt, err_holder))
+            if front:
+                _legacy_queue.appendleft((captured_ctx, fn, done_evt, err_holder))
+            else:
+                _legacy_queue.append((captured_ctx, fn, done_evt, err_holder))
 
     _ensure_subscription()
     if _sub_box.get("sub") is None:
@@ -219,12 +239,32 @@ def dispatch_main(fn: Callable[[], None]) -> None:
             done_evt.set()
 
 
-def dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> bool:
+def dispatch_main_wait(
+    fn: Callable[[], None],
+    *,
+    timeout: float = 15.0,
+    usd_context_name: Optional[str] = None,
+    priority: bool = False,
+) -> bool:
     from .tbs_usd_stage_context import get_current_usd_context_name
 
-    captured_ctx = get_current_usd_context_name()
+    if usd_context_name is not None:
+        captured_ctx = str(usd_context_name).strip() or None
+    else:
+        captured_ctx = get_current_usd_context_name()
+
+    # 이미 메인이면 enqueue+wait 금지 — update 콜백 안에서 자기 큐를
+    # 기다리며 교착(타임아웃) → 워커 fallback 으로 USD prim 미반영 회귀.
+    if threading.current_thread() is threading.main_thread():
+        try:
+            _run_on_main_direct(captured_ctx, fn)
+        except BaseException:
+            raise
+        return True
+
     done_evt = threading.Event()
     err_holder: List[Optional[BaseException]] = [None]
+    front = bool(priority)
 
     def wrapped() -> None:
         try:
@@ -240,11 +280,14 @@ def dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> bool
         ctx_key = _ctx_key(captured_ctx)
         _incr_pending_ctx(captured_ctx)
         with _lock:
-            _enqueue_ctx_locked(ctx_key, (wrapped, done_evt, err_holder))
+            _enqueue_ctx_locked(ctx_key, (wrapped, done_evt, err_holder), front=front)
     else:
         _incr_pending_legacy()
         with _lock:
-            _legacy_queue.append((captured_ctx, wrapped, done_evt, err_holder))
+            if front:
+                _legacy_queue.appendleft((captured_ctx, wrapped, done_evt, err_holder))
+            else:
+                _legacy_queue.append((captured_ctx, wrapped, done_evt, err_holder))
 
     _ensure_subscription()
     if _sub_box.get("sub") is None:

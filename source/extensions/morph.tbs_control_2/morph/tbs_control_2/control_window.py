@@ -1631,6 +1631,12 @@ def _execute_mapped_sequence_stub(
                     except Exception:
                         pass
                     try:
+                        from .control_sim_playback_plan import clear_screen_anim_bar_sim_t
+
+                        clear_screen_anim_bar_sim_t(ext, int(scr_i))
+                    except Exception:
+                        pass
+                    try:
                         notify_anim_finished(ext, int(scr_i))
                     except Exception:
                         pass
@@ -1845,12 +1851,48 @@ def _execute_mapped_sequence_stub(
                         if threading.current_thread() is threading.main_thread():
                             _apply_renewal_playback_ui()
                         else:
-                            from .tbs_main_dispatch import dispatch_main
+                            from .tbs_main_dispatch import dispatch_main, dispatch_main_wait
 
-                            dispatch_main(_apply_renewal_playback_ui)
+                            # 화면1·2 동일: 포트·막대·prim 반영이 끝날 때까지 LAM 대기
+                            _ctx_ui = _usd_context_name_for_sim_screen(ext, int(scr_i))
+                            ok_ui = dispatch_main_wait(
+                                _apply_renewal_playback_ui,
+                                timeout=5.0,
+                                usd_context_name=_ctx_ui,
+                                priority=True,
+                            )
+                            if not ok_ui:
+                                try:
+                                    print(
+                                        f"[TBS/SIM] renewal UI wait timeout "
+                                        f"screen={int(scr_i)} — requeue on main",
+                                        flush=True,
+                                    )
+                                except Exception:
+                                    pass
+                                # 워커에서 직접 USD 금지 — last_prim 만 갱신되는 회귀 방지
+                                try:
+                                    dispatch_main(
+                                        _apply_renewal_playback_ui,
+                                        usd_context_name=_ctx_ui,
+                                        priority=True,
+                                    )
+                                except Exception:
+                                    pass
                     except Exception:
                         try:
-                            _apply_renewal_playback_ui()
+                            if threading.current_thread() is threading.main_thread():
+                                _apply_renewal_playback_ui()
+                            else:
+                                from .tbs_main_dispatch import dispatch_main
+
+                                dispatch_main(
+                                    _apply_renewal_playback_ui,
+                                    usd_context_name=_usd_context_name_for_sim_screen(
+                                        ext, int(scr_i)
+                                    ),
+                                    priority=True,
+                                )
                         except Exception:
                             pass
                     return
@@ -1908,12 +1950,38 @@ def _execute_mapped_sequence_stub(
                     if threading.current_thread() is threading.main_thread():
                         _apply_renewal_live_ui()
                     else:
-                        from .tbs_main_dispatch import dispatch_main
+                        from .tbs_main_dispatch import dispatch_main, dispatch_main_wait
 
-                        dispatch_main(_apply_renewal_live_ui)
+                        _ctx_live = _usd_context_name_for_sim_screen(ext, int(scr_i))
+                        ok_live = dispatch_main_wait(
+                            _apply_renewal_live_ui,
+                            timeout=5.0,
+                            usd_context_name=_ctx_live,
+                            priority=True,
+                        )
+                        if not ok_live:
+                            try:
+                                dispatch_main(
+                                    _apply_renewal_live_ui,
+                                    usd_context_name=_ctx_live,
+                                    priority=True,
+                                )
+                            except Exception:
+                                pass
                 except Exception:
                     try:
-                        _apply_renewal_live_ui()
+                        if threading.current_thread() is threading.main_thread():
+                            _apply_renewal_live_ui()
+                        else:
+                            from .tbs_main_dispatch import dispatch_main
+
+                            dispatch_main(
+                                _apply_renewal_live_ui,
+                                usd_context_name=_usd_context_name_for_sim_screen(
+                                    ext, int(scr_i)
+                                ),
+                                priority=True,
+                            )
                     except Exception:
                         pass
 
@@ -5242,6 +5310,14 @@ def _render_ep_bar_prerun_at_t(
     if not isinstance(bar_pre, EpBarPrecomputed):
         return False
     t_bar = max(0.0, float(t_sim))
+    # 화면1·2 공통: 막대만 renewal/애니 진행 cap (포트 lookup 과 분리)
+    if bool(getattr(ext, "_sim_playback_started", False)):
+        try:
+            from .control_sim_playback_plan import playback_bar_lookup_sim_t
+
+            t_bar = float(playback_bar_lookup_sim_t(ext, int(screen), float(t_bar)))
+        except Exception:
+            pass
     try:
         pm = getattr(ext, "_sim_bar_preview_model", None)
         preview_full = bool(pm.get_value_as_bool()) if pm is not None else False
@@ -5287,6 +5363,7 @@ def _render_ep_bar_prerun_at_t(
             bar_total_est=float(total_est),
             row_order=tuple(str(r) for r in rows),
             preview_full=bool(preview_full),
+            t_bar=float(t_bar),
         )
         _update_ep_timeline_under_port_state(
             ext,
@@ -6273,6 +6350,20 @@ def _update_ep_timeline_under_port_state(
         pui = playback_ui_state
         occ = dict(getattr(pui, "ports", {}) or {})
         t_display = float(pui.axes.t_display)
+        # 플레이헤드는 sim_now(t_display). 세그먼트 truncate 폴백은 renewal cap 시각.
+        try:
+            t_bar_cap = float(getattr(pui, "t_bar", 0.0) or 0.0)
+        except Exception:
+            t_bar_cap = 0.0
+        if t_bar_cap <= 1e-9:
+            try:
+                from .control_sim_playback_plan import playback_bar_lookup_sim_t
+
+                t_bar_cap = float(
+                    playback_bar_lookup_sim_t(ext, int(screen), float(t_display))
+                )
+            except Exception:
+                t_bar_cap = float(t_display)
         t_bar = float(t_display)
         use_precomputed = True
         preview_full = bool(getattr(pui, "preview_full", False))
@@ -6295,7 +6386,9 @@ def _update_ep_timeline_under_port_state(
             pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
             bar_pre_fb = pre_by.get(scr_key) if isinstance(pre_by, dict) else None
             if isinstance(bar_pre_fb, EpBarPrecomputed) and isinstance(bar_pre_fb.rows, dict) and bar_pre_fb.rows:
-                rows_state = truncate_bar_rows_at_t(bar_pre_fb.rows, float(t_bar))
+                # 화면2 등 bar_rows 비어 있을 때 t_display(비캡)으로 truncate 하면
+                # renewal 전에 막대가 앞서감 — 반드시 t_bar_cap 사용
+                rows_state = truncate_bar_rows_at_t(bar_pre_fb.rows, float(t_bar_cap))
                 if float(total_est_fixed) <= 0.0 and float(getattr(bar_pre_fb, "total_est", 0.0) or 0.0) > 0.0:
                     total_est_fixed = float(bar_pre_fb.total_est)
         for r in rows:
@@ -8730,17 +8823,26 @@ def _poll_playback_sim_aligned_json_starts(ext: Any) -> None:
 
 def _should_defer_port_occ_sync_for_renewal(ext: Any, screen: int) -> bool:
     """
-    renewal JSON — 포트는 renewal wall(또는 재생 plan)만. 엔진 progress·DONE·occ 로 덮지 않음.
+    renewal JSON — 포트·prim 은 renewal wall 시점만.
 
-    재생(plan active): defer·guard 무시 — ``plan.lookup(sim_now)`` 가 패널 SSOT.
+    재생(plan): wall 적용 전에는 heartbeat/`_from_playback_plan` 도 막음
+    (lookup cap 만으로는 조기 prim 갱신이 새어 나감). wall 이후는 plan SSOT.
     """
     scr = max(1, int(screen))
     if bool(getattr(ext, "_sim_playback_started", False)):
         try:
-            from .control_sim_playback_plan import playback_plan_active
+            from .control_sim_playback_plan import (
+                _renewal_wall_applied_for_screen,
+                playback_plan_active,
+            )
 
             if playback_plan_active(ext, scr):
-                return False
+                # renewal 없는 JSON / wall 이미 적용 → plan heartbeat 허용
+                if not _screen_active_json_has_renewal(ext, scr):
+                    return False
+                if _renewal_wall_applied_for_screen(ext, scr):
+                    return False
+                return True
         except Exception:
             pass
     if _renewal_json_guard_active(ext, scr):
@@ -9141,9 +9243,11 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
     if not isinstance(payload, dict):
         return
     scr = int(screen)
+    # `_from_playback_plan` 단독으로는 renewal defer 를 뚫지 않음 —
+    # wall 콜백만 `_from_renewal_step` (또는 wall 적용 후 defer=False).
     if _should_defer_port_occ_sync_for_renewal(ext, scr) and not bool(
         payload.get("_from_renewal_step")
-    ) and not bool(payload.get("_from_playback_plan")):
+    ):
         return
     occ = payload.get("ports_occupancy", {})
     if not isinstance(occ, dict):
@@ -9173,8 +9277,16 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
                 pass
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
     active_ep = _remember_foup_active_ep(ext, scr, payload)
+    vis_ok = False
     try:
-        apply_port_lot_prim_visibility_for_context(ctx_nm, occ_prims)
+        import omni.usd as _ou  # type: ignore
+
+        _nm = str(ctx_nm or "").strip()
+        _ctx = _ou.get_context(_nm) if _nm else _ou.get_context()
+        _stage = _ctx.get_stage() if _ctx else None
+        if _stage is not None:
+            apply_port_lot_prim_visibility_for_context(ctx_nm, occ_prims)
+            vis_ok = True
     except Exception as exc:
         try:
             print(
@@ -9184,7 +9296,8 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
         except Exception:
             pass
     try:
-        sync_port_lot_positions_after_visibility(ctx_nm, foup_proc_active_ep=active_ep)
+        if vis_ok:
+            sync_port_lot_positions_after_visibility(ctx_nm, foup_proc_active_ep=active_ep)
     except Exception:
         pass
     try:
@@ -9196,7 +9309,9 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
             by_prev[str(scr)] = dict(occ_panel)
     except Exception:
         pass
-    if bool(getattr(ext, "_sim_playback_started", False)):
+    # USD 가시성 성공 시에만 last_prim 기록 — stage 없는 no-op 후
+    # 스킵되어 prim 이 영구 고정되는 회귀 방지
+    if bool(getattr(ext, "_sim_playback_started", False)) and vis_ok:
         try:
             by_prim = getattr(ext, "_sim_last_prim_ports_occupancy_by_screen", None)
             if not isinstance(by_prim, dict):

@@ -476,6 +476,7 @@ class TbsLamSequenceRunner:
         self._sim_rail: str = ""
         self._diag_ext: Any = None
         self._diag_screen: int = 1
+        self._progress_steps: List[dict] = []
 
     def _peer_rail_busy(self) -> bool:
         """병렬 타 레일 JSON 이 같은 화면에서 돌면 True — 채널 전체 wait/stop 억제."""
@@ -558,6 +559,7 @@ class TbsLamSequenceRunner:
         try:
             self._stop_flag.clear()
             steps = list(steps or [])
+            self._progress_steps = list(steps)
             if not steps:
                 if on_complete:
                     try:
@@ -567,6 +569,18 @@ class TbsLamSequenceRunner:
                 return
 
             sp = float(max(0.01, speed_scale or 1.0))
+            try:
+                from .control_sim_playback_plan import publish_anim_bar_progress_at_step
+
+                publish_anim_bar_progress_at_step(
+                    getattr(self, "_diag_ext", None),
+                    int(getattr(self, "_diag_screen", 1) or 1),
+                    steps,
+                    0,
+                    include_current=False,
+                )
+            except Exception:
+                pass
 
             try:
                 from . import sim_multi_diag as _mdiag
@@ -877,6 +891,20 @@ class TbsLamSequenceRunner:
             for ft in follower_threads:
                 ft.join(timeout=join_timeout)
 
+        # 그룹 duration 대기 종료 — 이 화면 애니 진행만큼 막대 상한 갱신
+        try:
+            from .control_sim_playback_plan import publish_anim_bar_progress_at_step
+
+            publish_anim_bar_progress_at_step(
+                getattr(self, "_diag_ext", None),
+                int(getattr(self, "_diag_screen", 1) or 1),
+                list(getattr(self, "_progress_steps", None) or steps),
+                int(anchor_idx),
+                include_current=True,
+            )
+        except Exception:
+            pass
+
         self._wait_for_motion_complete(
             motion_tx,
             motion_rot,
@@ -1075,6 +1103,18 @@ class TbsLamSequenceRunner:
         """step 한 개를 시작하고 estimated duration(초) 반환. blocking 하지 않음."""
         if self._stop_flag.is_set():
             return 0.0
+        try:
+            from .control_sim_playback_plan import publish_anim_bar_progress_at_step
+
+            publish_anim_bar_progress_at_step(
+                getattr(self, "_diag_ext", None),
+                int(getattr(self, "_diag_screen", 1) or 1),
+                list(getattr(self, "_progress_steps", None) or []),
+                int(idx),
+                include_current=False,
+            )
+        except Exception:
+            pass
         t = str(step.get("type") or "").upper()
         # hide 적용 (TBS 와 동일 — step 시작 시 invisible, duration 후 unhide 예약).
         # 주의: hide_for_step 안의 vis attribute set 은 USD write 다. background thread 에서
@@ -1110,6 +1150,19 @@ class TbsLamSequenceRunner:
                             f"(port/bar sync — playback duration 0)",
                             flush=True,
                         )
+                        try:
+                            from .control_sim_playback_plan import publish_anim_bar_progress_at_step
+
+                            # renewal 행 도달 = 막대도 sync 지점까지 허용
+                            publish_anim_bar_progress_at_step(
+                                getattr(self, "_diag_ext", None),
+                                int(getattr(self, "_diag_screen", 1) or 1),
+                                list(getattr(self, "_progress_steps", None) or []),
+                                int(idx),
+                                include_current=True,
+                            )
+                        except Exception:
+                            pass
                         if self._on_renewal_step is not None:
                             try:
                                 self._on_renewal_step(idx, step)
