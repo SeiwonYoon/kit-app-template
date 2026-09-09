@@ -4,8 +4,8 @@
 - ``SHOW_VIEWPORT_EBS_CONTROL_HUD``
     앱 **시작 시** EBS HUD 를 보일지.
 - ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT``
-    화면1 **좌하단** 클릭 버튼을 둘지.
-    클릭하면 HUD 보이기/숨기기를 토글한다 (시작 플래그와 독립).
+    화면1 **좌하단** 클릭 버튼 + Viewport 포커스 시 **O** 키.
+    클릭/키 = HUD 보이기/숨기기 토글 (시작 플래그와 독립).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def _ebs_hud_startup_visible() -> bool:
 
 
 def _ebs_hud_toggle_hotspot_enabled() -> bool:
-    """좌하단 토글 버튼 사용 여부 — ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT``."""
+    """좌하단 토글 버튼·O 단축키 사용 여부 — ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT``."""
     try:
         from .sim_control_defaults import SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT
 
@@ -144,6 +144,58 @@ def _user_wants_ebs_hud_visible(ext: Any) -> bool:
     return bool(getattr(ext, "_tbs_ebs_hud_user_visible", False))
 
 
+def _window_is_focused(win: Any) -> bool:
+    if win is None:
+        return False
+    try:
+        if bool(getattr(win, "focused", False)):
+            return True
+    except Exception:
+        pass
+    for attr in ("window", "_window", "ui_window", "viewport_window"):
+        try:
+            inner = getattr(win, attr, None)
+        except Exception:
+            inner = None
+        if inner is not None and inner is not win and _window_is_focused(inner):
+            return True
+    return False
+
+
+def _is_viewport_focused_for_ebs_hotkey(ext: Any) -> bool:
+    """Viewport(또는 분할 타일) 창이 포커스일 때만 True — 텍스트 입력 창 등에서는 False."""
+    try:
+        vw = _resolve_viewport_window(ext)
+        if _window_is_focused(vw):
+            return True
+    except Exception:
+        pass
+    # Dock 분할 보조 창 / Workspace 이름
+    names = ("Viewport", "TBS_SimSplit_1", "TBS_SimSplit_2")
+    try:
+        import omni.ui as ui  # type: ignore
+
+        get_win = getattr(ui.Workspace, "get_window", None)
+        if callable(get_win):
+            for nm in names:
+                try:
+                    if _window_is_focused(get_win(nm)):
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    try:
+        from omni.kit.viewport.utility import get_active_viewport_window  # type: ignore
+
+        active = get_active_viewport_window()
+        if _window_is_focused(active):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class TbsViewportControlHud:
     """Viewport 좌측 상단 — EBS 시뮬 제어 패널 + 좌하단 토글 버튼."""
 
@@ -153,10 +205,79 @@ class TbsViewportControlHud:
         self._toggle_root: Any = None
         self._sched_token: int = 0
         self._toggle_sched_token: int = 0
+        self._input_iface: Any = None
+        self._input_sub_id: Any = None
+        self._install_o_hotkey()
 
     def destroy(self) -> None:
+        self._uninstall_o_hotkey()
         self._destroy_layer()
         self._destroy_toggle_layer()
+
+    def _install_o_hotkey(self) -> None:
+        """Viewport 포커스 + O 키 → HUD 토글 (핫스팟과 동일)."""
+        self._uninstall_o_hotkey()
+        if not _ebs_hud_toggle_hotspot_enabled():
+            return
+        try:
+            import carb.input  # type: ignore
+            from carb.input import (  # type: ignore
+                DeviceType,
+                KeyboardEventType,
+                KeyboardInput,
+            )
+
+            iface = carb.input.acquire_input_interface()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} O hotkey subscribe skipped: {exc}", flush=True)
+            return
+
+        def _on_input_event(event: Any, *_args: Any, **_kwargs: Any) -> bool:
+            try:
+                if getattr(event, "deviceType", None) != DeviceType.KEYBOARD:
+                    return True
+                ke = getattr(event, "event", None)
+                if ke is None:
+                    return True
+                if getattr(ke, "type", None) != KeyboardEventType.KEY_RELEASE:
+                    return True
+                if getattr(ke, "input", None) != KeyboardInput.O:
+                    return True
+                # Ctrl/Alt/Shift+O 는 다른 단축키와 충돌 방지
+                try:
+                    mods = int(getattr(ke, "modifiers", 0) or 0)
+                    if mods:
+                        return True
+                except Exception:
+                    pass
+                # 홀드 중 자동 반복으로 토글이 연속 발화되지 않게 — RELEASE 1회만
+                if not _is_viewport_focused_for_ebs_hotkey(self._ext):
+                    return True
+                self.toggle_ebs_hud_visibility()
+            except Exception:
+                pass
+            return True
+
+        try:
+            self._input_iface = iface
+            self._input_sub_id = iface.subscribe_to_input_events(_on_input_event, order=0)
+            print(f"{_PRINT_PREFIX} O hotkey armed (Viewport focus only)", flush=True)
+        except Exception as exc:
+            self._input_iface = None
+            self._input_sub_id = None
+            print(f"{_PRINT_PREFIX} O hotkey subscribe failed: {exc}", flush=True)
+
+    def _uninstall_o_hotkey(self) -> None:
+        iface = self._input_iface
+        sub = self._input_sub_id
+        self._input_iface = None
+        self._input_sub_id = None
+        if iface is None or sub is None:
+            return
+        try:
+            iface.unsubscribe_to_input_events(sub)
+        except Exception:
+            pass
 
     def sync_layers(self, *, delay_frames: int = 8, force: bool = False) -> None:
         """EBS 제어 패널 마운트/갱신."""
@@ -253,7 +374,7 @@ class TbsViewportControlHud:
         _try_mount(max(0, int(delay_frames)))
 
     def toggle_ebs_hud_visibility(self) -> None:
-        """좌하단 클릭 → EBS HUD 보이기/숨기기."""
+        """좌하단 클릭 / Viewport 포커스+O → EBS HUD 보이기/숨기기."""
         want = not _user_wants_ebs_hud_visible(self._ext)
         try:
             self._ext._tbs_ebs_hud_user_visible = bool(want)
