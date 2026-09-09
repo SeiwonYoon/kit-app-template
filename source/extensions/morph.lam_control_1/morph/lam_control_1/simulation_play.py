@@ -10903,6 +10903,11 @@ class LamSimulationCsvPlayWindow:
             return
         process_only = self._read_process_only()
         self._process_only_last_applied = bool(process_only)
+        # 시뮬레이션 시작 시 배속 1x
+        try:
+            self._set_speed_preset(1.0)
+        except Exception:
+            pass
         sp = self._playback_speed_scale_for_process_only(process_only)
         pause_ck = match_csv_play_pause_checkpoint(
             str(path),

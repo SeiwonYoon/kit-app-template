@@ -588,16 +588,8 @@ def _start_federation_playback(
                 wire_sp()
         except Exception:
             pass
-    # 공정만보기면 1x. 아니면 파이프라인 고정값(기본 1.0) 대신 화면별 재생창 UI 배속.
-    if process_only:
-        play_speed = 1.0
-    elif csv_win is not None:
-        try:
-            play_speed = float(csv_win._playback_speed_scale_for_process_only(False))
-        except Exception:
-            play_speed = float(max(0.1, float(speed_scale or 1.0)))
-    else:
-        play_speed = float(max(0.1, float(speed_scale or 1.0)))
+    # 시뮬레이션 시작 시 배속 1x
+    play_speed = 1.0
 
     def _on_play_ui(csv_t: float, csv_total: float, wall_el: float, wall_tot: float) -> None:
         if csv_win is None:
