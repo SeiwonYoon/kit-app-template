@@ -351,6 +351,9 @@ async def _wait_prerun_done(ext: Any, *, timeout_sec: float = 600.0) -> bool:
     ``_sim_prerun_done_evt`` 만 보고 return 하면 ``_finalize_prerun_ui_assets`` 전에
     ``_collect_start_result`` 가 돌아 ``timetable_rows: []`` 가 간헐적으로 나간다.
     drain(finalize) 후 export 가 채워졌는지 확인한다.
+
+    타임아웃 시 event 만 set 되고 export 미준비면 False — 웹에는 실패 V2T.
+    (Kit 프리런/재생 동작은 이 반환값과 무관.)
     """
     ev = getattr(ext, "_sim_prerun_done_evt", None)
     app = kit_app.get_app()
@@ -366,16 +369,14 @@ async def _wait_prerun_done(ext: Any, *, timeout_sec: float = 600.0) -> bool:
             if _prerun_web_export_ready(ext):
                 return True
         await app.next_update_async()
-    # timeout — 마지막 drain 후 ready 이면 성공, 아니면 기존처럼 event 만 본다
+    # timeout — export 준비됐을 때만 성공. event-only 는 실패(빈 성공 응답 방지)
     try:
         from morph.tbs_control_2.control_window import _drain_sim_log_queue
 
         _drain_sim_log_queue(ext)
     except Exception:
         pass
-    if _prerun_web_export_ready(ext):
-        return True
-    return bool(ev is not None and hasattr(ev, "is_set") and ev.is_set())
+    return bool(_prerun_web_export_ready(ext))
 
 
 def _prerun_web_export_ready(ext: Any) -> bool:
@@ -414,7 +415,11 @@ def handle_start_simulation(
     *,
     dispatch: Callable[[str, Dict[str, Any]], None],
 ) -> None:
-    """T2V_request_start_simulation — configs[0]=case0, configs[1]=case1 settings_snapshot."""
+    """T2V_request_start_simulation — configs[0]=case0, configs[1]=case1 settings_snapshot.
+
+    Kit 시뮬 동작은 ``on_sim_start_clicked`` / 프리런 경로 그대로.
+    웹 V2T 만: 이미 진행 중·export 미준비·타임아웃 등도 ``code=1`` 로 1회 응답.
+    """
     pl = _event_payload_to_dict(payload)
     raw_config = pl.get("configs")
     if not isinstance(raw_config, list):
@@ -426,6 +431,14 @@ def handle_start_simulation(
         config.append({})
 
     req_id = bridge_queued("start_simulation", cases=2)
+    # V2T 중복 전송 방지 (실패/성공 각각 최대 1회) — Kit 쪽 시작/프리런과 무관
+    _v2t = {"sent": False}
+
+    def _dispatch_v2t(body: Dict[str, Any]) -> None:
+        if _v2t["sent"]:
+            return
+        _v2t["sent"] = True
+        dispatch("V2T_response_start_simulation", body)
 
     def _begin() -> None:
         t0 = bridge_work_start(req_id, "start_simulation")
@@ -433,10 +446,7 @@ def handle_start_simulation(
             ext = require_tbs_extension_instance()
         except Exception as exc:
             bridge_work_done(req_id, "start_simulation", t0)
-            dispatch(
-                "V2T_response_start_simulation",
-                _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
-            )
+            _dispatch_v2t(_err(str(exc), data={"results": list(_EMPTY_START_RESULT)}))
             return
 
         for case_index in (0, 1):
@@ -444,16 +454,32 @@ def handle_start_simulation(
             if snap:
                 _apply_settings_snapshot_for_case(ext, case_index, snap)
 
+        # on_sim_start_clicked 가 진행 중이면 예외 없이 return 만 함 → 웹에 실패 V2T.
+        # 시작은 호출하지 않음(Kit 도 동일하게 스킵). settings 적용은 기존과 동일.
+        try:
+            from morph.tbs_control_2.control_sim_screen_playback import (
+                is_simulation_in_progress,
+            )
+
+            if is_simulation_in_progress(ext):
+                bridge_work_done(req_id, "start_simulation", t0)
+                _dispatch_v2t(
+                    _err(
+                        "simulation already in progress",
+                        data={"results": list(_EMPTY_START_RESULT)},
+                    )
+                )
+                return
+        except Exception:
+            pass
+
         from morph.tbs_control_2.control_window import on_sim_start_clicked
 
         try:
             on_sim_start_clicked(ext)
         except Exception as exc:
             bridge_work_done(req_id, "start_simulation", t0)
-            dispatch(
-                "V2T_response_start_simulation",
-                _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
-            )
+            _dispatch_v2t(_err(str(exc), data={"results": list(_EMPTY_START_RESULT)}))
             return
 
         bridge_work_done(req_id, "start_simulation_begin", t0)
@@ -464,37 +490,49 @@ def handle_start_simulation(
                 ext2 = require_tbs_extension_instance()
             except Exception as exc:
                 bridge_work_done(req_id, "start_simulation_prerun_wait", t1)
-                dispatch(
-                    "V2T_response_start_simulation",
-                    _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
+                _dispatch_v2t(
+                    _err(str(exc), data={"results": list(_EMPTY_START_RESULT)})
                 )
                 return
             ok = await _wait_prerun_done(ext2)
             bridge_work_done(req_id, "start_simulation_prerun_wait", t1)
             if not ok:
-                dispatch(
-                    "V2T_response_start_simulation",
-                    _err("prerun timeout or failed", data={"results": list(_EMPTY_START_RESULT)}),
+                _dispatch_v2t(
+                    _err(
+                        "prerun timeout or failed",
+                        data={"results": list(_EMPTY_START_RESULT)},
+                    )
                 )
                 return
-            dispatch(
-                "V2T_response_start_simulation",
-                _ok({"results": _collect_start_result(ext2)}),
-            )
+            # wait True 여도 export 가 비면 성공으로 보내지 않음 (Kit 재생은 그대로)
+            if not _prerun_web_export_ready(ext2):
+                _dispatch_v2t(
+                    _err(
+                        "prerun export not ready",
+                        data={"results": list(_EMPTY_START_RESULT)},
+                    )
+                )
+                return
+            results = _collect_start_result(ext2)
+            if not any(isinstance(r, dict) and bool(r) for r in results):
+                _dispatch_v2t(
+                    _err(
+                        "prerun produced empty results",
+                        data={"results": list(_EMPTY_START_RESULT)},
+                    )
+                )
+                return
+            _dispatch_v2t(_ok({"results": results}))
 
         try:
             asyncio.ensure_future(_finish())
         except Exception as exc:
-            dispatch(
-                "V2T_response_start_simulation",
-                _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
-            )
+            _dispatch_v2t(_err(str(exc), data={"results": list(_EMPTY_START_RESULT)}))
 
     schedule_on_main_thread(
         _begin,
-        on_error=lambda exc: dispatch(
-            "V2T_response_start_simulation",
-            _err(str(exc), data={"results": list(_EMPTY_START_RESULT)}),
+        on_error=lambda exc: _dispatch_v2t(
+            _err(str(exc), data={"results": list(_EMPTY_START_RESULT)})
         ),
     )
 
