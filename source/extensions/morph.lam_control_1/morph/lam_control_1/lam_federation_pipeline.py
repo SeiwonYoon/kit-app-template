@@ -976,6 +976,17 @@ def _process_merged_response(
         )
         if auto_play:
             _fed_diag("S11_auto_play", "start playback", screen=screen)
+            try:
+                from .lam_federation_load_hud import (
+                    hold_ready_then_hide_federation_load_huds,
+                )
+
+                hold_ready_then_hide_federation_load_huds([screen])
+            except Exception as exc:
+                print(
+                    f"{_PRINT_PREFIX} screen{screen} pre-play HUD hide: {exc}",
+                    flush=True,
+                )
             err = _start_federation_playback(
                 ext,
                 lam_window,
@@ -1275,6 +1286,21 @@ def _start_ready_screens_together(
     out: List[ScreenPipelineResult] = []
     # 실패분은 유지, 성공분은 play 결과로 갱신
     by_screen = {r.screen: r for r in results}
+
+    # 전 화면 ready(100%) 후 1초 유지 → fly/play 직전 HUD 숨김 (I 미리보기 제외)
+    if ready:
+        try:
+            from .lam_federation_load_hud import (
+                hold_ready_then_hide_federation_load_huds,
+            )
+
+            hold_ready_then_hide_federation_load_huds([r.screen for r in ready])
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} pre-play HUD hide: {exc}",
+                flush=True,
+            )
+
     for r in ready:
         if _federation_start_stale(int(r.screen), int((r.meta or {}).get("start_gen") or 0)):
             _fed_diag(

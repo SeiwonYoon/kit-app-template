@@ -220,6 +220,16 @@ class LamControlExtension(omni.ext.IExt):
         except Exception:
             pass
 
+        # TEMP — Federation Load HUD I 토글 (테스트 후 이 블록 + i_hotkey 모듈 삭제)
+        try:
+            from .lam_federation_load_hud_i_hotkey import (
+                install_federation_load_hud_i_hotkey,
+            )
+
+            install_federation_load_hud_i_hotkey()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} FedLoadHUD I-hotkey install: {exc}", flush=True)
+
         assert self._registry is not None and self._scheduler is not None
         assert self._window is not None
         set_session(
@@ -232,6 +242,15 @@ class LamControlExtension(omni.ext.IExt):
 
     def on_shutdown(self) -> None:
         print(f"{_PRINT_PREFIX} on_shutdown", flush=True)
+        # TEMP — Federation Load HUD I 토글
+        try:
+            from .lam_federation_load_hud_i_hotkey import (
+                uninstall_federation_load_hud_i_hotkey,
+            )
+
+            uninstall_federation_load_hud_i_hotkey()
+        except Exception:
+            pass
         try:
             from .lam_traffic_light_emissive import shutdown_traffic_light_emissive
 

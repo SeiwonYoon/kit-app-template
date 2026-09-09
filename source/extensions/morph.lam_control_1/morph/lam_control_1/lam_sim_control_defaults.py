@@ -102,7 +102,7 @@ STATUS_PANEL_CONTENT_PADDING_PX: int = 10
 #   추가로 Viewport 포커스일 때 영문 O 키로도 동일 토글.
 # False → 클릭 영역·O 단축키 모두 비활성.
 SHOW_VIEWPORT_CSV_PANEL: bool = False
-SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT: bool = True
+SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT: bool = False
 
 # Viewport 우하단 장비배치도 패널.
 # SHOW_VIEWPORT_FLOORPLAN_PANEL: 기능·체크박스 자체 on/off (창 표시「장비배치도」기본값)
@@ -113,6 +113,11 @@ STARTUP_CHECK_FLOORPLAN_PANEL: bool = True
 # Viewport 좌상단 Federation API 로딩 HUD (요청중/실패/수신/파싱/준비완료). False → 미표시.
 # Viewport 좌상단 Federation 로딩 HUD (Loading data... N%).
 SHOW_VIEWPORT_FEDERATION_LOAD_HUD: bool = True
+
+# TEMP — Federation Load HUD ``I`` 토글 (Viewport 포커스). 테스트 후 삭제:
+#   lam_federation_load_hud_i_hotkey.py + 본 플래그 + extension TEMP 블록
+#   + lam_federation_load_hud.py 의 ``BEGIN/END TEMP: I-hotkey`` 블록
+TEMP_FEDERATION_LOAD_HUD_I_HOTKEY: bool = True
 
 # CSV 시뮬 재생 ui.Window — 타임라인 ScrollingFrame 아래(이벤트 함수·매크로·로그) 숨김.
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
@@ -327,6 +332,7 @@ __all__ = [
     "SHOW_VIEWPORT_FLOORPLAN_PANEL",
     "STARTUP_CHECK_FLOORPLAN_PANEL",
     "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
+    "TEMP_FEDERATION_LOAD_HUD_I_HOTKEY",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
     "CSV_PLAYBACK_PLAN_MODE",
     "CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED",
