@@ -99,6 +99,8 @@ STATUS_PANEL_CONTENT_PADDING_PX: int = 10
 # SHOW_VIEWPORT_CSV_PANEL: 앱 시작 시 HUD 표시 여부
 # SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT: 화면1 좌상단(Federation HUD 바로 아래)
 #   투명 클릭 버튼 — 클릭 시 CSV HUD 보이기/숨기기 (시작 플래그와 독립)
+#   추가로 Viewport 포커스일 때 영문 O 키로도 동일 토글.
+# False → 클릭 영역·O 단축키 모두 비활성.
 SHOW_VIEWPORT_CSV_PANEL: bool = False
 SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT: bool = True
 

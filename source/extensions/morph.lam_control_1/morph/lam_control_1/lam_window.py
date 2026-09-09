@@ -667,7 +667,7 @@ class LamWindow:
         """CSV Viewport HUD + (옵션) 좌상단 투명 토글 버튼.
 
         - ``SHOW_VIEWPORT_CSV_PANEL``: 시작 시 패널 표시 의도
-        - ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT``: Federation HUD 아래 토글
+        - ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT``: Federation HUD 아래 토글 + O 키
         """
         if self._csv_sim_windows.get(1) is None:
             self._ensure_csv_sim_play_window(1)

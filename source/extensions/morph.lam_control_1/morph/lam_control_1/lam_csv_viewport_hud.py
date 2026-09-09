@@ -10,7 +10,7 @@ CSV HUD 본체는 Viewport ``get_frame`` 이 아닌 **floating ``ui.Window``** �
 관련 플래그 (``lam_sim_control_defaults``):
 - ``SHOW_VIEWPORT_CSV_PANEL`` — 앱 시작 시 CSV HUD 표시
 - ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT`` — 화면1 좌상단(Federation HUD 바로 아래)
-  투명 토글 버튼 (TBS ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT`` 대응)
+  투명 토글 버튼 + Viewport 포커스 시 **O** 키 (TBS ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT`` 대응)
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ def viewport_csv_panel_startup_visible() -> bool:
 
 
 def viewport_csv_panel_toggle_hotspot_enabled() -> bool:
-    """투명 토글 버튼 — ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT``."""
+    """투명 토글 버튼·O 단축키 — ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT``."""
     if not viewport_csv_panel_feature_enabled():
         return False
     try:
@@ -112,6 +112,64 @@ def _resolve_viewport_window(viewport: Optional["LamViewport"]) -> Optional[Any]
     return None
 
 
+def _window_is_focused(win: Any) -> bool:
+    if win is None:
+        return False
+    try:
+        if bool(getattr(win, "focused", False)):
+            return True
+    except Exception:
+        pass
+    for attr in ("window", "_window", "ui_window", "viewport_window"):
+        try:
+            inner = getattr(win, attr, None)
+        except Exception:
+            inner = None
+        if inner is not None and inner is not win and _window_is_focused(inner):
+            return True
+    return False
+
+
+def _is_viewport_focused_for_csv_hotkey(
+    *,
+    viewport: Optional["LamViewport"] = None,
+    resolve_win: Optional[Any] = None,
+) -> bool:
+    """Viewport 창 포커스일 때만 True — 텍스트 입력 등에서는 False."""
+    try:
+        if _window_is_focused(resolve_win):
+            return True
+    except Exception:
+        pass
+    try:
+        if _window_is_focused(_resolve_viewport_window(viewport)):
+            return True
+    except Exception:
+        pass
+    names = ("Viewport", "LAM_SimSplit_1", "LAM_SimSplit_2", "TBS_SimSplit_1")
+    try:
+        import omni.ui as ui  # type: ignore
+
+        get_win = getattr(ui.Workspace, "get_window", None)
+        if callable(get_win):
+            for nm in names:
+                try:
+                    if _window_is_focused(get_win(nm)):
+                        return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    try:
+        from omni.kit.viewport.utility import get_active_viewport_window  # type: ignore
+
+        if _window_is_focused(get_active_viewport_window()):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 class LamCsvViewportControlsHud:
     """Viewport 우측 상단 — CSV Play HUD + 좌상단 투명 토글 버튼."""
 
@@ -135,7 +193,10 @@ class LamCsvViewportControlsHud:
         # Viewport get_frame 밖 — 토글 시 3D remount/깜빡임 방지
         self._float_window: Any = None
         self._legacy_frame_cleared: bool = False
+        self._input_iface: Any = None
+        self._input_sub_id: Any = None
         self._ensure_user_visible_flag()
+        self._install_o_hotkey()
 
     def _ensure_user_visible_flag(self) -> None:
         lam = self._lam
@@ -176,10 +237,77 @@ class LamCsvViewportControlsHud:
         return _resolve_viewport_window(self._viewport)
 
     def destroy(self) -> None:
+        self._uninstall_o_hotkey()
         self._csv.register_hud_timeline_ui(None)
         self._destroy_layer()
         self._destroy_toggle_layer()
         self._hud_combo = None
+
+    def _install_o_hotkey(self) -> None:
+        """Viewport 포커스 + O 키 → CSV HUD 토글 (핫스팟과 동일)."""
+        self._uninstall_o_hotkey()
+        if not viewport_csv_panel_toggle_hotspot_enabled():
+            return
+        try:
+            import carb.input  # type: ignore
+            from carb.input import (  # type: ignore
+                DeviceType,
+                KeyboardEventType,
+                KeyboardInput,
+            )
+
+            iface = carb.input.acquire_input_interface()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} O hotkey subscribe skipped: {exc}", flush=True)
+            return
+
+        def _on_input_event(event: Any, *_args: Any, **_kwargs: Any) -> bool:
+            try:
+                if getattr(event, "deviceType", None) != DeviceType.KEYBOARD:
+                    return True
+                ke = getattr(event, "event", None)
+                if ke is None:
+                    return True
+                if getattr(ke, "type", None) != KeyboardEventType.KEY_RELEASE:
+                    return True
+                if getattr(ke, "input", None) != KeyboardInput.O:
+                    return True
+                try:
+                    mods = int(getattr(ke, "modifiers", 0) or 0)
+                    if mods:
+                        return True
+                except Exception:
+                    pass
+                if not _is_viewport_focused_for_csv_hotkey(
+                    viewport=self._viewport,
+                    resolve_win=self._resolve_hud_window(),
+                ):
+                    return True
+                self.toggle_csv_hud_visibility()
+            except Exception:
+                pass
+            return True
+
+        try:
+            self._input_iface = iface
+            self._input_sub_id = iface.subscribe_to_input_events(_on_input_event, order=0)
+            print(f"{_PRINT_PREFIX} O hotkey armed (Viewport focus only)", flush=True)
+        except Exception as exc:
+            self._input_iface = None
+            self._input_sub_id = None
+            print(f"{_PRINT_PREFIX} O hotkey subscribe failed: {exc}", flush=True)
+
+    def _uninstall_o_hotkey(self) -> None:
+        iface = self._input_iface
+        sub = self._input_sub_id
+        self._input_iface = None
+        self._input_sub_id = None
+        if iface is None or sub is None:
+            return
+        try:
+            iface.unsubscribe_to_input_events(sub)
+        except Exception:
+            pass
 
     def sync_layers(self, *, delay_frames: int = 8, force: bool = False) -> None:
         """CSV HUD — Viewport get_frame 이 아닌 floating ``ui.Window``.
@@ -285,7 +413,7 @@ class LamCsvViewportControlsHud:
         _try_mount(max(0, int(delay_frames)))
 
     def toggle_csv_hud_visibility(self) -> None:
-        """투명 버튼 클릭 → CSV HUD 보이기/숨기기 (floating window.visible 만)."""
+        """투명 버튼 / Viewport 포커스+O → CSV HUD 보이기/숨기기 (floating window.visible 만)."""
         want = not self._user_wants_visible()
         self._set_user_visible(want)
         print(
