@@ -760,6 +760,11 @@ class TbsLamSequenceRunner:
                     )
                 except Exception:
                     pass
+                # 시퀀스 종료 직전 — 마지막 그룹 gate 누락/renewal 0초 대비 한 번 더 맞춤
+                try:
+                    self._gate_wall_anim_to_sim_now(list(steps), max(0, len(steps) - 1))
+                except Exception:
+                    pass
                 if not self._parallel_rail_scoped():
                     drain_sec = 30.0
                     try:
@@ -911,6 +916,171 @@ class TbsLamSequenceRunner:
             motion_replay,
             max_extra_sec=motion_extra_timeout,
         )
+        # 프리런: wall 그룹이 sim_now(막대·「동작중」)보다 앞서면 여기서 맞춤.
+        # (시작 게이트만으로는 현재 job 내부 드리프트를 막지 못함 — 화면2 aux 등)
+        try:
+            self._gate_wall_anim_to_sim_now(
+                list(getattr(self, "_progress_steps", None) or steps),
+                int(anchor_idx),
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _step_content_duration_1x_sec(step: Any) -> float:
+        """막대 publish 와 동일 — 1배속 콘텐츠 길이(초)."""
+        if not isinstance(step, dict):
+            return 0.0
+        try:
+            from .sequence_renewal import is_renewal_marker
+
+            if is_renewal_marker(step):
+                return 0.0
+        except Exception:
+            pass
+        t = str(step.get("type") or "").upper()
+        try:
+            if t in ("MOVE", "ROTATE", "DELAY"):
+                if t in ("MOVE", "ROTATE") and "duration_max" in step:
+                    return max(
+                        0.0,
+                        float(step.get("duration_max", step.get("duration", 0.0))),
+                    )
+                return max(0.0, float(step.get("duration", 0.0) or 0.0))
+            if t in ("PRIM_VISIBILITY", "SET_PRIM_VISIBILITY", "PRIM_HIDE", "PRIM_SHOW"):
+                return max(0.0, float(step.get("duration", 0.02) or 0.02))
+            if t in ("USD_TIMELINE", "TIMESAMPLES_REPLAY"):
+                play = step.get("play") or {}
+                if not isinstance(play, dict):
+                    play = {}
+                start = int(play.get("start_frame", step.get("start_frame", 0)) or 0)
+                end = int(play.get("end_frame", step.get("end_frame", 0)) or 0)
+                if end <= start:
+                    return 0.0
+                return max(0.0, float(end - start) / 30.0)
+        except Exception:
+            return 0.0
+        return 0.0
+
+    def _active_json_play_window(self) -> Tuple[float, Optional[float]]:
+        """``(play_start_sim, play_end_or_None)`` — 활성 job / runner 핀 / diag 메타."""
+        play0 = 0.0
+        play_end: Optional[float] = None
+        ext = getattr(self, "_diag_ext", None)
+        scr = int(getattr(self, "_diag_screen", 1) or 1)
+        act = None
+        try:
+            from .control_sim_playback_plan import _active_gated_event_src
+
+            rail = str(getattr(self, "_sim_rail", "") or "").strip().lower() or None
+            act = _active_gated_event_src(ext, scr, rail=rail)
+        except Exception:
+            act = None
+        if isinstance(act, dict) and act:
+            try:
+                play0 = float(
+                    act.get("_json_run_start_sim")
+                    or act.get("anim_play_start_sim_time")
+                    or 0.0
+                )
+            except Exception:
+                play0 = 0.0
+            try:
+                end_s = float(
+                    str(act.get("anim_play_end_sim_time") or "").strip() or "0"
+                )
+                if end_s > 1e-9:
+                    play_end = float(end_s)
+                else:
+                    asec = float(act.get("anim_sec") or 0.0)
+                    if play0 > 1e-9 and asec > 1e-9:
+                        play_end = float(play0) + float(asec)
+            except Exception:
+                play_end = None
+        # runner 에 핀 된 play window (레일/active 키 누락 시 화면2 게이트 no-op 방지)
+        if play0 <= 1e-9:
+            try:
+                play0 = float(getattr(self, "_gate_play0", 0.0) or 0.0)
+            except Exception:
+                play0 = 0.0
+        if play_end is None or float(play_end) <= 1e-9:
+            try:
+                pe = getattr(self, "_gate_play_end", None)
+                if pe is not None and float(pe) > 1e-9:
+                    play_end = float(pe)
+            except Exception:
+                pass
+        return float(play0), play_end
+
+    def _gate_wall_anim_to_sim_now(self, steps: List[dict], through_idx: int) -> None:
+        """wall 진행이 sim 축(막대·「동작중」)보다 앞서지 않도록 ``sim_now`` 대기.
+
+        막대/진행현황은 ``sim_now`` 권위. LAM 은 wall+eff_sp 라 화면2(aux·duration0·
+        motion wait skip)에서 콘텐츠가 먼저 끝나면 애니가 「동작중」보다 앞선다.
+        duration 합이 0 이어도 play_end/스텝 비율로 대기한다.
+        """
+        ext = getattr(self, "_diag_ext", None)
+        if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
+            return
+        scr = int(getattr(self, "_diag_screen", 1) or 1)
+        play0, play_end = self._active_json_play_window()
+        if play0 <= 1e-9 and (play_end is None or float(play_end) <= 1e-9):
+            return
+        steps_l = list(steps or [])
+        n = len(steps_l)
+        end_i = max(0, min(int(through_idx) + 1, n))
+        cum = 0.0
+        total_1x = 0.0
+        for i in range(n):
+            d = self._step_content_duration_1x_sec(steps_l[i] if i < n else None)
+            total_1x += float(d)
+            if i < end_i:
+                cum += float(d)
+        is_final = bool(n > 0 and int(through_idx) >= n - 1)
+        span = 0.0
+        if play_end is not None and float(play_end) > float(play0) + 1e-9:
+            span = float(play_end) - float(play0)
+        if span > 1e-9:
+            if is_final:
+                target = float(play_end)
+            elif total_1x > 1e-9:
+                target = float(play0) + float(span) * min(1.0, float(cum) / float(total_1x))
+            else:
+                # duration 메타 없음(화면2 timeline 0 등) — 스텝 진행 비율
+                frac = float(end_i) / float(max(1, n))
+                target = float(play0) + float(span) * float(frac)
+            target = min(float(target), float(play_end))
+        else:
+            target = float(play0) + float(cum)
+            if target <= float(play0) + 1e-9:
+                return
+        try:
+            from .control_sim_screen_playback import get_sim_playback_player
+
+            player = get_sim_playback_player(ext, scr)
+        except Exception:
+            player = None
+        if player is None:
+            return
+        # 과도한 stall 방지: 남은 sim 간격을 매우 낮은 배속으로 환산한 wall 상한
+        try:
+            t_now0 = float(player.sim_now(scr))
+        except Exception:
+            return
+        if t_now0 + 1e-9 >= float(target):
+            return
+        max_wall = max(0.5, (float(target) - t_now0) / 0.05 + 2.0)
+        deadline = time.monotonic() + float(max_wall)
+        while not self._stop_flag.is_set():
+            try:
+                t_now = float(player.sim_now(scr))
+            except Exception:
+                return
+            if t_now + 1e-9 >= float(target):
+                return
+            if time.monotonic() >= deadline:
+                return
+            self._sleep(0.02, allow_stop=True)
 
     def _collect_motion_targets_from_steps(
         self, steps: List[dict], a: int, b: int

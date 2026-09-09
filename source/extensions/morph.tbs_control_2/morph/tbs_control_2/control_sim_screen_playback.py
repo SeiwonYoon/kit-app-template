@@ -266,6 +266,13 @@ class SimPlaybackRuntime:
                 build_prog_payload=build_prog_payload,
                 prog_hb_interval=prog_iv,
             )
+        # 「동작중」 하이라이트를 JSON poll/run 보다 먼저 — 애니 reset 이 상태보다 앞서 보이는 것 방지
+        try:
+            from .control_sim_timetable_ui import refresh_all_timetable_highlights
+
+            refresh_all_timetable_highlights(ext)
+        except Exception:
+            pass
         try:
             from .control_window import (
                 _drain_playback_json_job_queues,

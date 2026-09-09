@@ -2087,6 +2087,17 @@ def _execute_mapped_sequence_stub(
                         )
                     except Exception:
                         pass
+                    # wall↔sim 게이트용 play window (active lookup 실패·레일 키 누락 대비)
+                    try:
+                        runner_obj._gate_play0 = float(json_run_start_sim)  # type: ignore[attr-defined]
+                        _gpe = float(play_end_sim) if float(play_end_sim) > 1e-9 else 0.0
+                        if _gpe <= 1e-9 and float(prerun_anim_sec) > 1e-9:
+                            _gpe = float(json_run_start_sim) + float(prerun_anim_sec)
+                        runner_obj._gate_play_end = (  # type: ignore[attr-defined]
+                            float(_gpe) if float(_gpe) > 1e-9 else None
+                        )
+                    except Exception:
+                        pass
                     runner_obj.run(
                         job.get("parsed", []),
                         usd_context_name=_ctx_run,
@@ -2140,20 +2151,15 @@ def _execute_mapped_sequence_stub(
                 except Exception:
                     pass
 
-            # 프리런: emit 틱 안에서 즉시 run 하면 reset 이 UI 갱신보다 앞서
-            # 진행현황이 끊긴다. tick_all 이 UI 후 poll 하도록 pending 만 켠다.
-            # on_done 연속 기동(_start_json_now)만 즉시 run (큐 밀림 방지).
-            _force_now = bool((job or {}).get("_start_json_now"))
-            if _playback and (not _force_now):
+            # 프리런: 절대 여기서 즉시 run 하지 않는다.
+            # on_done(_start_json_now) 이 tick 중간(하이라이트 전)에 run 하면
+            # 화면2에서 애니가 「동작중」보다 먼저 보이고 드리프트가 누적됨.
+            # tick_all: 하이라이트 → poll → sim_now 게이트 후 run.
+            if _playback:
                 active["_json_pending_sim_start"] = True
                 try:
                     if isinstance(active_by, dict):
                         active_by[_active_store_key] = active
-                except Exception:
-                    pass
-            elif _playback and _force_now:
-                try:
-                    _run_json_sequence()
                 except Exception:
                     pass
             elif lead_wall > 1e-6:

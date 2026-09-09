@@ -60,6 +60,8 @@ class SequenceRunner(_LegacySequenceRunner):
         self._sim_rail: str = ""
         self._diag_ext: Any = None
         self._diag_screen: int = 1
+        self._gate_play0: float = 0.0
+        self._gate_play_end: Optional[float] = None
 
     def _peer_rail_busy(self) -> bool:
         """병렬 타 레일이 살아 있으면 True — 채널 전체 stop 억제."""
@@ -225,6 +227,10 @@ class SequenceRunner(_LegacySequenceRunner):
         try:
             self._lam_runner._diag_screen = int(getattr(self, "_diag_screen", 1) or 1)  # type: ignore[attr-defined]
             self._lam_runner._sim_rail = str(getattr(self, "_sim_rail", "") or "")  # type: ignore[attr-defined]
+            self._lam_runner._gate_play0 = float(  # type: ignore[attr-defined]
+                getattr(self, "_gate_play0", 0.0) or 0.0
+            )
+            self._lam_runner._gate_play_end = getattr(self, "_gate_play_end", None)  # type: ignore[attr-defined]
         except Exception:
             pass
         self._lam_running = True
