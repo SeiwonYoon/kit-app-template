@@ -1742,7 +1742,13 @@ def _execute_mapped_sequence_stub(
                     else:
                         from .tbs_main_dispatch import dispatch_main_wait
 
-                        dispatch_main_wait(_finish_on_main, timeout=60.0)
+                        dispatch_main_wait(
+                            _finish_on_main,
+                            timeout=60.0,
+                            usd_context_name=_usd_context_name_for_sim_screen(
+                                ext, int(scr_i)
+                            ),
+                        )
                 except Exception:
                     try:
                         _finish_on_main()
@@ -2049,85 +2055,131 @@ def _execute_mapped_sequence_stub(
                         by_src[str(scr_i)] = snap_live
                 except Exception:
                     pass
-                # #7: JSON 시작 전 위치초기화 필수 (연달아 시작·큐 연속 포함).
-                # reset 완료 후에만 run. reset 뒤 halt 금지(방금 맞춘 자세를 다시 건드림).
-                try:
-                    _ok_reset = bool(
-                        _reset_sim_motion_before_json_run(
-                            ext, job, runner_obj=runner_obj
-                        )
-                    )
-                    if not _ok_reset:
-                        print(
-                            f"[TBS/SIM] pre-json motion reset incomplete "
-                            f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
-                            flush=True,
-                        )
-                except Exception as exc:
-                    print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
-                try:
-                    from . import sim_multi_diag as _mdiag
 
-                    _mdiag.log_anim_start(
-                        ext,
-                        screen=scr_i,
-                        ctx=_ctx_run,
-                        file_name=str((job or {}).get("file", "") or ""),
-                        est_total=float(est_total_f),
-                        eff_sp=float(eff_sp),
-                        proc_sec=float(proc_sec_job),
-                        runner=runner_obj,
-                    )
-                except Exception:
-                    pass
-                if runner_obj is not None:
+                def _start_lam_after_reset() -> None:
+                    # #7: JSON 시작 전 위치초기화. 화면2 프리런은 aux TIMESAMPLES
+                    # pre-seek 가 막대보다 애니를 수 초 늦추므로 생략하고
+                    # LAM reset_each_start(TBS_OFFSET) + 첫 TIMESAMPLES 스텝에 맡긴다.
+                    _do_pre_json = True
                     try:
-                        runner_obj._foup_proc_active_ep = _resolve_foup_proc_active_ep(
-                            ext, scr_i, dict(job or {})
-                        )
+                        if bool(_playback) and int(scr_i) >= 2:
+                            _do_pre_json = False
                     except Exception:
-                        pass
-                    # wall↔sim 게이트용 play window (active lookup 실패·레일 키 누락 대비)
-                    try:
-                        runner_obj._gate_play0 = float(json_run_start_sim)  # type: ignore[attr-defined]
-                        _gpe = float(play_end_sim) if float(play_end_sim) > 1e-9 else 0.0
-                        if _gpe <= 1e-9 and float(prerun_anim_sec) > 1e-9:
-                            _gpe = float(json_run_start_sim) + float(prerun_anim_sec)
-                        runner_obj._gate_play_end = (  # type: ignore[attr-defined]
-                            float(_gpe) if float(_gpe) > 1e-9 else None
-                        )
-                    except Exception:
-                        pass
-                    runner_obj.run(
-                        job.get("parsed", []),
-                        usd_context_name=_ctx_run,
-                        speed_scale=eff_sp,
-                        wait_until_done=False,
-                    )
-                else:
-                    try:
-                        print(
-                            f"[ANIM] 실행 스킵 — SequenceRunner 없음 screen={scr_i} ctx={_ctx_run!r}",
-                            flush=True,
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        set_json_wall_busy(ext, scr_i, False, rail=_job_rail)
-                    except TypeError:
+                        _do_pre_json = True
+                    if _do_pre_json:
                         try:
-                            set_json_wall_busy(ext, scr_i, False)
+                            _ok_reset = bool(
+                                _reset_sim_motion_before_json_run(
+                                    ext, job, runner_obj=runner_obj
+                                )
+                            )
+                            if not _ok_reset:
+                                print(
+                                    f"[TBS/SIM] pre-json motion reset incomplete "
+                                    f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
+                                    flush=True,
+                                )
+                        except Exception as exc:
+                            print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
+                    try:
+                        from . import sim_multi_diag as _mdiag
+
+                        _mdiag.log_anim_start(
+                            ext,
+                            screen=scr_i,
+                            ctx=_ctx_run,
+                            file_name=str((job or {}).get("file", "") or ""),
+                            est_total=float(est_total_f),
+                            eff_sp=float(eff_sp),
+                            proc_sec=float(proc_sec_job),
+                            runner=runner_obj,
+                        )
+                    except Exception:
+                        pass
+                    if runner_obj is not None:
+                        try:
+                            runner_obj._foup_proc_active_ep = _resolve_foup_proc_active_ep(
+                                ext, scr_i, dict(job or {})
+                            )
                         except Exception:
                             pass
-                    except Exception:
-                        pass
-                    # runner 없으면 on_done 미호출 — 슬롯만 비우고 tick drain 이 pending 처리
+                        # wall↔sim 게이트용 play window (active lookup 실패·레일 키 누락 대비)
+                        try:
+                            runner_obj._gate_play0 = float(json_run_start_sim)  # type: ignore[attr-defined]
+                            _gpe = float(play_end_sim) if float(play_end_sim) > 1e-9 else 0.0
+                            if _gpe <= 1e-9 and float(prerun_anim_sec) > 1e-9:
+                                _gpe = float(json_run_start_sim) + float(prerun_anim_sec)
+                            runner_obj._gate_play_end = (  # type: ignore[attr-defined]
+                                float(_gpe) if float(_gpe) > 1e-9 else None
+                            )
+                        except Exception:
+                            pass
+                        runner_obj.run(
+                            job.get("parsed", []),
+                            usd_context_name=_ctx_run,
+                            speed_scale=eff_sp,
+                            wait_until_done=False,
+                        )
+                    else:
+                        try:
+                            print(
+                                f"[ANIM] 실행 스킵 — SequenceRunner 없음 screen={scr_i} ctx={_ctx_run!r}",
+                                flush=True,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            set_json_wall_busy(ext, scr_i, False, rail=_job_rail)
+                        except TypeError:
+                            try:
+                                set_json_wall_busy(ext, scr_i, False)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                        # runner 없으면 on_done 미호출 — 슬롯만 비우고 tick drain 이 pending 처리
+                        try:
+                            if isinstance(active_by, dict):
+                                active_by[_active_store_key] = {}
+                        except Exception:
+                            pass
+
+                def _kick_json_start() -> None:
+                    prev_ctx = None
                     try:
-                        if isinstance(active_by, dict):
-                            active_by[_active_store_key] = {}
+                        from .tbs_usd_stage_context import (
+                            pop_usd_context_name,
+                            push_usd_context_name,
+                        )
+
+                        prev_ctx = push_usd_context_name(_ctx_run)
                     except Exception:
-                        pass
-                    return
+                        prev_ctx = None
+                    try:
+                        _start_lam_after_reset()
+                    finally:
+                        try:
+                            from .tbs_usd_stage_context import pop_usd_context_name
+
+                            pop_usd_context_name(prev_ctx)
+                        except Exception:
+                            pass
+
+                # tick_all poll/drain 은 메인. 여기서 sync restore 하면
+                # 화면1 초기화가 화면2 JSON 기동을 수 초 막는다 → 막대만 앞서고 애니만 늦음.
+                on_main = False
+                try:
+                    on_main = threading.current_thread() is threading.main_thread()
+                except Exception:
+                    on_main = False
+                if bool(_playback) and on_main:
+                    threading.Thread(
+                        target=_kick_json_start,
+                        name=f"tbs_json_kick_{int(scr_i)}",
+                        daemon=True,
+                    ).start()
+                else:
+                    _kick_json_start()
 
             active["_json_run_fn"] = _run_json_sequence
             # run_fn 준비됨 — lead 가 있을 때만 pending (SSOT emit=play_start 는 즉시)
@@ -2151,17 +2203,28 @@ def _execute_mapped_sequence_stub(
                 except Exception:
                     pass
 
-            # 프리런: 절대 여기서 즉시 run 하지 않는다.
-            # on_done(_start_json_now) 이 tick 중간(하이라이트 전)에 run 하면
-            # 화면2에서 애니가 「동작중」보다 먼저 보이고 드리프트가 누적됨.
-            # tick_all: 하이라이트 → poll → sim_now 게이트 후 run.
+            # 프리런: on_done(_start_json_now) 은 tick 중간(하이라이트 전)이라 pending.
+            # drain/poll(하이라이트 이후) 이고 sim_now 가 이미 시작 시각이면 즉시 기동.
             if _playback:
-                active["_json_pending_sim_start"] = True
+                _from_on_done = bool((job or {}).get("_start_json_now"))
+                _due_now = False
                 try:
-                    if isinstance(active_by, dict):
-                        active_by[_active_store_key] = active
+                    _pl_due = get_sim_playback_player(ext, int(scr_i))
+                    _sn_due = (
+                        float(_pl_due.sim_now(int(scr_i))) if _pl_due is not None else 0.0
+                    )
+                    _due_now = _sn_due + 1e-9 >= float(json_run_start_sim)
                 except Exception:
-                    pass
+                    _due_now = True
+                if (not _from_on_done) and _due_now:
+                    _run_json_sequence()
+                else:
+                    active["_json_pending_sim_start"] = True
+                    try:
+                        if isinstance(active_by, dict):
+                            active_by[_active_store_key] = active
+                    except Exception:
+                        pass
             elif lead_wall > 1e-6:
                 threading.Timer(float(lead_wall), _run_json_sequence).start()
             else:
@@ -8792,20 +8855,13 @@ def _poll_playback_sim_aligned_json_starts(ext: Any) -> None:
         if not bool(active.get("_json_pending_sim_start")):
             continue
         try:
-            from .sim_parallel_rails import screen_from_state_key
+            from .sim_parallel_rails import screen_from_anim_slot
 
-            scr_i = screen_from_state_key(scr_s)
+            scr_i = int(screen_from_anim_slot(scr_s, active))
         except Exception:
-            try:
-                scr_i = int(str(scr_s).split(":", 1)[0])
-            except Exception:
-                continue
-        try:
-            tag = int(str(active.get("tbs_sim_screen", scr_i) or scr_i).strip() or scr_i)
-            if tag >= 1:
-                scr_i = tag
-        except Exception:
-            pass
+            scr_i = 0
+        if scr_i < 1:
+            continue
         try:
             t_start = float(active.get("_json_run_start_sim", 0.0))
         except Exception:
@@ -15312,7 +15368,9 @@ def _restore_sim_prim_motion_to_initial(
         else:
             from .tbs_lam_sequence_engine import _dispatch_main_wait
 
-            _dispatch_main_wait(_do_on_main, timeout=20.0)
+            _dispatch_main_wait(
+                _do_on_main, timeout=20.0, usd_context_name=usd_context_name
+            )
     except Exception as exc:
         print(f"[TBS/SIM] restore motion failed: {exc}", flush=True)
 

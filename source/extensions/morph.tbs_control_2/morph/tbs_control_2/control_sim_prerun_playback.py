@@ -1249,7 +1249,7 @@ class SimTimelinePlayer:
         if ext is not None:
             try:
                 from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
-                from .control_sim_playback_gate import is_json_sequence_busy
+                from .sim_parallel_rails import screen_from_anim_slot
 
                 if bool(SIM_PRERUN_PLAN_SSOT):
                     active_by = getattr(ext, "_sim_anim_active_by_screen", None)
@@ -1259,20 +1259,8 @@ class SimTimelinePlayer:
                                 continue
                             if not bool(act.get("_json_sequence_started")):
                                 continue
-                            try:
-                                scr_a = int(
-                                    str(act.get("tbs_sim_screen") or "").strip() or "0"
-                                )
-                            except Exception:
-                                scr_a = 0
+                            scr_a = int(screen_from_anim_slot(_k, act))
                             if scr_a < 1:
-                                try:
-                                    from .sim_parallel_rails import screen_from_state_key
-
-                                    scr_a = int(screen_from_state_key(_k))
-                                except Exception:
-                                    continue
-                            if not is_json_sequence_busy(ext, scr_a):
                                 continue
                             end_s = 0.0
                             try:

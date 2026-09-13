@@ -205,22 +205,39 @@ def _pop_lam_stage_context(prev: Optional[str]) -> None:
 # `run_prim_rotate_animation`, hide vis attribute set, offset correction,
 # `_apply_start_snapshot`) 을 main thread 의 다음 update tick 으로 dispatch 한다.
 # background thread 는 dispatch 만 하고 step duration 만큼 sleep → 다음 step 진행.
-def _dispatch_main(fn: Callable[[], None]) -> None:
+def _dispatch_main(
+    fn: Callable[[], None], *, usd_context_name: Optional[str] = None
+) -> None:
     """main-thread FIFO dispatch (``tbs_main_dispatch``)."""
     try:
         from .tbs_main_dispatch import dispatch_main as _fifo_dispatch_main
+        from .tbs_usd_stage_context import get_current_usd_context_name
 
-        _fifo_dispatch_main(fn)
+        ctx = usd_context_name
+        if ctx is None:
+            ctx = get_current_usd_context_name()
+        _fifo_dispatch_main(fn, usd_context_name=ctx)
     except Exception as exc:
         _seq_log(f"{_PRINT_PREFIX} dispatch_main failed: {exc}", flush=True)
 
 
-def _dispatch_main_wait(fn: Callable[[], None], *, timeout: float = 15.0) -> bool:
+def _dispatch_main_wait(
+    fn: Callable[[], None],
+    *,
+    timeout: float = 15.0,
+    usd_context_name: Optional[str] = None,
+) -> bool:
     """FIFO main dispatch — 완료까지 대기."""
     try:
         from .tbs_main_dispatch import dispatch_main_wait as _fifo_dispatch_main_wait
+        from .tbs_usd_stage_context import get_current_usd_context_name
 
-        ok = _fifo_dispatch_main_wait(fn, timeout=float(timeout))
+        ctx = usd_context_name
+        if ctx is None:
+            ctx = get_current_usd_context_name()
+        ok = _fifo_dispatch_main_wait(
+            fn, timeout=float(timeout), usd_context_name=ctx
+        )
         if not ok:
             _seq_log(f"{_PRINT_PREFIX} _dispatch_main_wait TIMEOUT after {timeout}s", flush=True)
         return ok
@@ -497,6 +514,41 @@ class TbsLamSequenceRunner:
         except Exception:
             return False
 
+    def _q_main(self, fn: Callable[[], None]) -> None:
+        """이 러너의 USD 컨텍스트 큐로 fire-and-forget (화면1·2 큐가 섞이지 않게)."""
+        _dispatch_main(fn, usd_context_name=self._usd_context_name)
+
+    def _q_main_wait(self, fn: Callable[[], None], *, timeout: float = 15.0) -> bool:
+        return _dispatch_main_wait(
+            fn, timeout=float(timeout), usd_context_name=self._usd_context_name
+        )
+
+    def _resolve_lam_diag_screen(self) -> int:
+        """이 러너가 속한 시뮬 화면. aux 컨텍스트는 절대 화면1로 떨어지지 않는다."""
+        try:
+            tagged = int(getattr(self, "_diag_screen", 0) or 0)
+        except Exception:
+            tagged = 0
+        if tagged >= 2:
+            return tagged
+        ctx = str(self._usd_context_name or "").strip()
+        if ctx:
+            ext = getattr(self, "_diag_ext", None)
+            try:
+                names = list(getattr(ext, "_sim_multi_context_names", []) or [])
+            except Exception:
+                names = []
+            for i, nm in enumerate(names):
+                if str(nm or "").strip() == ctx:
+                    return i + 2
+            if ctx.startswith("morph_tbs_split_aux_"):
+                try:
+                    return max(2, int(ctx.rsplit("_", 1)[-1]) + 1)
+                except Exception:
+                    return 2
+            return 2
+        return tagged if tagged >= 1 else 1
+
     def _parallel_rail_scoped(self) -> bool:
         """병렬 ON + oht/move 레일 runner — motion wait 를 자기 prim 으로만 한정."""
         try:
@@ -602,7 +654,7 @@ class TbsLamSequenceRunner:
                     flush=True,
                 )
                 try:
-                    _dispatch_main_wait(
+                    self._q_main_wait(
                         lambda paths=rpaths, c=self._usd_context_name: _reset_tbs_offset_ops_for_paths(
                             paths, usd_context_name=c
                         ),
@@ -613,20 +665,36 @@ class TbsLamSequenceRunner:
 
                 # TIMESAMPLES/USD_TIMELINE: TBS_OFFSET 만으로는 end-frame 자세가 남는다.
                 # 이번 JSON 의 인스턴스 playback prim 만 range_start 로 seek + 즉시 evaluate.
+                # 화면2 프리런: 이 seek 가 aux Option E 에서 수 초 걸려 JSON 가시 시작이
+                # 막대보다 늦다. 첫 TIMESAMPLES 스텝의 start(reset=True) 가 동일 역할을 한다.
+                _seek_ts = True
+                try:
+                    from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                    ext_seek = getattr(self, "_diag_ext", None)
+                    if (
+                        bool(SIM_PRERUN_PLAN_SSOT)
+                        and bool(getattr(ext_seek, "_sim_playback_started", False))
+                        and int(self._resolve_lam_diag_screen()) >= 2
+                    ):
+                        _seek_ts = False
+                except Exception:
+                    _seek_ts = True
                 replay_paths: List[str] = []
                 seen_rp: set[str] = set()
-                for st in steps:
-                    if not st or not step_kind_is_instance_playback(
-                        str(st.get("type") or "")
-                    ):
-                        continue
-                    try:
-                        pp = (StepRef.from_dict(st.get("ref")).prim_path or "").strip()
-                    except Exception:
-                        pp = ""
-                    if pp.startswith("/") and pp not in seen_rp:
-                        seen_rp.add(pp)
-                        replay_paths.append(pp)
+                if _seek_ts:
+                    for st in steps:
+                        if not st or not step_kind_is_instance_playback(
+                            str(st.get("type") or "")
+                        ):
+                            continue
+                        try:
+                            pp = (StepRef.from_dict(st.get("ref")).prim_path or "").strip()
+                        except Exception:
+                            pp = ""
+                        if pp.startswith("/") and pp not in seen_rp:
+                            seen_rp.add(pp)
+                            replay_paths.append(pp)
                 if replay_paths:
 
                     def _seek_replay_instances_to_start(
@@ -679,7 +747,7 @@ class TbsLamSequenceRunner:
                                     pass
 
                     try:
-                        _dispatch_main_wait(
+                        self._q_main_wait(
                             _seek_replay_instances_to_start, timeout=15.0
                         )
                     except Exception as exc:
@@ -967,7 +1035,7 @@ class TbsLamSequenceRunner:
         play0 = 0.0
         play_end: Optional[float] = None
         ext = getattr(self, "_diag_ext", None)
-        scr = int(getattr(self, "_diag_screen", 1) or 1)
+        scr = int(self._resolve_lam_diag_screen())
         act = None
         try:
             from .control_sim_playback_plan import _active_gated_event_src
@@ -1022,7 +1090,7 @@ class TbsLamSequenceRunner:
         ext = getattr(self, "_diag_ext", None)
         if ext is None or not bool(getattr(ext, "_sim_playback_started", False)):
             return
-        scr = int(getattr(self, "_diag_screen", 1) or 1)
+        scr = int(self._resolve_lam_diag_screen())
         play0, play_end = self._active_json_play_window()
         if play0 <= 1e-9 and (play_end is None or float(play_end) <= 1e-9):
             return
@@ -1062,6 +1130,14 @@ class TbsLamSequenceRunner:
             player = None
         if player is None:
             return
+        # 이 플레이어에 해당 화면 시계가 없으면 대기 금지.
+        # 화면1 플레이어에 sim_now(2) 는 항상 0 → 타임아웃까지 멈춤 = 화면2 애니 지연.
+        try:
+            keys = getattr(player, "_sim_now_by_screen", None)
+            if isinstance(keys, dict) and int(scr) not in keys:
+                return
+        except Exception:
+            pass
         # 과도한 stall 방지: 남은 sim 간격을 매우 낮은 배속으로 환산한 wall 상한
         try:
             t_now0 = float(player.sim_now(scr))
@@ -1414,7 +1490,7 @@ class TbsLamSequenceRunner:
                 result.instance.asset_end_time > result.instance.asset_start_time
                 and result.instance.asset_tps > 0
             ):
-                _dispatch_main_wait(
+                self._q_main_wait(
                     lambda: _refresh_instance_asset_time_from_stage(result.instance),
                     timeout=5.0,
                 )
@@ -1490,7 +1566,7 @@ class TbsLamSequenceRunner:
 
                 snap_holder["v"] = snapshot_timeline()
 
-            _dispatch_main_wait(_snap_tl, timeout=5.0)
+            self._q_main_wait(_snap_tl, timeout=5.0)
             snap = snap_holder.get("v") or (None, 0.0, False, None)
             tl_snap, saved_time, was_playing, prev_speed = snap
 
@@ -1512,7 +1588,7 @@ class TbsLamSequenceRunner:
                 )
 
             try:
-                _dispatch_main_wait(_tl_begin, timeout=15.0)
+                self._q_main_wait(_tl_begin, timeout=15.0)
             except Exception as exc:
                 _seq_log(
                     f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE begin failed: {exc}",
@@ -1551,7 +1627,7 @@ class TbsLamSequenceRunner:
                 )
 
             try:
-                _dispatch_main_wait(_tl_end, timeout=15.0)
+                self._q_main_wait(_tl_end, timeout=15.0)
             except Exception as exc:
                 _seq_log(
                     f"{_PRINT_PREFIX} step[{idx}] USD_TIMELINE end failed: {exc}",
@@ -1619,7 +1695,7 @@ class TbsLamSequenceRunner:
             )
 
         try:
-            _dispatch_main_wait(_do_replay_begin_and_start_in_main, timeout=10.0)
+            self._q_main_wait(_do_replay_begin_and_start_in_main, timeout=10.0)
         except Exception as exc:
             _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] replay begin/start dispatch failed: {exc}",
@@ -1646,7 +1722,7 @@ class TbsLamSequenceRunner:
                         pass
 
                 try:
-                    _dispatch_main_wait(_do_end_replay_fail, timeout=5.0)
+                    self._q_main_wait(_do_end_replay_fail, timeout=5.0)
                 except Exception:
                     pass
             return 0.0
@@ -1771,7 +1847,7 @@ class TbsLamSequenceRunner:
         _seq_log(f"{_PRINT_PREFIX} _start_move idx={idx} dispatching to main thread", flush=True)
         # LAM VTM∥ATM 과 동일: fire-and-forget. wait 하면 메인 FIFO + busy 폴링과
         # 경합하여 peer JSON 스탭이 끝날 때까지 자기 스탭이 멈춘 것처럼 직렬화된다.
-        _dispatch_main(_do_in_main)
+        self._q_main(_do_in_main)
         _seq_log(
             f"{_PRINT_PREFIX} step[{idx}] MOVE dispatched prim={paths} "
             f"from_initial={from_initial} dur={duration}",
@@ -1887,7 +1963,7 @@ class TbsLamSequenceRunner:
             flush=True,
         )
         # LAM 과 동일: kickoff fire-and-forget (peer 레일 스텝 직렬화 방지)
-        _dispatch_main(_do_in_main)
+        self._q_main(_do_in_main)
         return duration
 
     # -------------------------------------------------------- SET_PRIM_VISIBILITY
@@ -1931,7 +2007,7 @@ class TbsLamSequenceRunner:
                         flush=True,
                     )
 
-        _dispatch_main_wait(_do_in_main, timeout=5.0)
+        self._q_main_wait(_do_in_main, timeout=5.0)
         label_ctx = step.get("_lam_wafer_label_ctx")
         if label_ctx:
             try:

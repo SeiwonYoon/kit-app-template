@@ -150,6 +150,30 @@ def screen_from_state_key(key: str) -> int:
         return 1
 
 
+def screen_from_anim_slot(key: Any, act: Any = None) -> int:
+    """pending/active 슬롯 → 화면 번호.
+
+    store key ``N`` / ``N:oht`` 를 우선하고, 키가 숫자가 아닐 때만
+    ``act['tbs_sim_screen']`` 을 쓴다. 실패 시 0 (화면1로 추정하지 않음).
+    ``screen_from_state_key`` 는 실패 시 1 을 돌려 화면2 clamp 가 빠질 수 있어
+    시계 묶음에는 이 함수를 쓴다.
+    """
+    raw = str(key or "").strip()
+    if raw:
+        head = raw.split(":", 1)[0].strip()
+        try:
+            scr = int(head)
+            if scr >= 1:
+                return scr
+        except Exception:
+            pass
+    try:
+        tag = int(str((act or {}).get("tbs_sim_screen") or "").strip() or "0")
+    except Exception:
+        tag = 0
+    return tag if tag >= 1 else 0
+
+
 def rail_from_state_key(key: str) -> Optional[str]:
     """``1:oht`` → ``oht``. 레일 없으면 None."""
     raw = str(key or "").strip()
@@ -188,6 +212,7 @@ __all__ = [
     "rail_from_job_or_payload",
     "rail_from_state_key",
     "rail_queue_key",
+    "screen_from_anim_slot",
     "screen_from_state_key",
     "twin_rail",
 ]

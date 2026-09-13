@@ -246,7 +246,9 @@ def probe_channel_motion_busy_on_main(
     try:
         from .tbs_lam_sequence_engine import _dispatch_main_wait
 
-        _dispatch_main_wait(_check_on_main, timeout=2.0)
+        _dispatch_main_wait(
+            _check_on_main, timeout=2.0, usd_context_name=usd_context_name
+        )
     except Exception:
         holder["busy"] = is_channel_motion_busy(usd_context_name, registry)
     return bool(holder.get("busy", False))
