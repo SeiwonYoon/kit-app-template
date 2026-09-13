@@ -2,7 +2,8 @@
 
 lot 수 ≤3: 등장 순 FOUP1..N (기존).
 lot 수 ≥4: 4번째→FOUP1, 5번째→FOUP2, … 순환. 해당 lot **첫 공정 시작** 시
-표시 lot명·카운트·애니 대상(``foup_index``)·웨이퍼 번호 색을 그 FOUP 기준으로 맞춤.
+표시 lot명·카운트·애니 대상(``foup_index``)·웨이퍼 원형 배경 색을 그 FOUP 기준으로 맞춤.
+lot_id 텍스트 색(``FOUP*_LOT_COLOR_RGBA``)과 웨이퍼 ● 색(``FOUP*_WAFER_COLOR_RGBA``)은 별개.
 """
 
 from __future__ import annotations
@@ -14,12 +15,20 @@ from .lam_sim_control_defaults import (
     FOUP1_LOT_COLOR_RGBA,
     FOUP2_LOT_COLOR_RGBA,
     FOUP3_LOT_COLOR_RGBA,
+    FOUP1_WAFER_COLOR_RGBA,
+    FOUP2_WAFER_COLOR_RGBA,
+    FOUP3_WAFER_COLOR_RGBA,
 )
 
 _DEFAULT_LOT_COLORS: Dict[int, Tuple[float, float, float, float]] = {
     1: FOUP1_LOT_COLOR_RGBA,
     2: FOUP2_LOT_COLOR_RGBA,
     3: FOUP3_LOT_COLOR_RGBA,
+}
+_DEFAULT_WAFER_COLORS: Dict[int, Tuple[float, float, float, float]] = {
+    1: FOUP1_WAFER_COLOR_RGBA,
+    2: FOUP2_WAFER_COLOR_RGBA,
+    3: FOUP3_WAFER_COLOR_RGBA,
 }
 
 
@@ -34,8 +43,13 @@ class FoupLotTakeover:
 
 
 def foup_lot_color_rgba(foup_index: int) -> Tuple[float, float, float, float]:
-    """FOUP1~3 lot_id·슬롯 웨이퍼 번호 라벨 색."""
+    """FOUP1~3 lot_id 텍스트 색."""
     return _DEFAULT_LOT_COLORS.get(int(foup_index), (1.0, 1.0, 1.0, 1.0))
+
+
+def foup_wafer_color_rgba(foup_index: int) -> Tuple[float, float, float, float]:
+    """FOUP1~3 웨이퍼 번호 라벨 원형 배경(●) 색."""
+    return _DEFAULT_WAFER_COLORS.get(int(foup_index), (1.0, 1.0, 1.0, 1.0))
 
 
 def _clean_lot_id(raw: str) -> str:
@@ -228,6 +242,7 @@ __all__ = [
     "assert_foup_lot_cycle_rules",
     "build_foup_lot_takeovers",
     "foup_lot_color_rgba",
+    "foup_wafer_color_rgba",
     "foup_lot_ids_from_dwells",
     "foup_lot_ids_from_lot_map",
     "foup_slot_for_lot_ordinal",

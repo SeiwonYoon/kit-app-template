@@ -4,7 +4,7 @@
 - CSV Play 시작 baseline: 위 설정이 True 일 때만 FOUP1~3×25 에 번호 등록.
 - ``PRIM_VISIBILITY`` (pick hide SLOT / show ARM; place 는 팔 hide 시 SLOT 으로 이식) 실행 시
   ``WaferNumberLabelTracker`` 가 **동일 카세트 번호**를 팔·airlock·chamber 등으로 옮긴다.
-- 웨이퍼가 속한 FOUP lot 색(파랑/빨강/초록)은 FOUP·팔·장비 등 **표시 위치와 무관하게** 원형 배경(●)에 이식된다.
+- 웨이퍼가 속한 FOUP 원형 배경색(●)은 FOUP·팔·장비 등 **표시 위치와 무관하게** 이식된다.
 - pick: SLOT hide 시 번호·FOUP 색 보관 → **ARM show** 때 팔 prim 에 부여(선행 점프 방지).
 - place: SLOT show 시에도 맵은 팔에 유지 → **ARM hide** 때 SLOT 으로 이식.
 - airlock/chamber/aligner 슬롯 인덱스(1·2)가 아니라 **FOUP 에서 올린 웨이퍼 번호**가 유지된다.
@@ -26,7 +26,7 @@ from .lam_sim_control_defaults import (
 )
 from .lam_viewport_overlay_config import WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS
 from .lam_buffer_return_rules import foup_index_from_slot_key
-from .lam_foup_lot_display import foup_lot_color_rgba
+from .lam_foup_lot_display import foup_wafer_color_rgba
 from .lam_wafer_prim_paths import (
     IS_LABEL_SHOW,
     load_wafer_prim_by_slot_key,
@@ -1393,7 +1393,7 @@ class LamWaferFoupViewportLabels:
                 color = _LABEL_COLOR
                 fi = tracker.foup_index_for_path(path_str)
                 if fi is not None:
-                    color = foup_lot_color_rgba(fi)
+                    color = foup_wafer_color_rgba(fi)
                 root = self._build_one_label(pos, text, color=color)
                 if root is not None:
                     self._label_transforms[path_str] = root
@@ -1451,7 +1451,7 @@ class LamWaferFoupViewportLabels:
         label_text = str(text or "")
         with root:
             with sc.Transform(scale_to=sc.Space.SCREEN):
-                # ㅁ(한자키) → ● 원형 배경 — FOUP lot 색
+                # ㅁ(한자키) → ● 원형 배경 — FOUP wafer 색
                 sc.Label(
                     "●",
                     size=bg_sz,

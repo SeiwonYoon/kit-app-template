@@ -223,10 +223,14 @@ FEDERATION_BEARER_TOKEN: str = ""
 # 추가 헤더 예: {"X-API-Key": "..."}
 FEDERATION_EXTRA_HEADERS: dict = {}
 
-# FOUP lot_id / FOUP 슬롯 웨이퍼 번호 3D 라벨 색 (RGBA 0~1) — FOUP1 파랑 / FOUP2 빨강 / FOUP3 초록
+# FOUP lot_id 텍스트 색 (RGBA 0~1) — FOUP1 파랑 / FOUP2 빨강 / FOUP3 초록
 FOUP1_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.20, 0.55, 1.00, 1.00)
 FOUP2_LOT_COLOR_RGBA: tuple[float, float, float, float] = (1.00, 0.25, 0.25, 1.00)
 FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.00)
+# 웨이퍼 번호 라벨 원형 배경(●) 색 — lot_id 텍스트 색과 독립
+FOUP1_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (0.20, 0.55, 1.00, 1.00)
+FOUP2_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (1.00, 0.25, 0.25, 1.00)
+FOUP3_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.00)
 # 색 샘플 (밝은 배경에서도 잘 보이게 채도·명도를 잡음). 필요 시 위 튜플에 복사.
 #   흰색   (1.00, 1.00, 1.00, 1.00)
 #   검정   (0.00, 0.00, 0.00, 1.00)
@@ -360,6 +364,9 @@ __all__ = [
     "FOUP1_LOT_COLOR_RGBA",
     "FOUP2_LOT_COLOR_RGBA",
     "FOUP3_LOT_COLOR_RGBA",
+    "FOUP1_WAFER_COLOR_RGBA",
+    "FOUP2_WAFER_COLOR_RGBA",
+    "FOUP3_WAFER_COLOR_RGBA",
     "FOUP_LOT_ID_FONT_SIZE",
     "WAFER_NUMBER_LABEL_FONT_SIZE",
     "WAFER_NUMBER_LABEL_BG_COLOR_RGBA",
