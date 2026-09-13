@@ -966,46 +966,14 @@ def _process_merged_response(
         _fed_load_hud(
             screen, "ready", ext=ext, lam_window=lam_window
         )
-        if auto_play:
-            _fed_diag("S11_auto_play", "start playback", screen=screen)
-            try:
-                from .lam_federation_load_hud import (
-                    hold_ready_then_hide_federation_load_huds,
-                )
-
-                hold_ready_then_hide_federation_load_huds([screen])
-            except Exception as exc:
-                print(
-                    f"{_PRINT_PREFIX} screen{screen} pre-play HUD hide: {exc}",
-                    flush=True,
-                )
-            err = _start_federation_playback(
-                ext,
-                lam_window,
-                csv_win,
-                screen,
-                cached,
-                speed_scale=speed_scale,
-            )
-            if err:
-                _fed_diag(
-                    "S11_auto_play_fail",
-                    err,
-                    screen=screen,
-                )
-                _fed_load_hud(
-                    screen,
-                    "failed",
-                    detail=err,
-                    ext=ext,
-                    lam_window=lam_window,
-                )
-                return ScreenPipelineResult(screen, False, err, meta)
-            _fed_load_hud(
-                screen, "playing", ext=ext, lam_window=lam_window
-            )
-        else:
-            _fed_diag("S11_auto_play_skip", "auto_play=False (barrier)", screen=screen)
+        _arm_screen_play_button(
+            ext,
+            lam_window,
+            screen,
+            cached,
+            speed_scale=speed_scale,
+            start_gen=gen,
+        )
         return ScreenPipelineResult(
             screen, True, "ok", meta, prerun=prerun, cached=cached
         )
@@ -1259,6 +1227,61 @@ def _process_one_screen(
         return ScreenPipelineResult(screen, False, str(exc), meta)
 
 
+def _arm_screen_play_button(
+    ext: Any,
+    lam_window: Any,
+    screen: int,
+    cached: Any,
+    *,
+    speed_scale: float,
+    start_gen: int,
+) -> None:
+    """로딩 100% HUD → 재생 버튼. 클릭 후 그 화면만 play."""
+    si = max(1, int(screen))
+    gen = int(start_gen or 0)
+
+    def _on_play() -> None:
+        if _federation_start_stale(si, gen):
+            _fed_diag(
+                "S11_stale",
+                "skip play click — newer web start",
+                screen=si,
+                gen=gen,
+            )
+            return
+        csv_win = _resolve_csv_play_window(lam_window, si)
+        _fed_diag("S11_play_click", "per-screen play from HUD button", screen=si)
+        err = _start_federation_playback(
+            ext,
+            lam_window,
+            csv_win,
+            si,
+            cached,
+            speed_scale=speed_scale,
+        )
+        if err:
+            _fed_diag("S11_play_click_fail", err, screen=si)
+            _fed_load_hud(
+                si,
+                "failed",
+                detail=err,
+                ext=ext,
+                lam_window=lam_window,
+            )
+            return
+        _fed_load_hud(si, "playing", ext=ext, lam_window=lam_window)
+
+    try:
+        from .lam_federation_load_hud import arm_federation_play_button
+
+        arm_federation_play_button(
+            si, _on_play, ext=ext, lam_window=lam_window
+        )
+        _fed_diag("S11_play_button_armed", "waiting for click", screen=si)
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} screen{si} arm play button: {exc}", flush=True)
+
+
 def _start_ready_screens_together(
     ext: Any,
     lam_window: Any,
@@ -1266,79 +1289,24 @@ def _start_ready_screens_together(
     *,
     speed_scale: float,
 ) -> List[ScreenPipelineResult]:
-    """준비완료(ok+cached) 화면만 거의 동시에 play 시작. 실패 화면은 그대로 둔다."""
+    """레거시 배리어 진입점 — 일괄 play 없이 화면별 재생 버튼만 건다."""
     ready = [r for r in results if r.ok and r.cached is not None]
-    failed = [r for r in results if not r.ok]
     _fed_diag(
         "S11_barrier",
-        "start ready screens together",
+        "arm per-screen play buttons (no auto start)",
         ready=[r.screen for r in ready],
-        failed=[r.screen for r in failed],
+        failed=[r.screen for r in results if not r.ok],
     )
-    out: List[ScreenPipelineResult] = []
-    # 실패분은 유지, 성공분은 play 결과로 갱신
-    by_screen = {r.screen: r for r in results}
-
-    # 전 화면 ready(100%) 후 1초 유지 → fly/play 직전 HUD 숨김 (I 미리보기 제외)
-    if ready:
-        try:
-            from .lam_federation_load_hud import (
-                hold_ready_then_hide_federation_load_huds,
-            )
-
-            hold_ready_then_hide_federation_load_huds([r.screen for r in ready])
-        except Exception as exc:
-            print(
-                f"{_PRINT_PREFIX} pre-play HUD hide: {exc}",
-                flush=True,
-            )
-
     for r in ready:
-        if _federation_start_stale(int(r.screen), int((r.meta or {}).get("start_gen") or 0)):
-            _fed_diag(
-                "S11_stale",
-                "skip play — newer web start",
-                screen=r.screen,
-                gen=(r.meta or {}).get("start_gen"),
-            )
-            by_screen[r.screen] = ScreenPipelineResult(
-                r.screen,
-                False,
-                f"screen{r.screen}: superseded before play",
-                dict(r.meta or {}),
-                prerun=r.prerun,
-                cached=r.cached,
-            )
-            continue
-        csv_win = _resolve_csv_play_window(lam_window, r.screen)
-        _fed_diag("S11_auto_play", "barrier start playback", screen=r.screen)
-        err = _start_federation_playback(
+        _arm_screen_play_button(
             ext,
             lam_window,
-            csv_win,
             r.screen,
             r.cached,
             speed_scale=speed_scale,
+            start_gen=int((r.meta or {}).get("start_gen") or 0),
         )
-        if err:
-            _fed_diag("S11_auto_play_fail", err, screen=r.screen)
-            _fed_load_hud(
-                r.screen,
-                "failed",
-                detail=err,
-                ext=ext,
-                lam_window=lam_window,
-            )
-            by_screen[r.screen] = ScreenPipelineResult(
-                r.screen, False, err, dict(r.meta or {}), prerun=r.prerun, cached=r.cached
-            )
-        else:
-            _fed_load_hud(
-                r.screen, "playing", ext=ext, lam_window=lam_window
-            )
-    for si in sorted(by_screen.keys()):
-        out.append(by_screen[si])
-    return out
+    return list(results)
 
 
 def run_federation_start_simulation(
@@ -1354,11 +1322,11 @@ def run_federation_start_simulation(
     bearer_token_override: Optional[str] = None,
     extra_headers_override: Optional[Dict[str, str]] = None,
 ) -> None:
-    """T2V ``configs`` payload → 화면 표시 + fetch + prerun + (옵션) 재생.
+    """T2V ``configs`` payload → 화면 표시 + fetch + prerun + 화면별 재생 버튼.
 
     요청에 포함된 화면(case)은 시작 전에 UI「정지(초기화)」와 동일하게
-    강제 종료한 뒤 fetch·준비하며, 듀얼이면 성공 화면만 동시에 재생한다.
-    실패 화면은 HUD에 실패를 남기고 play 하지 않는다.
+    강제 종료한 뒤 fetch·준비한다. 화면마다 준비되는 즉시 재생 버튼을 띄우고,
+    클릭한 화면만 시작한다. 실패 화면은 HUD에 실패를 남기고 play 하지 않는다.
     """
     defaults = _read_federation_defaults()
     url = str(url_override or defaults["url"] or "").strip()
@@ -1400,7 +1368,7 @@ def run_federation_start_simulation(
     )
 
     def _work_after_visibility() -> Dict[str, Any]:
-        _fed_diag("S06_work_begin", "after visibility — fetch/parse then barrier play")
+        _fed_diag("S06_work_begin", "after visibility — fetch/parse then per-screen play button")
         lam_window = getattr(ext, "_lam_window", None) or getattr(ext, "_window", None)
         if lam_window is None:
             _fed_diag("S06_fail", "LAM window is not ready")
@@ -1469,13 +1437,12 @@ def run_federation_start_simulation(
             )
         results.sort(key=lambda r: r.screen)
 
-        # Phase B: 성공 화면만 동시 시작
+        # Phase B: 일괄 auto-play 없음. 화면별 HUD 재생 버튼이 play 시작.
         if auto_play:
-            results = _start_ready_screens_together(
-                ext,
-                lam_window,
-                results,
-                speed_scale=speed_scale,
+            _fed_diag(
+                "S11_play_buttons",
+                "per-screen play buttons armed (no barrier start)",
+                ready=[r.screen for r in results if r.ok],
             )
         else:
             for r in results:

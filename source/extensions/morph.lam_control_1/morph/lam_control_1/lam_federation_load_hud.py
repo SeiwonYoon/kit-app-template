@@ -2,8 +2,9 @@
 
 요청~준비완료까지 ``Loading data... N%`` 단일 칩 UI.
 아이콘: ``data/img/ic_loading.png`` 를 중심 기준으로 계속 회전 (ByteImageProvider).
-실 로딩 %: 약 10초 동안 0→99, ready/play 직전 100. 전 화면 ready 후 1초 뒤
-(camera fly / 재생 직전) HUD 숨김. I 단축키 미리보기와는 별개.
+실 로딩 %: 약 10초 동안 0→99, 화면별 ready(100%) 후 **같은 자리**에 재생 버튼.
+재생 클릭 → ``_PLAY_CLICK_DELAY_SEC`` 뒤 버튼 숨김 + 그 화면만 시뮬 시작.
+전 화면 100% 후 일괄 자동 재생은 하지 않는다. I 단축키 미리보기와는 별개.
 
 표시 on/off: ``lam_sim_control_defaults.SHOW_VIEWPORT_FEDERATION_LOAD_HUD``.
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .kit_main_dispatch import schedule_on_main_thread
 
@@ -51,11 +52,25 @@ _SPIN_DEG_PER_SEC = 360.0  # 1초에 1바퀴
 # 실 API 로딩 전용: 10초 동안 0→99, 완료(ready/playing) 시 즉시 100
 _RAMP_TO_99_SEC = 10.0
 _RAMP_CAP_PCT = 99.0
-# 전 화면 ready(재생준비) 후 fly/play 직전 HUD 유지 시간
+# 전 화면 ready 후 fly/play 직전 HUD 유지(레거시 hold_ready 경로)
 _PRE_PLAY_HIDE_DELAY_SEC = 1.0
+
+# --- 재생 버튼 (로딩 100% 후 같은 자리 대체). 기본 크기는 로딩 칩과 동일. ---
+_PLAY_BTN_W = _PANEL_W
+_PLAY_BTN_H = _PANEL_H
+_PLAY_BTN_BORDER_WIDTH = 0
+_PLAY_BTN_BORDER_ARGB = 0x00000000
+_PLAY_BTN_BG_ARGB = _BG_ARGB
+_PLAY_GLYPH_ARGB = _TEXT_ARGB
+_PLAY_GLYPH_FONT_SIZE = 18
+_PLAY_ICON_W = 18
+_PLAY_ICON_H = 18
+_PLAY_CLICK_DELAY_SEC = 1.0
+_PLAY_IMAGE_NAME = "ic_play.png"  # data/img/ — 없으면 문자 ▶
 
 _lock = threading.RLock()
 _panels: Dict[int, "_FedLoadPanel"] = {}
+_play_click_fns: Dict[int, Callable[[], None]] = {}
 
 # --- BEGIN TEMP: I-hotkey (delete with lam_federation_load_hud_i_hotkey.py) ---
 _user_overlay_visible: bool = True  # 실 Federation 로딩은 기본 표시
@@ -176,15 +191,24 @@ def federation_load_hud_enabled() -> bool:
         return True
 
 
-def _loading_icon_path() -> Optional[Path]:
-    """``data/img/ic_loading.png``."""
+def _img_dir() -> Path:
     try:
         from .lam_data_paths import extension_data_root
 
-        img_dir = extension_data_root() / "img"
+        return extension_data_root() / "img"
     except Exception:
-        img_dir = Path(__file__).resolve().parent.parent.parent / "data" / "img"
-    p = img_dir / "ic_loading.png"
+        return Path(__file__).resolve().parent.parent.parent / "data" / "img"
+
+
+def _loading_icon_path() -> Optional[Path]:
+    """``data/img/ic_loading.png``."""
+    p = _img_dir() / "ic_loading.png"
+    return p if p.is_file() else None
+
+
+def _play_icon_path() -> Optional[Path]:
+    """``data/img/ic_play.png`` (없으면 None → 문자 ▶)."""
+    p = _img_dir() / str(_PLAY_IMAGE_NAME or "ic_play.png")
     return p if p.is_file() else None
 
 
@@ -325,6 +349,38 @@ def hide_federation_load_hud(screen: Optional[int] = None) -> None:
     schedule_on_main_thread(_apply)
 
 
+def arm_federation_play_button(
+    screen: int,
+    on_play: Callable[[], None],
+    *,
+    ext: Any = None,
+    lam_window: Any = None,
+) -> None:
+    """해당 화면 로딩 HUD를 재생 버튼으로 바꾸고, 클릭 시 ``on_play`` 를 호출한다."""
+    si = max(1, int(screen))
+    if not callable(on_play):
+        return
+    with _lock:
+        _play_click_fns[si] = on_play
+
+    def _apply() -> None:
+        panel = _ensure_panel(si, kit_ext=ext, lam_window=lam_window)
+        if panel is None:
+            return
+        panel._play_fn = on_play
+        panel._play_starting = False
+        try:
+            panel.apply_user_overlay_visible(True)
+        except Exception:
+            pass
+        if str(getattr(panel, "_phase", "") or "") in ("ready", "playing"):
+            panel._enter_play_mode()
+        elif str(getattr(panel, "_pct_mode", "") or "") == "complete":
+            panel._enter_play_mode()
+
+    schedule_on_main_thread(_apply)
+
+
 def hold_ready_then_hide_federation_load_huds(
     screens: List[int],
     *,
@@ -446,6 +502,10 @@ class _FedLoadPanel:
         self._icon: Any = None
         self._icon_provider: Any = None
         self._base_im: Any = None
+        self._load_root: Any = None
+        self._play_root: Any = None
+        self._play_fn: Optional[Callable[[], None]] = None
+        self._play_starting = False
         self._angle_deg = 0.0
         self._phase = ""
         self._display_pct = 0.0
@@ -491,6 +551,8 @@ class _FedLoadPanel:
         self._icon = None
         self._icon_provider = None
         self._base_im = None
+        self._load_root = None
+        self._play_root = None
         vw = self._mounted_vw
         self._mounted_vw = None
         if vw is None:
@@ -560,132 +622,146 @@ class _FedLoadPanel:
                 with root:
                     with ui.VStack():
                         ui.Spacer(height=_TOP)
-                        with ui.HStack(height=_PANEL_H):
+                        row_h = max(int(_PANEL_H), int(_PLAY_BTN_H))
+                        with ui.HStack(height=row_h):
                             ui.Spacer(width=_LEFT)
                             # Viewport overlay 에서 Frame.style 배경이 무시되는 경우가 많아
                             # CSV HUD 와 같이 ZStack + Rectangle 로 배경을 그림.
-                            with ui.ZStack(width=_PANEL_W, height=_PANEL_H):
-                                ui.Rectangle(
-                                    width=_PANEL_W,
-                                    height=_PANEL_H,
-                                    style={
-                                        "background_color": _BG_ARGB,
-                                        "border_width": 0,
-                                    },
+                            wrap_w = max(int(_PANEL_W), int(_PLAY_BTN_W))
+                            wrap_h = max(int(_PANEL_H), int(_PLAY_BTN_H))
+                            with ui.ZStack(width=wrap_w, height=wrap_h):
+                                self._load_root = ui.ZStack(
+                                    width=_PANEL_W, height=_PANEL_H
                                 )
-                                # 칩 전체 높이에서 콘텐츠 행을 Spacer 로 세로 중앙 배치
-                                with ui.VStack(height=_PANEL_H):
-                                    ui.Spacer()
-                                    if row_align is not None:
-                                        row = ui.HStack(
-                                            height=_LINE_H, alignment=row_align
-                                        )
-                                    else:
-                                        row = ui.HStack(height=_LINE_H)
-                                    with row:
-                                        ui.Spacer(width=_PAD_LEFT)
-                                        self._icon = None
-                                        self._icon_provider = None
-                                        self._spin_enabled = False
+                                with self._load_root:
+                                    ui.Rectangle(
+                                        width=_PANEL_W,
+                                        height=_PANEL_H,
+                                        style={
+                                            "background_color": _BG_ARGB,
+                                            "border_width": 0,
+                                        },
+                                    )
+                                    # 칩 전체 높이에서 콘텐츠 행을 Spacer 로 세로 중앙 배치
+                                    with ui.VStack(height=_PANEL_H):
+                                        ui.Spacer()
+                                        if row_align is not None:
+                                            row = ui.HStack(
+                                                height=_LINE_H, alignment=row_align
+                                            )
+                                        else:
+                                            row = ui.HStack(height=_LINE_H)
+                                        with row:
+                                            ui.Spacer(width=_PAD_LEFT)
+                                            self._icon = None
+                                            self._icon_provider = None
+                                            self._spin_enabled = False
 
-                                        def _make_icon_widget() -> None:
-                                            # 아이콘을 LINE_H 안에서 세로 중앙
-                                            with ui.VStack(
-                                                width=_ICON_W, height=_LINE_H
-                                            ):
-                                                ui.Spacer()
-                                                if self._base_im is not None:
-                                                    try:
-                                                        provider_cls = getattr(
-                                                            ui,
-                                                            "ByteImageProvider",
-                                                            None,
-                                                        )
-                                                        with_prov = getattr(
-                                                            ui,
-                                                            "ImageWithProvider",
-                                                            None,
-                                                        )
-                                                        if (
-                                                            provider_cls is not None
-                                                            and with_prov is not None
-                                                        ):
-                                                            self._icon_provider = (
-                                                                provider_cls()
+                                            def _make_icon_widget() -> None:
+                                                # 아이콘을 LINE_H 안에서 세로 중앙
+                                                with ui.VStack(
+                                                    width=_ICON_W, height=_LINE_H
+                                                ):
+                                                    ui.Spacer()
+                                                    if self._base_im is not None:
+                                                        try:
+                                                            provider_cls = getattr(
+                                                                ui,
+                                                                "ByteImageProvider",
+                                                                None,
                                                             )
-                                                            self._push_rotated_icon(
-                                                                0.0
+                                                            with_prov = getattr(
+                                                                ui,
+                                                                "ImageWithProvider",
+                                                                None,
                                                             )
-                                                            self._icon = with_prov(
-                                                                self._icon_provider,
+                                                            if (
+                                                                provider_cls is not None
+                                                                and with_prov is not None
+                                                            ):
+                                                                self._icon_provider = (
+                                                                    provider_cls()
+                                                                )
+                                                                self._push_rotated_icon(
+                                                                    0.0
+                                                                )
+                                                                self._icon = with_prov(
+                                                                    self._icon_provider,
+                                                                    width=_ICON_W,
+                                                                    height=_ICON_H,
+                                                                )
+                                                                self._spin_enabled = True
+                                                        except Exception as exc:
+                                                            print(
+                                                                f"{_PRINT_PREFIX} ByteImageProvider fail: {exc}",
+                                                                flush=True,
+                                                            )
+                                                            self._icon_provider = None
+                                                    if (
+                                                        self._icon is None
+                                                        and icon_path is not None
+                                                    ):
+                                                        try:
+                                                            self._icon = ui.Image(
+                                                                str(icon_path),
                                                                 width=_ICON_W,
                                                                 height=_ICON_H,
                                                             )
-                                                            self._spin_enabled = True
-                                                    except Exception as exc:
+                                                        except Exception:
+                                                            self._icon = ui.Image(
+                                                                width=_ICON_W,
+                                                                height=_ICON_H,
+                                                                style={
+                                                                    "image_url": str(
+                                                                        icon_path
+                                                                    )
+                                                                },
+                                                            )
+                                                        self._spin_enabled = False
                                                         print(
-                                                            f"{_PRINT_PREFIX} ByteImageProvider fail: {exc}",
+                                                            f"{_PRINT_PREFIX} spin disabled (static Image fallback)",
                                                             flush=True,
                                                         )
-                                                        self._icon_provider = None
-                                                if (
-                                                    self._icon is None
-                                                    and icon_path is not None
-                                                ):
-                                                    try:
-                                                        self._icon = ui.Image(
-                                                            str(icon_path),
-                                                            width=_ICON_W,
-                                                            height=_ICON_H,
-                                                        )
-                                                    except Exception:
-                                                        self._icon = ui.Image(
+                                                    if self._icon is None:
+                                                        self._icon = ui.Label(
+                                                            "●",
                                                             width=_ICON_W,
                                                             height=_ICON_H,
                                                             style={
-                                                                "image_url": str(
-                                                                    icon_path
-                                                                )
+                                                                "color": _TEXT_ARGB,
+                                                                "font_size": 12,
                                                             },
                                                         )
-                                                    self._spin_enabled = False
-                                                    print(
-                                                        f"{_PRINT_PREFIX} spin disabled (static Image fallback)",
-                                                        flush=True,
-                                                    )
-                                                if self._icon is None:
-                                                    self._icon = ui.Label(
-                                                        "●",
-                                                        width=_ICON_W,
-                                                        height=_ICON_H,
-                                                        style={
-                                                            "color": _TEXT_ARGB,
-                                                            "font_size": 12,
-                                                        },
-                                                    )
-                                                    self._spin_enabled = False
-                                                ui.Spacer()
+                                                        self._spin_enabled = False
+                                                    ui.Spacer()
 
-                                        _make_icon_widget()
-                                        ui.Spacer(width=_GAP_ICON_TEXT)
-                                        label_kw: Dict[str, Any] = {
-                                            "height": _LINE_H,
-                                            "style": {
-                                                "color": _TEXT_ARGB,
-                                                "font_size": _FONT_SIZE,
-                                            },
-                                        }
-                                        if row_align is not None:
-                                            label_kw["alignment"] = row_align
-                                        self._label = ui.Label(
-                                            "Loading data... 0%", **label_kw
-                                        )
+                                            _make_icon_widget()
+                                            ui.Spacer(width=_GAP_ICON_TEXT)
+                                            label_kw: Dict[str, Any] = {
+                                                "height": _LINE_H,
+                                                "style": {
+                                                    "color": _TEXT_ARGB,
+                                                    "font_size": _FONT_SIZE,
+                                                },
+                                            }
+                                            if row_align is not None:
+                                                label_kw["alignment"] = row_align
+                                            self._label = ui.Label(
+                                                "Loading data... 0%", **label_kw
+                                            )
+                                            ui.Spacer()
                                         ui.Spacer()
-                                    ui.Spacer()
+                                self._build_play_chip(ui)
             self._display_pct = 0.0
             self._target_pct = 0.0
             self._failed = False
             self._angle_deg = 0.0
+            self._play_starting = False
+            with _lock:
+                pending_fn = _play_click_fns.get(self.screen)
+            if pending_fn is not None:
+                self._play_fn = pending_fn
+            self._set_play_visible(False)
             # --- BEGIN TEMP: I-hotkey ---
             try:
                 self.apply_user_overlay_visible(
@@ -702,6 +778,182 @@ class _FedLoadPanel:
             )
             self.destroy()
             return False
+
+    def _build_play_chip(self, ui: Any) -> None:
+        """로딩 칩과 같은 자리의 재생 버튼 (텍스트 없음, ▶ 또는 ic_play 이미지)."""
+        pw = int(_PLAY_BTN_W)
+        ph = int(_PLAY_BTN_H)
+        ra = getattr(ui, "Alignment", None)
+        center = getattr(ra, "CENTER", None) if ra is not None else None
+        self._play_root = ui.ZStack(width=pw, height=ph)
+        with self._play_root:
+            ui.Rectangle(
+                width=pw,
+                height=ph,
+                style={
+                    "background_color": int(_PLAY_BTN_BG_ARGB),
+                    "border_width": float(_PLAY_BTN_BORDER_WIDTH),
+                    "border_color": int(_PLAY_BTN_BORDER_ARGB),
+                },
+            )
+            glyph_stack_kw: Dict[str, Any] = {"width": pw, "height": ph}
+            if center is not None:
+                glyph_stack_kw["alignment"] = center
+            with ui.VStack(**glyph_stack_kw):
+                ui.Spacer()
+                row_kw: Dict[str, Any] = {"height": int(_PLAY_ICON_H)}
+                if center is not None:
+                    row_kw["alignment"] = center
+                with ui.HStack(**row_kw):
+                    ui.Spacer()
+                    play_img = _play_icon_path()
+                    if play_img is not None:
+                        try:
+                            ui.Image(
+                                str(play_img),
+                                width=int(_PLAY_ICON_W),
+                                height=int(_PLAY_ICON_H),
+                            )
+                        except Exception:
+                            ui.Image(
+                                width=int(_PLAY_ICON_W),
+                                height=int(_PLAY_ICON_H),
+                                style={"image_url": str(play_img)},
+                            )
+                    else:
+                        glyph_kw: Dict[str, Any] = {
+                            "style": {
+                                "color": int(_PLAY_GLYPH_ARGB),
+                                "font_size": int(_PLAY_GLYPH_FONT_SIZE),
+                            }
+                        }
+                        if center is not None:
+                            glyph_kw["alignment"] = center
+                        ui.Label("▶", **glyph_kw)
+                    ui.Spacer()
+                ui.Spacer()
+            btn_style = {
+                "Button": {
+                    "background_color": 0x00000000,
+                    "border_width": 0,
+                    "border_color": 0x00000000,
+                    "padding": 0,
+                    "margin": 0,
+                },
+                "Button:hovered": {
+                    "background_color": 0x22FFFFFF,
+                    "border_width": 0,
+                },
+                "Button:pressed": {
+                    "background_color": 0x33FFFFFF,
+                    "border_width": 0,
+                },
+            }
+            ui.Button(
+                "",
+                width=pw,
+                height=ph,
+                clicked_fn=self._on_play_clicked,
+                style=btn_style,
+            )
+
+        def _on_mouse(*args: Any, **_kwargs: Any) -> None:
+            # viewport overlay 투명 Button 이 클릭을 못 받을 때 Rectangle/ZStack 로 보조
+            btn = args[2] if len(args) >= 3 else 0
+            try:
+                if int(btn) != 0:
+                    return
+            except Exception:
+                pass
+            self._on_play_clicked()
+
+        for widget in (self._play_root,):
+            setter = getattr(widget, "set_mouse_pressed_fn", None)
+            if callable(setter):
+                try:
+                    setter(_on_mouse)
+                except Exception:
+                    pass
+        self._set_widget_visible(self._play_root, False)
+
+    def _set_widget_visible(self, widget: Any, want: bool) -> None:
+        if widget is None:
+            return
+        try:
+            widget.visible = bool(want)
+        except Exception:
+            try:
+                if hasattr(widget, "set_visible"):
+                    widget.set_visible(bool(want))
+            except Exception:
+                pass
+
+    def _set_play_visible(self, play_on: bool) -> None:
+        self._set_widget_visible(self._load_root, not bool(play_on))
+        self._set_widget_visible(self._play_root, bool(play_on))
+
+    def _enter_load_mode(self) -> None:
+        self._play_starting = False
+        self._set_play_visible(False)
+
+    def _enter_play_mode(self) -> None:
+        if bool(getattr(self, "_i_preview", False)):
+            return
+        if self._play_fn is None:
+            with _lock:
+                self._play_fn = _play_click_fns.get(self.screen)
+        if self._play_fn is None:
+            return
+        self._stop_anim()
+        self._play_starting = False
+        self._set_play_visible(True)
+        try:
+            if self._root is not None:
+                self._root.visible = True
+        except Exception:
+            pass
+
+    def _on_play_clicked(self) -> None:
+        if self._play_starting:
+            return
+        fn = self._play_fn
+        if fn is None:
+            with _lock:
+                fn = _play_click_fns.get(self.screen)
+            self._play_fn = fn
+        if not callable(fn):
+            return
+        self._play_starting = True
+        si = int(self.screen)
+        delay = max(0.0, float(_PLAY_CLICK_DELAY_SEC))
+
+        def _after_delay() -> None:
+            try:
+                if delay > 1e-9:
+                    time.sleep(delay)
+            except Exception:
+                pass
+
+            def _go() -> None:
+                try:
+                    _hide_panels_visible(si, skip_i_preview=True)
+                except Exception:
+                    pass
+                try:
+                    fn()
+                except Exception as exc:
+                    print(
+                        f"{_PRINT_PREFIX} screen{si} play click failed: {exc}",
+                        flush=True,
+                    )
+
+            schedule_on_main_thread(_go)
+
+        threading.Thread(
+            target=_after_delay,
+            name=f"lam-fed-play-click-s{si}",
+            daemon=True,
+        ).start()
 
     def set_phase(
         self,
@@ -725,6 +977,7 @@ class _FedLoadPanel:
             self._fail_detail = short
             self._target_pct = float(self._display_pct)
             self._stop_anim()
+            self._enter_load_mode()
             self._refresh_label()
             try:
                 self._label.style = {"color": _FAIL_ARGB, "font_size": _FONT_SIZE}
@@ -750,8 +1003,8 @@ class _FedLoadPanel:
             self._start_anim()
             return
 
-        # 실 로딩 완료 → 즉시 100
-        if phase in ("ready", "playing"):
+        # 실 로딩 완료 → 즉시 100, 재생 버튼으로 대체 (I 미리보기 제외)
+        if phase == "ready":
             self._i_preview = False
             self._pct_mode = "complete"
             self._ramp_t0 = None
@@ -759,10 +1012,24 @@ class _FedLoadPanel:
             self._target_pct = 100.0
             self._refresh_label()
             self._stop_anim()
+            self._enter_play_mode()
+            return
+        if phase == "playing":
+            self._i_preview = False
+            self._pct_mode = "complete"
+            self._ramp_t0 = None
+            self._display_pct = 100.0
+            self._target_pct = 100.0
+            self._stop_anim()
             return
 
         # 실 API 로딩(requesting/received/parsing): 10초 동안 0→99
         self._i_preview = False
+        with _lock:
+            _play_click_fns.pop(self.screen, None)
+        self._play_fn = None
+        self._play_starting = False
+        self._enter_load_mode()
         self._pct_mode = "ramp"
         if phase == "requesting" or self._ramp_t0 is None:
             self._ramp_t0 = time.perf_counter()
@@ -863,6 +1130,7 @@ class _FedLoadPanel:
 
 
 __all__ = [
+    "arm_federation_play_button",
     "federation_load_hud_enabled",
     "federation_load_hud_user_overlay_visible",
     "hide_federation_load_hud",
