@@ -38,11 +38,11 @@ _PANEL_H = 36
 _TOP = 10
 _LEFT = 10
 _PAD_LEFT = 14
-_ICON_W = 15
-_ICON_H = 16
+_ICON_W = 18
+_ICON_H = 18
 _LINE_H = 20  # 아이콘·텍스트 공통 행 높이 (세로 중앙 정렬용)
 _GAP_ICON_TEXT = 7
-_FONT_SIZE = 16  # 기존 13 + 3
+_FONT_SIZE = 18
 # rgba(48, 47, 64, 0.5) → omni.ui 0xAARRGGBB
 _BG_ARGB = 0x80302F40
 _TEXT_ARGB = 0xFFE8EEF5
@@ -121,23 +121,6 @@ def _ensure_i_hotkey_preview_panels() -> None:
             pass
 
 
-def _destroy_i_hotkey_preview_panels() -> None:
-    with _lock:
-        to_drop = [
-            si
-            for si, p in _panels.items()
-            if bool(getattr(p, "_i_preview", False))
-        ]
-    for si in to_drop:
-        with _lock:
-            panel = _panels.pop(int(si), None)
-        if panel is not None:
-            try:
-                panel.destroy()
-            except Exception:
-                pass
-
-
 def set_federation_load_hud_user_overlay_visible(want: bool) -> None:
     """사용자 I 토글 — 배경·아이콘·텍스트 전체 show/hide (스핀은 보일 때 재개)."""
     global _user_overlay_visible
@@ -169,8 +152,6 @@ def set_federation_load_hud_user_overlay_visible(want: bool) -> None:
                 panel.apply_user_overlay_visible(_user_overlay_visible)
             except Exception:
                 pass
-        if not _user_overlay_visible:
-            _destroy_i_hotkey_preview_panels()
 
     schedule_on_main_thread(_apply)
 
@@ -275,16 +256,18 @@ def set_federation_load_status(
 
     def _apply() -> None:
         if not federation_load_hud_enabled():
-            hide_federation_load_hud(si)
+            _hide_panels_visible(si)
             return
         if ph == "playing":
             with _lock:
-                panel = _panels.pop(si, None)
+                panel = _panels.get(si)
             if panel is not None:
                 try:
-                    panel.destroy()
+                    if not bool(getattr(panel, "_i_preview", False)):
+                        panel.set_phase("playing")
                 except Exception:
                     pass
+            _hide_panels_visible(si)
             return
         panel = _ensure_panel(si, kit_ext=kit_ext, lam_window=lam_window)
         if panel is None:
@@ -307,22 +290,37 @@ def set_federation_load_status(
     schedule_on_main_thread(_apply)
 
 
+def _hide_panels_visible(
+    screen: Optional[int] = None,
+    *,
+    skip_i_preview: bool = False,
+) -> None:
+    """패널 객체는 유지하고 ``visible`` 만 False. pop/destroy 없음."""
+    with _lock:
+        if screen is None:
+            targets = list(_panels.keys())
+        else:
+            targets = [max(1, int(screen))]
+        panels = []
+        for si in targets:
+            panel = _panels.get(si)
+            if panel is None:
+                continue
+            if skip_i_preview and bool(getattr(panel, "_i_preview", False)):
+                continue
+            panels.append(panel)
+    for panel in panels:
+        try:
+            panel.apply_user_overlay_visible(False)
+        except Exception:
+            pass
+
+
 def hide_federation_load_hud(screen: Optional[int] = None) -> None:
-    """특정 화면 또는 전체 HUD 숨김."""
+    """특정 화면 또는 전체 HUD 숨김 (객체 유지, visible=False)."""
 
     def _apply() -> None:
-        with _lock:
-            if screen is None:
-                targets = list(_panels.keys())
-            else:
-                targets = [max(1, int(screen))]
-            for si in targets:
-                panel = _panels.pop(si, None)
-                if panel is not None:
-                    try:
-                        panel.destroy()
-                    except Exception:
-                        pass
+        _hide_panels_visible(screen)
 
     schedule_on_main_thread(_apply)
 
@@ -332,11 +330,12 @@ def hold_ready_then_hide_federation_load_huds(
     *,
     delay_sec: Optional[float] = None,
 ) -> None:
-    """실 시뮬레이션 재생 직전용 — ready(100%) 유지 후 delay 뒤 HUD 제거.
+    """실 시뮬레이션 재생 직전용 — ready(100%) 유지 후 delay 뒤 HUD 숨김.
 
     I 미리보기(``_i_preview``) 패널은 건드리지 않는다.
     호출 스레드(Federation worker)를 ``delay_sec`` 동안 block 한 뒤
-    메인 스레드에서 destroy 한다. camera fly / play 시작 **직전**에 호출.
+    메인 스레드에서 visible=False 한다. camera fly / play 시작 **직전**에 호출.
+    패널 객체는 ``_panels`` 에 남겨 다음 로딩·I 토글이 다시 켤 수 있게 한다.
     """
     from .kit_main_dispatch import run_on_main_thread
 
@@ -374,16 +373,7 @@ def hold_ready_then_hide_federation_load_huds(
 
     def _hide_real() -> None:
         for si in sis:
-            with _lock:
-                panel = _panels.get(si)
-                if panel is not None and bool(getattr(panel, "_i_preview", False)):
-                    continue
-                panel = _panels.pop(si, None)
-            if panel is not None:
-                try:
-                    panel.destroy()
-                except Exception:
-                    pass
+            _hide_panels_visible(si, skip_i_preview=True)
         print(
             f"{_PRINT_PREFIX} pre-play hide screens={sis} after {delay:.1f}s",
             flush=True,
