@@ -4618,8 +4618,8 @@ def _sleep_until_process_only_start(
 ) -> bool:
     """공정만보기: CSV 진행 시계가 ``block.time_sec`` 에 도달할 때까지 대기.
 
-    - JSON 실행 중: wall 1x 로 시계 진행 → VTM t=6 시작 후 2s 뒤 ATM t=8 시작 가능.
-    - 전 레인 idle: 다음 예정 이벤트 CSV t 로만 점프(빈 대기 제거). 동시에 전부 시작하지 않음.
+    - JSON 실행 중: wall 1x 로 시계 진행 → VTM t=3 시작 후 1s 뒤 ATM t=4 시작.
+    - 전 레인 idle: 아직 시작하지 않은 다음 JSON CSV t 로만 점프. 실행 중 간격은 유지.
     - 같은 레인: ``lane_ready``(이전 JSON 종료) 후에만 시작.
     """
     _ = (nominal_wall, lane_last_csv, lane)
@@ -4643,7 +4643,9 @@ def _sleep_until_process_only_start(
             _process_only_try_idle_compress_to_next(all_blocks, screen=si)
         csv_now = _process_only_playhead_csv_now(screen=si)
         if csv_now + 1e-6 >= target_csv:
-            _process_only_mark_block_started(block, screen=si)
+            # started 는 JSON 실행 시작 시점에만 표시한다.
+            # 여기서 찍으면 타 레인이 idle 점프로 다음 CSV t 까지 당겨
+            # VTM t=3 / ATM t=4 의 1초 간격이 사라진다.
             sess = csv_play_screen_session(si)
             with sess.process_only_playhead_lock:
                 if target_csv > sess.process_only_playhead_csv:
@@ -5718,6 +5720,8 @@ def _csv_playback_execute_json_block(
     wall_elapsed = time.monotonic() - t0
     lane = _playback_lane_from_block(block)
     _csv_play_timeline_row_begin_entry(sched, screen=si)
+    if get_csv_play_progress_snap(screen=si).get("process_only"):
+        _process_only_mark_block_started(block, screen=si)
     try:
         _run_lam_sim_steps_cancellable(
             registry,
