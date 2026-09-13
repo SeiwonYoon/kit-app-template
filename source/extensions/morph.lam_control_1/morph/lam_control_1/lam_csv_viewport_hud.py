@@ -10,7 +10,8 @@ CSV HUD 본체는 Viewport ``get_frame`` 이 아닌 **floating ``ui.Window``** �
 관련 플래그 (``lam_sim_control_defaults``):
 - ``SHOW_VIEWPORT_CSV_PANEL`` — 앱 시작 시 CSV HUD 표시
 - ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT`` — 화면1 좌상단(Federation HUD 바로 아래)
-  투명 토글 버튼 + Viewport 포커스 시 **O** 키 (TBS ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT`` 대응)
+  투명 토글 버튼 (TBS ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT`` 대응).
+  Viewport 포커스 시 **O** 키 토글은 이 플래그와 무관하게 동작한다.
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ def viewport_csv_panel_startup_visible() -> bool:
 
 
 def viewport_csv_panel_toggle_hotspot_enabled() -> bool:
-    """투명 토글 버튼·O 단축키 — ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT``."""
+    """투명 토글 버튼 사용 여부 — ``SHOW_VIEWPORT_CSV_PANEL_TOGGLE_HOTSPOT``."""
     if not viewport_csv_panel_feature_enabled():
         return False
     try:
@@ -244,10 +245,8 @@ class LamCsvViewportControlsHud:
         self._hud_combo = None
 
     def _install_o_hotkey(self) -> None:
-        """Viewport 포커스 + O 키 → CSV HUD 토글 (핫스팟과 동일)."""
+        """Viewport 포커스 + O 키 → CSV HUD 토글 (투명 핫스팟 표시와 독립)."""
         self._uninstall_o_hotkey()
-        if not viewport_csv_panel_toggle_hotspot_enabled():
-            return
         try:
             import carb.input  # type: ignore
             from carb.input import (  # type: ignore

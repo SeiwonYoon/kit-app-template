@@ -86,8 +86,7 @@ SHOW_VIEWPORT_EBS_CONTROL_HUD: bool = False
 
 # True  → 화면1 좌하단에 거의 안 보이는 클릭 영역을 둔다.
 #         클릭 1회 = EBS HUD 보이기 ↔ 숨기기 토글.
-#         추가로 Viewport 포커스일 때 영문 O 키로도 동일 토글.
-# False → 클릭 영역·O 단축키 모두 비활성.
+# False → 클릭 영역만 비활성. Viewport 포커스 시 O 키 토글은 이 플래그와 무관.
 # 참고: 완전 투명(alpha=0)은 Kit 에서 클릭이 무시될 수 있어, 구현은 아주 옅은 배경을 씀.
 SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT: bool = True
 

@@ -4,8 +4,8 @@
 - ``SHOW_VIEWPORT_EBS_CONTROL_HUD``
     앱 **시작 시** EBS HUD 를 보일지.
 - ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT``
-    화면1 **좌하단** 클릭 버튼 + Viewport 포커스 시 **O** 키.
-    클릭/키 = HUD 보이기/숨기기 토글 (시작 플래그와 독립).
+    화면1 **좌하단** 클릭 버튼. 클릭 = HUD 보이기/숨기기 토글 (시작 플래그와 독립).
+    Viewport 포커스 시 **O** 키 토글은 이 플래그와 무관하게 동작한다.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def _ebs_hud_startup_visible() -> bool:
 
 
 def _ebs_hud_toggle_hotspot_enabled() -> bool:
-    """좌하단 토글 버튼·O 단축키 사용 여부 — ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT``."""
+    """좌하단 투명 토글 버튼 사용 여부 — ``SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT``."""
     try:
         from .sim_control_defaults import SHOW_VIEWPORT_EBS_HUD_TOGGLE_HOTSPOT
 
@@ -215,10 +215,8 @@ class TbsViewportControlHud:
         self._destroy_toggle_layer()
 
     def _install_o_hotkey(self) -> None:
-        """Viewport 포커스 + O 키 → HUD 토글 (핫스팟과 동일)."""
+        """Viewport 포커스 + O 키 → HUD 토글 (투명 핫스팟 표시와 독립)."""
         self._uninstall_o_hotkey()
-        if not _ebs_hud_toggle_hotspot_enabled():
-            return
         try:
             import carb.input  # type: ignore
             from carb.input import (  # type: ignore
