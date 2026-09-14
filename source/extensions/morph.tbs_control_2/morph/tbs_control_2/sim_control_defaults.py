@@ -50,12 +50,12 @@ class SimControlDefaults:
     oht_to_inout_max: float = 35.0
 
     # IN/OUT → BP(버퍼)
-    bp1_to_bp_min: float = 30.0
-    bp1_to_bp_max: float = 35.0
+    bp1_to_bp_min: float = 15
+    bp1_to_bp_max: float = 16
 
     # BP → EP
-    bp_to_ep_min: float = 30.0
-    bp_to_ep_max: float = 35.0
+    bp_to_ep_min: float = 15
+    bp_to_ep_max: float = 16
 
     # EP → OHT(회수)
     ep_to_oht_min: float = 30.0

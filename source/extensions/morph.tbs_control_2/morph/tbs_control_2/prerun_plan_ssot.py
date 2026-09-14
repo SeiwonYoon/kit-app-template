@@ -489,7 +489,7 @@ class _Planner:
         self._pending_foup = remain
 
     def _schedule_anims_through(self, horizon: float) -> None:
-        """ready 된 애니를 horizon 까지 가능한 만큼 배치."""
+        """``horizon`` 까지 ready 된 애니만 직렬 배치. 이후 lead 는 예약하지 않는다."""
         while True:
             candidates: List[PlanProcess] = []
             for uid in list(self._anim_waiting):
@@ -648,8 +648,10 @@ class _Planner:
             for _lot, _ep, ready_t in self._pending_foup:
                 times.append(max(float(ready_t), float(self._foup_free_at)))
 
-            # 먼저 현재 큐에서 가능한 애니 배치 (무한 전방)
-            self._schedule_anims_through(1e12)
+            # 현재 시각까지 ready 된 애니만 배치.
+            # 아직 lead 중인 공정을 무한 전방으로 예약하면, EP 회수 직후처럼
+            # 큐가 비어 있는 구간에 다른 공정 JSON 이 못 들어가고 wall 이 부풀어 오른다.
+            self._schedule_anims_through(t)
 
             # 다음 이벤트: port_sync / anim_end(FOUP) / wall_end / foup_end
             events: List[Tuple[float, str, str]] = []
@@ -675,6 +677,36 @@ class _Planner:
                     if hold is not None and getattr(p, "_port_applied", False) is True:
                         events.append((float(hold), "wall_end", p.uid))
 
+            events.sort(
+                key=lambda e: (
+                    e[0],
+                    0
+                    if e[1] == "port_sync"
+                    else 1
+                    if e[1] == "anim_end"
+                    else 2
+                    if e[1] == "foup_end"
+                    else 3,
+                    e[2],
+                )
+            )
+
+            next_pack = None
+            for uid in list(self._anim_waiting):
+                pw = self._active.get(uid)
+                if pw is None or not pw.needs_anim or pw.t_anim_start is not None:
+                    continue
+                cand = max(float(pw.t_anim_ready), float(self._anim_free_at))
+                if next_pack is None or cand < next_pack:
+                    next_pack = cand
+            if next_pack is not None:
+                ev0 = float(events[0][0]) if events else None
+                if ev0 is None or float(next_pack) < float(ev0) - 1e-12:
+                    if float(next_pack) > float(t) + 1e-12:
+                        t = float(next_pack)
+                    self._schedule_anims_through(t)
+                    continue
+
             if not events and not self._anim_waiting and not self._pending_foup and not self._active:
                 # 남은 LOT / 포트 적재 / 회수대기가 있으면 기동 재시도 후 종료 판단
                 self._try_start_all(t)
@@ -693,7 +725,7 @@ class _Planner:
             if not events:
                 # 애니만 남았거나 FOUP pending
                 self._try_start_foup(t)
-                self._schedule_anims_through(1e12)
+                self._schedule_anims_through(t)
                 leftover = any(str(v or "").strip() for v in self.ports.values())
                 if (
                     not self._active
@@ -718,6 +750,10 @@ class _Planner:
                         nxt.append(float(p.t_anim_end))
                     if p.kind == KIND_FOUP and p.t_wall_end and not getattr(p, "_foup_done", False):
                         nxt.append(float(p.t_wall_end))
+                for uid in list(self._anim_waiting):
+                    pw = self._active.get(uid)
+                    if pw is not None and pw.needs_anim and pw.t_anim_start is None:
+                        nxt.append(max(float(pw.t_anim_ready), float(self._anim_free_at)))
                 for _lot, _ep, ready_t in self._pending_foup:
                     nxt.append(max(float(ready_t), float(self._foup_free_at)))
                 if not nxt:
@@ -731,20 +767,6 @@ class _Planner:
                 continue
 
             # 같은 시각 이벤트를 모두 반영한 뒤에만 애니 큐를 진행한다.
-            # port_sync → anim_end → foup_end → wall_end
-            events.sort(
-                key=lambda e: (
-                    e[0],
-                    0
-                    if e[1] == "port_sync"
-                    else 1
-                    if e[1] == "anim_end"
-                    else 2
-                    if e[1] == "foup_end"
-                    else 3,
-                    e[2],
-                )
-            )
             t = float(events[0][0])
             batch = [e for e in events if abs(float(e[0]) - t) <= 1e-9]
             for _t_ev, typ, uid in batch:
@@ -790,7 +812,7 @@ class _Planner:
                     setattr(p, "_done", True)
                     self._finish_process(p)
             self._try_start_all(t)
-            self._schedule_anims_through(1e12)
+            self._schedule_anims_through(t)
 
         final_t = 0.0
         for p in self.processes:
@@ -1178,6 +1200,61 @@ def assert_process_start_rules() -> None:
         )
     if abs(float(p2.t_wall_end) - 30.0) < 1e-6:
         raise AssertionError("p2 wall 이 proc(30)에 고정되면 직렬 연장이 빠진 것")
+
+    # --- E2) 큐 idle(다른 JSON 없음)이면 늦은 lead 예약에 밀리지 않음 ---
+    pl_gap = _Planner(
+        PrerunPlanConfig(
+            lot_count=0,
+            ep_count=2,
+            ebs_on=True,
+            anim_from_json=False,
+            anim_sec_fallback=14.0,
+        )
+    )
+    p_late = pl_gap._start_process(
+        kind=KIND_OHT_TO_INOUT,
+        lot_id="LOT_L",
+        port="INOUT",
+        from_port="OHT",
+        to_port="INOUT",
+        proc_sec=90.0,
+        needs_anim=True,
+        t=0.0,
+    )
+    p_late.anim_sec = 14.0
+    p_late.t_anim_ready = _lead_ready(0.0, 90.0, 14.0)
+    p_late.t_anim_start = None
+    p_late.t_anim_end = None
+    p_late.t_wall_end = None
+    pl_gap._anim_free_at = 0.0
+    pl_gap._anim_waiting = [p_late.uid]
+    pl_gap._schedule_anims_through(0.0)
+    if p_late.t_anim_start is not None:
+        raise AssertionError("lead 중 공정을 현재 시각에 예약하면 idle 구간을 막음")
+    p_soon = pl_gap._start_process(
+        kind=KIND_BP_TO_EP,
+        lot_id="LOT_B",
+        port="EP1",
+        from_port="BP1",
+        to_port="EP1",
+        proc_sec=15.5,
+        needs_anim=True,
+        t=50.0,
+    )
+    p_soon.anim_sec = 14.0
+    p_soon.t_anim_ready = _lead_ready(50.0, 15.5, 14.0)
+    p_soon.t_anim_start = None
+    p_soon.t_anim_end = None
+    p_soon.t_wall_end = None
+    pl_gap._anim_waiting = [p_late.uid, p_soon.uid]
+    pl_gap._schedule_anims_through(float(p_soon.t_anim_ready))
+    want_soon = float(p_soon.t_anim_ready)
+    if p_soon.t_anim_start is None or abs(float(p_soon.t_anim_start) - want_soon) > 1e-6:
+        raise AssertionError(
+            f"idle 이면 BP→EP JSON 은 ready 에 나가야 함 want={want_soon} got={p_soon.t_anim_start}"
+        )
+    if p_late.t_anim_start is not None:
+        raise AssertionError("늦은 lead 공정이 이른 JSON 을 밀면 안 됨")
 
     # --- F) 첫 JSON lead 만큼 전체 당김 (플래그 함수) ---
     pl6 = _Planner(
