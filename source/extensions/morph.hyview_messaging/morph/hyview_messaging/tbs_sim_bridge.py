@@ -789,6 +789,9 @@ def handle_screen_visibility(
 ) -> None:
     """T2V_request_screen_visibility — 화면1·2 Dock 표시 전환 (start 와 독립).
 
+    웹 요청 시 UI「리셋」과 동일하게 ``on_sim_reset_clicked`` 를 먼저 호출한다
+    (진행 중이면 강제 stop + 위치 초기화). 제어창 화면 체크박스는 이 경로를 타지 않는다.
+
     요청::
         ``{"show_1": true, "show_2": false}``
         또는 ``{"screens": [1]}`` / ``{"screens": [1, 2]}``
@@ -826,12 +829,17 @@ def handle_screen_visibility(
         show_1 = True
 
     def _work() -> Dict[str, Any]:
+        from morph.tbs_control_2.control_window import on_sim_reset_clicked
         from morph.tbs_control_2.tbs_screen_visibility import (
             request_screen_visibility,
             visible_screens,
         )
 
         ext = require_tbs_extension_instance()
+        try:
+            on_sim_reset_clicked(ext)
+        except Exception as exc:
+            print(f"[HyView/bridge] screen_visibility reset failed: {exc}", flush=True)
         # Dock 전환은 async — 모델은 즉시 갱신되고 레이아웃은 다음 틱에 적용.
         request_screen_visibility(ext, show_1, show_2)
         s1, s2 = visible_screens(ext)
