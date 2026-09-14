@@ -96,6 +96,16 @@ def prerun_config_from_engine(engine: Any) -> PrerunPlanConfig:
             oht_in = oht_ep
     except Exception:
         pass
+    first_oht_to_ep: Tuple[float, ...] = ()
+    if not init_ports:
+        try:
+            pool = getattr(engine, "_pre_pool", None) or {}
+            arr = pool.get("oht_to_bp1") if isinstance(pool, dict) else None
+            if isinstance(arr, list) and arr:
+                n = int(ep_count)
+                first_oht_to_ep = tuple(float(arr[i]) for i in range(min(n, len(arr))))
+        except Exception:
+            first_oht_to_ep = ()
 
     return PrerunPlanConfig(
         lot_count=int(lot_count),
@@ -111,6 +121,7 @@ def prerun_config_from_engine(engine: Any) -> PrerunPlanConfig:
         anim_sec_fallback=10.0,
         foup_global_serial=True,
         initial_full_ports=init_ports,
+        first_oht_to_ep=first_oht_to_ep,
     )
 
 

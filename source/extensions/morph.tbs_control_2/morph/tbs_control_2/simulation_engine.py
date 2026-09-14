@@ -710,6 +710,48 @@ class TBSSimulationEngine:
             self._timing.foup_process_max,
         )
 
+        # 최초 시작·EP/INOUT 공석일 때만: 첫 OHT 투입 초를 EP1 < EP2 < EP3 < INOUT.
+        # 이미 뽑힌 값을 재배치만 한다 (이후 슬롯·다른 구간은 그대로).
+        try:
+            init_full = [
+                str(p).strip().upper()
+                for p in (getattr(self._init_cfg, "initial_full_ports", None) or [])
+                if str(p or "").strip()
+            ]
+        except Exception:
+            init_full = []
+        if not init_full:
+            try:
+                ep_n = len(tuple(getattr(self, "_ep_ports", ()) or ()))
+            except Exception:
+                ep_n = 2
+            ep_n = max(2, min(3, int(ep_n or 2)))
+            ep_arr = self._pre_pool.get("oht_to_bp1")
+            if isinstance(ep_arr, list) and len(ep_arr) >= ep_n:
+                head = sorted(float(x) for x in ep_arr[:ep_n])
+                ep_arr[:ep_n] = head
+                if bool(getattr(self, "_ebs_enabled", True)):
+                    last_ep = float(head[-1])
+                    in_arr = self._pre_pool.get("oht_to_inout")
+                    if isinstance(in_arr, list) and in_arr:
+                        v0 = float(in_arr[0])
+                        if v0 <= last_ep + 1e-12:
+                            swap_i = None
+                            for i in range(1, len(in_arr)):
+                                if float(in_arr[i]) > last_ep + 1e-12:
+                                    swap_i = i
+                                    break
+                            if swap_i is None:
+                                swap_i = max(
+                                    range(len(in_arr)),
+                                    key=lambda i: float(in_arr[i]),
+                                )
+                            if int(swap_i) != 0:
+                                in_arr[0], in_arr[swap_i] = (
+                                    float(in_arr[swap_i]),
+                                    float(in_arr[0]),
+                                )
+
         self._recompute_sim_total_est_from_pool()
 
     def _presample_range_for_key(self, key: str) -> Tuple[float, float]:

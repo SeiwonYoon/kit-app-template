@@ -51,6 +51,8 @@ class PrerunPlanConfig:
     foup_global_serial: bool = True
     # 시뮬 시작 시 미리 적재할 포트 (엔진 ``initial_full_ports`` 와 동일).
     initial_full_ports: Tuple[str, ...] = ()
+    # 공석 첫 웨이브 OHT→EP 초 (EP1, EP2, …). 비면 proc_oht_to_ep 공통.
+    first_oht_to_ep: Tuple[float, ...] = ()
 
 
 @dataclass
@@ -346,17 +348,22 @@ class _Planner:
                 self._bp_reserved[bp] = p.uid
         # 2) OHT→EP (버퍼 측 LOT 없을 때만)
         if not self._has_inout_or_bp_lot():
-            for ep in list(self._empty_eps()):
+            for i, ep in enumerate(list(self._empty_eps())):
                 if not self.remaining_lots:
                     break
                 lot = self.remaining_lots.pop(0)
+                proc_sec = float(cfg.proc_oht_to_ep)
+                if abs(float(t)) <= 1e-12:
+                    firsts = tuple(getattr(cfg, "first_oht_to_ep", ()) or ())
+                    if i < len(firsts):
+                        proc_sec = float(firsts[i])
                 p = self._start_process(
                     kind=KIND_OHT_TO_EP,
                     lot_id=lot,
                     port=ep,
                     from_port="OHT",
                     to_port=ep,
-                    proc_sec=cfg.proc_oht_to_ep,
+                    proc_sec=proc_sec,
                     needs_anim=True,
                     t=t,
                 )
