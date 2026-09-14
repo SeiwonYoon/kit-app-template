@@ -242,14 +242,19 @@ class SimPlaybackRuntime:
         prog_iv = _HB_PROG_INTERVAL_MULTI if multi else _HB_PROG_INTERVAL
         for sess in playing:
             sess.advance_clock_only(ext)
-        # UI 먼저: emit → 진행현황/막대 갱신 후 JSON start.
-        # (이전에 poll 이 앞에 있으면 reset 이 메인에서 UI 틱을 가로채 진행현황이 끊김)
+        # 화면1과 동일: emit 이 JSON 을 기동한 뒤 막대 UI. 잔여 enqueue 만 여기서 비움.
         for sess in playing:
             sess.emit_due_and_sync(
                 max_emits=max_emits_per_screen,
                 sync_engine_now=sync_engine_now,
                 ext=ext,
             )
+        try:
+            from .control_window import _drain_playback_json_job_queues
+
+            _drain_playback_json_job_queues(ext)
+        except Exception:
+            pass
         try:
             from .control_window import _try_release_all_playback_json_walls
 
@@ -293,23 +298,22 @@ class SimPlaybackRuntime:
                 _poll_playback_sim_aligned_json_starts(ext)
             except Exception:
                 pass
-            if multi:
-                try:
-                    _drain_playback_json_job_queues(ext)
-                except Exception:
-                    pass
-                try:
-                    _poll_playback_sim_aligned_json_starts(ext)
-                except Exception:
-                    pass
-                try:
-                    _drain_sim_anim_pending_when_idle(ext)
-                except Exception:
-                    pass
-                try:
-                    _poll_playback_sim_aligned_json_starts(ext)
-                except Exception:
-                    pass
+            try:
+                _drain_playback_json_job_queues(ext)
+            except Exception:
+                pass
+            try:
+                _poll_playback_sim_aligned_json_starts(ext)
+            except Exception:
+                pass
+            try:
+                _drain_sim_anim_pending_when_idle(ext)
+            except Exception:
+                pass
+            try:
+                _poll_playback_sim_aligned_json_starts(ext)
+            except Exception:
+                pass
         except Exception:
             pass
         if on_after_tick is not None:

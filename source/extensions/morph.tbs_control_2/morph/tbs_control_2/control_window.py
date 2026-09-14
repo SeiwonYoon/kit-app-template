@@ -11352,9 +11352,9 @@ def _enqueue_playback_json_job(ext: Any, job: Dict[str, Any]) -> None:
 
 
 def _dispatch_json_anim_job(ext: Any, job: Dict[str, Any]) -> None:
-    if bool(getattr(ext, "_sim_playback_started", False)) and is_multi_playback_instances(ext):
-        _enqueue_playback_json_job(ext, job)
-        return
+    # 화면1과 동일: emit 시점에 _start_job_impl. N>1 전용 enqueue 는
+    # 막대 UI 보다 JSON 이 한 틱 늦고, sessions>1 / playing==1 이면 drain 이 빠져
+    # 화면2만 시계·막대만 흐른다.
     fn = getattr(ext, "_sim_json_start_fn", None)
     if callable(fn):
         try:
@@ -11415,10 +11415,11 @@ def _drain_sim_anim_pending_when_idle(ext: Any) -> None:
 
 
 def _drain_playback_json_job_queues(ext: Any) -> None:
-    """N>1 — 화면별 대기 job. 직렬은 runner idle 시 1건, 병렬은 레일별 idle 시 동시 시작."""
+    """화면별 대기 job. 직렬은 runner idle 시 1건, 병렬은 레일별 idle 시 동시 시작.
+
+    sessions 수와 무관 — 잔여 큐가 있으면 재생 화면이 1장이어도 비운다.
+    """
     if not bool(getattr(ext, "_sim_playback_started", False)):
-        return
-    if not is_multi_playback_instances(ext):
         return
     fn = getattr(ext, "_sim_json_start_fn", None)
     if not callable(fn):
