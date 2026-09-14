@@ -12433,21 +12433,23 @@ def _update_sim_progress(ext: Any, payload: Dict[str, str]) -> None:
         # enrich 는 상단(디듀프 전)에서 이미 수행 — 여기서는 UI 조립만
         conc = str(payload.get("concurrent_summary") or "").strip()
         playing = str(payload.get("anim_playing_json") or "").strip()
-        qdel = str(payload.get("anim_queue_delay_sec") or "").strip()
-        qwait = str(payload.get("anim_queue_waiting") or "").strip()
         wall = str(payload.get("wall_sec") or "").strip()
         if conc:
-            conc_rows = [ln for ln in conc.splitlines() if str(ln or "").strip()]
-            conc_play_flags = _parse_concurrent_anim_playing_flags(
-                payload if isinstance(payload, dict) else {}, len(conc_rows)
+            raw_rows = [ln for ln in conc.splitlines() if str(ln or "").strip()]
+            raw_flags = _parse_concurrent_anim_playing_flags(
+                payload if isinstance(payload, dict) else {}, len(raw_rows)
             )
+            for i, ln in enumerate(raw_rows):
+                if "FOUP" in str(ln).upper():
+                    continue
+                conc_rows.append(ln)
+                conc_play_flags.append(
+                    bool(raw_flags[i]) if i < len(raw_flags) else False
+                )
         bits: list = []
         # [동시공정] 은 줄별 라벨(녹색)로 표시 — 위젯 없을 때만 본문에 넣음
         # [재생중애니] 는 상단 녹색 라벨로만 표시 (본문 중복 제거)
-        if qwait:
-            bits.append(f"[애니대기큐] {qwait}")
-        elif qdel and qdel not in ("0", "0.0", "0.00"):
-            bits.append(f"[애니큐대기] {qdel}s")
+        # FOUP 공정·애니대기큐 는 진행현황에 넣지 않음 (FOUP 은 상단 전용 라벨)
         if wall and wall not in ("0", "0.0", "0.00"):
             bits.append(f"[공정wall] {wall}s")
         if bits:

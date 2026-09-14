@@ -3567,6 +3567,8 @@ class TBSSimulationEngine:
                     lab = str(snap.get("label") or "").strip() or "?"
                     if "타임라인" in lab:
                         continue
+                    if "FOUP" in lab.upper():
+                        continue
                     pct = str(snap.get("percent") or "0").strip()
                     phase = str(snap.get("anim_phase") or "").strip()
                     aj = str(snap.get("linked_anim_json") or "").strip()

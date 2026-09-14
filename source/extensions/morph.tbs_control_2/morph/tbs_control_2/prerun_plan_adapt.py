@@ -589,13 +589,15 @@ def enrich_ssot_playback_progress(
         # 시작 시각 순 — 화면에서 읽기 쉽게
         active_procs.sort(key=lambda x: float(getattr(x, "t_start", 0.0) or 0.0))
         for p in active_procs:
+            kind = str(getattr(p, "kind", "") or "")
+            if kind == KIND_FOUP or str(kind).upper().startswith("FOUP"):
+                continue
             t0 = float(getattr(p, "t_start", 0.0) or 0.0)
             we = _plan_proc_wall_end(p)
             # 표시 분모 = wall SSOT (실애니 직렬 연장 포함)
             span = max(1e-6, we - t0)
             el = max(0.0, min(span, t - t0))
             pct = int(min(100.0, 100.0 * el / span))
-            kind = str(getattr(p, "kind", "") or "")
             lot = str(getattr(p, "lot_id", "") or "")
             fr = str(getattr(p, "from_port", "") or "")
             to = str(getattr(p, "to_port", "") or getattr(p, "port", "") or "")
