@@ -49,6 +49,8 @@ class PrerunPlanConfig:
     anim_sec_fallback: float = 10.0
     # True면 FOUP 전역 capacity=1 (엔진과 동일). 예시 LOT3는 비중첩.
     foup_global_serial: bool = True
+    # 시뮬 시작 시 미리 적재할 포트 (엔진 ``initial_full_ports`` 와 동일).
+    initial_full_ports: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -147,6 +149,19 @@ class _Planner:
         self._bp_reserved: Dict[str, str] = {}
         # BP 적재 시각(sim t) — BP→EP 는 오래된 순(FIFO). INOUT→BP 빈 슬롯 선택과 무관.
         self._bp_loaded_at: Dict[str, float] = {}
+        # 엔진 ``_apply_initial_full_ports`` 와 같은 init_cfg.initial_full_ports 를 t=0 에 반영
+        seq = 1
+        for raw in (self.cfg.initial_full_ports or ()):
+            port = str(raw or "").strip().upper()
+            if port not in self.ports or str(self.ports.get(port) or "").strip():
+                continue
+            lot = f"LOT_A{seq}"
+            seq += 1
+            self.ports[port] = lot
+            if port.startswith("BP"):
+                self._bp_loaded_at[port] = 0.0
+            if port.startswith("EP"):
+                self._pending_foup.append((lot, port, 0.0))
         self._record_ports(0.0, "init")
 
     def _new_uid(self, kind: str) -> str:

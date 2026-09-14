@@ -77,8 +77,14 @@ def prerun_config_from_engine(engine: Any) -> PrerunPlanConfig:
         ebs_on = bool(getattr(engine, "_ebs_enabled", getattr(init, "ebs_enabled", True)))
     except Exception:
         ebs_on = True
+    init_ports = tuple(getattr(init, "initial_full_ports", None) or ())
     if timing is None:
-        return PrerunPlanConfig(lot_count=lot_count, ep_count=ep_count, ebs_on=ebs_on)
+        return PrerunPlanConfig(
+            lot_count=lot_count,
+            ep_count=ep_count,
+            ebs_on=ebs_on,
+            initial_full_ports=init_ports,
+        )
 
     oht_ep = _pool_or_mid(engine, "oht_to_bp1", timing.oht_to_bp1_min, timing.oht_to_bp1_max)
     oht_in = _pool_or_mid(engine, "oht_to_inout", timing.oht_to_inout_min, timing.oht_to_inout_max)
@@ -104,6 +110,7 @@ def prerun_config_from_engine(engine: Any) -> PrerunPlanConfig:
         anim_from_json=True,
         anim_sec_fallback=10.0,
         foup_global_serial=True,
+        initial_full_ports=init_ports,
     )
 
 

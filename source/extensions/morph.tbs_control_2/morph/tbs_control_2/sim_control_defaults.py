@@ -218,7 +218,7 @@ SIM_PRERUN_PLAN_SSOT: bool = True
 # True: 첫 JSON(애니) 시작 시각만큼 프리런 전체 일정을 앞당김.
 #   시뮬 시작 직후 lead 공백 없이 첫 JSON 부터 재생. 웹/타임테이블도 동일 플랜 사용.
 # False(기본): 기존 back-align lead 유지 (공정 끝에 애니 맞춤).
-SIM_PRERUN_STRIP_FIRST_JSON_LEAD: bool = False
+SIM_PRERUN_STRIP_FIRST_JSON_LEAD: bool = True
 
 # ---------------------------------------------------------------------------
 # Extract 결과 캐시 (data/preextract/)
