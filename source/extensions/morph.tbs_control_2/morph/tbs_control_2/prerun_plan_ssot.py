@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # 동시 anim-ready 시 포트 우선순위 (낮을수록 먼저)
@@ -51,8 +51,6 @@ class PrerunPlanConfig:
     foup_global_serial: bool = True
     # 시뮬 시작 시 미리 적재할 포트 (엔진 ``initial_full_ports`` 와 동일).
     initial_full_ports: Tuple[str, ...] = ()
-    # 공석 첫 웨이브 OHT→EP 초 (EP1, EP2, …). 비면 proc_oht_to_ep 공통.
-    first_oht_to_ep: Tuple[float, ...] = ()
 
 
 @dataclass
@@ -129,9 +127,31 @@ def _lead_ready(t_start: float, proc_sec: float, anim_sec: float) -> float:
 
 
 class _Planner:
-    def __init__(self, cfg: PrerunPlanConfig) -> None:
+    def __init__(self, cfg: PrerunPlanConfig, engine: Any = None) -> None:
         self.cfg = cfg
         self.ports = _empty_ports(cfg.ep_count, cfg.ebs_on)
+        # 엔진 ``_pre_pool`` 복사본 — ``_presampled`` 와 같이 공정 회차마다 순차 소비.
+        # 엔진 인덱스는 건드리지 않는다 (SSOT 는 tick 없음, 화면 공유 풀은 adopt 이후 스냅샷).
+        self._proc_pools: Dict[str, List[float]] = {}
+        self._proc_idx: Dict[str, int] = {}
+        try:
+            src = getattr(engine, "_pre_pool", None) if engine is not None else None
+            if isinstance(src, dict):
+                for k in (
+                    "oht_to_bp1",
+                    "oht_to_inout",
+                    "bp1_to_bp",
+                    "bp_to_ep",
+                    "ep_to_oht",
+                    "foup_process",
+                ):
+                    arr = src.get(k)
+                    if isinstance(arr, list) and arr:
+                        self._proc_pools[k] = [float(x) for x in arr]
+                        self._proc_idx[k] = 0
+        except Exception:
+            self._proc_pools = {}
+            self._proc_idx = {}
         self.remaining_lots = [_lot_id(i) for i in range(1, int(cfg.lot_count) + 1)]
         self.completed_lots: List[str] = []
         self.processes: List[PlanProcess] = []
@@ -165,6 +185,19 @@ class _Planner:
             if port.startswith("EP"):
                 self._pending_foup.append((lot, port, 0.0))
         self._record_ports(0.0, "init")
+
+    def _take_proc(self, key: str, fallback: float) -> float:
+        """엔진 사전샘플 풀에서 1회분. 없으면 cfg 스칼라 (문서/회귀 픽스처)."""
+        arr = self._proc_pools.get(str(key or ""))
+        i = int(self._proc_idx.get(str(key or ""), 0) or 0)
+        if isinstance(arr, list) and 0 <= i < len(arr):
+            try:
+                v = float(arr[i])
+                self._proc_idx[str(key or "")] = i + 1
+                return v
+            except Exception:
+                pass
+        return float(fallback)
 
     def _new_uid(self, kind: str) -> str:
         self._uid_seq += 1
@@ -340,7 +373,7 @@ class _Planner:
                     port=ep,
                     from_port=bp,
                     to_port=ep,
-                    proc_sec=cfg.proc_bp_to_ep,
+                    proc_sec=self._take_proc("bp_to_ep", float(cfg.proc_bp_to_ep)),
                     needs_anim=True,
                     t=t,
                 )
@@ -348,22 +381,17 @@ class _Planner:
                 self._bp_reserved[bp] = p.uid
         # 2) OHT→EP (버퍼 측 LOT 없을 때만)
         if not self._has_inout_or_bp_lot():
-            for i, ep in enumerate(list(self._empty_eps())):
+            for ep in list(self._empty_eps()):
                 if not self.remaining_lots:
                     break
                 lot = self.remaining_lots.pop(0)
-                proc_sec = float(cfg.proc_oht_to_ep)
-                if abs(float(t)) <= 1e-12:
-                    firsts = tuple(getattr(cfg, "first_oht_to_ep", ()) or ())
-                    if i < len(firsts):
-                        proc_sec = float(firsts[i])
                 p = self._start_process(
                     kind=KIND_OHT_TO_EP,
                     lot_id=lot,
                     port=ep,
                     from_port="OHT",
                     to_port=ep,
-                    proc_sec=proc_sec,
+                    proc_sec=self._take_proc("oht_to_bp1", float(cfg.proc_oht_to_ep)),
                     needs_anim=True,
                     t=t,
                 )
@@ -378,7 +406,7 @@ class _Planner:
                 port=ep,
                 from_port=ep,
                 to_port="OHT",
-                proc_sec=cfg.proc_remove,
+                proc_sec=self._take_proc("ep_to_oht", float(cfg.proc_remove)),
                 needs_anim=True,
                 t=t,
             )
@@ -402,7 +430,7 @@ class _Planner:
                     port="INOUT",
                     from_port="INOUT",
                     to_port=bp,
-                    proc_sec=cfg.proc_inout_to_bp,
+                    proc_sec=self._take_proc("bp1_to_bp", float(cfg.proc_inout_to_bp)),
                     needs_anim=True,
                     t=t,
                 )
@@ -422,7 +450,7 @@ class _Planner:
                 port="INOUT",
                 from_port="OHT",
                 to_port="INOUT",
-                proc_sec=cfg.proc_oht_to_inout,
+                proc_sec=self._take_proc("oht_to_inout", float(cfg.proc_oht_to_inout)),
                 needs_anim=True,
                 t=t,
             )
@@ -443,17 +471,18 @@ class _Planner:
             if start_t > float(t) + 1e-12:
                 remain.append((lot, ep, ready_t))
                 continue
+            proc_sec = self._take_proc("foup_process", float(self.cfg.proc_foup))
             p = self._start_process(
                 kind=KIND_FOUP,
                 lot_id=lot,
                 port=ep,
                 from_port=ep,
                 to_port=ep,
-                proc_sec=self.cfg.proc_foup,
+                proc_sec=proc_sec,
                 needs_anim=False,
                 t=start_t,
             )
-            p.t_wall_end = start_t + float(self.cfg.proc_foup)
+            p.t_wall_end = start_t + float(proc_sec)
             p.t_hold_end = float(p.t_wall_end)
             if self.cfg.foup_global_serial:
                 self._foup_free_at = float(p.t_wall_end)
@@ -835,9 +864,14 @@ def shift_plan_strip_first_json_lead(plan: PrerunPlan) -> PrerunPlan:
     return plan
 
 
-def build_prerun_plan(cfg: Optional[PrerunPlanConfig] = None) -> PrerunPlan:
-    """설정으로 전체 프리런 일정을 계산한다."""
-    plan = _Planner(cfg or PrerunPlanConfig()).run()
+def build_prerun_plan(
+    cfg: Optional[PrerunPlanConfig] = None, engine: Any = None
+) -> PrerunPlan:
+    """설정으로 전체 프리런 일정을 계산한다.
+
+    ``engine`` 이 있으면 해당 ``_pre_pool`` 을 LOT(회차)마다 순차 사용한다.
+    """
+    plan = _Planner(cfg or PrerunPlanConfig(), engine=engine).run()
     try:
         from .sim_control_defaults import SIM_PRERUN_STRIP_FIRST_JSON_LEAD
 
