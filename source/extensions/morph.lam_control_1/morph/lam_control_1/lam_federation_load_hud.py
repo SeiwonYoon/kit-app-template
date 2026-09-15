@@ -55,18 +55,24 @@ _RAMP_CAP_PCT = 99.0
 # 전 화면 ready 후 fly/play 직전 HUD 유지(레거시 hold_ready 경로)
 _PRE_PLAY_HIDE_DELAY_SEC = 1.0
 
-# --- 재생 버튼 (로딩 100% 후 같은 자리 대체). 기본 크기는 로딩 칩과 동일. ---
-_PLAY_BTN_W = _PANEL_W
+# --- 재생 버튼 (로딩 100% 후 같은 자리 대체, 가로 중심 유지). ---
+_PLAY_BTN_W = 140
 _PLAY_BTN_H = _PANEL_H
 _PLAY_BTN_BORDER_WIDTH = 0
 _PLAY_BTN_BORDER_ARGB = 0x00000000
-_PLAY_BTN_BG_ARGB = _BG_ARGB
-_PLAY_GLYPH_ARGB = _TEXT_ARGB
+_PLAY_BTN_BG_ARGB = 0xFF4747B3  # #4747B3
+_PLAY_BTN_BG_CLICK_ARGB = 0xFFFF7A00  # #FF7A00
+_PLAY_GLYPH_ARGB = 0xFFFFFFFF  # 세모 흰색
 _PLAY_GLYPH_FONT_SIZE = 18
 _PLAY_ICON_W = 18
 _PLAY_ICON_H = 18
 _PLAY_CLICK_DELAY_SEC = 1.0
 _PLAY_IMAGE_NAME = "ic_play.png"  # data/img/ — 없으면 문자 ▶
+
+
+def _play_center_pad() -> int:
+    """로딩칩 너비 안에서 재생 버튼이 같은 중심을 갖도록 좌우 여백."""
+    return max(0, (int(_PANEL_W) - int(_PLAY_BTN_W)) // 2)
 
 _lock = threading.RLock()
 _panels: Dict[int, "_FedLoadPanel"] = {}
@@ -504,8 +510,11 @@ class _FedLoadPanel:
         self._base_im: Any = None
         self._load_root: Any = None
         self._play_root: Any = None
+        self._play_bg: Any = None
+        self._chip_wrap: Any = None
         self._play_fn: Optional[Callable[[], None]] = None
         self._play_starting = False
+        self._sel_disable_scope: Any = None
         self._angle_deg = 0.0
         self._phase = ""
         self._display_pct = 0.0
@@ -540,11 +549,13 @@ class _FedLoadPanel:
             if (not self._failed) and self._phase not in ("ready", "playing", "failed"):
                 self._start_anim()
         else:
+            self._release_pick_block()
             self._stop_anim()
 
     # --- END TEMP: I-hotkey ---
 
     def destroy(self) -> None:
+        self._release_pick_block()
         self._stop_anim()
         self._root = None
         self._label = None
@@ -553,6 +564,8 @@ class _FedLoadPanel:
         self._base_im = None
         self._load_root = None
         self._play_root = None
+        self._play_bg = None
+        self._chip_wrap = None
         vw = self._mounted_vw
         self._mounted_vw = None
         if vw is None:
@@ -627,9 +640,10 @@ class _FedLoadPanel:
                             ui.Spacer(width=_LEFT)
                             # Viewport overlay 에서 Frame.style 배경이 무시되는 경우가 많아
                             # CSV HUD 와 같이 ZStack + Rectangle 로 배경을 그림.
-                            wrap_w = max(int(_PANEL_W), int(_PLAY_BTN_W))
+                            wrap_w = int(_PANEL_W)
                             wrap_h = max(int(_PANEL_H), int(_PLAY_BTN_H))
-                            with ui.ZStack(width=wrap_w, height=wrap_h):
+                            self._chip_wrap = ui.ZStack(width=wrap_w, height=wrap_h)
+                            with self._chip_wrap:
                                 self._load_root = ui.ZStack(
                                     width=_PANEL_W, height=_PANEL_H
                                 )
@@ -751,7 +765,16 @@ class _FedLoadPanel:
                                             )
                                             ui.Spacer()
                                         ui.Spacer()
-                                self._build_play_chip(ui)
+                                pad = _play_center_pad()
+                                with ui.HStack(width=wrap_w, height=int(_PLAY_BTN_H)):
+                                    if pad:
+                                        ui.Spacer(width=pad)
+                                    self._build_play_chip(ui)
+                                    if pad:
+                                        ui.Spacer(width=pad)
+                            self._wire_hud_pick_block(
+                                self._chip_wrap, on_press=self._on_overlay_pressed
+                            )
             self._display_pct = 0.0
             self._target_pct = 0.0
             self._failed = False
@@ -779,15 +802,151 @@ class _FedLoadPanel:
             self.destroy()
             return False
 
+    def _clear_overlay_prim_selection(self) -> None:
+        try:
+            import omni.usd as ou
+
+            names: List[str] = [""]
+            try:
+                from .lam_csv_play_screen import usd_context_name_for_screen
+                from .lam_extension_singleton import get_lam_extension_instance
+
+                ext = get_lam_extension_instance()
+                cn = usd_context_name_for_screen(ext, int(self.screen)) if ext else None
+                if cn:
+                    names.append(str(cn))
+            except Exception:
+                pass
+            seen = set()
+            for nm in names:
+                key = str(nm or "")
+                if key in seen:
+                    continue
+                seen.add(key)
+                ctx = ou.get_context(key) if key else ou.get_context()
+                if ctx is None:
+                    continue
+                sel = ctx.get_selection()
+                if sel is not None:
+                    sel.clear_selected_prim_paths()
+        except Exception:
+            pass
+
+    def _set_pick_block(self, block: bool) -> None:
+        if bool(block):
+            if self._sel_disable_scope is not None:
+                return
+            vw = self._mounted_vw
+            if vw is None:
+                return
+            try:
+                import omni.kit.viewport.utility as vpu
+
+                api = getattr(vw, "viewport_api", None)
+                last_exc: Optional[BaseException] = None
+                for cand in (vw, api):
+                    if cand is None:
+                        continue
+                    try:
+                        self._sel_disable_scope = vpu.disable_selection(
+                            cand, disable_click=True
+                        )
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                if last_exc is not None and self._sel_disable_scope is None:
+                    self._sel_disable_scope = None
+            except Exception:
+                self._sel_disable_scope = None
+            return
+        self._release_pick_block()
+
+    def _release_pick_block(self) -> None:
+        scope = self._sel_disable_scope
+        self._sel_disable_scope = None
+        self._sel_disable_scope = None
+        if scope is None:
+            return
+        for closer in ("__exit__", "release", "unsubscribe"):
+            fn = getattr(scope, closer, None)
+            if not callable(fn):
+                continue
+            try:
+                if closer == "__exit__":
+                    fn(None, None, None)
+                else:
+                    fn()
+            except Exception:
+                pass
+            break
+
+    def _wire_hud_pick_block(
+        self, widget: Any, *, on_press: Optional[Callable[[], None]] = None
+    ) -> None:
+        """오버레이 위 마우스 이벤트를 먹고, 뒤 prim 선택을 끈다."""
+        if widget is None:
+            return
+
+        def _press(*args: Any, **_k: Any) -> bool:
+            btn = args[2] if len(args) >= 3 else 0
+            try:
+                if int(btn) not in (0, 1):
+                    return True
+            except Exception:
+                pass
+            self._set_pick_block(True)
+            self._clear_overlay_prim_selection()
+            try:
+                import omni.kit.app
+
+                omni.kit.app.get_app().post_update(
+                    lambda *_a: self._clear_overlay_prim_selection()
+                )
+            except Exception:
+                pass
+            if on_press is not None:
+                try:
+                    if int(btn) == 0:
+                        on_press()
+                except Exception:
+                    on_press()
+            return True
+
+        def _release(*_a: Any, **_k: Any) -> bool:
+            return True
+
+        def _move(*_a: Any, **_k: Any) -> bool:
+            return True
+
+        def _hover(hovered: Any = False, *_a: Any, **_k: Any) -> bool:
+            self._set_pick_block(bool(hovered))
+            if bool(hovered):
+                self._clear_overlay_prim_selection()
+            return True
+
+        for name, fn in (
+            ("set_mouse_pressed_fn", _press),
+            ("set_mouse_released_fn", _release),
+            ("set_mouse_moved_fn", _move),
+            ("set_mouse_hovered_fn", _hover),
+        ):
+            setter = getattr(widget, name, None)
+            if callable(setter):
+                try:
+                    setter(fn)
+                except Exception:
+                    pass
+
     def _build_play_chip(self, ui: Any) -> None:
-        """로딩 칩과 같은 자리의 재생 버튼 (텍스트 없음, ▶ 또는 ic_play 이미지)."""
+        """로딩 칩과 같은 가로 중심의 재생 버튼 (흰 ▶, 배경 #4747B3)."""
         pw = int(_PLAY_BTN_W)
         ph = int(_PLAY_BTN_H)
         ra = getattr(ui, "Alignment", None)
         center = getattr(ra, "CENTER", None) if ra is not None else None
         self._play_root = ui.ZStack(width=pw, height=ph)
         with self._play_root:
-            ui.Rectangle(
+            self._play_bg = ui.Rectangle(
                 width=pw,
                 height=ph,
                 style={
@@ -834,18 +993,18 @@ class _FedLoadPanel:
                 ui.Spacer()
             btn_style = {
                 "Button": {
-                    "background_color": 0x00000000,
+                    "background_color": 0x01000000,
                     "border_width": 0,
                     "border_color": 0x00000000,
                     "padding": 0,
                     "margin": 0,
                 },
                 "Button:hovered": {
-                    "background_color": 0x22FFFFFF,
+                    "background_color": 0x01000000,
                     "border_width": 0,
                 },
                 "Button:pressed": {
-                    "background_color": 0x33FFFFFF,
+                    "background_color": 0x01000000,
                     "border_width": 0,
                 },
             }
@@ -856,24 +1015,6 @@ class _FedLoadPanel:
                 clicked_fn=self._on_play_clicked,
                 style=btn_style,
             )
-
-        def _on_mouse(*args: Any, **_kwargs: Any) -> None:
-            # viewport overlay 투명 Button 이 클릭을 못 받을 때 Rectangle/ZStack 로 보조
-            btn = args[2] if len(args) >= 3 else 0
-            try:
-                if int(btn) != 0:
-                    return
-            except Exception:
-                pass
-            self._on_play_clicked()
-
-        for widget in (self._play_root,):
-            setter = getattr(widget, "set_mouse_pressed_fn", None)
-            if callable(setter):
-                try:
-                    setter(_on_mouse)
-                except Exception:
-                    pass
         self._set_widget_visible(self._play_root, False)
 
     def _set_widget_visible(self, widget: Any, want: bool) -> None:
@@ -906,12 +1047,41 @@ class _FedLoadPanel:
             return
         self._stop_anim()
         self._play_starting = False
+        try:
+            if self._play_bg is not None:
+                self._play_bg.set_style(
+                    {
+                        "background_color": int(_PLAY_BTN_BG_ARGB),
+                        "border_width": float(_PLAY_BTN_BORDER_WIDTH),
+                        "border_color": int(_PLAY_BTN_BORDER_ARGB),
+                    }
+                )
+        except Exception:
+            try:
+                if self._play_bg is not None:
+                    self._play_bg.style = {
+                        "background_color": int(_PLAY_BTN_BG_ARGB),
+                        "border_width": 0,
+                    }
+            except Exception:
+                pass
         self._set_play_visible(True)
         try:
             if self._root is not None:
                 self._root.visible = True
         except Exception:
             pass
+
+    def _on_overlay_pressed(self) -> None:
+        play = self._play_root
+        if play is None:
+            return
+        try:
+            if not bool(getattr(play, "visible", False)):
+                return
+        except Exception:
+            return
+        self._on_play_clicked()
 
     def _on_play_clicked(self) -> None:
         if self._play_starting:
@@ -924,6 +1094,24 @@ class _FedLoadPanel:
         if not callable(fn):
             return
         self._play_starting = True
+        try:
+            if self._play_bg is not None:
+                self._play_bg.set_style(
+                    {
+                        "background_color": int(_PLAY_BTN_BG_CLICK_ARGB),
+                        "border_width": float(_PLAY_BTN_BORDER_WIDTH),
+                        "border_color": int(_PLAY_BTN_BORDER_ARGB),
+                    }
+                )
+        except Exception:
+            try:
+                if self._play_bg is not None:
+                    self._play_bg.style = {
+                        "background_color": int(_PLAY_BTN_BG_CLICK_ARGB),
+                        "border_width": 0,
+                    }
+            except Exception:
+                pass
         si = int(self.screen)
         delay = max(0.0, float(_PLAY_CLICK_DELAY_SEC))
 
