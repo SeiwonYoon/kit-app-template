@@ -1234,59 +1234,18 @@ class SimTimelinePlayer:
             self._playing = True
 
     def advance_sim_clock(self, ext: Any = None) -> None:
-        """wall-clock 기준으로 ``sim_now`` 만 전진 (emit 없음).
+        """wall-clock × 배속으로 ``sim_now`` 만 전진 (emit 없음).
 
-        SSOT: JSON 실행 중에는 해당 애니의 ``anim_play_end`` 를 넘기지 않는다.
-        (시계·진행현황이 다음 공정으로 앞서가고 화면은 이전 JSON 인 싱크 붕괴 방지)
+        화면마다 같은 벽시계를 쓴다. JSON/애니가 늦어도 그 시간을 깎지 않는다.
+        (애니 ``anim_play_end`` 에 묶으면 화면2처럼 애니가 길 때 시계가 누적 지연된다.)
         """
+        del ext
         now_wall = time.perf_counter()
         sp = 1.0
         try:
             sp = max(0.05, float(self._speed()))
         except Exception:
             sp = 1.0
-        caps: Dict[int, float] = {}
-        if ext is not None:
-            try:
-                from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
-                from .sim_parallel_rails import screen_from_anim_slot
-
-                if bool(SIM_PRERUN_PLAN_SSOT):
-                    active_by = getattr(ext, "_sim_anim_active_by_screen", None)
-                    if isinstance(active_by, dict):
-                        for _k, act in list(active_by.items()):
-                            if not isinstance(act, dict) or not act:
-                                continue
-                            if not bool(act.get("_json_sequence_started")):
-                                continue
-                            scr_a = int(screen_from_anim_slot(_k, act))
-                            if scr_a < 1:
-                                continue
-                            end_s = 0.0
-                            try:
-                                end_s = float(
-                                    str(act.get("anim_play_end_sim_time") or "").strip()
-                                    or "0"
-                                )
-                            except Exception:
-                                end_s = 0.0
-                            if end_s <= 1e-9:
-                                try:
-                                    t0a = float(act.get("_json_run_start_sim") or 0.0)
-                                    asec = float(act.get("anim_sec") or 0.0)
-                                    if asec > 1e-9:
-                                        end_s = t0a + asec
-                                except Exception:
-                                    end_s = 0.0
-                            if end_s > 1e-9:
-                                prev = caps.get(scr_a)
-                                caps[scr_a] = (
-                                    float(end_s)
-                                    if prev is None
-                                    else min(float(prev), float(end_s))
-                                )
-            except Exception:
-                caps = {}
         with self._lock:
             if not self._playing:
                 return
@@ -1295,9 +1254,6 @@ class SimTimelinePlayer:
                 dt = max(0.0, now_wall - last_w)
                 t_sim = float(self._sim_now_by_screen.get(scr, 0.0)) + float(dt) * float(sp)
                 t_sim = min(float(res.final_sim_time), float(t_sim))
-                cap = caps.get(int(scr))
-                if cap is not None and t_sim > float(cap) + 1e-9:
-                    t_sim = float(cap)
                 self._sim_now_by_screen[scr] = float(t_sim)
                 self._last_wall_by_screen[scr] = float(now_wall)
 

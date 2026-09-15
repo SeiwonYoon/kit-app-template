@@ -5378,13 +5378,14 @@ def _render_ep_bar_prerun_at_t(
     bar_pre = pre_by.get(scr_key) if isinstance(pre_by, dict) else None
     if not isinstance(bar_pre, EpBarPrecomputed):
         return False
-    t_bar = max(0.0, float(t_sim))
-    # 화면1·2 공통: 막대만 renewal/애니 진행 cap (포트 lookup 과 분리)
+    t_now = max(0.0, float(t_sim))
+    t_bar = float(t_now)
+    # 세그먼트 truncate 만 cap. 재생 화살표·표시 시각은 sim_now(t_now) 유지.
     if bool(getattr(ext, "_sim_playback_started", False)):
         try:
             from .control_sim_playback_plan import playback_bar_lookup_sim_t
 
-            t_bar = float(playback_bar_lookup_sim_t(ext, int(screen), float(t_bar)))
+            t_bar = float(playback_bar_lookup_sim_t(ext, int(screen), float(t_now)))
         except Exception:
             pass
     try:
@@ -5426,7 +5427,7 @@ def _render_ep_bar_prerun_at_t(
 
         state = PlaybackUIState(
             screen=int(screen),
-            axes=PlaybackUIAxes(t_display=float(t_bar), t_plan=float(t_bar)),
+            axes=PlaybackUIAxes(t_display=float(t_now), t_plan=float(t_now)),
             ports=dict(occ or {}),
             bar_rows={str(k): list(v) for k, v in rows_state.items()},
             bar_total_est=float(total_est),
@@ -5438,7 +5439,7 @@ def _render_ep_bar_prerun_at_t(
             ext,
             ch,
             dict(occ or {}),
-            f"{float(t_bar):.2f}",
+            f"{float(t_now):.2f}",
             honor_explicit_sim_time=True,
             playback_ui_state=state,
         )
