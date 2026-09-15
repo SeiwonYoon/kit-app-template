@@ -93,6 +93,7 @@ from typing import Any, Callable, Dict, List
 
 
 from ..tbs_sim_bridge import (
+    handle_bp_change,
     handle_control_simulation,
     handle_ebs_enable,
     handle_eqp_change,
@@ -107,11 +108,13 @@ from ..hyview_event_contract import (
     PAYLOAD_CASE,
     PAYLOAD_T,
     PAYLOAD_TIME,
+    T2V_REQUEST_BP_CHANGE,
     T2V_REQUEST_RESTART_SIMULATION,
     T2V_REQUEST_SCREEN_VISIBILITY,
     T2V_REQUEST_SEEK_SIMULATION,
     T2V_REQUEST_TIME_SYNC,
     T2V_REQUEST_TIME_TABLE,
+    V2T_RESPONSE_BP_CHANGE,
     V2T_RESPONSE_RESTART_SIMULATION,
     V2T_RESPONSE_SCREEN_VISIBILITY,
     V2T_RESPONSE_SEEK_SIMULATION,
@@ -218,6 +221,8 @@ class EBSHandler(BaseHandler):
 
             "V2T_response_eqp_change",
 
+            V2T_RESPONSE_BP_CHANGE,
+
             "V2T_response_ebs_enable",
 
             "V2T_response_start_simulation",
@@ -245,6 +250,8 @@ class EBSHandler(BaseHandler):
         return {
 
             "T2V_request_eqp_change": self._on_req_eqp_change,
+
+            T2V_REQUEST_BP_CHANGE: self._on_req_bp_change,
 
             "T2V_request_ebs_enable": self._on_req_ebs_enable,
 
@@ -409,6 +416,44 @@ class EBSHandler(BaseHandler):
         # TODO: EBS 작업 실행 (eqp_id 기반 분기 필요 시 bridge 쪽 확장)
 
         handle_eqp_change(event.payload, dispatch=_on_bridge_done)
+
+
+
+    def _on_req_bp_change(self, event: carb.events.IEvent) -> None:
+
+        """
+
+        T2V_request_bp_change — 화면별 BP 개수 (BP1..N 표시, INOUT·EP·나머지 BP 숨김).
+
+
+
+        요청: ``{"case": 0, "bp_count": 2}``
+
+        성공 응답 data: ``{"case": case_index, "bp_count": bp_count}``
+
+        """
+
+        print(f"[EBSHandler] _on_req_bp_change - {event.payload}")
+
+        case_index = event.payload["case"]
+
+        bp_count = event.payload["bp_count"]
+
+        def _on_bridge_done(bridge_res: Dict[str, Any]) -> None:
+
+            self._dispatch_bridge_result(
+
+                V2T_RESPONSE_BP_CHANGE,
+
+                bridge_res,
+
+                ok_data={"case": case_index, "bp_count": bp_count},
+
+                err_data={"case": case_index, "bp_count": bp_count},
+
+            )
+
+        handle_bp_change(event.payload, dispatch=_on_bridge_done)
 
 
 

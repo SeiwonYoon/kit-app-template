@@ -306,6 +306,45 @@ def handle_eqp_change(
     )
 
 
+def handle_bp_change(
+    payload: Any,
+    *,
+    dispatch: Callable[[Dict[str, Any]], None],
+) -> None:
+    """T2V_request_bp_change — bp_count 만큼 BP1..N LOT prim 표시, 나머지 포트 숨김."""
+    pl = _event_payload_to_dict(payload)
+    try:
+        case_index = int(pl.get("case", 0))
+        bp_count = int(pl.get("bp_count", 2))
+    except Exception as exc:
+        dispatch(
+            _err(
+                f"invalid payload: {exc}",
+                data={"case": pl.get("case", 0), "bp_count": pl.get("bp_count", 2)},
+            )
+        )
+        return
+
+    def _work() -> Dict[str, Any]:
+        ext = require_tbs_extension_instance()
+        from morph.tbs_control_2.control_window import _usd_context_name_for_sim_screen
+        from morph.tbs_control_2.port_lot_visibility import apply_bp_count_layout_for_context
+
+        apply_bp_count_layout_for_context(
+            _usd_context_name_for_sim_screen(ext, _case_index_to_screen(case_index)),
+            bp_count,
+        )
+        return _ok({"case": case_index, "bp_count": bp_count})
+
+    _schedule_hyview_main_work(
+        "bp_change",
+        _work,
+        dispatch,
+        case=case_index,
+        bp_count=bp_count,
+    )
+
+
 def handle_ebs_enable(
     payload: Any,
     *,

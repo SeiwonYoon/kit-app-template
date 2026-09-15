@@ -54,6 +54,9 @@ _FOUP_LIFTED_BY_CTX: Dict[str, Set[str]] = {}
 # +Y 진행(+1) / -Y 진행(-1). 애니가 끊긴 뒤 restore 가 어느 쪽으로 맞출지 결정(컨텍스트별).
 _FOUP_LIFT_SIGN_BY_CTX: Dict[str, Dict[str, int]] = {}
 
+# T2V bp_count 레이아웃 — occupancy 가 숨긴 포트 LOT prim 을 다시 켜지 않게 ctx 별 유지
+_BP_LAYOUT_HIDE_PORTS_BY_CTX: Dict[str, Tuple[str, ...]] = {}
+
 
 def _ctx_key(usd_context_name: Optional[str]) -> str:
     """USD 컨텍스트 이름 정규화 키 (None/빈 문자열 → 기본 컨텍스트 "")."""
@@ -1015,6 +1018,37 @@ def apply_port_lot_prim_visibility_for_context(usd_context_name: Optional[str], 
             except Exception:
                 pass
         _set_prim_visible_on_stage(stage, path_s, has_lot)
+    hide_ports = _BP_LAYOUT_HIDE_PORTS_BY_CTX.get(_ctx_key(usd_context_name))
+    if hide_ports:
+        for port in hide_ports:
+            path_h = str(mapping.get(str(port), "") or "").strip()
+            if path_h:
+                _set_prim_visible_on_stage(stage, path_h, False)
+
+
+def apply_bp_count_layout_for_context(
+    usd_context_name: Optional[str], bp_count: int
+) -> None:
+    """웹 ``bp_count`` — BP1..N 만 남기고 INOUT·EP·나머지 BP LOT prim 숨김.
+
+    경로: ``config/port_lot_prim_paths.json``. occupancy 갱신 후에도 유지.
+    """
+    n = int(bp_count)
+    shown = {f"BP{i}" for i in range(1, n + 1)}
+    hide_ports = tuple(
+        p
+        for p in ("INOUT", "EP1", "EP2", "EP3", "BP1", "BP2", "BP3", "BP4")
+        if p not in shown
+    )
+    _BP_LAYOUT_HIDE_PORTS_BY_CTX[_ctx_key(usd_context_name)] = hide_ports
+    mapping = load_port_lot_prim_paths()
+    stage = _get_stage_for_context(usd_context_name)
+    if not stage or not mapping:
+        return
+    for port in hide_ports:
+        path_s = str(mapping.get(port, "") or "").strip()
+        if path_s:
+            _set_prim_visible_on_stage(stage, path_s, False)
 
 
 def apply_port_lot_prim_visibility(ports_occupancy: Any) -> None:
