@@ -519,6 +519,12 @@ def sync_play_prim_hide_checkbox_after_play_start(
 ) -> None:
     """Play 시작 자동 숨김 완료 후 「prim숨김」 체크만 ON (visibility 재적용 없음)."""
     si = max(1, int(screen))
+    try:
+        from .lam_hyview_v2t_notify import notify_prim_hide
+
+        notify_prim_hide(si, prim_hide=True)
+    except Exception:
+        pass
     if si <= 1:
         from .lam_viewport_overlay_state import set_toggle_play_prim_hide
 

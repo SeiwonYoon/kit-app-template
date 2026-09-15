@@ -17,9 +17,19 @@ V2T_RESPONSE_CONTROL_SIMULATION = "V2T_response_control_simulation"
 # Kit → 웹 단방향 통지 — Viewport STATUS 패널과 동일 스냅샷 (T2V 요청 없음)
 V2T_NOTIFY_STATUS_PANEL = "V2T_notify_status_panel"
 
+# Kit → 웹 단방향 통지 — 시뮬 시작 후 자동 prim 숨김 (T2V 요청 없음)
+# data 키는 T2V_control_simulation 과 동일 (case, prim_hide)
+V2T_NOTIFY_CONTROL_SIMULATION = "V2T_notify_control_simulation"
+
+# Kit → 웹 단방향 통지 — Federation 로딩 HUD 와 동일 단계 (T2V 요청 없음)
+V2T_NOTIFY_LOAD_STATUS = "V2T_notify_load_status"
+
 PAYLOAD_CONFIGS = "configs"
 # case 0 → 화면1, case 1 → 화면2
 PAYLOAD_CASE = "case"
+# V2T_notify_load_status — HUD phase 와 동일 값
+PAYLOAD_STATUS = "status"
+PAYLOAD_DETAIL = "detail"
 
 # T2V_control_simulation payload 키 (모두 optional — 있는 항목만 적용)
 PAYLOAD_PROC_ONLY = "proc_only"            # 공정만보기 (bool)
@@ -35,12 +45,15 @@ ALL_V2T_EVENT_TYPES: Tuple[str, ...] = (
     V2T_RESPONSE_STOP_SIMULATION,
     V2T_RESPONSE_CONTROL_SIMULATION,
     V2T_NOTIFY_STATUS_PANEL,
+    V2T_NOTIFY_CONTROL_SIMULATION,
+    V2T_NOTIFY_LOAD_STATUS,
 )
 
 __all__ = [
     "ALL_V2T_EVENT_TYPES",
     "PAYLOAD_CASE",
     "PAYLOAD_CONFIGS",
+    "PAYLOAD_DETAIL",
     "PAYLOAD_PROC_ONLY",
     "PAYLOAD_SHOW_TOP_VIEW",
     "PAYLOAD_FOUP_INFO_SHOW",
@@ -48,9 +61,12 @@ __all__ = [
     "PAYLOAD_WAFER_NUMBER_SHOW",
     "PAYLOAD_PRIM_HIDE",
     "PAYLOAD_SPEED",
+    "PAYLOAD_STATUS",
     "T2V_CONTROL_SIMULATION",
     "T2V_REQUEST_START_SIMULATION",
     "T2V_REQUEST_STOP_SIMULATION",
+    "V2T_NOTIFY_CONTROL_SIMULATION",
+    "V2T_NOTIFY_LOAD_STATUS",
     "V2T_NOTIFY_STATUS_PANEL",
     "V2T_RESPONSE_CONTROL_SIMULATION",
     "V2T_RESPONSE_START_SIMULATION",

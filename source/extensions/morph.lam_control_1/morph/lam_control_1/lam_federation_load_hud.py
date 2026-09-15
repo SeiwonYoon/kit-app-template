@@ -268,12 +268,20 @@ def set_federation_load_status(
 ) -> None:
     """화면별 Federation 로딩 상태 갱신 (워커 스레드에서도 호출 가능).
 
+    HUD 표시 여부와 무관하게 웹으로 ``V2T_notify_load_status`` 를 보낸다.
+    웹이 무시해도 Kit 동작은 변하지 않는다.
     ``progress_pct`` 가 있으면 0~100 으로 직접 반영(단계 목표보다 우선).
     """
     si = max(1, int(screen))
     ph = str(phase or "").strip().lower()
     if ph not in _PHASE_TARGET_PCT:
         return
+    try:
+        from .lam_hyview_v2t_notify import notify_load_status
+
+        notify_load_status(si, ph, detail=str(detail or ""))
+    except Exception:
+        pass
     kit_ext = ext
     if kit_ext is None and lam_window is not None:
         kit_ext = getattr(lam_window, "_kit_ext", None)
