@@ -3,7 +3,7 @@
 - pick/place 집계: ``lam_viewport_overlay_state``
   · Play 시작: ``seed_foup_counts_from_non_atm_first`` (slot 최초 wafer → 진행중)
   · JSON 실행: ``record_foup_event_from_schedule_entry`` (``atm_foup{n}_pick|place``)
-- 4줄: lot_id(FOUP별 색) / current/total / 진행중 / 완료
+- 제목(lot_id) + 반출 / 공정진행 / 공정완료 (좌·우 끝 정렬)
 - 웨이퍼 번호 3D 라벨 색: ``lam_foup_lot_display`` — FOUP·팔·장비 등 표시 위치와 무관하게 lot 색 유지
 """
 
@@ -20,11 +20,14 @@ from .lam_sim_control_defaults import FOUP_LOT_ID_FONT_SIZE
 from .lam_viewport_overlay_config import (
     FOUP_ANCHOR_PRIM_BY_INDEX,
     FOUP_PANEL_BG_RGBA,
-    FOUP_PANEL_BORDER_RGBA,
+    FOUP_PANEL_BODY_H_PX,
+    FOUP_PANEL_DIVIDER_RGBA,
     FOUP_PANEL_FONT_SIZE,
     FOUP_PANEL_HEIGHT_PX,
-    FOUP_PANEL_LINE_HEIGHT_PX,
     FOUP_PANEL_OFFSET_XYZ_M,
+    FOUP_PANEL_PAD_X_PX,
+    FOUP_PANEL_TITLE_H_PX,
+    FOUP_PANEL_TOP_BAR_H_PX,
     FOUP_PANEL_WIDTH_PX,
 )
 from .lam_viewport_overlay_state import (
@@ -50,11 +53,16 @@ _ACTIVE_FOUP_PANEL_BY_SCREEN: Dict[int, "LamFoupStatus3dPanel"] = {}
 # SceneView id → screen (화면1 전역 OFF 가 화면2 를 지우지 않도록)
 _ACTIVE_SCENEVIEW_SCREEN: Dict[int, int] = {}
 
-_PANEL_LINE_COUNT = 4
+_BODY_ROW_COUNT = 3
 _WHITE = (1.0, 1.0, 1.0, 1.0)
 _PANEL_W = int(FOUP_PANEL_WIDTH_PX)
 _PANEL_H = int(FOUP_PANEL_HEIGHT_PX)
-_LINE_H = int(FOUP_PANEL_LINE_HEIGHT_PX)
+_TITLE_H = int(FOUP_PANEL_TITLE_H_PX)
+_BODY_H = int(FOUP_PANEL_BODY_H_PX)
+_TOP_BAR_H = int(FOUP_PANEL_TOP_BAR_H_PX)
+_PAD_X = int(FOUP_PANEL_PAD_X_PX)
+_BODY_ROW_LABELS = ("반출", "공정진행", "공정완료")
+_LAYOUT_VER = 4
 
 
 def force_remove_foup_sceneviews(*, screen: Optional[int] = None) -> None:
@@ -606,13 +614,42 @@ class LamFoupStatus3dPanel:
         """앵커 위치·집계 텍스트 주기 갱신 (집계는 JSON 시작 시 overlay_state 에 기록)."""
         self._update_ui()
 
+    def _panel_layout_ok(self, node: Dict[str, Any]) -> bool:
+        rows = node.get("rows")
+        return (
+            node.get("layout_ver") == _LAYOUT_VER
+            and node.get("title") is not None
+            and node.get("top_bar") is not None
+            and isinstance(rows, list)
+            and len(rows) == _BODY_ROW_COUNT
+        )
+
+    def _iter_node_labels(self, node: Dict[str, Any]) -> list:
+        out: list = []
+        title = node.get("title")
+        if title is not None:
+            out.append(title)
+        for row in list(node.get("rows") or []):
+            for key in ("left", "right"):
+                w = row.get(key) if isinstance(row, dict) else None
+                if w is not None:
+                    out.append(w)
+        return out
+
+    def _clear_node_texts(self, node: Dict[str, Any]) -> None:
+        for lbl in self._iter_node_labels(node):
+            try:
+                lbl.text = ""
+            except Exception:
+                pass
+
     def _ensure_ui_built(self) -> None:
         """Scene graph는 1회만 만든 뒤, text/transform만 업데이트."""
         if not self._built or not self._root:
             return
         if self._panel_nodes:
             for node in self._panel_nodes.values():
-                if len(list(node.get("labels") or [])) != _PANEL_LINE_COUNT:
+                if not self._panel_layout_ok(node):
                     self._panel_nodes.clear()
                     try:
                         self._root.clear()
@@ -621,8 +658,21 @@ class LamFoupStatus3dPanel:
                     break
             else:
                 return
+        half_w = float(_PANEL_W) * 0.5
+        half_h = float(_PANEL_H) * 0.5
+        left_x = -half_w + float(_PAD_X)
+        right_x = half_w - float(_PAD_X)
+        title_y = half_h - float(_TOP_BAR_H) - (float(_TITLE_H) - float(_TOP_BAR_H)) * 0.5
+        bar_y = half_h - float(_TOP_BAR_H) * 0.5
+        div_y = half_h - float(_TITLE_H)
+        body_top = half_h - float(_TITLE_H)
+        slot_h = float(_BODY_H) / float(_BODY_ROW_COUNT)
+        align_left = ui.Alignment.LEFT_CENTER
+        align_right = getattr(ui.Alignment, "RIGHT_CENTER", None) or align_left
+        title_font = int(FOUP_LOT_ID_FONT_SIZE)
+        body_font = int(FOUP_PANEL_FONT_SIZE)
+
         with self._root:
-            # NOTE: 앵커 prim이 없는 FOUP은 노드를 만들지 않는다.
             for fi in (1, 2, 3):
                 anchor_path = _normalize_path(FOUP_ANCHOR_PRIM_BY_INDEX.get(fi, ""))
                 if not anchor_path:
@@ -633,37 +683,73 @@ class LamFoupStatus3dPanel:
                 )
                 with root:
                     with sc.Transform(scale_to=sc.Space.SCREEN):
-                        bg = (48.0 / 255.0, 47.0 / 255.0, 64.0 / 255.0, 0.5)
-                        border = (0.45, 0.55, 0.70, 0.90)
-                        try:
-                            bg = tuple(FOUP_PANEL_BG_RGBA)
-                        except Exception:
-                            pass
-                        try:
-                            border = tuple(FOUP_PANEL_BORDER_RGBA)
-                        except Exception:
-                            pass
-                        sc.Rectangle(width=_PANEL_W, height=_PANEL_H, color=bg, wireframe=False)
-                        sc.Rectangle(width=_PANEL_W, height=_PANEL_H, color=border, wireframe=True)
-                        left = -_PANEL_W // 2 + 10
-                        top = _PANEL_H // 2 - 20
-                        labels = []
-                        for i in range(_PANEL_LINE_COUNT):
-                            y = top - i * _LINE_H - (10 if i >= 1 else 0)
-                            with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
-                                font_sz = (
-                                    int(FOUP_LOT_ID_FONT_SIZE)
-                                    if i == 0
-                                    else int(FOUP_PANEL_FONT_SIZE)
+                        bg = tuple(FOUP_PANEL_BG_RGBA)
+                        sc.Rectangle(
+                            width=_PANEL_W,
+                            height=_PANEL_H,
+                            color=bg,
+                            wireframe=False,
+                        )
+                        with sc.Transform(
+                            transform=sc.Matrix44.get_translation_matrix(0.0, bar_y, 0.0)
+                        ):
+                            top_bar = sc.Rectangle(
+                                width=_PANEL_W,
+                                height=_TOP_BAR_H,
+                                color=_WHITE,
+                                wireframe=False,
+                            )
+                        with sc.Transform(
+                            transform=sc.Matrix44.get_translation_matrix(0.0, div_y, 0.0)
+                        ):
+                            sc.Rectangle(
+                                width=_PANEL_W,
+                                height=1.0,
+                                color=tuple(FOUP_PANEL_DIVIDER_RGBA),
+                                wireframe=False,
+                            )
+                        with sc.Transform(
+                            transform=sc.Matrix44.get_translation_matrix(left_x, title_y, 0.0)
+                        ):
+                            title = sc.Label(
+                                "",
+                                size=title_font,
+                                color=_WHITE,
+                                alignment=align_left,
+                            )
+                        rows: list = []
+                        for i in range(_BODY_ROW_COUNT):
+                            y = body_top - slot_h * (float(i) + 0.5)
+                            with sc.Transform(
+                                transform=sc.Matrix44.get_translation_matrix(
+                                    left_x, y, 0.0
                                 )
-                                lbl = sc.Label(
+                            ):
+                                left_lbl = sc.Label(
                                     "",
-                                    size=font_sz,
+                                    size=body_font,
                                     color=_WHITE,
-                                    alignment=ui.Alignment.LEFT_CENTER,
+                                    alignment=align_left,
                                 )
-                                labels.append(lbl)
-                self._panel_nodes[fi] = {"root": root, "labels": labels}
+                            with sc.Transform(
+                                transform=sc.Matrix44.get_translation_matrix(
+                                    right_x, y, 0.0
+                                )
+                            ):
+                                right_lbl = sc.Label(
+                                    "",
+                                    size=body_font,
+                                    color=_WHITE,
+                                    alignment=align_right,
+                                )
+                            rows.append({"left": left_lbl, "right": right_lbl})
+                self._panel_nodes[fi] = {
+                    "layout_ver": _LAYOUT_VER,
+                    "root": root,
+                    "title": title,
+                    "top_bar": top_bar,
+                    "rows": rows,
+                }
 
     def _update_ui(self) -> None:
         if not self._built or not self._root:
@@ -682,16 +768,13 @@ class LamFoupStatus3dPanel:
                 continue
             prim = st.GetPrimAtPath(anchor_path)
             if not prim or not prim.IsValid():
-                # 앵커가 없으면 패널을 멀리 보내고 텍스트를 비움(뜬금없는 빈 라벨 방지)
                 try:
-                    node["root"].transform = sc.Matrix44.get_translation_matrix(1e9, 1e9, 1e9)
+                    node["root"].transform = sc.Matrix44.get_translation_matrix(
+                        1e9, 1e9, 1e9
+                    )
                 except Exception:
                     pass
-                for lbl in list(node.get("labels") or []):
-                    try:
-                        lbl.text = ""
-                    except Exception:
-                        pass
+                self._clear_node_texts(node)
                 continue
             center = _prim_world_center(prim)
             if center is None:
@@ -706,22 +789,36 @@ class LamFoupStatus3dPanel:
             c: FoupCounts = get_foup_counts(fi, screen=self._screen)
             lot_id = get_lot_id_for_foup(fi, screen=self._screen)
             lot_color = foup_lot_color_rgba(fi)
-            lines: list[tuple[str, tuple[float, float, float, float]]] = [
-                (lot_id, lot_color),
-                (f"{c.current_in_foup_now}/{c.total}", _WHITE),
-                (f"진행중 {c.in_process_count}", _WHITE),
-                (f"완료 {c.done_count}", _WHITE),
-            ]
-            lbls = list(node.get("labels") or [])
-            for i in range(min(len(lbls), len(lines))):
-                text, color = lines[i]
+            try:
+                node["top_bar"].color = lot_color
+            except Exception:
+                pass
+            title = node.get("title")
+            if title is not None:
                 try:
-                    lbls[i].text = text
-                    lbls[i].color = color
-                    if i == 0:
-                        lbls[i].size = int(FOUP_LOT_ID_FONT_SIZE)
-                    else:
-                        lbls[i].size = int(FOUP_PANEL_FONT_SIZE)
+                    title.text = str(lot_id or "")
+                    title.color = lot_color
+                    title.size = int(FOUP_LOT_ID_FONT_SIZE)
+                except Exception:
+                    pass
+            values = (
+                f"{c.current_in_foup_now}/{c.total}",
+                str(int(c.in_process_count)),
+                str(int(c.done_count)),
+            )
+            rows = list(node.get("rows") or [])
+            for i, row in enumerate(rows[:_BODY_ROW_COUNT]):
+                left = row.get("left") if isinstance(row, dict) else None
+                right = row.get("right") if isinstance(row, dict) else None
+                try:
+                    if left is not None:
+                        left.text = _BODY_ROW_LABELS[i]
+                        left.color = _WHITE
+                        left.size = int(FOUP_PANEL_FONT_SIZE)
+                    if right is not None:
+                        right.text = values[i]
+                        right.color = _WHITE
+                        right.size = int(FOUP_PANEL_FONT_SIZE)
                 except Exception:
                     pass
 
@@ -732,31 +829,12 @@ class LamFoupStatus3dPanel:
         )
         with root:
             with sc.Transform(scale_to=sc.Space.SCREEN):
-                # 표 형태(테두리/연한 배경)로 보이도록 패널을 그림
-                panel_w = _PANEL_W
-                panel_h = _PANEL_H
-                bg = tuple(FOUP_PANEL_BG_RGBA)
-                border = (0.45, 0.55, 0.70, 0.90)
-                sc.Rectangle(width=panel_w, height=panel_h, color=bg, wireframe=False)
-                sc.Rectangle(width=panel_w, height=panel_h, color=border, wireframe=True)
-
-                left = -panel_w // 2 + 10
-                top = panel_h // 2 - 18
-                lines = [ln for ln in (text or "").splitlines() if ln.strip()]
-                for i, ln in enumerate(lines[:_PANEL_LINE_COUNT]):
-                    y = top - i * _LINE_H - (10 if i >= 1 else 0)
-                    with sc.Transform(transform=sc.Matrix44.get_translation_matrix(left, y, 0)):
-                        font_sz = (
-                            int(FOUP_LOT_ID_FONT_SIZE)
-                            if i == 0
-                            else int(FOUP_PANEL_FONT_SIZE)
-                        )
-                        sc.Label(
-                            ln,
-                            size=font_sz,
-                            color=(1.0, 1.0, 1.0, 1.0),
-                            alignment=ui.Alignment.LEFT_CENTER,
-                        )
+                sc.Rectangle(
+                    width=_PANEL_W,
+                    height=_PANEL_H,
+                    color=tuple(FOUP_PANEL_BG_RGBA),
+                    wireframe=False,
+                )
 
 
 __all__ = [
