@@ -8,11 +8,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .lam_api_timeline_parser import object_array_to_merged
 
 _PRINT_PREFIX = "[LAM/federation]"
+
+# 페이지 HTTP 실패 시 추가 재시도 횟수 (최초 1회 + 이 값). HUD 문구는 바꾸지 않는다.
+_FETCH_EXTRA_RETRIES = 3
+_FETCH_RETRY_DELAY_SEC = 1.0
 
 _SIMULATION_PATH_SUFFIX = "/api/v1/lam/simulations/"
 
@@ -178,6 +182,38 @@ def parse_simulation_get_url(url: str) -> Tuple[str, str, int, int]:
     return fab_base, exec_id, max(0, offset), limit
 
 
+def _call_with_fetch_retries(
+    fn: Callable[[], Any],
+    *,
+    screen: int,
+    what: str,
+) -> Any:
+    """페이지 조회 실패 시 최대 3회 더 시도. 호출 중 HUD 단계는 바꾸지 않는다."""
+    extra = max(0, int(_FETCH_EXTRA_RETRIES))
+    attempts = 1 + extra
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            print(
+                f"{_PRINT_PREFIX} screen={screen} {what} "
+                f"attempt {attempt}/{attempts} failed: {exc}",
+                flush=True,
+            )
+            if attempt < attempts:
+                print(
+                    f"{_PRINT_PREFIX} screen={screen} {what} "
+                    f"retry {attempt}/{extra} in {_FETCH_RETRY_DELAY_SEC:.1f}s "
+                    f"(HUD Loading data... unchanged)",
+                    flush=True,
+                )
+                time.sleep(float(_FETCH_RETRY_DELAY_SEC))
+    assert last_exc is not None
+    raise last_exc
+
+
 def _http_get_json(
     url: str,
     *,
@@ -265,14 +301,23 @@ def fetch_simulation_get_pages(
         page_url = build_simulation_get_url(
             base_url, eid, offset=offset, limit=limit
         )
-        status, data, raw = _http_get_json(
-            page_url, timeout_sec=timeout_sec, headers=headers
+        page_off = int(offset)
+
+        def _get_page() -> Tuple[int, List[Dict[str, Any]]]:
+            status_i, data_i, raw_i = _http_get_json(
+                page_url, timeout_sec=timeout_sec, headers=headers
+            )
+            if status_i and status_i >= 400:
+                raise RuntimeError(f"HTTP {status_i}: {raw_i[:500]}")
+            return status_i, _simulation_get_objects_from_payload(data_i)
+
+        status, objects = _call_with_fetch_retries(
+            _get_page,
+            screen=int(screen),
+            what=f"simulation GET offset={page_off}",
         )
         last_status = status
         pages += 1
-        if status and status >= 400:
-            raise RuntimeError(f"HTTP {status}: {raw[:500]}")
-        objects = _simulation_get_objects_from_payload(data)
         all_objects.extend(objects)
         if not quiet:
             print(
@@ -280,6 +325,7 @@ def fetch_simulation_get_pages(
                 f"status={status} rows={len(objects)}",
                 flush=True,
             )
+        # limit 만큼 가득 찬 페이지만 다음 offset 으로 이어 받는다 (예: 1000건 초과).
         if len(objects) < int(limit):
             break
         offset += int(limit)
@@ -404,17 +450,28 @@ def fetch_federation_pages(
         if use_fixture:
             data = _load_fixture_page(offset)
             status = 200
-            raw = ""
         else:
-            status, data, raw = _http_post_json(
-                url, page_body, headers=headers, timeout_sec=timeout_sec
+            page_off = int(offset)
+
+            def _post_page() -> Tuple[int, Dict[str, Any]]:
+                status_i, data_i, raw_i = _http_post_json(
+                    url, page_body, headers=headers, timeout_sec=timeout_sec
+                )
+                if status_i and status_i >= 400:
+                    raise RuntimeError(f"HTTP {status_i}: {raw_i[:500]}")
+                if not isinstance(data_i, dict):
+                    raise RuntimeError(
+                        f"invalid JSON response at offset={page_off}"
+                    )
+                return status_i, data_i
+
+            status, data = _call_with_fetch_retries(
+                _post_page,
+                screen=int(screen),
+                what=f"federation POST offset={page_off}",
             )
         last_status = status
         pages += 1
-        if status and status >= 400:
-            raise RuntimeError(f"HTTP {status}: {raw[:500]}")
-        if not isinstance(data, dict):
-            raise RuntimeError(f"invalid JSON response at offset={offset}")
         cols = list(data.get("columns") or [])
         rows = list(data.get("rows") or [])
         if not merged_base:

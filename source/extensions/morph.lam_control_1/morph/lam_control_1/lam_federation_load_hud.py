@@ -68,6 +68,7 @@ _PLAY_ICON_W = 18
 _PLAY_ICON_H = 18
 _PLAY_CLICK_DELAY_SEC = 1.0
 _PLAY_IMAGE_NAME = "ic_play.png"  # data/img/ — 없으면 문자 ▶
+_FAIL_GLYPH = "✕"
 
 
 def _play_center_pad() -> int:
@@ -519,6 +520,8 @@ class _FedLoadPanel:
         self._load_root: Any = None
         self._play_root: Any = None
         self._play_bg: Any = None
+        self._play_mark: Any = None
+        self._fail_mark: Any = None
         self._chip_wrap: Any = None
         self._play_fn: Optional[Callable[[], None]] = None
         self._play_starting = False
@@ -573,6 +576,8 @@ class _FedLoadPanel:
         self._load_root = None
         self._play_root = None
         self._play_bg = None
+        self._play_mark = None
+        self._fail_mark = None
         self._chip_wrap = None
         vw = self._mounted_vw
         self._mounted_vw = None
@@ -973,30 +978,47 @@ class _FedLoadPanel:
                     row_kw["alignment"] = center
                 with ui.HStack(**row_kw):
                     ui.Spacer()
-                    play_img = _play_icon_path()
-                    if play_img is not None:
-                        try:
-                            ui.Image(
-                                str(play_img),
-                                width=int(_PLAY_ICON_W),
-                                height=int(_PLAY_ICON_H),
-                            )
-                        except Exception:
-                            ui.Image(
-                                width=int(_PLAY_ICON_W),
-                                height=int(_PLAY_ICON_H),
-                                style={"image_url": str(play_img)},
-                            )
-                    else:
-                        glyph_kw: Dict[str, Any] = {
+                    icon_w = int(_PLAY_ICON_W)
+                    icon_h = int(_PLAY_ICON_H)
+                    with ui.ZStack(width=icon_w, height=icon_h):
+                        play_img = _play_icon_path()
+                        if play_img is not None:
+                            try:
+                                self._play_mark = ui.Image(
+                                    str(play_img),
+                                    width=icon_w,
+                                    height=icon_h,
+                                )
+                            except Exception:
+                                self._play_mark = ui.Image(
+                                    width=icon_w,
+                                    height=icon_h,
+                                    style={"image_url": str(play_img)},
+                                )
+                        else:
+                            glyph_kw: Dict[str, Any] = {
+                                "width": icon_w,
+                                "height": icon_h,
+                                "style": {
+                                    "color": int(_PLAY_GLYPH_ARGB),
+                                    "font_size": int(_PLAY_GLYPH_FONT_SIZE),
+                                },
+                            }
+                            if center is not None:
+                                glyph_kw["alignment"] = center
+                            self._play_mark = ui.Label("▶", **glyph_kw)
+                        fail_kw: Dict[str, Any] = {
+                            "width": icon_w,
+                            "height": icon_h,
                             "style": {
                                 "color": int(_PLAY_GLYPH_ARGB),
                                 "font_size": int(_PLAY_GLYPH_FONT_SIZE),
-                            }
+                            },
                         }
                         if center is not None:
-                            glyph_kw["alignment"] = center
-                        ui.Label("▶", **glyph_kw)
+                            fail_kw["alignment"] = center
+                        self._fail_mark = ui.Label(str(_FAIL_GLYPH), **fail_kw)
+                    self._set_widget_visible(self._fail_mark, False)
                     ui.Spacer()
                 ui.Spacer()
             btn_style = {
@@ -1043,18 +1065,14 @@ class _FedLoadPanel:
 
     def _enter_load_mode(self) -> None:
         self._play_starting = False
+        self._sync_play_marks(failed=False)
         self._set_play_visible(False)
 
-    def _enter_play_mode(self) -> None:
-        if bool(getattr(self, "_i_preview", False)):
-            return
-        if self._play_fn is None:
-            with _lock:
-                self._play_fn = _play_click_fns.get(self.screen)
-        if self._play_fn is None:
-            return
-        self._stop_anim()
-        self._play_starting = False
+    def _sync_play_marks(self, *, failed: bool) -> None:
+        self._set_widget_visible(self._play_mark, not bool(failed))
+        self._set_widget_visible(self._fail_mark, bool(failed))
+
+    def _apply_play_bg(self) -> None:
         try:
             if self._play_bg is not None:
                 self._play_bg.set_style(
@@ -1073,6 +1091,35 @@ class _FedLoadPanel:
                     }
             except Exception:
                 pass
+
+    def _enter_fail_mode(self) -> None:
+        """재생 버튼과 같은 자리·배경, 세모 대신 가운데 X. 클릭해도 재생하지 않음."""
+        if bool(getattr(self, "_i_preview", False)):
+            return
+        self._stop_anim()
+        self._play_starting = False
+        self._play_fn = None
+        self._sync_play_marks(failed=True)
+        self._apply_play_bg()
+        self._set_play_visible(True)
+        try:
+            if self._root is not None:
+                self._root.visible = True
+        except Exception:
+            pass
+
+    def _enter_play_mode(self) -> None:
+        if bool(getattr(self, "_i_preview", False)):
+            return
+        if self._play_fn is None:
+            with _lock:
+                self._play_fn = _play_click_fns.get(self.screen)
+        if self._play_fn is None:
+            return
+        self._stop_anim()
+        self._play_starting = False
+        self._sync_play_marks(failed=False)
+        self._apply_play_bg()
         self._set_play_visible(True)
         try:
             if self._root is not None:
@@ -1092,6 +1139,8 @@ class _FedLoadPanel:
         self._on_play_clicked()
 
     def _on_play_clicked(self) -> None:
+        if self._failed:
+            return
         if self._play_starting:
             return
         fn = self._play_fn
@@ -1167,18 +1216,10 @@ class _FedLoadPanel:
         if phase == "failed":
             self._failed = True
             self._pct_mode = "idle"
-            short = (detail or "").strip()
-            if len(short) > 28:
-                short = short[:25] + "..."
-            self._fail_detail = short
+            self._fail_detail = ""
             self._target_pct = float(self._display_pct)
             self._stop_anim()
-            self._enter_load_mode()
-            self._refresh_label()
-            try:
-                self._label.style = {"color": _FAIL_ARGB, "font_size": _FONT_SIZE}
-            except Exception:
-                pass
+            self._enter_fail_mode()
             return
 
         self._failed = False
@@ -1239,13 +1280,9 @@ class _FedLoadPanel:
             return
         try:
             if self._failed:
-                msg = "Load failed"
-                if self._fail_detail:
-                    msg = f"Failed: {self._fail_detail}"
-                self._label.text = msg
-            else:
-                pct = int(round(max(0.0, min(100.0, self._display_pct))))
-                self._label.text = f"Loading data... {pct}%"
+                return
+            pct = int(round(max(0.0, min(100.0, self._display_pct))))
+            self._label.text = f"Loading data... {pct}%"
         except Exception:
             pass
 
