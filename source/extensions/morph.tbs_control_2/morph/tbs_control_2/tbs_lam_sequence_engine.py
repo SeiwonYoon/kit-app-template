@@ -664,37 +664,21 @@ class TbsLamSequenceRunner:
                     _seq_log(f"{_PRINT_PREFIX} reset TBS_OFFSET failed: {exc}", flush=True)
 
                 # TIMESAMPLES/USD_TIMELINE: TBS_OFFSET 만으로는 end-frame 자세가 남는다.
-                # 이번 JSON 의 인스턴스 playback prim 만 range_start 로 seek + 즉시 evaluate.
-                # 화면2 프리런: 이 seek 가 aux Option E 에서 수 초 걸려 JSON 가시 시작이
-                # 막대보다 늦다. 첫 TIMESAMPLES 스텝의 start(reset=True) 가 동일 역할을 한다.
-                _seek_ts = True
-                try:
-                    from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
-
-                    ext_seek = getattr(self, "_diag_ext", None)
-                    if (
-                        bool(SIM_PRERUN_PLAN_SSOT)
-                        and bool(getattr(ext_seek, "_sim_playback_started", False))
-                        and int(self._resolve_lam_diag_screen()) >= 2
-                    ):
-                        _seek_ts = False
-                except Exception:
-                    _seek_ts = True
+                # 화면1·2 동일: 이번 JSON 의 인스턴스 playback prim 만 range_start 로 seek.
                 replay_paths: List[str] = []
                 seen_rp: set[str] = set()
-                if _seek_ts:
-                    for st in steps:
-                        if not st or not step_kind_is_instance_playback(
-                            str(st.get("type") or "")
-                        ):
-                            continue
-                        try:
-                            pp = (StepRef.from_dict(st.get("ref")).prim_path or "").strip()
-                        except Exception:
-                            pp = ""
-                        if pp.startswith("/") and pp not in seen_rp:
-                            seen_rp.add(pp)
-                            replay_paths.append(pp)
+                for st in steps:
+                    if not st or not step_kind_is_instance_playback(
+                        str(st.get("type") or "")
+                    ):
+                        continue
+                    try:
+                        pp = (StepRef.from_dict(st.get("ref")).prim_path or "").strip()
+                    except Exception:
+                        pp = ""
+                    if pp.startswith("/") and pp not in seen_rp:
+                        seen_rp.add(pp)
+                        replay_paths.append(pp)
                 if replay_paths:
 
                     def _seek_replay_instances_to_start(

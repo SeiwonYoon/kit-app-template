@@ -2057,30 +2057,21 @@ def _execute_mapped_sequence_stub(
                     pass
 
                 def _start_lam_after_reset() -> None:
-                    # #7: JSON 시작 전 위치초기화. 화면2 프리런은 aux TIMESAMPLES
-                    # pre-seek 가 막대보다 애니를 수 초 늦추므로 생략하고
-                    # LAM reset_each_start(TBS_OFFSET) + 첫 TIMESAMPLES 스텝에 맡긴다.
-                    _do_pre_json = True
+                    # 화면1·2 동일: JSON 시작 전 위치초기화 (aux ctx 는 restore 가 화면별 적용).
                     try:
-                        if bool(_playback) and int(scr_i) >= 2:
-                            _do_pre_json = False
-                    except Exception:
-                        _do_pre_json = True
-                    if _do_pre_json:
-                        try:
-                            _ok_reset = bool(
-                                _reset_sim_motion_before_json_run(
-                                    ext, job, runner_obj=runner_obj
-                                )
+                        _ok_reset = bool(
+                            _reset_sim_motion_before_json_run(
+                                ext, job, runner_obj=runner_obj
                             )
-                            if not _ok_reset:
-                                print(
-                                    f"[TBS/SIM] pre-json motion reset incomplete "
-                                    f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
-                                    flush=True,
-                                )
-                        except Exception as exc:
-                            print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
+                        )
+                        if not _ok_reset:
+                            print(
+                                f"[TBS/SIM] pre-json motion reset incomplete "
+                                f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
+                                flush=True,
+                            )
+                    except Exception as exc:
+                        print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
                     try:
                         from . import sim_multi_diag as _mdiag
 
