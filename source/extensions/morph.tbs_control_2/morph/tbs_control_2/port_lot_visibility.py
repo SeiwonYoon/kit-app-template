@@ -1029,7 +1029,7 @@ def apply_port_lot_prim_visibility_for_context(usd_context_name: Optional[str], 
 def apply_bp_count_layout_for_context(
     usd_context_name: Optional[str], bp_count: int
 ) -> None:
-    """웹 ``bp_count`` — BP1..N 만 남기고 INOUT·EP·나머지 BP LOT prim 숨김.
+    """웹 ``bp_count`` — BP1..N 표시, INOUT·EP·나머지 BP LOT prim 숨김.
 
     경로: ``config/port_lot_prim_paths.json``. occupancy 갱신 후에도 유지.
     """
@@ -1049,6 +1049,10 @@ def apply_bp_count_layout_for_context(
         path_s = str(mapping.get(port, "") or "").strip()
         if path_s:
             _set_prim_visible_on_stage(stage, path_s, False)
+    for port in shown:
+        path_s = str(mapping.get(port, "") or "").strip()
+        if path_s:
+            _set_prim_visible_on_stage(stage, path_s, True)
 
 
 def apply_port_lot_prim_visibility(ports_occupancy: Any) -> None:
