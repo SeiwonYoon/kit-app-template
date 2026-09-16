@@ -409,9 +409,9 @@ def playback_foup_heartbeat_elapsed(
 
     sp = 1.0
     try:
-        from .control_sim_playback_speed import ensure_step_speed_locked
+        from .control_sim_playback_speed import get_ui_sim_speed
 
-        sp = max(0.1, float(ensure_step_speed_locked(ext, max(1, int(screen)))))
+        sp = max(0.1, float(get_ui_sim_speed(ext)))
     except Exception:
         pass
 
@@ -473,9 +473,9 @@ def _wall_mapped_sim_for_active_job(
         lead_wall = max(0.0, _f(active.get("_json_lead_wall_sec"), 0.0))
         if lead_wall <= 1e-9 and json_lead > 1e-9:
             try:
-                from .control_sim_playback_speed import ensure_step_speed_locked
+                from .control_sim_playback_speed import get_ui_sim_speed
 
-                user_sp = max(0.1, float(ensure_step_speed_locked(ext, max(1, int(screen)))))
+                user_sp = max(0.1, float(get_ui_sim_speed(ext)))
                 lead_wall = float(json_lead) / float(user_sp)
             except Exception:
                 lead_wall = float(json_lead)
@@ -514,9 +514,9 @@ def _wall_mapped_sim_for_active_job(
         if json_lead > 1e-9 and not seq_started and lead_wall > 1e-9 and now_wall < sw + lead_wall:
             user_sp = 1.0
             try:
-                from .control_sim_playback_speed import ensure_step_speed_locked
+                from .control_sim_playback_speed import get_ui_sim_speed
 
-                user_sp = max(0.1, float(ensure_step_speed_locked(ext, scr)))
+                user_sp = max(0.1, float(get_ui_sim_speed(ext)))
             except Exception:
                 pass
             wall_el = max(0.0, (now_wall - sw) * user_sp)

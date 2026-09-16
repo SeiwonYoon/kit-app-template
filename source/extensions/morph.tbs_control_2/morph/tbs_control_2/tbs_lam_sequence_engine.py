@@ -531,6 +531,17 @@ class TbsLamSequenceRunner:
         except Exception:
             return False
 
+    def _live_speed_scale(self, fallback: float) -> float:
+        """SSOT 재생: 화면 공통 UI 배속. 아니면 기존 fallback/CSV."""
+        if self._is_ssot_playback():
+            try:
+                from .control_sim_playback_speed import get_ui_sim_speed
+
+                return max(0.05, float(get_ui_sim_speed(getattr(self, "_diag_ext", None))))
+            except Exception:
+                pass
+        return _playback_speed_scale(fallback)
+
     def _peer_rail_busy(self) -> bool:
         """병렬 타 레일 JSON 이 같은 화면에서 돌면 True — 채널 전체 wait/stop 억제."""
         try:
@@ -827,7 +838,7 @@ class TbsLamSequenceRunner:
                     _seq_log(f"{_PRINT_PREFIX} _apply_start_snapshot failed: {exc}", flush=True)
 
             d0_ms = int(first.get("step_delay_ms", 0) or 0)
-            sp = _playback_speed_scale(sp)
+            sp = self._live_speed_scale(sp)
             d0 = max(0.0, (d0_ms / 1000.0) / sp)
             if d0 > 0:
                 self._sleep(d0)
@@ -848,12 +859,12 @@ class TbsLamSequenceRunner:
                     except Exception:
                         pass
                     break
-                sp = _playback_speed_scale(sp)
+                sp = self._live_speed_scale(sp)
                 b = _group_end_index(steps, a)
                 self._execute_group(steps, a, b, sp, reset_each_start)
                 next_idx = b + 1
                 if next_idx < len(steps):
-                    sp = _playback_speed_scale(sp)
+                    sp = self._live_speed_scale(sp)
                     delay_ms_next = int((steps[next_idx] or {}).get("step_delay_ms", 0) or 0)
                     delay_next = max(0.0, (delay_ms_next / 1000.0) / sp)
                     if delay_next > 0:
@@ -877,7 +888,7 @@ class TbsLamSequenceRunner:
             # 자기 시퀀스가 멈춰 보이는 간섭의 주원인).
             if steps and not self._stop_flag.is_set():
                 try:
-                    sp_final = _playback_speed_scale(float(max(0.01, speed_scale or 1.0)))
+                    sp_final = self._live_speed_scale(float(max(0.01, speed_scale or 1.0)))
                     last = max(0, len(steps) - 1)
                     all_tx, all_rot, all_replay = self._collect_motion_targets_from_steps(
                         steps, 0, last
@@ -899,7 +910,7 @@ class TbsLamSequenceRunner:
                 if not self._parallel_rail_scoped():
                     drain_sec = 30.0
                     try:
-                        sp_final = _playback_speed_scale(float(max(0.01, speed_scale or 1.0)))
+                        sp_final = self._live_speed_scale(float(max(0.01, speed_scale or 1.0)))
                         last = max(0, len(steps) - 1)
                         extra = self._estimate_group_motion_extra_timeout(steps, 0, last, sp_final)
                         drain_sec = max(15.0, float(extra))
@@ -970,7 +981,7 @@ class TbsLamSequenceRunner:
         """
         if self._stop_flag.is_set():
             return
-        sp = _playback_speed_scale(speed_scale)
+        sp = self._live_speed_scale(speed_scale)
         leader_idx = a
         anchor_idx = b
         t_group_start = time.monotonic()
@@ -993,7 +1004,7 @@ class TbsLamSequenceRunner:
                 def _runner_for(idx: int = i, step: dict = step_i) -> None:
                     prev_tctx = _push_lam_stage_context(self._usd_context_name)
                     try:
-                        sp_follow = _playback_speed_scale(sp)
+                        sp_follow = self._live_speed_scale(sp)
                         delay = max(
                             0.0,
                             (int(step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_follow,
@@ -1003,7 +1014,7 @@ class TbsLamSequenceRunner:
                         if self._stop_flag.is_set():
                             return
                         start_at = time.monotonic()
-                        sp_step = _playback_speed_scale(sp)
+                        sp_step = self._live_speed_scale(sp)
                         dur = self._start_step(idx, step, sp_step, reset_each_start)
                         if idx == anchor_idx:
                             anchor_finish_at_holder["t"] = start_at + dur
@@ -1017,7 +1028,7 @@ class TbsLamSequenceRunner:
                 follower_threads.append(t)
 
             anchor_step = steps[anchor_idx] or {}
-            sp_anchor = _playback_speed_scale(sp)
+            sp_anchor = self._live_speed_scale(sp)
             anchor_delay_sec = max(
                 0.0, (int(anchor_step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_anchor
             )
@@ -2066,6 +2077,13 @@ class TbsLamSequenceRunner:
     # ------------------------------------------------------------ wait/sleep
 
     def _wait_for(self, target_monotonic: float) -> None:
+        now = time.monotonic()
+        remain = float(target_monotonic) - float(now)
+        if remain <= 1e-9:
+            return
+        if self._is_ssot_playback():
+            self._live_speed_sleep(remain, allow_stop=True)
+            return
         while not self._stop_flag.is_set():
             now = time.monotonic()
             if now >= target_monotonic:
@@ -2088,6 +2106,9 @@ class TbsLamSequenceRunner:
     def _sleep(self, sec: float, *, allow_stop: bool = True) -> None:
         if sec <= 0:
             return
+        if self._is_ssot_playback():
+            self._live_speed_sleep(float(sec), allow_stop=allow_stop)
+            return
         try:
             from .tbs_sim_play_stubs import csv_play_session_active
 
@@ -2104,6 +2125,20 @@ class TbsLamSequenceRunner:
             if now >= end:
                 return
             time.sleep(min(0.1, end - now))
+
+    def _live_speed_sleep(self, wall_sec: float, *, allow_stop: bool = True) -> None:
+        """현재 배속 기준 wall 대기를 1x 초로 환산한 뒤, 라이브 UI 배속으로 소진."""
+        if wall_sec <= 1e-9:
+            return
+        sp0 = max(0.05, float(self._live_speed_scale(1.0)))
+        nominal = float(wall_sec) * float(sp0)
+        while nominal > 1e-6:
+            if allow_stop and self._stop_flag.is_set():
+                return
+            sp = max(0.05, float(self._live_speed_scale(sp0)))
+            wall_chunk = min(0.05, nominal / sp)
+            time.sleep(max(0.0, wall_chunk))
+            nominal -= wall_chunk * sp
 
     # ---------------------------------------------------------- hide helpers
 

@@ -145,6 +145,8 @@ class SimPlaybackRuntime:
     emit_fn: EmitFn
     speed_fn: SpeedFn
     gate_fn: GateFn
+    shared_sim_now: float = 0.0
+    shared_last_wall: float = 0.0
 
     @classmethod
     def start(
@@ -188,6 +190,8 @@ class SimPlaybackRuntime:
             )
 
         rt = cls(sessions=sessions, emit_fn=emit_fn, speed_fn=speed_fn, gate_fn=gate_fn)
+        rt.shared_sim_now = 0.0
+        rt.shared_last_wall = time.perf_counter()
         _attach_runtime(ext, rt)
         if len(sessions) > 1:
             try:
@@ -238,10 +242,32 @@ class SimPlaybackRuntime:
         playing = [s for s in self.sessions.values() if s.is_playing()]
         if not playing:
             return
+        from .control_sim_playback_speed import get_ui_sim_speed
+
+        now_wall = time.perf_counter()
+        last_w = float(getattr(self, "shared_last_wall", 0.0) or 0.0)
+        if last_w <= 1e-15:
+            last_w = float(now_wall)
+        dt = max(0.0, float(now_wall) - last_w)
+        try:
+            sp = max(0.05, float(get_ui_sim_speed(ext)))
+        except Exception:
+            try:
+                sp = max(0.05, float(self.speed_fn()))
+            except Exception:
+                sp = 1.0
+        self.shared_sim_now = float(getattr(self, "shared_sim_now", 0.0) or 0.0) + (
+            float(dt) * float(sp)
+        )
+        self.shared_last_wall = float(now_wall)
+        t_shared = float(self.shared_sim_now)
+        for sess in playing:
+            try:
+                sess.player.apply_shared_sim_now(t_shared, now_wall)
+            except Exception:
+                sess.advance_clock_only(ext)
         multi = len(playing) > 1
         prog_iv = _HB_PROG_INTERVAL_MULTI if multi else _HB_PROG_INTERVAL
-        for sess in playing:
-            sess.advance_clock_only(ext)
         # 화면1과 동일: emit 이 JSON 을 기동한 뒤 막대 UI. 잔여 enqueue 만 여기서 비움.
         for sess in playing:
             sess.emit_due_and_sync(

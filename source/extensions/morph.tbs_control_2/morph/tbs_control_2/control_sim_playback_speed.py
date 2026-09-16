@@ -1,8 +1,12 @@
-"""프리런 재생 — 단계(이벤트) 경계 라이브 배속 (진행 중 단계는 시작 배속 유지)."""
+"""프리런 재생 — 화면 공통 라이브 배속.
+
+sim_now 는 화면별로 잠그지 않는다. UI 배속을 바꾸면 화면 1·2 가
+같은 벽시계에 같은 배속을 곱해 같이 흐른다.
+"""
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
 
 def get_ui_sim_speed(ext: Any) -> float:
@@ -27,16 +31,14 @@ def _lock_map(ext: Any) -> Dict[str, float]:
 
 
 def is_playback_step_speed_locked(ext: Any, screen: int) -> bool:
-    return str(max(1, int(screen))) in _lock_map(ext)
+    del screen
+    return False
 
 
 def lock_playback_step_speed(ext: Any, screen: int) -> float:
-    """현재 UI 배속을 이 화면의 진행 중 단계에 고정 (이미 고정돼 있으면 유지)."""
-    key = str(max(1, int(screen)))
-    mp = _lock_map(ext)
-    if key not in mp:
-        mp[key] = float(get_ui_sim_speed(ext))
-    return float(mp[key])
+    """호환용. 시계는 화면 고정 배속을 쓰지 않는다."""
+    del screen
+    return float(get_ui_sim_speed(ext))
 
 
 def unlock_playback_step_speed(ext: Any, screen: int) -> None:
@@ -55,26 +57,21 @@ def clear_playback_step_speed_locks(ext: Any) -> None:
 
 
 def get_playback_advance_speed(ext: Any, screen: int) -> float:
-    """``sim_now`` 전진용 — 단계 고정 중이면 고정 배속, 아니면 UI 라이브 배속."""
-    key = str(max(1, int(screen)))
-    mp = _lock_map(ext)
-    if key in mp:
-        try:
-            return max(0.05, float(mp[key]))
-        except Exception:
-            pass
+    """``sim_now`` 전진 — 화면과 무관하게 현재 UI 배속."""
+    del screen
     return max(0.05, float(get_ui_sim_speed(ext)))
 
 
 def ensure_step_speed_locked(ext: Any, screen: int) -> float:
-    """JSON job 등 단계 시작 직전 — 아직 고정 없으면 지금 UI 배속으로 고정."""
-    return lock_playback_step_speed(ext, screen)
+    """호환용. JSON/표시도 라이브 UI 배속."""
+    del screen
+    return float(get_ui_sim_speed(ext))
 
 
 def make_playback_speed_supplier(ext: Any, screen: int) -> Callable[[], float]:
-    scr = int(screen)
+    del screen
 
     def _sup() -> float:
-        return get_playback_advance_speed(ext, scr)
+        return get_playback_advance_speed(ext, 1)
 
     return _sup

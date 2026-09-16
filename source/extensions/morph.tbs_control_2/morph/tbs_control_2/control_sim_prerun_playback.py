@@ -1233,6 +1233,24 @@ class SimTimelinePlayer:
             self._skipped_by_screen[scr] = set()
             self._playing = True
 
+    def apply_shared_sim_now(self, t_shared: float, now_wall: float) -> None:
+        """화면 공통 sim 시각을 이 플레이어에 반영 (final_sim_time 상한만 화면별)."""
+        try:
+            t0 = max(0.0, float(t_shared))
+        except Exception:
+            return
+        try:
+            wall = float(now_wall)
+        except Exception:
+            wall = time.perf_counter()
+        with self._lock:
+            if not self._playing:
+                return
+            for scr, res in self._results.items():
+                cap = float(res.final_sim_time) if res is not None else t0
+                self._sim_now_by_screen[scr] = min(float(cap), float(t0))
+                self._last_wall_by_screen[scr] = float(wall)
+
     def advance_sim_clock(self, ext: Any = None) -> None:
         """wall-clock × 배속으로 ``sim_now`` 만 전진 (emit 없음).
 

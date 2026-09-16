@@ -319,7 +319,7 @@ from .control_sim_playback_gate import (
 )
 from .control_sim_playback_speed import (
     clear_playback_step_speed_locks,
-    ensure_step_speed_locked,
+    get_ui_sim_speed,
     lock_playback_step_speed,
     unlock_playback_step_speed,
 )
@@ -1188,12 +1188,7 @@ def _execute_mapped_sequence_stub(
 
             sp = 1.0
             try:
-                if bool(getattr(ext, "_sim_playback_started", False)):
-                    sp = float(ensure_step_speed_locked(ext, scr_i))
-                else:
-                    m = getattr(ext, "_sim_speed_model", None)
-                    if m is not None:
-                        sp = max(0.1, float(m.get_value_as_float()))
+                sp = float(get_ui_sim_speed(ext))
             except Exception:
                 sp = 1.0
             proc_sec_job = 0.0
@@ -2047,24 +2042,22 @@ def _execute_mapped_sequence_stub(
                     pass
 
                 def _start_lam_after_reset() -> None:
-                    # SSOT 재생: 시작 시각이 악보. 여기서 restore/idle wait 하면
-                    # anim_play_start 가 밀려 renewal 이 막대보다 늦다.
-                    # 위치는 SequenceRunner.reset_each_start 가 이번 JSON prim 만 맞춘다.
-                    if not bool(_ssot_play):
-                        try:
-                            _ok_reset = bool(
-                                _reset_sim_motion_before_json_run(
-                                    ext, job, runner_obj=runner_obj
-                                )
+                    # 위치초기화는 화면1·2·SSOT 동일. idle wait(0.2s) 는 restore 함수가
+                    # 메인에서 생략하므로 시작 시각만 밀지 않는다.
+                    try:
+                        _ok_reset = bool(
+                            _reset_sim_motion_before_json_run(
+                                ext, job, runner_obj=runner_obj
                             )
-                            if not _ok_reset:
-                                print(
-                                    f"[TBS/SIM] pre-json motion reset incomplete "
-                                    f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
-                                    flush=True,
-                                )
-                        except Exception as exc:
-                            print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
+                        )
+                        if not _ok_reset:
+                            print(
+                                f"[TBS/SIM] pre-json motion reset incomplete "
+                                f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
+                                flush=True,
+                            )
+                    except Exception as exc:
+                        print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
                     try:
                         from . import sim_multi_diag as _mdiag
 
@@ -2150,13 +2143,13 @@ def _execute_mapped_sequence_stub(
                             pass
 
                 # tick_all poll/drain 은 메인. 여기서 sync restore 하면
-                # 화면1 초기화가 화면2 JSON 기동을 수 초 막는다 → 막대만 앞서고 애니만 늦음.
+                # 화면1 초기화가 화면2 JSON 기동을 막아 막대만 앞서고 애니만 늦음.
                 on_main = False
                 try:
                     on_main = threading.current_thread() is threading.main_thread()
                 except Exception:
                     on_main = False
-                if bool(_playback) and on_main and (not bool(_ssot_play)):
+                if bool(_playback) and on_main:
                     threading.Thread(
                         target=_kick_json_start,
                         name=f"tbs_json_kick_{int(scr_i)}",
@@ -14942,6 +14935,17 @@ def _reset_sim_motion_before_json_run(
     # 백그라운드: dispatch_main_wait 로 restore 한 뒤 큐만 짧게 확인.
     if on_main:
         return True
+    # SSOT 재생: restore 는 이미 dispatch_main_wait 로 끝난 상태.
+    # 0.2s idle 은 시작만 밀고 위치에는 도움이 없다.
+    try:
+        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+        if bool(SIM_PRERUN_PLAN_SSOT) and bool(
+            getattr(ext, "_sim_playback_started", False)
+        ):
+            return True
+    except Exception:
+        pass
     try:
         from .tbs_main_dispatch import wait_context_dispatch_idle
 
