@@ -56,6 +56,9 @@ _FOUP_LIFT_SIGN_BY_CTX: Dict[str, Dict[str, int]] = {}
 
 # T2V bp_count 레이아웃 — occupancy 가 숨긴 포트 LOT prim 을 다시 켜지 않게 ctx 별 유지
 _BP_LAYOUT_HIDE_PORTS_BY_CTX: Dict[str, Tuple[str, ...]] = {}
+# 새로 켠 BP 한 프레임 오프셋 복원 대기 (ctx → path → 원래 offset translate)
+_BP_LAYOUT_NUDGE_PENDING: Dict[str, Dict[str, Gf.Vec3f]] = {}
+_BP_LAYOUT_NUDGE_OFFSET = Gf.Vec3f(0.05, 0.0, 0.0)
 
 
 def _ctx_key(usd_context_name: Optional[str]) -> str:
@@ -235,6 +238,7 @@ def clear_port_lot_authoring_cache() -> None:
     _FOUP_IN_PROGRESS_BY_CTX.clear()
     _FOUP_LIFTED_BY_CTX.clear()
     _FOUP_LIFT_SIGN_BY_CTX.clear()
+    _BP_LAYOUT_NUDGE_PENDING.clear()
 
 
 def mark_foup_in_progress(
@@ -1045,6 +1049,85 @@ def apply_port_lot_prim_visibility_for_context(usd_context_name: Optional[str], 
                 _set_prim_visible_on_stage(stage, path_h, False)
 
 
+def _write_prim_translate(stage: Any, prim_path: str, value: Gf.Vec3f) -> None:
+    if not stage or not prim_path:
+        return
+    try:
+        from .sequence_engine import _set_translate
+
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return
+        _set_translate(prim, value)
+    except Exception:
+        pass
+
+
+def _restore_bp_layout_nudge(usd_context_name: Optional[str], paths: Tuple[str, ...]) -> None:
+    """한 프레임 뒤 — 새로 켠 BP offset translate 를 저장값으로 되돌린다."""
+    key = _ctx_key(usd_context_name)
+    store = _BP_LAYOUT_NUDGE_PENDING.get(key)
+    if not store:
+        return
+    stage = _get_stage_for_context(usd_context_name)
+    for path in paths:
+        orig = store.pop(path, None)
+        if orig is None:
+            continue
+        _write_prim_translate(stage, path, orig)
+    if not store:
+        _BP_LAYOUT_NUDGE_PENDING.pop(key, None)
+
+
+def _nudge_newly_shown_bp_prims_for_context(
+    usd_context_name: Optional[str],
+    newly_shown: Set[str],
+    mapping: Dict[str, str],
+    stage: Any,
+) -> None:
+    """이번에 레이아웃으로 켜진 BP 만 한 프레임 미세 이동 후 복원 (TAA 재샘플)."""
+    if not newly_shown or not stage or not mapping:
+        return
+    key = _ctx_key(usd_context_name)
+    pending = _BP_LAYOUT_NUDGE_PENDING.setdefault(key, {})
+    restore_paths: List[str] = []
+    dx = float(_BP_LAYOUT_NUDGE_OFFSET[0])
+    dy = float(_BP_LAYOUT_NUDGE_OFFSET[1])
+    dz = float(_BP_LAYOUT_NUDGE_OFFSET[2])
+    for port in newly_shown:
+        path_s = str(mapping.get(port, "") or "").strip()
+        if not path_s:
+            continue
+        cur = _read_prim_translate(stage, path_s)
+        if cur is None:
+            continue
+        if path_s not in pending:
+            pending[path_s] = Gf.Vec3f(float(cur[0]), float(cur[1]), float(cur[2]))
+        orig = pending[path_s]
+        _write_prim_translate(
+            stage,
+            path_s,
+            Gf.Vec3f(float(orig[0]) + dx, float(orig[1]) + dy, float(orig[2]) + dz),
+        )
+        restore_paths.append(path_s)
+    if not restore_paths:
+        if not pending:
+            _BP_LAYOUT_NUDGE_PENDING.pop(key, None)
+        return
+    paths = tuple(restore_paths)
+    ctx_name = usd_context_name
+
+    def _restore() -> None:
+        _restore_bp_layout_nudge(ctx_name, paths)
+
+    try:
+        import omni.kit.app as kit_app
+
+        kit_app.get_app().post_update(_restore)
+    except Exception:
+        _restore()
+
+
 def apply_bp_count_layout_for_context(
     usd_context_name: Optional[str], bp_count: int
 ) -> None:
@@ -1059,7 +1142,10 @@ def apply_bp_count_layout_for_context(
         for p in ("INOUT", "EP1", "EP2", "EP3", "BP1", "BP2", "BP3", "BP4")
         if p not in shown
     )
-    _BP_LAYOUT_HIDE_PORTS_BY_CTX[_ctx_key(usd_context_name)] = hide_ports
+    key = _ctx_key(usd_context_name)
+    prev_hide = set(_BP_LAYOUT_HIDE_PORTS_BY_CTX.get(key) or ())
+    newly_shown = shown.intersection(prev_hide)
+    _BP_LAYOUT_HIDE_PORTS_BY_CTX[key] = hide_ports
     mapping = load_port_lot_prim_paths()
     stage = _get_stage_for_context(usd_context_name)
     if not stage or not mapping:
@@ -1073,6 +1159,10 @@ def apply_bp_count_layout_for_context(
         if path_s:
             _set_prim_visible_on_stage(stage, path_s, True)
     _reset_renderer_accumulation_for_context(usd_context_name)
+    # accumulation 만으로 잔상이 없으면 아래 호출을 주석 처리
+    _nudge_newly_shown_bp_prims_for_context(
+        usd_context_name, newly_shown, mapping, stage
+    )
 
 
 def apply_port_lot_prim_visibility(ports_occupancy: Any) -> None:
