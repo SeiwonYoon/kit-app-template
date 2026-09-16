@@ -269,34 +269,52 @@ class SequenceRunner(_LegacySequenceRunner):
                     peer_now = self._peer_rail_busy()
                     if scoped or peer_now:
                         # 병렬 레일: 이번 JSON prim 만 정리 (채널 전체 stop/drain 금지)
+                        _own = _collect_prim_paths_for_reset(list(self._lam_last_steps or []))
                         stop_channel_animations_for_paths(
                             self._last_usd_context_name,
-                            _collect_prim_paths_for_reset(list(self._lam_last_steps or [])),
+                            _own,
                             diag_reason="lam_run_end_peer_preserve",
                         )
+                        try:
+                            from .tbs_lam_sequence_engine import pause_timesample_replays_for_paths
+
+                            pause_timesample_replays_for_paths(self._tbs_registry, _own)
+                        except Exception:
+                            pass
                     else:
                         stop_channel_animations(
                             self._last_usd_context_name,
                             diag_reason="lam_run_end",
                         )
-                        # SSOT 재생: 종료 drain 이 길면 다음 JSON 이 수 초 지연된다.
-                        _drain_max = 4.0
+                        try:
+                            from .tbs_lam_sequence_engine import pause_timesample_replays_for_paths
+
+                            pause_timesample_replays_for_paths(
+                                self._tbs_registry,
+                                _collect_prim_paths_for_reset(
+                                    list(self._lam_last_steps or [])
+                                ),
+                            )
+                        except Exception:
+                            pass
+                        # SSOT 재생: drain 이 다음 JSON anim_play_start 를 민다.
+                        _ssot_skip_drain = False
                         try:
                             from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
 
                             _dext = getattr(self, "_diag_ext", None)
-                            if bool(SIM_PRERUN_PLAN_SSOT) and bool(
+                            _ssot_skip_drain = bool(SIM_PRERUN_PLAN_SSOT) and bool(
                                 getattr(_dext, "_sim_playback_started", False)
-                            ):
-                                _drain_max = 0.12
+                            )
                         except Exception:
-                            _drain_max = 4.0
-                        drain_channel_motion_complete(
-                            self._last_usd_context_name,
-                            self._tbs_registry,
-                            max_sec=float(_drain_max),
-                            stable_ticks=1 if float(_drain_max) < 0.5 else 2,
-                        )
+                            _ssot_skip_drain = False
+                        if not _ssot_skip_drain:
+                            drain_channel_motion_complete(
+                                self._last_usd_context_name,
+                                self._tbs_registry,
+                                max_sec=4.0,
+                                stable_ticks=2,
+                            )
                 except Exception:
                     pass
                 if callable(cb):

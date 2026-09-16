@@ -277,6 +277,31 @@ def _collect_prim_paths_for_reset(steps: List[dict]) -> List[str]:
     return out
 
 
+def pause_timesample_replays_for_paths(registry: Any, prim_paths: List[str]) -> None:
+    """이번 JSON 의 TIMESAMPLES 만 pause — 끝 자세 유지, 타 레일 인스턴스는 그대로."""
+    if registry is None:
+        return
+    for raw in prim_paths or []:
+        pp = str(raw or "").strip()
+        if not pp.startswith("/"):
+            continue
+        try:
+            inst = registry.get_by_prim_path(pp)
+        except Exception:
+            inst = None
+        if inst is None:
+            continue
+        try:
+            if str(getattr(inst, "state", "") or "") != "playing":
+                continue
+        except Exception:
+            continue
+        try:
+            inst.state = "paused"
+        except Exception:
+            pass
+
+
 def _refresh_instance_asset_time_from_stage(instance) -> tuple[float, float, float]:
     """instance 의 asset_start/end/tps 가 (0,0) 이면 prim 산하 timeSamples 에서 폴백 추출.
 
@@ -495,6 +520,17 @@ class TbsLamSequenceRunner:
         self._diag_screen: int = 1
         self._progress_steps: List[dict] = []
 
+    def _is_ssot_playback(self) -> bool:
+        try:
+            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+            ext = getattr(self, "_diag_ext", None)
+            return bool(SIM_PRERUN_PLAN_SSOT) and bool(
+                getattr(ext, "_sim_playback_started", False)
+            )
+        except Exception:
+            return False
+
     def _peer_rail_busy(self) -> bool:
         """병렬 타 레일 JSON 이 같은 화면에서 돌면 True — 채널 전체 wait/stop 억제."""
         try:
@@ -509,7 +545,7 @@ class TbsLamSequenceRunner:
             ext = getattr(self, "_diag_ext", None)
             if ext is None:
                 return False
-            scr = int(getattr(self, "_diag_screen", 1) or 1)
+            scr = int(self._lam_bar_screen())
             return bool(is_twin_rail_occupying(ext, scr, rail))
         except Exception:
             return False
@@ -549,6 +585,43 @@ class TbsLamSequenceRunner:
             return 2
         return tagged if tagged >= 1 else 1
 
+    def _lam_bar_screen(self) -> int:
+        return int(self._resolve_lam_diag_screen())
+
+    def _lam_bar_rail(self) -> Optional[str]:
+        r = str(getattr(self, "_sim_rail", "") or "").strip().lower()
+        return r if r in ("oht", "move") else None
+
+    def _publish_lam_bar_progress(self, step_idx: int, *, include_current: bool = False) -> None:
+        try:
+            from .control_sim_playback_plan import publish_anim_bar_progress_at_step
+
+            steps = list(getattr(self, "_progress_steps", None) or [])
+            publish_anim_bar_progress_at_step(
+                getattr(self, "_diag_ext", None),
+                int(self._lam_bar_screen()),
+                steps,
+                int(step_idx),
+                include_current=bool(include_current),
+                rail=self._lam_bar_rail(),
+            )
+        except Exception:
+            pass
+
+    def _playback_defers_port_lot_visibility(self) -> bool:
+        ext = getattr(self, "_diag_ext", None)
+        return bool(ext is not None and getattr(ext, "_sim_playback_started", False))
+
+    def _filter_port_lot_vis_paths(self, paths: List[str]) -> List[str]:
+        """재생 중 포트 LOT FOUP 가시성은 occupancy/renewal SSOT — JSON vis 스텝 제외."""
+        if not paths or not self._playback_defers_port_lot_visibility():
+            return list(paths or [])
+        try:
+            from .port_lot_visibility import is_port_lot_mapped_prim
+        except Exception:
+            return list(paths)
+        return [p for p in paths if not is_port_lot_mapped_prim(p)]
+
     def _parallel_rail_scoped(self) -> bool:
         """병렬 ON + oht/move 레일 runner — motion wait 를 자기 prim 으로만 한정."""
         try:
@@ -560,6 +633,22 @@ class TbsLamSequenceRunner:
             return rail in ("oht", "move")
         except Exception:
             return False
+
+    def _stop_this_json_motion(self) -> None:
+        """이번 JSON prim 의 MOVE/ROTATE/TIMESAMPLES 만 정지. 타 레일은 건드리지 않음."""
+        steps = list(getattr(self, "_progress_steps", None) or [])
+        paths = _collect_prim_paths_for_reset(steps)
+        try:
+            from .sim_channel_scope import stop_channel_animations_for_paths
+
+            stop_channel_animations_for_paths(
+                self._usd_context_name,
+                paths,
+                diag_reason="json_own_end",
+            )
+        except Exception:
+            pass
+        pause_timesample_replays_for_paths(self._registry, paths)
 
     # ------------------------------------------------------------------ public
 
@@ -622,15 +711,7 @@ class TbsLamSequenceRunner:
 
             sp = float(max(0.01, speed_scale or 1.0))
             try:
-                from .control_sim_playback_plan import publish_anim_bar_progress_at_step
-
-                publish_anim_bar_progress_at_step(
-                    getattr(self, "_diag_ext", None),
-                    int(getattr(self, "_diag_screen", 1) or 1),
-                    steps,
-                    0,
-                    include_current=False,
-                )
+                self._publish_lam_bar_progress(0, include_current=False)
             except Exception:
                 pass
 
@@ -653,16 +734,6 @@ class TbsLamSequenceRunner:
                     f"{_PRINT_PREFIX} reset_each_start: zero TBS_OFFSET for {len(rpaths)} prim(s)",
                     flush=True,
                 )
-                try:
-                    self._q_main_wait(
-                        lambda paths=rpaths, c=self._usd_context_name: _reset_tbs_offset_ops_for_paths(
-                            paths, usd_context_name=c
-                        ),
-                        timeout=15.0,
-                    )
-                except Exception as exc:
-                    _seq_log(f"{_PRINT_PREFIX} reset TBS_OFFSET failed: {exc}", flush=True)
-
                 # TIMESAMPLES/USD_TIMELINE: TBS_OFFSET 만으로는 end-frame 자세가 남는다.
                 # 화면1·2 동일: 이번 JSON 의 인스턴스 playback prim 만 range_start 로 seek.
                 replay_paths: List[str] = []
@@ -679,66 +750,68 @@ class TbsLamSequenceRunner:
                     if pp.startswith("/") and pp not in seen_rp:
                         seen_rp.add(pp)
                         replay_paths.append(pp)
-                if replay_paths:
 
-                    def _seek_replay_instances_to_start(
-                        paths: List[str] = replay_paths,
-                    ) -> None:
-                        from .tbs_lam_sequence_editor import (
-                            _range_start_seconds_for_instance,
-                        )
+                def _seek_replay_instances_to_start(
+                    paths: List[str] = replay_paths,
+                ) -> None:
+                    from .tbs_lam_sequence_editor import (
+                        _range_start_seconds_for_instance,
+                    )
 
-                        ev = getattr(self._scheduler, "_evaluator", None)
-                        for pp in paths:
-                            try:
-                                inst = self._registry.get_by_prim_path(pp)
-                            except Exception:
-                                inst = None
-                            if inst is None:
-                                continue
-                            try:
-                                inst.virtual_time = _range_start_seconds_for_instance(
-                                    inst
-                                )
-                                inst.state = "stopped"
-                            except Exception:
-                                continue
-                            if ev is None:
-                                continue
-                            # end-frame default 를 시작 프레임으로 덮어쓰려면
-                            # replay 활성 + mapping invalidate 가 필요하다.
-                            try:
-                                fn_begin = getattr(ev, "begin_replay_mode", None)
-                                if callable(fn_begin):
-                                    fn_begin(pp)
-                            except Exception:
-                                pass
-                            for fn_name in (
-                                "invalidate_mapping",
-                                "force_rebuild_attr_cache",
-                            ):
-                                fn = getattr(ev, fn_name, None)
-                                if callable(fn):
-                                    try:
-                                        fn(pp)
-                                    except Exception:
-                                        pass
-                            fn_now = getattr(ev, "evaluate_instance_now", None)
-                            if callable(fn_now):
+                    ev = getattr(self._scheduler, "_evaluator", None)
+                    for pp in paths:
+                        try:
+                            inst = self._registry.get_by_prim_path(pp)
+                        except Exception:
+                            inst = None
+                        if inst is None:
+                            continue
+                        try:
+                            inst.virtual_time = _range_start_seconds_for_instance(
+                                inst
+                            )
+                            inst.state = "stopped"
+                        except Exception:
+                            continue
+                        if ev is None:
+                            continue
+                        # end-frame default 를 시작 프레임으로 덮어쓰려면
+                        # replay 활성 + mapping invalidate 가 필요하다.
+                        try:
+                            fn_begin = getattr(ev, "begin_replay_mode", None)
+                            if callable(fn_begin):
+                                fn_begin(pp)
+                        except Exception:
+                            pass
+                        for fn_name in (
+                            "invalidate_mapping",
+                            "force_rebuild_attr_cache",
+                        ):
+                            fn = getattr(ev, fn_name, None)
+                            if callable(fn):
                                 try:
-                                    fn_now(pp)
+                                    fn(pp)
                                 except Exception:
                                     pass
+                        fn_now = getattr(ev, "evaluate_instance_now", None)
+                        if callable(fn_now):
+                            try:
+                                fn_now(pp)
+                            except Exception:
+                                pass
 
-                    try:
-                        self._q_main_wait(
-                            _seek_replay_instances_to_start, timeout=15.0
-                        )
-                    except Exception as exc:
-                        _seq_log(
-                            f"{_PRINT_PREFIX} reset TIMESAMPLES vt failed: {exc}",
-                            flush=True,
-                        )
+                def _reset_start_pose() -> None:
+                    _reset_tbs_offset_ops_for_paths(
+                        rpaths, usd_context_name=self._usd_context_name
+                    )
+                    if replay_paths:
+                        _seek_replay_instances_to_start()
+
+                try:
+                    # 메인 왕복 1회. SSOT 는 시작이 밀리면 renewal 이 막대보다 늦다.
+                    self._q_main_wait(_reset_start_pose, timeout=15.0)
+                except Exception as exc:
+                    _seq_log(f"{_PRINT_PREFIX} reset_each_start failed: {exc}", flush=True)
 
             first = steps[0] or {}
             self._start_from_current = bool(first.get("_start_from_current", False))
@@ -789,6 +862,12 @@ class TbsLamSequenceRunner:
 
             try:
                 self._hide.clear_all()
+            except Exception:
+                pass
+
+            # JSON 종료 — 자기 prim TIMESAMPLES/MOVE 는 항상 멈춘다 (병렬이어도).
+            try:
+                self._stop_this_json_motion()
             except Exception:
                 pass
 
@@ -942,7 +1021,7 @@ class TbsLamSequenceRunner:
             anchor_delay_sec = max(
                 0.0, (int(anchor_step.get("step_delay_ms", 0) or 0) / 1000.0) / sp_anchor
             )
-            self._sleep(anchor_delay_sec + 0.05, allow_stop=True)
+            self._sleep(anchor_delay_sec + (0.0 if self._is_ssot_playback() else 0.05), allow_stop=True)
             self._wait_for(anchor_finish_at_holder["t"])
             join_timeout = motion_extra_timeout + 5.0
             for ft in follower_threads:
@@ -950,26 +1029,20 @@ class TbsLamSequenceRunner:
 
         # 그룹 duration 대기 종료 — 이 화면 애니 진행만큼 막대 상한 갱신
         try:
-            from .control_sim_playback_plan import publish_anim_bar_progress_at_step
-
-            publish_anim_bar_progress_at_step(
-                getattr(self, "_diag_ext", None),
-                int(getattr(self, "_diag_screen", 1) or 1),
-                list(getattr(self, "_progress_steps", None) or steps),
-                int(anchor_idx),
-                include_current=True,
-            )
+            self._publish_lam_bar_progress(int(anchor_idx), include_current=True)
         except Exception:
             pass
 
-        self._wait_for_motion_complete(
-            motion_tx,
-            motion_rot,
-            motion_replay,
-            max_extra_sec=motion_extra_timeout,
-        )
-        # 프리런: wall 그룹이 sim_now(막대·「동작중」)보다 앞서면 여기서 맞춤.
-        # (시작 게이트만으로는 현재 job 내부 드리프트를 막지 못함 — 화면2 aux 등)
+        # SSOT 재생: 추정 duration 이 악보. TIMESAMPLES 는 끝까지 playing 이라
+        # motion wait 하면 renewal 그룹이 막대 port_sync 보다 늦다.
+        if not self._is_ssot_playback():
+            self._wait_for_motion_complete(
+                motion_tx,
+                motion_rot,
+                motion_replay,
+                max_extra_sec=motion_extra_timeout,
+            )
+        # 그룹이 sim_now 보다 앞섰으면 여기서 맞춤 (renewal 이 막대보다 먼저 오지 않게).
         try:
             self._gate_wall_anim_to_sim_now(
                 list(getattr(self, "_progress_steps", None) or steps),
@@ -980,39 +1053,13 @@ class TbsLamSequenceRunner:
 
     @staticmethod
     def _step_content_duration_1x_sec(step: Any) -> float:
-        """막대 publish 와 동일 — 1배속 콘텐츠 길이(초)."""
-        if not isinstance(step, dict):
-            return 0.0
+        """막대 publish·게이트 공통 — 1배속 콘텐츠 길이(초, USD speed_scale 포함)."""
         try:
-            from .sequence_renewal import is_renewal_marker
+            from .sim_sequence_duration import step_content_duration_1x_sec
 
-            if is_renewal_marker(step):
-                return 0.0
-        except Exception:
-            pass
-        t = str(step.get("type") or "").upper()
-        try:
-            if t in ("MOVE", "ROTATE", "DELAY"):
-                if t in ("MOVE", "ROTATE") and "duration_max" in step:
-                    return max(
-                        0.0,
-                        float(step.get("duration_max", step.get("duration", 0.0))),
-                    )
-                return max(0.0, float(step.get("duration", 0.0) or 0.0))
-            if t in ("PRIM_VISIBILITY", "SET_PRIM_VISIBILITY", "PRIM_HIDE", "PRIM_SHOW"):
-                return max(0.0, float(step.get("duration", 0.02) or 0.02))
-            if t in ("USD_TIMELINE", "TIMESAMPLES_REPLAY"):
-                play = step.get("play") or {}
-                if not isinstance(play, dict):
-                    play = {}
-                start = int(play.get("start_frame", step.get("start_frame", 0)) or 0)
-                end = int(play.get("end_frame", step.get("end_frame", 0)) or 0)
-                if end <= start:
-                    return 0.0
-                return max(0.0, float(end - start) / 30.0)
+            return float(step_content_duration_1x_sec(step))
         except Exception:
             return 0.0
-        return 0.0
 
     def _active_json_play_window(self) -> Tuple[float, Optional[float]]:
         """``(play_start_sim, play_end_or_None)`` — 활성 job / runner 핀 / diag 메타."""
@@ -1092,7 +1139,13 @@ class TbsLamSequenceRunner:
         span = 0.0
         if play_end is not None and float(play_end) > float(play0) + 1e-9:
             span = float(play_end) - float(play0)
-        if span > 1e-9:
+        # SSOT: prefix 1x 초 = sim 경과. play_end 비율로 늘리면
+        # renewal 이 막대 port_sync(anim_start+offset) 보다 늦다.
+        if self._is_ssot_playback():
+            target = float(play0) + float(cum)
+            if target <= float(play0) + 1e-9:
+                return
+        elif span > 1e-9:
             if is_final:
                 target = float(play_end)
             elif total_1x > 1e-9:
@@ -1334,15 +1387,7 @@ class TbsLamSequenceRunner:
         if self._stop_flag.is_set():
             return 0.0
         try:
-            from .control_sim_playback_plan import publish_anim_bar_progress_at_step
-
-            publish_anim_bar_progress_at_step(
-                getattr(self, "_diag_ext", None),
-                int(getattr(self, "_diag_screen", 1) or 1),
-                list(getattr(self, "_progress_steps", None) or []),
-                int(idx),
-                include_current=False,
-            )
+            self._publish_lam_bar_progress(int(idx), include_current=False)
         except Exception:
             pass
         t = str(step.get("type") or "").upper()
@@ -1350,9 +1395,14 @@ class TbsLamSequenceRunner:
         # 주의: hide_for_step 안의 vis attribute set 은 USD write 다. background thread 에서
         # 호출되면 _start_move 처럼 deadlock 위험이 있다(현재는 default OFF 이므로 보류,
         # 사용자가 hide_enabled 를 켜기 시작하면 같은 _dispatch_main 패턴으로 마이그레이션).
+        hide_s = str(step.get("hide_prims", "") or "")
+        if hide_s and self._playback_defers_port_lot_visibility():
+            toks = [x.strip() for x in hide_s.split(",") if str(x).strip()]
+            toks = self._filter_port_lot_vis_paths(toks)
+            hide_s = ",".join(toks)
         hidden_paths = self._hide.hide_for_step(
-            bool(step.get("hide_enabled", False)),
-            str(step.get("hide_prims", "") or ""),
+            bool(step.get("hide_enabled", False)) and bool(hide_s),
+            hide_s,
         )
         duration = 0.0
         try:
@@ -1381,16 +1431,7 @@ class TbsLamSequenceRunner:
                             flush=True,
                         )
                         try:
-                            from .control_sim_playback_plan import publish_anim_bar_progress_at_step
-
-                            # renewal 행 도달 = 막대도 sync 지점까지 허용
-                            publish_anim_bar_progress_at_step(
-                                getattr(self, "_diag_ext", None),
-                                int(getattr(self, "_diag_screen", 1) or 1),
-                                list(getattr(self, "_progress_steps", None) or []),
-                                int(idx),
-                                include_current=True,
-                            )
+                            self._publish_lam_bar_progress(int(idx), include_current=True)
                         except Exception:
                             pass
                         if self._on_renewal_step is not None:
@@ -1962,6 +2003,7 @@ class TbsLamSequenceRunner:
         tail = float(step.get("duration", 0.02) or 0.02) / sp
         stage = _stage()
         paths = _resolve_prim_paths(stage, prim_id)
+        paths = self._filter_port_lot_vis_paths(paths)
         if not paths:
             _seq_log(
                 f"{_PRINT_PREFIX} step[{idx}] SET_PRIM_VISIBILITY skip — prim={prim_id!r}",
@@ -2160,4 +2202,4 @@ class TbsLamSequenceRunner:
                 _seq_log(f"{_PRINT_PREFIX} _apply_start_snapshot path={path}: {exc}", flush=True)
 
 
-__all__ = ["TbsLamSequenceRunner"]
+__all__ = ["TbsLamSequenceRunner", "pause_timesample_replays_for_paths"]

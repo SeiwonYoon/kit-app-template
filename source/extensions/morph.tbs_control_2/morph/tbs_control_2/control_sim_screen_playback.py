@@ -421,7 +421,7 @@ def bootstrap_playback_after_prerun(
                     scr_i = int(scr_k)
                 except Exception:
                     continue
-                refresh_playback_display_at_sim(ext, scr_i, 0.0, force=True)
+                refresh_playback_display_at_sim(ext, scr_i, 0.0, force=True, from_reset=True)
         except Exception:
             pass
     except Exception:
@@ -461,7 +461,7 @@ def add_playback_sessions_after_prerun(
         ensure_playback_plans_for_results(ext, new_results)
         for scr_k in new_results:
             try:
-                refresh_playback_display_at_sim(ext, int(scr_k), 0.0, force=True)
+                refresh_playback_display_at_sim(ext, int(scr_k), 0.0, force=True, from_reset=True)
             except Exception:
                 pass
     except Exception:

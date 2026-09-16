@@ -207,4 +207,12 @@ __all__ = [
     "estimate_json_file_duration_sec",
     "linked_json_for_process",
     "resolve_process_anim_sec",
+    "step_content_duration_1x_sec",
 ]
+
+
+def step_content_duration_1x_sec(step: Any) -> float:
+    """JSON 스텝 1배속 초 — 막대 publish·LAM 게이트·renewal offset 공통."""
+    if not isinstance(step, dict):
+        return 0.0
+    return float(_step_duration_sec(step))

@@ -600,9 +600,9 @@ def try_release_json_wall_when_idle(
     except Exception:
         pass
     try:
-        from .control_sim_playback_plan import refresh_playback_display_at_sim
+        from .control_sim_playback_plan import refresh_playback_bar_at_sim
 
-        refresh_playback_display_at_sim(ext, scr, force=True)
+        refresh_playback_bar_at_sim(ext, scr)
     except Exception:
         pass
     return True

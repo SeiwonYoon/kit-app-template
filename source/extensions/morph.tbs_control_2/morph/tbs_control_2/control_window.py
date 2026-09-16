@@ -1045,39 +1045,9 @@ def _execute_mapped_sequence_stub(
                     _job_rail = rail_from_job_or_payload(job)
             except Exception:
                 _job_rail = None
-            # SSOT 재생: 슬롯 busy 면 선점(halt) 금지.
-            # 앞 JSON 완주 후 on_done/_start_json_now 만 다음을 기동한다.
-            try:
-                from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
-                from .control_sim_playback_gate import is_json_anim_slot_held
-
-                if bool(SIM_PRERUN_PLAN_SSOT) and bool(
-                    getattr(ext, "_sim_playback_started", False)
-                ):
-                    _force_now = bool((job or {}).get("_start_json_now"))
-                    if (not _force_now) and is_json_anim_slot_held(
-                        ext, int(scr_i), rail=_job_rail
-                    ):
-                        try:
-                            pending_by = getattr(ext, "_sim_anim_pending_by_screen", None)
-                            if not isinstance(pending_by, dict):
-                                pending_by = {}
-                                ext._sim_anim_pending_by_screen = pending_by
-                            _pk = str(scr_i)
-                            if _job_rail:
-                                from .sim_parallel_rails import rail_queue_key
-
-                                _pk = rail_queue_key(scr_i, str(_job_rail))
-                            pending = pending_by.get(_pk, [])
-                            if not isinstance(pending, list):
-                                pending = []
-                            pending.append(dict(job) if isinstance(job, dict) else job)
-                            pending_by[_pk] = pending
-                        except Exception:
-                            pass
-                        return
-            except Exception:
-                pass
+            # SSOT 재생: 프리런 ``anim_play_start`` 시각에 기동한다.
+            # 앞 JSON 종료를 기다려 큐에 넣으면 시작이 밀리고 싱크가 깨진다.
+            # 같은 레일은 SequenceRunner.run 이 이전 스레드만 교체한다 (채널 전체 stop 아님).
             try:
                 set_json_wall_busy(ext, scr_i, True, rail=_job_rail)
             except TypeError:
@@ -1371,10 +1341,14 @@ def _execute_mapped_sequence_stub(
                         )
                 except Exception:
                     pass
-            eff_sp = compute_json_effective_speed(sp, span_for_eff, est_total_f)
-
-            # SSOT: catch-up 배속 금지 — 늦게 시작해도 정상 속도로 완주.
-            # (남은 구간에 맞추어 가속하면 MOVE/TIMESAMPLES 가 끊긴 것처럼 남)
+            # SSOT: JSON 배속 = 사용자 배속만. proc 대비 압축하면
+            # anim_play_start+renewal_offset 이 port_sync 와 어긋난다.
+            if _ssot_play:
+                eff_sp = max(0.1, float(sp))
+            else:
+                # SSOT: catch-up 배속 금지 — 늦게 시작해도 정상 속도로 완주.
+                # (남은 구간에 맞추어 가속하면 MOVE/TIMESAMPLES 가 끊긴 것처럼 남)
+                eff_sp = compute_json_effective_speed(sp, span_for_eff, est_total_f)
 
             json_wall_sec = json_wall_duration_sec(est_total_f, eff_sp)
 
@@ -1579,6 +1553,13 @@ def _execute_mapped_sequence_stub(
                     pass
 
                 def _finish_on_main() -> None:
+                    if _playback:
+                        try:
+                            from .control_sim_playback_plan import apply_playback_json_end_ports
+
+                            apply_playback_json_end_ports(ext, int(scr_i), dict(src_done))
+                        except Exception:
+                            pass
                     if not _playback:
                         try:
                             _flush_pending_post_anim_port_applies(ext, int(scr_i))
@@ -1859,14 +1840,23 @@ def _execute_mapped_sequence_stub(
                         else:
                             from .tbs_main_dispatch import dispatch_main, dispatch_main_wait
 
-                            # 화면1·2 동일: 포트·막대·prim 반영이 끝날 때까지 LAM 대기
+                            # SSOT: 막대는 sim_now 키프레임. LAM 이 UI wait 하면
+                            # renewal 이후 3D 가 더 늦고, wait 자체도 체감 지연.
                             _ctx_ui = _usd_context_name_for_sim_screen(ext, int(scr_i))
-                            ok_ui = dispatch_main_wait(
-                                _apply_renewal_playback_ui,
-                                timeout=5.0,
-                                usd_context_name=_ctx_ui,
-                                priority=True,
-                            )
+                            if bool(_ssot_play):
+                                dispatch_main(
+                                    _apply_renewal_playback_ui,
+                                    usd_context_name=_ctx_ui,
+                                    priority=True,
+                                )
+                                ok_ui = True
+                            else:
+                                ok_ui = dispatch_main_wait(
+                                    _apply_renewal_playback_ui,
+                                    timeout=5.0,
+                                    usd_context_name=_ctx_ui,
+                                    priority=True,
+                                )
                             if not ok_ui:
                                 try:
                                     print(
@@ -2057,21 +2047,24 @@ def _execute_mapped_sequence_stub(
                     pass
 
                 def _start_lam_after_reset() -> None:
-                    # 화면1·2 동일: JSON 시작 전 위치초기화 (aux ctx 는 restore 가 화면별 적용).
-                    try:
-                        _ok_reset = bool(
-                            _reset_sim_motion_before_json_run(
-                                ext, job, runner_obj=runner_obj
+                    # SSOT 재생: 시작 시각이 악보. 여기서 restore/idle wait 하면
+                    # anim_play_start 가 밀려 renewal 이 막대보다 늦다.
+                    # 위치는 SequenceRunner.reset_each_start 가 이번 JSON prim 만 맞춘다.
+                    if not bool(_ssot_play):
+                        try:
+                            _ok_reset = bool(
+                                _reset_sim_motion_before_json_run(
+                                    ext, job, runner_obj=runner_obj
+                                )
                             )
-                        )
-                        if not _ok_reset:
-                            print(
-                                f"[TBS/SIM] pre-json motion reset incomplete "
-                                f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
-                                flush=True,
-                            )
-                    except Exception as exc:
-                        print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
+                            if not _ok_reset:
+                                print(
+                                    f"[TBS/SIM] pre-json motion reset incomplete "
+                                    f"screen={scr_i} file={str((job or {}).get('file', '') or '')}",
+                                    flush=True,
+                                )
+                        except Exception as exc:
+                            print(f"[TBS/SIM] pre-json motion reset failed: {exc}", flush=True)
                     try:
                         from . import sim_multi_diag as _mdiag
 
@@ -2163,7 +2156,7 @@ def _execute_mapped_sequence_stub(
                     on_main = threading.current_thread() is threading.main_thread()
                 except Exception:
                     on_main = False
-                if bool(_playback) and on_main:
+                if bool(_playback) and on_main and (not bool(_ssot_play)):
                     threading.Thread(
                         target=_kick_json_start,
                         name=f"tbs_json_kick_{int(scr_i)}",
@@ -2194,10 +2187,8 @@ def _execute_mapped_sequence_stub(
                 except Exception:
                     pass
 
-            # 프리런: on_done(_start_json_now) 은 tick 중간(하이라이트 전)이라 pending.
-            # drain/poll(하이라이트 이후) 이고 sim_now 가 이미 시작 시각이면 즉시 기동.
+            # SSOT: sim_now 가 anim_play_start 이면 즉시 기동 (on_done 한 틱 대기도 없음).
             if _playback:
-                _from_on_done = bool((job or {}).get("_start_json_now"))
                 _due_now = False
                 try:
                     _pl_due = get_sim_playback_player(ext, int(scr_i))
@@ -2207,7 +2198,7 @@ def _execute_mapped_sequence_stub(
                     _due_now = _sn_due + 1e-9 >= float(json_run_start_sim)
                 except Exception:
                     _due_now = True
-                if (not _from_on_done) and _due_now:
+                if _due_now:
                     _run_json_sequence()
                 else:
                     active["_json_pending_sim_start"] = True
@@ -2361,11 +2352,19 @@ def _execute_mapped_sequence_stub(
                 pass
         except Exception:
             pass
-        # SSOT 재생: busy 면 QUEUE(FIFO). 이전 JSON 선점(halt) 금지 —
-        # 앞 애니 완주 → on_done → 위치초기화 → 다음 애니.
+        # SSOT 재생: 프리런 시작 시각에 START. 앞 JSON 종료 대기로 큐에 넣지 않음.
         runner_busy = False
         _pending_key = str(_scr)
         _slot_rail = None
+        _ssot_play = False
+        try:
+            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+            _ssot_play = bool(SIM_PRERUN_PLAN_SSOT) and bool(
+                getattr(ext, "_sim_playback_started", False)
+            )
+        except Exception:
+            _ssot_play = False
         try:
             from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
             from .control_sim_playback_gate import (
@@ -2376,9 +2375,10 @@ def _execute_mapped_sequence_stub(
             if parallel_moves_enabled() and job.get("sim_rail"):
                 _slot_rail = str(job.get("sim_rail") or "").strip().lower() or None
                 _pending_key = rail_queue_key(_scr, str(job.get("sim_rail")))
-            runner_busy = bool(
-                is_json_sequence_busy(ext, int(_scr), rail=_slot_rail)
-            ) or bool(is_json_anim_slot_held(ext, int(_scr), rail=_slot_rail))
+            if not _ssot_play:
+                runner_busy = bool(
+                    is_json_sequence_busy(ext, int(_scr), rail=_slot_rail)
+                ) or bool(is_json_anim_slot_held(ext, int(_scr), rail=_slot_rail))
         except Exception:
             runner_busy = False
         if runner_busy:
@@ -6411,20 +6411,7 @@ def _update_ep_timeline_under_port_state(
         pui = playback_ui_state
         occ = dict(getattr(pui, "ports", {}) or {})
         t_display = float(pui.axes.t_display)
-        # 플레이헤드는 sim_now(t_display). 세그먼트 truncate 폴백은 renewal cap 시각.
-        try:
-            t_bar_cap = float(getattr(pui, "t_bar", 0.0) or 0.0)
-        except Exception:
-            t_bar_cap = 0.0
-        if t_bar_cap <= 1e-9:
-            try:
-                from .control_sim_playback_plan import playback_bar_lookup_sim_t
-
-                t_bar_cap = float(
-                    playback_bar_lookup_sim_t(ext, int(screen), float(t_display))
-                )
-            except Exception:
-                t_bar_cap = float(t_display)
+        # 플레이헤드 = sim_now. 프리런 테이프의 리뉴얼 지점이 그 시각에 드러난다.
         t_bar = float(t_display)
         use_precomputed = True
         preview_full = bool(getattr(pui, "preview_full", False))
@@ -6447,16 +6434,14 @@ def _update_ep_timeline_under_port_state(
             pre_by = getattr(ext, "_sim_ep_bar_prerun_by_screen", None)
             bar_pre_fb = pre_by.get(scr_key) if isinstance(pre_by, dict) else None
             if isinstance(bar_pre_fb, EpBarPrecomputed) and isinstance(bar_pre_fb.rows, dict) and bar_pre_fb.rows:
-                # 화면2 등 bar_rows 비어 있을 때 t_display(비캡)으로 truncate 하면
-                # renewal 전에 막대가 앞서감 — 반드시 t_bar_cap 사용
-                rows_state = truncate_bar_rows_at_t(bar_pre_fb.rows, float(t_bar_cap))
+                rows_state = truncate_bar_rows_at_t(bar_pre_fb.rows, float(t_bar))
                 if float(total_est_fixed) <= 0.0 and float(getattr(bar_pre_fb, "total_est", 0.0) or 0.0) > 0.0:
                     total_est_fixed = float(bar_pre_fb.total_est)
         for r in rows:
             rk = str(r)
             if rk not in rows_state:
                 rows_state[rk] = []
-        _sync_ep_bar_virtual_time_to_sim(ext, screen, float(t_display))
+        _sync_ep_bar_virtual_time_to_sim(ext, screen, float(t_bar))
         st_by = getattr(ext, "_sim_ep_occ_timeline_state_by_screen", None)
         if not isinstance(st_by, dict):
             st_by = {}
@@ -6465,7 +6450,7 @@ def _update_ep_timeline_under_port_state(
         if not isinstance(st, dict):
             st = {"t_last": None, "rows": {}, "total_est_fixed": None}
             st_by[scr_key] = st
-        st["t_last"] = float(t_display)
+        st["t_last"] = float(t_bar)
         st["rows"] = rows_state
         if total_est_fixed > 0.0:
             st["total_est_fixed"] = float(total_est_fixed)
@@ -6527,7 +6512,13 @@ def _update_ep_timeline_under_port_state(
         if playback_lock:
             t_display = float(t_playback)
             t_bar = float(t_display)
-            _sync_ep_bar_virtual_time_to_sim(ext, screen, float(t_display))
+            try:
+                from .control_sim_playback_plan import playback_bar_lookup_sim_t
+
+                t_bar = float(playback_bar_lookup_sim_t(ext, int(screen), float(t_display)))
+            except Exception:
+                t_bar = float(t_display)
+            _sync_ep_bar_virtual_time_to_sim(ext, screen, float(t_bar))
         else:
             try:
                 vt_by = getattr(ext, "_sim_ep_timeline_virtual_time_by_screen", None)
@@ -8538,7 +8529,14 @@ def _on_sim_bar_preview_toggled(ext: Any) -> None:
                 tnow = float(player.sim_now(si))
             except Exception:
                 tnow = 0.0
-            _sync_ep_bar_virtual_time_to_sim(ext, si, tnow)
+            t_bar_sync = float(tnow)
+            try:
+                from .control_sim_playback_plan import playback_bar_lookup_sim_t
+
+                t_bar_sync = float(playback_bar_lookup_sim_t(ext, si, float(tnow)))
+            except Exception:
+                t_bar_sync = float(tnow)
+            _sync_ep_bar_virtual_time_to_sim(ext, si, t_bar_sync)
             occ = empty_occ
             if isinstance(last_by, dict) and isinstance(last_by.get(str(si)), dict):
                 occ = dict(last_by.get(str(si)) or empty_occ)
@@ -8877,13 +8875,20 @@ def _poll_playback_sim_aligned_json_starts(ext: Any) -> None:
 
 def _should_defer_port_occ_sync_for_renewal(ext: Any, screen: int) -> bool:
     """
-    renewal JSON — 포트·prim 은 renewal wall 시점만.
+    라이브 JSON/LAM occ 를 막는다.
 
-    재생(plan): wall 적용 전에는 heartbeat/`_from_playback_plan` 도 막음
-    (lookup cap 만으로는 조기 prim 갱신이 새어 나감). wall 이후는 plan SSOT.
+    재생 SSOT: 포트·prim 은 프리런 키프레임(``sim_now``)과 REMOVE JSON 종료만.
     """
     scr = max(1, int(screen))
     if bool(getattr(ext, "_sim_playback_started", False)):
+        try:
+            from .control_sim_playback_plan import playback_plan_active
+            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+            if playback_plan_active(ext, scr) and bool(SIM_PRERUN_PLAN_SSOT):
+                return True
+        except Exception:
+            pass
         try:
             from .control_sim_playback_plan import (
                 _renewal_wall_applied_for_screen,
@@ -8891,7 +8896,6 @@ def _should_defer_port_occ_sync_for_renewal(ext: Any, screen: int) -> bool:
             )
 
             if playback_plan_active(ext, scr):
-                # renewal 없는 JSON / wall 이미 적용 → plan heartbeat 허용
                 if not _screen_active_json_has_renewal(ext, scr):
                     return False
                 if _renewal_wall_applied_for_screen(ext, scr):
@@ -9297,11 +9301,18 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
     if not isinstance(payload, dict):
         return
     scr = int(screen)
-    # `_from_playback_plan` 단독으로는 renewal defer 를 뚫지 않음 —
-    # wall 콜백만 `_from_renewal_step` (또는 wall 적용 후 defer=False).
-    if _should_defer_port_occ_sync_for_renewal(ext, scr) and not bool(
-        payload.get("_from_renewal_step")
-    ):
+    milestone = bool(
+        payload.get("_from_occ_keyframe")
+        or payload.get("_from_renewal_step")
+        or payload.get("_from_json_end")
+        or payload.get("_from_seek")
+        or payload.get("_from_playback_reset")
+    )
+    # 재생 SSOT: 라이브 LAM/JSON occ 는 막고, 프리런 키프레임·JSON 종료만 허용.
+    if _should_defer_port_occ_sync_for_renewal(ext, scr) and not milestone:
+        return
+    # 재생 중 heartbeat·plan lookup 이 애니 도중 prim 을 숨기지 않게
+    if bool(getattr(ext, "_sim_playback_started", False)) and not milestone:
         return
     occ = payload.get("ports_occupancy", {})
     if not isinstance(occ, dict):
@@ -9928,6 +9939,7 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
                         apply_payload["sim_time"] = f"{float(t_target):.2f}"
                     except Exception:
                         pass
+                apply_payload["_from_seek"] = True
                 _apply_sim_event_state_only(ext, apply_payload, screen=int(screen))
             except Exception:
                 pass
@@ -9947,11 +9959,14 @@ def _fast_apply_prerun_seek(ext: Any, *, screen: int, row_index: int) -> Tuple[f
             it = items[i]
             kind = str(it.kind or "").strip().lower()
             if kind == "event" and isinstance(it.payload, dict):
-                _apply_sim_event_state_only(ext, dict(it.payload), screen=int(screen))
+                p_seek = dict(it.payload)
+                p_seek["_from_seek"] = True
+                _apply_sim_event_state_only(ext, p_seek, screen=int(screen))
             elif kind == "progress" and isinstance(it.payload, dict):
                 p = dict(it.payload)
                 occ = p.get("ports_occupancy", {})
                 if isinstance(occ, dict) and occ:
+                    p["_from_seek"] = True
                     _apply_sim_event_state_only(ext, p, screen=int(screen))
                 try:
                     by_lp = getattr(ext, "_sim_progress_last_payload_by_screen", None)
@@ -10575,7 +10590,7 @@ def _finalize_prerun_ui_assets(
             rendered = False
             if bool(getattr(ext, "_sim_playback_started", False)):
                 try:
-                    refresh_playback_display_at_sim(ext, int(si), 0.0, force=True)
+                    refresh_playback_display_at_sim(ext, int(si), 0.0, force=True, from_reset=True)
                     rendered = True
                 except Exception:
                     pass
@@ -10793,7 +10808,7 @@ def _bootstrap_partial_prerun_playback(
 
         for scr_k in new_results:
             try:
-                refresh_playback_display_at_sim(ext, int(scr_k), 0.0, force=True)
+                refresh_playback_display_at_sim(ext, int(scr_k), 0.0, force=True, from_reset=True)
             except Exception:
                 pass
     except Exception:
@@ -14045,6 +14060,7 @@ def on_sim_start_clicked(ext: Any) -> None:
                     "ports_occupancy": dict(occ_init),
                     "sim_time": "0.00",
                     "foup_proc_active_ep": "",
+                    "_from_playback_reset": True,
                 },
                 screen=int(scr0),
             )
