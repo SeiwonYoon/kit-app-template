@@ -246,13 +246,17 @@ FOUP3_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1
 #   갈색   (0.55, 0.28, 0.08, 1.00)
 #   회색   (0.35, 0.35, 0.38, 1.00)
 # FOUP 상태보기 패널 첫 줄(lot_id) 글자 크기 [px]. 나머지 줄은 overlay 의 FOUP_PANEL_FONT_SIZE.
-FOUP_LOT_ID_FONT_SIZE: int = 22
+FOUP_LOT_ID_FONT_SIZE: int = 20
 # 웨이퍼 번호 3D 라벨 글자 크기 [px] (전 슬롯 공통).
-WAFER_NUMBER_LABEL_FONT_SIZE: int = 20
+WAFER_NUMBER_LABEL_FONT_SIZE: int = 14
+# 웨이퍼 번호 전경 색 (RGBA 0~1).
+WAFER_NUMBER_LABEL_COLOR_RGBA: tuple[float, float, float, float] = (0.00, 0.00, 0.00, 1.00)
 # 웨이퍼 번호 라벨 원형 배경 (sc.Widget + ui.Circle). RGBA 0~1.
 WAFER_NUMBER_LABEL_BG_COLOR_RGBA: tuple[float, float, float, float] = (0.00, 0.00, 0.00, 1.00)
 # 원형 배경 지름 [px]. 글자보다 약간 크게.
 WAFER_NUMBER_LABEL_BG_SIZE_PX: int = 32
+# 원형 배경(●) 크기 = 글자 크기 × 이 배율.
+WAFER_NUMBER_LABEL_BG_SCALE: float = 1.7
 
 # ---------------------------------------------------------------------------
 # Extract 결과 캐시 (data/preextract/)
@@ -369,8 +373,10 @@ __all__ = [
     "FOUP3_WAFER_COLOR_RGBA",
     "FOUP_LOT_ID_FONT_SIZE",
     "WAFER_NUMBER_LABEL_FONT_SIZE",
+    "WAFER_NUMBER_LABEL_COLOR_RGBA",
     "WAFER_NUMBER_LABEL_BG_COLOR_RGBA",
     "WAFER_NUMBER_LABEL_BG_SIZE_PX",
+    "WAFER_NUMBER_LABEL_BG_SCALE",
     "default_viewport_split_count",
     "default_csv_play_screen_count",
     "default_visible_screens",

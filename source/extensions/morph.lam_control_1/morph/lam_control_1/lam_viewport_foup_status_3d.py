@@ -21,6 +21,7 @@ from .lam_viewport_overlay_config import (
     FOUP_ANCHOR_PRIM_BY_INDEX,
     FOUP_PANEL_BG_RGBA,
     FOUP_PANEL_BODY_H_PX,
+    FOUP_PANEL_DIVIDER_H_PX,
     FOUP_PANEL_DIVIDER_RGBA,
     FOUP_PANEL_FONT_SIZE,
     FOUP_PANEL_HEIGHT_PX,
@@ -61,8 +62,9 @@ _TITLE_H = int(FOUP_PANEL_TITLE_H_PX)
 _BODY_H = int(FOUP_PANEL_BODY_H_PX)
 _TOP_BAR_H = int(FOUP_PANEL_TOP_BAR_H_PX)
 _PAD_X = int(FOUP_PANEL_PAD_X_PX)
+_DIVIDER_H = float(FOUP_PANEL_DIVIDER_H_PX)
 _BODY_ROW_LABELS = ("반출", "공정진행", "공정완료")
-_LAYOUT_VER = 4
+_LAYOUT_VER = 5
 
 
 def force_remove_foup_sceneviews(*, screen: Optional[int] = None) -> None:
@@ -704,7 +706,7 @@ class LamFoupStatus3dPanel:
                         ):
                             sc.Rectangle(
                                 width=_PANEL_W,
-                                height=1.0,
+                                height=_DIVIDER_H,
                                 color=tuple(FOUP_PANEL_DIVIDER_RGBA),
                                 wireframe=False,
                             )

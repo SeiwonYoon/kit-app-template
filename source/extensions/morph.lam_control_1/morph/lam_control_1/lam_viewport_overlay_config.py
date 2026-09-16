@@ -389,14 +389,15 @@ FOUP_ANCHOR_PRIM_BY_INDEX: Dict[int, str] = {
 FOUP_PANEL_OFFSET_XYZ_M: Tuple[float, float, float] = (-20, -35, 0.10)
 
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
-FOUP_PANEL_WIDTH_PX: int = 220
-FOUP_PANEL_HEIGHT_PX: int = 178
+FOUP_PANEL_WIDTH_PX: int = 200
+FOUP_PANEL_HEIGHT_PX: int = 160
 FOUP_PANEL_TITLE_H_PX: int = 52
-FOUP_PANEL_BODY_H_PX: int = 126
-FOUP_PANEL_TOP_BAR_H_PX: int = 4
-FOUP_PANEL_PAD_X_PX: int = 8
-FOUP_PANEL_LINE_HEIGHT_PX: int = 42
-FOUP_PANEL_FONT_SIZE: int = 15
+FOUP_PANEL_BODY_H_PX: int = 110
+FOUP_PANEL_TOP_BAR_H_PX: int = 3
+FOUP_PANEL_PAD_X_PX: int = 12
+FOUP_PANEL_LINE_HEIGHT_PX: int = 25
+FOUP_PANEL_FONT_SIZE: int = 14
+FOUP_PANEL_DIVIDER_H_PX: float = 0.5
 FOUP_PANEL_DIVIDER_RGBA: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.5)
 FOUP_PANEL_BG_RGBA: Tuple[float, float, float, float] = (
     48.0 / 255.0,
@@ -609,6 +610,7 @@ __all__ = [
     "FOUP_PANEL_PAD_X_PX",
     "FOUP_PANEL_LINE_HEIGHT_PX",
     "FOUP_PANEL_FONT_SIZE",
+    "FOUP_PANEL_DIVIDER_H_PX",
     "FOUP_PANEL_BG_RGBA",
     "FOUP_PANEL_BORDER_RGBA",
     "FOUP_PANEL_DIVIDER_RGBA",

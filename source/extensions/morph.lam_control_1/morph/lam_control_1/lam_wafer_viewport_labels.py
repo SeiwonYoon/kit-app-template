@@ -22,6 +22,8 @@ from omni.ui import scene as sc
 from pxr import Usd, UsdGeom
 
 from .lam_sim_control_defaults import (
+    WAFER_NUMBER_LABEL_BG_SCALE,
+    WAFER_NUMBER_LABEL_COLOR_RGBA,
     WAFER_NUMBER_LABEL_FONT_SIZE,
 )
 from .lam_viewport_overlay_config import WAFER_LABEL_SHOW_FOUP_SLOT_NUMBERS
@@ -1447,7 +1449,7 @@ class LamWaferFoupViewportLabels:
             transform=sc.Matrix44.get_translation_matrix(*world_pos),
         )
         font_sz = max(8, int(WAFER_NUMBER_LABEL_FONT_SIZE))
-        bg_sz = max(font_sz + 2, int(font_sz * 1.5))
+        bg_sz = max(font_sz + 2, int(font_sz * float(WAFER_NUMBER_LABEL_BG_SCALE)))
         label_text = str(text or "")
         with root:
             with sc.Transform(scale_to=sc.Space.SCREEN):
@@ -1458,11 +1460,11 @@ class LamWaferFoupViewportLabels:
                     color=color,
                     alignment=ui.Alignment.CENTER,
                 )
-                # 웨이퍼 번호 — 흰색 전경
+                # 웨이퍼 번호 전경
                 sc.Label(
                     label_text,
                     size=font_sz,
-                    color=(1.0, 1.0, 1.0, 1.0),
+                    color=tuple(WAFER_NUMBER_LABEL_COLOR_RGBA),
                     alignment=ui.Alignment.CENTER,
                 )
         return root
