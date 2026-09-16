@@ -16517,12 +16517,15 @@ def on_sim_reset_for_screen(ext: Any, screen: int) -> None:
         pass
 
 
-def _apply_ep_port_layout_for_sim_screen(ext: Any, screen: int, *, reason: str = "") -> None:
+def _apply_ep_port_layout_for_sim_screen(
+    ext: Any, screen: int, *, reason: str = "", show_all_prims: Optional[bool] = None
+) -> None:
     """화면별 CASE EP/EBS 설정을 해당 USD 컨텍스트에 반영한다."""
     from .ebs_case_models import case_from_screen, get_sim_ebs_enabled_for_case, get_sim_ep_count_idx_for_case
     from .tbs_ep_port_visibility import (
         apply_ep_port_layout_for_context,
         ep_count_from_combo_idx,
+        resolve_ep_layout_show_all_prims,
         schedule_apply_ep_port_layout,
         schedule_apply_ep_port_layout_for_context,
     )
@@ -16539,6 +16542,7 @@ def _apply_ep_port_layout_for_sim_screen(ext: Any, screen: int, *, reason: str =
     ep_count = ep_count_from_combo_idx(idx)
     ebs_on = bool(get_sim_ebs_enabled_for_case(ext, cid))
     rs = str(reason or f"screen{s}_ep_ebs").strip() or f"screen{s}_ep_ebs"
+    show_all = resolve_ep_layout_show_all_prims(show_all_prims)
     if s <= 1:
         schedule_apply_ep_port_layout(
             ext,
@@ -16546,6 +16550,7 @@ def _apply_ep_port_layout_for_sim_screen(ext: Any, screen: int, *, reason: str =
             ebs_enabled=ebs_on,
             delay_frames=2,
             reason=rs,
+            show_all_prims=show_all,
         )
         return
     ctx_nm = _usd_context_name_for_sim_screen(ext, s)
@@ -16557,10 +16562,13 @@ def _apply_ep_port_layout_for_sim_screen(ext: Any, screen: int, *, reason: str =
                 s,
                 delay_frames=2,
                 reason=rs,
+                show_all_prims=show_all,
             )
         except Exception:
             try:
-                apply_ep_port_layout_for_context(ext, str(ctx_nm), s, reason=rs)
+                apply_ep_port_layout_for_context(
+                    ext, str(ctx_nm), s, reason=rs, show_all_prims=show_all
+                )
             except Exception:
                 pass
 

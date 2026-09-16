@@ -102,6 +102,7 @@ from ..tbs_sim_bridge import (
     handle_seek_simulation,
     handle_start_simulation,
     handle_time_sync,
+    parse_show_all_prims,
 )
 
 from ..hyview_event_contract import (
@@ -475,7 +476,9 @@ class EBSHandler(BaseHandler):
 
         요청: ``{"case": 0, "ebs_enable": true}``
 
-        성공/실패 data echo: ``case``, ``ebs_enable``
+        선택 키 ``show_all_prims`` (기본 true, 생략 시 true): false 이면 EP prim 전부 켜기 생략, EBS만 적용.
+
+        성공/실패 data echo: ``case``, ``ebs_enable``, ``show_all_prims``
 
         """
 
@@ -486,6 +489,14 @@ class EBSHandler(BaseHandler):
         case_index = event.payload["case"]
 
         ebs_enable = event.payload["ebs_enable"]
+
+        try:
+
+            show_all_prims = parse_show_all_prims(event.payload)
+
+        except Exception:
+
+            show_all_prims = True
 
 
 
@@ -499,9 +510,9 @@ class EBSHandler(BaseHandler):
 
                 bridge_res,
 
-                ok_data={"case": case_index, "ebs_enable": ebs_enable},
+                ok_data={"case": case_index, "ebs_enable": ebs_enable, "show_all_prims": show_all_prims},
 
-                err_data={"case": case_index, "ebs_enable": ebs_enable},
+                err_data={"case": case_index, "ebs_enable": ebs_enable, "show_all_prims": show_all_prims},
 
             )
 

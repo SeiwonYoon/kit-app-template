@@ -102,6 +102,24 @@ def _event_payload_to_dict(payload: Any) -> Dict[str, Any]:
     return out
 
 
+def parse_show_all_prims(payload: Any) -> bool:
+    """``show_all_prims`` 생략/None → True (기존 EP 전부 켜기). 명시 false 만 새 동작."""
+    pl = _event_payload_to_dict(payload)
+    if "show_all_prims" not in pl:
+        return True
+    raw = pl.get("show_all_prims")
+    if raw is None:
+        return True
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("", "true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+        return True
+    return bool(raw)
+
+
 def _ok(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {"code": 0, "message": "success", "data": dict(data or {})}
 
@@ -362,18 +380,34 @@ def handle_ebs_enable(
             )
         )
         return
+    show_all_prims = parse_show_all_prims(pl)
 
     def _work() -> Dict[str, Any]:
         ext = require_tbs_extension_instance()
-        _apply_ebs_enable_for_case(ext, case_index, ebs_enable)
         from morph.tbs_control_2.control_window import _apply_ep_port_layout_for_sim_screen
-
-        _apply_ep_port_layout_for_sim_screen(
-            ext,
-            _case_index_to_screen(case_index),
-            reason="hyview_ebs_enable",
+        from morph.tbs_control_2.tbs_ep_port_visibility import (
+            begin_ep_layout_show_all_prims,
+            end_ep_layout_show_all_prims,
         )
-        return _ok({"case": case_index, "ebs_enable": bool(ebs_enable)})
+
+        begin_ep_layout_show_all_prims(show_all_prims)
+        try:
+            _apply_ebs_enable_for_case(ext, case_index, ebs_enable)
+            _apply_ep_port_layout_for_sim_screen(
+                ext,
+                _case_index_to_screen(case_index),
+                reason="hyview_ebs_enable",
+                show_all_prims=show_all_prims,
+            )
+        finally:
+            end_ep_layout_show_all_prims()
+        return _ok(
+            {
+                "case": case_index,
+                "ebs_enable": bool(ebs_enable),
+                "show_all_prims": bool(show_all_prims),
+            }
+        )
 
     _schedule_hyview_main_work(
         "ebs_enable",
@@ -381,6 +415,7 @@ def handle_ebs_enable(
         dispatch,
         case=case_index,
         ebs_enable=bool(ebs_enable),
+        show_all_prims=bool(show_all_prims),
     )
 
 

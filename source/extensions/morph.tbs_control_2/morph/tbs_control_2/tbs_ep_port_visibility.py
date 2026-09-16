@@ -18,6 +18,8 @@ _baseline_by_scope: Dict[str, Dict[str, str]] = {}
 _active_ep_count: Optional[int] = None
 _active_ep_by_scope: Dict[str, int] = {}
 _active_ebs_state_by_scope: Dict[str, Tuple[int, bool]] = {}
+# 웹 ``show_all_prims=false`` 구간만 False. Kit 체크박스·미지정은 True.
+_ep_layout_show_all_override: Optional[bool] = None
 _apply_retry_sub: Any = None
 
 
@@ -38,6 +40,25 @@ def ep_count_idx_for_screen(ext: Any, screen_1based: int) -> int:
         return int(get_sim_ep_count_idx_for_case(ext, case_from_screen(si)))
     except Exception:
         return int(_SIM_DEF.ep_count_idx)
+
+
+def begin_ep_layout_show_all_prims(show_all: bool) -> None:
+    """웹 ebs_enable 처리 중 EP show_prims 적용 여부 오버라이드."""
+    global _ep_layout_show_all_override
+    _ep_layout_show_all_override = bool(show_all)
+
+
+def end_ep_layout_show_all_prims() -> None:
+    global _ep_layout_show_all_override
+    _ep_layout_show_all_override = None
+
+
+def resolve_ep_layout_show_all_prims(explicit: Optional[bool] = None) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    if _ep_layout_show_all_override is not None:
+        return bool(_ep_layout_show_all_override)
+    return True
 
 
 def ebs_enabled_for_screen(ext: Any, screen_1based: int) -> bool:
@@ -268,8 +289,12 @@ def apply_ep_port_layout_on_stage(
     scope_key: Optional[str] = None,
     ebs_enabled: bool = True,
     reason: str = "",
+    show_all_prims: Optional[bool] = None,
 ) -> bool:
-    """지정 stage 에 EP2/EP3 show·hide 를 적용한다."""
+    """지정 stage 에 EP2/EP3 show·hide 를 적용한다.
+
+    ``show_all_prims=False`` 이면 EP hide/show 는 건너뛰고 EBS(``/ebsonoff``) 만 적용.
+    """
     global _active_ep_count
     if stage is None:
         return False
@@ -280,31 +305,35 @@ def apply_ep_port_layout_on_stage(
         if sk == _default_scope_key() and prev is None:
             prev = _active_ep_count
     note = f" ({reason})" if reason else ""
+    do_show_all = resolve_ep_layout_show_all_prims(show_all_prims)
 
-    if prev is not None and int(prev) != int(ep_count):
-        prev_layout = _layout_for_ep_count(int(prev))
-        for path in _unique_paths(prev_layout.show_prims):
-            _restore_baseline(stage, path, scope_key=sk)
-
-    hide_paths = _unique_paths(layout.hide_prims)
-    show_paths = _unique_paths(layout.show_prims)
     hid_ok = 0
     show_ok = 0
-    for path in hide_paths:
-        if _set_visible_on_stage(stage, path, False, scope_key=sk):
-            hid_ok += 1
-    for path in show_paths:
-        if _set_visible_on_stage(stage, path, True, scope_key=sk):
-            show_ok += 1
+    hide_paths: List[str] = []
+    show_paths: List[str] = []
+    if do_show_all:
+        if prev is not None and int(prev) != int(ep_count):
+            prev_layout = _layout_for_ep_count(int(prev))
+            for path in _unique_paths(prev_layout.show_prims):
+                _restore_baseline(stage, path, scope_key=sk)
 
-    with _lock:
-        _active_ep_by_scope[sk] = int(ep_count)
-        if sk == _default_scope_key():
-            _active_ep_count = int(ep_count)
+        hide_paths = _unique_paths(layout.hide_prims)
+        show_paths = _unique_paths(layout.show_prims)
+        for path in hide_paths:
+            if _set_visible_on_stage(stage, path, False, scope_key=sk):
+                hid_ok += 1
+        for path in show_paths:
+            if _set_visible_on_stage(stage, path, True, scope_key=sk):
+                show_ok += 1
+
+        with _lock:
+            _active_ep_by_scope[sk] = int(ep_count)
+            if sk == _default_scope_key():
+                _active_ep_count = int(ep_count)
 
     print(
-        f"{_PRINT_PREFIX} EP={ep_count} scope={sk}{note}: hide {hid_ok}/{len(hide_paths)}, "
-        f"show {show_ok}/{len(show_paths)}",
+        f"{_PRINT_PREFIX} EP={ep_count} scope={sk}{note} show_all={int(do_show_all)}: "
+        f"hide {hid_ok}/{len(hide_paths)}, show {show_ok}/{len(show_paths)}",
         flush=True,
     )
     _apply_ebs_layout_on_stage(
@@ -314,10 +343,18 @@ def apply_ep_port_layout_on_stage(
         scope_key=sk,
         reason=reason or "ebs",
     )
+    if not do_show_all:
+        return True
     return bool(hid_ok + show_ok > 0 or (not hide_paths and not show_paths))
 
 
-def apply_ep_port_layout(ep_count: int, *, ebs_enabled: bool = True, reason: str = "") -> bool:
+def apply_ep_port_layout(
+    ep_count: int,
+    *,
+    ebs_enabled: bool = True,
+    reason: str = "",
+    show_all_prims: Optional[bool] = None,
+) -> bool:
     """기본 ``omni.usd`` 컨텍스트 stage 에 EP2/EP3 show·hide 적용."""
     stage = _get_stage()
     return apply_ep_port_layout_on_stage(
@@ -326,6 +363,7 @@ def apply_ep_port_layout(ep_count: int, *, ebs_enabled: bool = True, reason: str
         scope_key=_default_scope_key(),
         ebs_enabled=bool(ebs_enabled),
         reason=reason,
+        show_all_prims=show_all_prims,
     )
 
 
@@ -335,6 +373,7 @@ def apply_ep_port_layout_for_context(
     screen_1based: int,
     *,
     reason: str = "",
+    show_all_prims: Optional[bool] = None,
 ) -> bool:
     """분할 보조 USD 컨텍스트에 화면별 EP2/EP3 레이아웃을 적용한다."""
     cn = str(context_name or "").strip()
@@ -351,6 +390,7 @@ def apply_ep_port_layout_for_context(
         scope_key=_scope_key_for_context_name(cn),
         ebs_enabled=bool(ebs_on),
         reason=reason or f"split_screen{int(screen_1based)}",
+        show_all_prims=show_all_prims,
     )
 
 
@@ -362,15 +402,17 @@ def schedule_apply_ep_port_layout_for_context(
     delay_frames: int = 4,
     max_attempts: int = 60,
     reason: str = "",
+    show_all_prims: Optional[bool] = None,
 ) -> None:
     """보조 컨텍스트 stage 가 늦게 열릴 때 EP/EBS show·hide 재시도."""
     cn = str(context_name or "").strip()
     if not cn:
         return
+    show_all = resolve_ep_layout_show_all_prims(show_all_prims)
     # 즉시 1회 시도
     try:
         if apply_ep_port_layout_for_context(
-            ext, cn, int(screen_1based), reason=reason
+            ext, cn, int(screen_1based), reason=reason, show_all_prims=show_all
         ):
             return
     except Exception:
@@ -406,6 +448,7 @@ def schedule_apply_ep_port_layout_for_context(
                     scope_key=_scope_key_for_context_name(cn),
                     ebs_enabled=bool(ebs_on),
                     reason=reason or f"split_screen{int(screen_1based)}_sched",
+                    show_all_prims=show_all,
                 )
             except Exception:
                 pass
@@ -448,6 +491,7 @@ def schedule_apply_ep_port_layout(
     delay_frames: int = 24,
     max_attempts: int = 120,
     reason: str = "",
+    show_all_prims: Optional[bool] = None,
 ) -> None:
     """Master open·startup 후 stage prim 준비될 때까지 post_update 재시도."""
     if ebs_enabled is None:
@@ -458,6 +502,7 @@ def schedule_apply_ep_port_layout(
         except Exception:
             ebs_enabled = True
     ebs_flag = bool(ebs_enabled)
+    show_all = resolve_ep_layout_show_all_prims(show_all_prims)
     _stop_retry_subscription()
     frames_until = [max(0, int(delay_frames))]
     attempts_left = [max(1, int(max_attempts))]
@@ -500,7 +545,9 @@ def schedule_apply_ep_port_layout(
                     )
                     _finish()
                 return
-        apply_ep_port_layout(ep_count, ebs_enabled=ebs_flag, reason=reason)
+        apply_ep_port_layout(
+            ep_count, ebs_enabled=ebs_flag, reason=reason, show_all_prims=show_all
+        )
         fn = getattr(ext, "_sync_sim_multi_split_row_visibility_fn", None)
         if callable(fn):
             try:
@@ -520,7 +567,9 @@ def schedule_apply_ep_port_layout(
         )
     except Exception as exc:
         print(f"{_PRINT_PREFIX} schedule failed: {exc}", flush=True)
-        apply_ep_port_layout(ep_count, ebs_enabled=ebs_flag, reason=reason)
+        apply_ep_port_layout(
+            ep_count, ebs_enabled=ebs_flag, reason=reason, show_all_prims=show_all
+        )
 
 
 def on_sim_ebs_enabled_changed(ext: Any) -> None:
@@ -578,6 +627,9 @@ __all__ = [
     "apply_ep_port_layout_on_stage",
     "schedule_apply_ep_port_layout",
     "schedule_apply_ep_port_layout_for_context",
+    "begin_ep_layout_show_all_prims",
+    "end_ep_layout_show_all_prims",
+    "resolve_ep_layout_show_all_prims",
     "on_sim_ep_count_combo_changed",
     "on_sim_ebs_enabled_changed",
     "teardown_ep_port_visibility",
