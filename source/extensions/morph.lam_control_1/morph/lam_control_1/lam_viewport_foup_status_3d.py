@@ -781,7 +781,7 @@ class LamFoupStatus3dPanel:
             center = _prim_world_center(prim)
             if center is None:
                 continue
-            ox, oy, oz = FOUP_PANEL_OFFSET_XYZ_M
+            ox, oy, oz = FOUP_PANEL_OFFSET_XYZ_M.get(int(fi), (-20, -35, 0.10))
             pos = (center[0] + ox, center[1] + oy, center[2] + oz)
             try:
                 node["root"].transform = sc.Matrix44.get_translation_matrix(*pos)
