@@ -2,7 +2,8 @@
 
 요청~준비완료까지 ``Loading data... N%`` 단일 칩 UI.
 아이콘: ``data/img/ic_loading.png`` 를 중심 기준으로 계속 회전 (ByteImageProvider).
-실 로딩 %: 약 10초 동안 0→99, 화면별 ready(100%) 후 **같은 자리**에 재생 버튼.
+실 로딩 %: 약 60초 동안 0→99, 준비 완료 시 그 숫자부터 2초 동안 100까지 채운 뒤
+같은 자리에 재생 버튼.
 재생 클릭 → ``_PLAY_CLICK_DELAY_SEC`` 뒤 버튼 숨김 + 그 화면만 시뮬 시작.
 전 화면 100% 후 일괄 자동 재생은 하지 않는다. I 단축키 미리보기와는 별개.
 
@@ -49,9 +50,10 @@ _BG_ARGB = 0x80302F40
 _TEXT_ARGB = 0xFFE8EEF5
 _FAIL_ARGB = 0xFFE06060
 _SPIN_DEG_PER_SEC = 360.0  # 1초에 1바퀴
-# 실 API 로딩 전용: 10초 동안 0→99, 완료(ready/playing) 시 즉시 100
-_RAMP_TO_99_SEC = 10.0
+# 실 API 로딩 전용: 60초 동안 0→99, 완료(ready) 시 현재 %에서 2초 동안 100
+_RAMP_TO_99_SEC = 60.0
 _RAMP_CAP_PCT = 99.0
+_FINISH_TO_100_SEC = 2.0
 # 전 화면 ready 후 fly/play 직전 HUD 유지(레거시 hold_ready 경로)
 _PRE_PLAY_HIDE_DELAY_SEC = 1.0
 
@@ -388,9 +390,12 @@ def arm_federation_play_button(
             panel.apply_user_overlay_visible(True)
         except Exception:
             pass
+        mode = str(getattr(panel, "_pct_mode", "") or "")
+        if mode == "finish":
+            return
         if str(getattr(panel, "_phase", "") or "") in ("ready", "playing"):
             panel._enter_play_mode()
-        elif str(getattr(panel, "_pct_mode", "") or "") == "complete":
+        elif mode == "complete":
             panel._enter_play_mode()
 
     schedule_on_main_thread(_apply)
@@ -539,7 +544,9 @@ class _FedLoadPanel:
         self._anim_gen = 0
         self._spin_err_logged = False
         self._ramp_t0: Optional[float] = None
-        self._pct_mode: str = "idle"  # idle|ramp|fixed|complete
+        self._finish_t0: Optional[float] = None
+        self._finish_from_pct: float = 0.0
+        self._pct_mode: str = "idle"  # idle|ramp|fixed|finish|complete
         # --- BEGIN TEMP: I-hotkey ---
         self._i_preview = False
         # --- END TEMP: I-hotkey ---
@@ -1228,7 +1235,7 @@ class _FedLoadPanel:
         except Exception:
             pass
 
-        # I 단축키 미리보기 — 고정 % / 스핀만 (실로딩 10초 램프와 무관)
+        # I 단축키 미리보기 — 고정 % / 스핀만 (실로딩 60초 램프와 무관)
         if is_preview:
             self._i_preview = True
             self._pct_mode = "fixed"
@@ -1240,27 +1247,26 @@ class _FedLoadPanel:
             self._start_anim()
             return
 
-        # 실 로딩 완료 → 즉시 100, 재생 버튼으로 대체 (I 미리보기 제외)
+        # 실 로딩 완료 → 현재 %에서 2초 동안 100, 끝난 뒤 재생 버튼 (I 미리보기 제외)
         if phase == "ready":
             self._i_preview = False
-            self._pct_mode = "complete"
-            self._ramp_t0 = None
-            self._display_pct = 100.0
-            self._target_pct = 100.0
-            self._refresh_label()
-            self._stop_anim()
-            self._enter_play_mode()
+            if self._pct_mode == "complete":
+                self._enter_play_mode()
+                return
+            if self._pct_mode != "finish":
+                self._begin_finish_to_100()
             return
         if phase == "playing":
             self._i_preview = False
             self._pct_mode = "complete"
             self._ramp_t0 = None
+            self._finish_t0 = None
             self._display_pct = 100.0
             self._target_pct = 100.0
             self._stop_anim()
             return
 
-        # 실 API 로딩(requesting/received/parsing): 10초 동안 0→99
+        # 실 API 로딩(requesting/received/parsing): 60초 동안 0→99
         self._i_preview = False
         with _lock:
             _play_click_fns.pop(self.screen, None)
@@ -1268,12 +1274,32 @@ class _FedLoadPanel:
         self._play_starting = False
         self._enter_load_mode()
         self._pct_mode = "ramp"
+        self._finish_t0 = None
         if phase == "requesting" or self._ramp_t0 is None:
             self._ramp_t0 = time.perf_counter()
             self._display_pct = 0.0
         self._target_pct = float(_RAMP_CAP_PCT)
         self._refresh_label()
         self._start_anim()
+
+    def _begin_finish_to_100(self) -> None:
+        """ready 시점 표시 %에서 2초 동안 100까지. 끝나면 재생 버튼."""
+        from_pct = max(0.0, min(float(_RAMP_CAP_PCT), float(self._display_pct)))
+        self._finish_from_pct = from_pct
+        self._finish_t0 = time.perf_counter()
+        self._ramp_t0 = None
+        self._pct_mode = "finish"
+        self._target_pct = 100.0
+        self._refresh_label()
+        self._start_anim()
+
+    def _complete_finish_to_100(self) -> None:
+        self._display_pct = 100.0
+        self._target_pct = 100.0
+        self._pct_mode = "complete"
+        self._finish_t0 = None
+        self._refresh_label()
+        self._enter_play_mode()
 
     def _refresh_label(self) -> None:
         if self._label is None:
@@ -1314,7 +1340,7 @@ class _FedLoadPanel:
                     self._angle_deg + _SPIN_DEG_PER_SEC * elapsed
                 ) % 360.0
                 self._push_rotated_icon(self._angle_deg)
-            # 실로딩: 벽시계 기준 10초 → 99% (그 전에는 99 캡)
+            # 실로딩: 벽시계 기준 60초 → 99% (그 전에는 99 캡)
             if (
                 self._pct_mode == "ramp"
                 and self._ramp_t0 is not None
@@ -1330,6 +1356,23 @@ class _FedLoadPanel:
                 ) >= 0.2:
                     self._display_pct = new_pct
                     self._refresh_label()
+            elif (
+                self._pct_mode == "finish"
+                and self._finish_t0 is not None
+                and not self._failed
+            ):
+                t = max(0.0, now - float(self._finish_t0))
+                dur = max(1e-6, float(_FINISH_TO_100_SEC))
+                span = 100.0 - float(self._finish_from_pct)
+                if t >= dur:
+                    self._complete_finish_to_100()
+                else:
+                    new_pct = float(self._finish_from_pct) + span * (t / dur)
+                    if int(round(new_pct)) != int(round(self._display_pct)) or abs(
+                        new_pct - self._display_pct
+                    ) >= 0.2:
+                        self._display_pct = new_pct
+                        self._refresh_label()
             # fixed(I preview) / complete — % 추종 없음
 
         # IApp.post_update 사용 금지 — update event stream 구독
