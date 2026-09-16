@@ -915,14 +915,33 @@ def _normalized_ports_occupancy(ports_occupancy: Any) -> Dict[str, str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _get_usd_context(usd_context_name: Optional[str]) -> Any:
+    """이름 있는 USD 컨텍스트(없으면 기본 컨텍스트)."""
+    try:
+        nm = (usd_context_name or "").strip()
+        return ou.get_context(nm) if nm else ou.get_context()
+    except Exception:
+        return None
+
+
 def _get_stage_for_context(usd_context_name: Optional[str]) -> Any:
     """이름 있는 USD 컨텍스트(없으면 기본 컨텍스트)에서 stage 를 안전하게 가져온다."""
     try:
-        nm = (usd_context_name or "").strip()
-        ctx = ou.get_context(nm) if nm else ou.get_context()
+        ctx = _get_usd_context(usd_context_name)
         return ctx.get_stage() if ctx else None
     except Exception:
         return None
+
+
+def _reset_renderer_accumulation_for_context(usd_context_name: Optional[str]) -> None:
+    """해당 화면 USD 컨텍스트의 RTX 누적(TAA/DLSS)을 비운다."""
+    try:
+        ctx = _get_usd_context(usd_context_name)
+        if ctx is None:
+            return
+        ctx.reset_renderer_accumulation()
+    except Exception:
+        pass
 
 
 def bind_material_to_prim(stage: Any, prim_path: str, material_path: str) -> bool:
@@ -1053,6 +1072,7 @@ def apply_bp_count_layout_for_context(
         path_s = str(mapping.get(port, "") or "").strip()
         if path_s:
             _set_prim_visible_on_stage(stage, path_s, True)
+    _reset_renderer_accumulation_for_context(usd_context_name)
 
 
 def apply_port_lot_prim_visibility(ports_occupancy: Any) -> None:
