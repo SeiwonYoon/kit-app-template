@@ -174,6 +174,82 @@ def _bind_ep_count_combo(ext: Any, combo: Any) -> None:
         ext._sim_ep_count_combo = combo
 
 
+def get_sim_bp_count_idx(ext: Any) -> int:
+    try:
+        m = getattr(ext, "_sim_bp_count_idx_model", None)
+        if m is not None:
+            return max(0, min(2, int(m.get_value_as_int())))
+    except Exception:
+        pass
+    try:
+        combo = getattr(ext, "_sim_bp_count_combo", None)
+        if combo is not None:
+            return max(0, min(2, int(combo.model.get_item_value_model().as_int)))
+    except Exception:
+        pass
+    return 0
+
+
+def _sync_bp_count_combo_widgets(ext: Any, idx: int) -> None:
+    i = max(0, min(2, int(idx)))
+    try:
+        ext._sim_bp_count_idx_model.set_value(int(i))
+    except Exception:
+        pass
+    for combo in list(getattr(ext, "_sim_bp_count_combos", None) or []):
+        if combo is None:
+            continue
+        try:
+            combo.model.get_item_value_model().set_value(int(i))
+        except Exception:
+            pass
+
+
+def _bind_bp_count_combo(ext: Any, combo: Any) -> None:
+    from .ebs_case_models import CASE_A
+
+    def _on_combo(_m: Any, *_a: Any) -> None:
+        try:
+            idx = int(_m.get_item_value_model().as_int)
+        except Exception:
+            idx = 0
+        _sync_bp_count_combo_widgets(ext, int(idx))
+        on_sim_bp_count_changed_for_case(ext, CASE_A)
+
+    try:
+        combo.model.add_item_changed_fn(_on_combo)
+    except Exception:
+        pass
+    combos = getattr(ext, "_sim_bp_count_combos", None)
+    if not isinstance(combos, list):
+        combos = []
+        ext._sim_bp_count_combos = combos
+    combos.append(combo)
+    if getattr(ext, "_sim_bp_count_combo", None) is None:
+        ext._sim_bp_count_combo = combo
+
+
+def on_sim_bp_count_changed_for_case(ext: Any, case_id: int) -> None:
+    """웹 ``T2V_request_bp_change`` 와 동일 — 해당 CASE 화면 LOT prim 레이아웃."""
+    from .control_window import _usd_context_name_for_sim_screen
+    from .ebs_case_models import get_sim_bp_count_for_case, screen_from_case
+    from .port_lot_visibility import apply_bp_count_layout_for_context
+
+    cid = int(case_id)
+    screen = int(screen_from_case(cid))
+    try:
+        n = int(get_sim_bp_count_for_case(ext, cid))
+    except Exception:
+        n = 2
+    try:
+        apply_bp_count_layout_for_context(
+            _usd_context_name_for_sim_screen(ext, screen),
+            n,
+        )
+    except Exception:
+        pass
+
+
 def init_ebs_control_models(ext: Any) -> None:
     """시뮬 UI 모델·런타임 상태 초기화 (창/HUD 공유)."""
     from .control_window import _on_sim_bar_preview_toggled
@@ -213,6 +289,9 @@ def init_ebs_control_models(ext: Any) -> None:
     ext._sim_ep_count_idx_model = ui.SimpleIntModel(int(_SIM_DEF.ep_count_idx))
     ext._sim_ep_count_combo = None
     ext._sim_ep_count_combos = []
+    ext._sim_bp_count_idx_model = ui.SimpleIntModel(0)
+    ext._sim_bp_count_combo = None
+    ext._sim_bp_count_combos: List[Any] = []
     ext._sim_ebs_enabled_model = ui.SimpleBoolModel(True)
     ext._sim_ebs_enabled_checkboxes: List[Any] = []
     ext._sim_init_buffer_row = None

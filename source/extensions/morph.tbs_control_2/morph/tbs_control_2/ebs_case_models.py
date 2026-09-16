@@ -133,6 +133,9 @@ def init_ebs_case_b_models(ext: Any) -> None:
     ext._ebs_b_ep_count_idx_model = ui.SimpleIntModel(int(_SIM_DEF.ep_count_idx))
     ext._ebs_b_ep_count_combo = None
     ext._ebs_b_ep_count_combos: List[Any] = []
+    ext._ebs_b_bp_count_idx_model = ui.SimpleIntModel(0)
+    ext._ebs_b_bp_count_combo = None
+    ext._ebs_b_bp_count_combos: List[Any] = []
     ext._ebs_b_ebs_enabled_model = ui.SimpleBoolModel(True)
     ext._ebs_b_timing_oht_inout_rows: List[Any] = []
     for name in _BOOL_FIELDS:
@@ -221,6 +224,91 @@ def bind_case_b_ep_count_combo(ext: Any, combo: Any) -> None:
     combos.append(combo)
     if getattr(ext, "_ebs_b_ep_count_combo", None) is None:
         ext._ebs_b_ep_count_combo = combo
+
+
+def bp_count_from_combo_idx(idx: int) -> int:
+    i = int(idx)
+    if i <= 0:
+        return 2
+    if i == 1:
+        return 3
+    return 4
+
+
+def combo_idx_from_bp_count(n: int) -> int:
+    try:
+        v = int(n)
+    except Exception:
+        return 0
+    if v >= 4:
+        return 2
+    if v >= 3:
+        return 1
+    return 0
+
+
+def get_sim_bp_count_idx_for_case(ext: Any, case_id: int) -> int:
+    cid = int(case_id)
+    if cid == CASE_A:
+        from .ebs_control_panel_ui import get_sim_bp_count_idx
+
+        return int(get_sim_bp_count_idx(ext))
+    try:
+        m = getattr(ext, "_ebs_b_bp_count_idx_model", None)
+        if m is not None:
+            return max(0, min(2, int(m.get_value_as_int())))
+    except Exception:
+        pass
+    try:
+        combo = getattr(ext, "_ebs_b_bp_count_combo", None)
+        if combo is not None:
+            return max(0, min(2, int(combo.model.get_item_value_model().as_int)))
+    except Exception:
+        pass
+    return 0
+
+
+def get_sim_bp_count_for_case(ext: Any, case_id: int) -> int:
+    return int(bp_count_from_combo_idx(get_sim_bp_count_idx_for_case(ext, int(case_id))))
+
+
+def _sync_case_b_bp_count_combo_widgets(ext: Any, idx: int) -> None:
+    i = max(0, min(2, int(idx)))
+    try:
+        ext._ebs_b_bp_count_idx_model.set_value(int(i))
+    except Exception:
+        pass
+    for combo in list(getattr(ext, "_ebs_b_bp_count_combos", None) or []):
+        if combo is None:
+            continue
+        try:
+            combo.model.get_item_value_model().set_value(int(i))
+        except Exception:
+            pass
+
+
+def bind_case_b_bp_count_combo(ext: Any, combo: Any) -> None:
+    from .ebs_control_panel_ui import on_sim_bp_count_changed_for_case
+
+    def _on_combo(_m: Any, *_a: Any) -> None:
+        try:
+            idx = int(_m.get_item_value_model().as_int)
+        except Exception:
+            idx = 0
+        _sync_case_b_bp_count_combo_widgets(ext, int(idx))
+        on_sim_bp_count_changed_for_case(ext, CASE_B)
+
+    try:
+        combo.model.add_item_changed_fn(_on_combo)
+    except Exception:
+        pass
+    combos = getattr(ext, "_ebs_b_bp_count_combos", None)
+    if not isinstance(combos, list):
+        combos = []
+        ext._ebs_b_bp_count_combos = combos
+    combos.append(combo)
+    if getattr(ext, "_ebs_b_bp_count_combo", None) is None:
+        ext._ebs_b_bp_count_combo = combo
 
 
 def _ep_count_from_snap_value(raw: Any, *, default: int = 2) -> int:

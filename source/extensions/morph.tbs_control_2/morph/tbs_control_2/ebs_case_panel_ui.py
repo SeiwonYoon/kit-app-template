@@ -9,10 +9,12 @@ import omni.ui as ui
 from .ebs_case_models import (
     CASE_A,
     CASE_B,
+    bind_case_b_bp_count_combo,
     bind_case_b_ep_count_combo,
     copy_case_a_to_b,
     copy_case_b_to_a,
     get_case_model,
+    get_sim_bp_count_idx_for_case,
     get_sim_ep_count_idx_for_case,
     screen_from_case,
 )
@@ -20,7 +22,7 @@ from .ebs_case_models import (
 
 def build_ebs_case_window_panel(ext: Any, case_id: int, *, cb_style: Any) -> None:
     """``EBS제어창(CASE A|B)`` 스크롤 영역 본문."""
-    from .ebs_control_panel_ui import _bind_ep_count_combo, _on_faulty_port_changed
+    from .ebs_control_panel_ui import _bind_bp_count_combo, _bind_ep_count_combo, _on_faulty_port_changed
     from .control_window import (
         _sync_ebs_control_visibility_for_case,
         _sync_ep3_port_cell_visibility_for_case,
@@ -34,14 +36,17 @@ def build_ebs_case_window_panel(ext: Any, case_id: int, *, cb_style: Any) -> Non
     cid = int(case_id)
     screen = screen_from_case(cid)
     ep_idx = int(get_sim_ep_count_idx_for_case(ext, cid))
+    bp_idx = int(get_sim_bp_count_idx_for_case(ext, cid))
 
     if cid == CASE_A:
         ep_combo_bind = lambda c: _bind_ep_count_combo(ext, c)
+        bp_combo_bind = lambda c: _bind_bp_count_combo(ext, c)
         on_ep_changed = lambda: on_sim_ep_count_changed(ext)
         sync_vis = lambda: _sync_ebs_control_visibility_for_case(ext, CASE_A)
         sync_ep3 = lambda: _sync_ep3_port_cell_visibility_for_case(ext, CASE_A)
     else:
         ep_combo_bind = lambda c: bind_case_b_ep_count_combo(ext, c)
+        bp_combo_bind = lambda c: bind_case_b_bp_count_combo(ext, c)
         on_ep_changed = lambda: on_sim_ep_count_changed_for_case(ext, CASE_B)
         sync_vis = lambda: _sync_ebs_control_visibility_for_case(ext, CASE_B)
         sync_ep3 = lambda: _sync_ep3_port_cell_visibility_for_case(ext, CASE_B)
@@ -97,6 +102,8 @@ def build_ebs_case_window_panel(ext: Any, case_id: int, *, cb_style: Any) -> Non
                 ui.IntField(model=_m("lot_count"), width=80)
                 ui.Label("EP 개수", width=55)
                 ep_combo_bind(ui.ComboBox(ep_idx, "2", "3"))
+                ui.Label("BP 개수", width=55)
+                bp_combo_bind(ui.ComboBox(bp_idx, "2", "3", "4"))
 
             with ui.HStack(spacing=8, height=28):
                 ui.Label("LOT생성간격", width=100)
