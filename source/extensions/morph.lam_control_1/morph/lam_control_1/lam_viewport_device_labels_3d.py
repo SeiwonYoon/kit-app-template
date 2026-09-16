@@ -26,7 +26,10 @@ from .lam_viewport_overlay_config import (
     DEVICE_LABEL_WIDTH_SLACK_PX,
     DeviceLabelSpec,
 )
-from .lam_viewport_overlay_state import get_toggle_device_labels
+from .lam_viewport_overlay_state import (
+    get_toggle_device_labels,
+    is_top_view_checked_for_screen,
+)
 
 _PM_LABEL_NAME_RE = re.compile(r"^PM([1-5])$", re.IGNORECASE)
 # 실무 라벨: ``PM5 strip`` 등 — PM1~5 문자열이 포함되면 항상 강조(파란) 배경
@@ -648,12 +651,18 @@ class LamViewportDeviceLabels3d:
                 except Exception:
                     pass
 
+    def _top_view_checked(self) -> bool:
+        return is_top_view_checked_for_screen(
+            self._screen, csv_window=self._csv_window
+        )
+
     def _tick_positions(self) -> None:
         if not self._label_roots:
             return
         st = self._stage_for_panel()
         if st is None:
             return
+        top_view = self._top_view_checked()
         for spec in DEVICE_LABEL_SPECS:
             root = self._label_roots.get(spec.name)
             if root is None:
@@ -667,7 +676,7 @@ class LamViewportDeviceLabels3d:
             center = _prim_world_center(prim)
             if center is None:
                 continue
-            ox, oy, oz = spec.offset_xyz_m
+            ox, oy, oz = spec.offset_for_view(top_view=top_view)
             pos = (center[0] + ox, center[1] + oy, center[2] + oz)
             try:
                 root.transform = sc.Matrix44.get_translation_matrix(*pos)
@@ -702,6 +711,7 @@ class LamViewportDeviceLabels3d:
         self._label_roots.clear()
         self._bg_rects.clear()
 
+        top_view = self._top_view_checked()
         with self._root:
             for spec in DEVICE_LABEL_SPECS:
                 p = _normalize_path(spec.prim_path)
@@ -713,7 +723,7 @@ class LamViewportDeviceLabels3d:
                 center = _prim_world_center(prim)
                 if center is None:
                     continue
-                ox, oy, oz = spec.offset_xyz_m
+                ox, oy, oz = spec.offset_for_view(top_view=top_view)
                 pos = (center[0] + ox, center[1] + oy, center[2] + oz)
                 self._build_label(pos, spec)
 

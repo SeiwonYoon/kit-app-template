@@ -940,6 +940,30 @@ def get_toggle_top_view() -> bool:
         return bool(_toggle_top_view)
 
 
+def is_top_view_checked_for_screen(screen: int = 1, *, csv_window: Any = None) -> bool:
+    """해당 화면 「탑뷰 보기」 체크. 화면1은 전역 토글, 화면2+는 CSV 창 모델·적용 플래그."""
+    si = max(1, int(screen or 1))
+    win = csv_window
+    if win is not None:
+        m = getattr(win, "_top_view_model", None)
+        if m is not None:
+            for attr in ("get_value_as_bool", "as_bool", "get_value"):
+                try:
+                    fn = getattr(m, attr, None)
+                    if callable(fn):
+                        return bool(fn())
+                except Exception:
+                    continue
+    if si <= 1:
+        return get_toggle_top_view()
+    try:
+        from .lam_csv_screen_runtime import is_screen_top_view_applied
+
+        return bool(is_screen_top_view_applied(si))
+    except Exception:
+        return False
+
+
 def update_progress_snap(snap: Dict[str, Any], *, screen: int = 1) -> None:
     si = max(1, int(screen or 1))
     with _lock:
@@ -1446,6 +1470,7 @@ __all__ = [
     "get_toggle_play_camera_fly",
     "set_toggle_top_view",
     "get_toggle_top_view",
+    "is_top_view_checked_for_screen",
     "get_ui_model_top_view",
     "ui_models_are_syncing",
     "update_progress_snap",

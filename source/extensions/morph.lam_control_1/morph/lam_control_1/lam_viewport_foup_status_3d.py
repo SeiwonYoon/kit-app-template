@@ -25,8 +25,8 @@ from .lam_viewport_overlay_config import (
     FOUP_PANEL_DIVIDER_RGBA,
     FOUP_PANEL_FONT_SIZE,
     FOUP_PANEL_HEIGHT_PX,
-    FOUP_PANEL_OFFSET_XYZ_M,
     FOUP_PANEL_PAD_X_PX,
+    foup_panel_offset_xyz_m,
     FOUP_PANEL_TITLE_H_PX,
     FOUP_PANEL_TOP_BAR_H_PX,
     FOUP_PANEL_WIDTH_PX,
@@ -36,6 +36,7 @@ from .lam_viewport_overlay_state import (
     get_foup_counts,
     get_lot_id_for_foup,
     get_toggle_foup_status,
+    is_top_view_checked_for_screen,
 )
 from .lam_foup_lot_display import foup_lot_color_rgba
 
@@ -760,6 +761,9 @@ class LamFoupStatus3dPanel:
         if st is None:
             return
         self._ensure_ui_built()
+        top_view = is_top_view_checked_for_screen(
+            self._screen, csv_window=self._csv
+        )
 
         for fi in (1, 2, 3):
             node = self._panel_nodes.get(fi)
@@ -781,7 +785,7 @@ class LamFoupStatus3dPanel:
             center = _prim_world_center(prim)
             if center is None:
                 continue
-            ox, oy, oz = FOUP_PANEL_OFFSET_XYZ_M.get(int(fi), (-20, -35, 0.10))
+            ox, oy, oz = foup_panel_offset_xyz_m(int(fi), top_view=top_view)
             pos = (center[0] + ox, center[1] + oy, center[2] + oz)
             try:
                 node["root"].transform = sc.Matrix44.get_translation_matrix(*pos)

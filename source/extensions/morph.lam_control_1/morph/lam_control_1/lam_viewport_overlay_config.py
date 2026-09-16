@@ -391,6 +391,20 @@ FOUP_PANEL_OFFSET_XYZ_M: Dict[int, Tuple[float, float, float]] = {
     2: (-20, -35, 0.10),
     3: (-20, -35, 0.10),
 }
+# 「탑뷰 보기」 체크 시 사용. 기본과 같은 값으로 시작.
+FOUP_PANEL_OFFSET_XYZ_M_TOP_VIEW: Dict[int, Tuple[float, float, float]] = {
+    1: (-20, -35, 0.10),
+    2: (-20, -35, 0.10),
+    3: (-20, -35, 0.10),
+}
+
+
+def foup_panel_offset_xyz_m(foup_index: int, *, top_view: bool = False) -> Tuple[float, float, float]:
+    src = FOUP_PANEL_OFFSET_XYZ_M_TOP_VIEW if bool(top_view) else FOUP_PANEL_OFFSET_XYZ_M
+    rec = src.get(int(foup_index))
+    if rec is None:
+        rec = FOUP_PANEL_OFFSET_XYZ_M.get(int(foup_index), (-20, -35, 0.10))
+    return (float(rec[0]), float(rec[1]), float(rec[2]))
 
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
 FOUP_PANEL_WIDTH_PX: int = 200
@@ -437,6 +451,7 @@ DEVICE_LABEL_PM_OCCUPIED_BG_RGBA: Tuple[float, float, float, float] = (
 class DeviceLabelSpec:
     """기기 3D 라벨 한 항목.
 
+    - ``offset_xyz_m``: 기본(원근) 뷰 오프셋. ``offset_xyz_m_top_view``: 탑뷰 체크 시.
     - ``bg_rgba`` / ``border_rgba``: FOUP 패널과 동일 형식 (0~1 float RGBA).
     - ``padding_px``: (가로, 세로) [px]. 패널 크기는 글자 길이 + padding 으로 자동.
     - ``show_border``: FOUP 와 같이 wireframe 테두리 표시.
@@ -445,12 +460,17 @@ class DeviceLabelSpec:
     name: str
     prim_path: str
     offset_xyz_m: Tuple[float, float, float] = (0.0, 0.0, 0.10)
+    offset_xyz_m_top_view: Tuple[float, float, float] = (0.0, 0.0, 0.10)
     color_rgba: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     font_size: int = 16
     bg_rgba: Tuple[float, float, float, float] = DEVICE_LABEL_DEFAULT_BG_RGBA
     border_rgba: Tuple[float, float, float, float] = DEVICE_LABEL_DEFAULT_BORDER_RGBA
     padding_px: Tuple[int, int] = DEVICE_LABEL_DEFAULT_PADDING_PX
     show_border: bool = True
+
+    def offset_for_view(self, *, top_view: bool = False) -> Tuple[float, float, float]:
+        rec = self.offset_xyz_m_top_view if bool(top_view) else self.offset_xyz_m
+        return (float(rec[0]), float(rec[1]), float(rec[2]))
 
 
 # v1: CoolStation 1개만 채우고 나머지는 사용자가 추가
@@ -460,6 +480,7 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
         # prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
         prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1001_000___________1262/TL14_1001_r11___________SSA4001A_04_1319",
         offset_xyz_m=(-0.20, 0.0, 0.15),
+        offset_xyz_m_top_view=(-0.20, 0.0, 0.15),
         color_rgba=(1.0, 1.0, 1.0, 1.0),
         font_size=16,
         bg_rgba=(0.10, 0.12, 0.15, 0.75),   # 생략 시 FOUP와 동일
@@ -471,6 +492,7 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
         # prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
         prim_path="/World/aaa_1/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084",
         offset_xyz_m=(-0.20, 0.0, 0.15),
+        offset_xyz_m_top_view=(-0.20, 0.0, 0.15),
         color_rgba=(1.0, 1.0, 1.0, 1.0),
         font_size=16,
     ),
@@ -479,6 +501,7 @@ DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
         # prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
         prim_path="/World/aaa_1/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r07__________B_1114",
         offset_xyz_m=(-0.20, 0.0, 0.15),
+        offset_xyz_m_top_view=(-0.20, 0.0, 0.15),
         color_rgba=(1.0, 1.0, 1.0, 1.0),
         font_size=16,
     )
@@ -606,6 +629,8 @@ __all__ = [
     "STATUS_PANEL_ROWS",
     "FOUP_ANCHOR_PRIM_BY_INDEX",
     "FOUP_PANEL_OFFSET_XYZ_M",
+    "FOUP_PANEL_OFFSET_XYZ_M_TOP_VIEW",
+    "foup_panel_offset_xyz_m",
     "FOUP_PANEL_WIDTH_PX",
     "FOUP_PANEL_HEIGHT_PX",
     "FOUP_PANEL_TITLE_H_PX",

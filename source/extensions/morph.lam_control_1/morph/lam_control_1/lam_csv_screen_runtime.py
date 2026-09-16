@@ -547,6 +547,12 @@ def sync_play_prim_hide_checkbox_after_play_start(
     _applied_prim_hide_by_screen[si] = True
 
 
+def is_screen_top_view_applied(screen: int) -> bool:
+    """화면2+ 마지막 적용 탑뷰. 화면1은 호출하지 않는다(전역 토글 사용)."""
+    si = max(1, int(screen or 1))
+    return bool(_applied_top_view_by_screen.get(si) or False)
+
+
 def apply_top_view_for_screen(
     runtime: CsvScreenRuntime,
     *,
@@ -978,6 +984,7 @@ __all__ = [
     "schedule_play_stop_perspective_restore_for_screen",
     "sync_play_prim_hide_checkbox_after_play_start",
     "apply_top_view_for_screen",
+    "is_screen_top_view_applied",
     "bind_viewport_camera_for_screen",
     "capture_csv_overlay_settings",
     "resolve_csv_screen_runtime",
