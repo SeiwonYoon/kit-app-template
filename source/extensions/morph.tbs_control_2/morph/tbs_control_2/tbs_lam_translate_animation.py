@@ -334,6 +334,9 @@ def _on_update(e) -> None:
     dt = float(payload.get("dt", 0.0) or 0.0)
     if dt <= 0:
         dt = 1.0 / 60.0
+    elif dt > 0.05:
+        # 타 화면 JSON 시작 hitch 한 틱이 보간을 점프시키지 않게.
+        dt = 0.05
     try:
         from .tbs_sim_play_stubs import get_csv_play_anim_dt_scale
     except Exception:

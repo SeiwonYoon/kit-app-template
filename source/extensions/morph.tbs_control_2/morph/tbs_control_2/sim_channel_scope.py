@@ -41,20 +41,7 @@ def stop_channel_animations(
         )
     except Exception:
         pass
-    target = str(usd_context_name or "").strip()
-    if not target:
-        try:
-            from .rotate_animation import stop_all_rotate_animations
-
-            stop_all_rotate_animations()
-        except Exception:
-            pass
-        try:
-            from .curve_animation import stop_all_curve_animations
-
-            stop_all_curve_animations()
-        except Exception:
-            pass
+    # 레거시 rotate/curve stop_all 은 전역이라 화면2 애니까지 끊김 — 호출하지 않음.
 
 
 def stop_channel_animations_for_paths(

@@ -92,7 +92,7 @@ class SequenceRunner(_LegacySequenceRunner):
         lam = self._lam_runner
         if lam is not None:
             try:
-                lam.on_renewal_step = cb
+                lam._on_renewal_step = cb
             except Exception:
                 pass
 
@@ -178,7 +178,6 @@ class SequenceRunner(_LegacySequenceRunner):
 
         ctx_nm = str(usd_context_name or "").strip() or None
         self._last_usd_context_name = ctx_nm
-        peer_busy = self._peer_rail_busy()
 
         if self._lam_thread is not None and self._lam_thread.is_alive():
             # on_done → 다음 JSON: 이전 LAM 스레드가 main 대기(dispatch_main_wait) 중일 수 있음.
@@ -192,28 +191,21 @@ class SequenceRunner(_LegacySequenceRunner):
                 self._lam_running = False
                 self._lam_thread = None
             else:
+                # 이전 JSON 을 stop 으로 선점하지 않고 완료까지 join 대기
+                join_t = 10.0
                 try:
-                    diag_ext = getattr(self, "_diag_ext", None)
-                    diag_scr = int(getattr(self, "_diag_screen", 1) or 1)
-                    if self._lam_runner is not None:
-                        try:
-                            from . import sim_multi_diag as _mdiag
+                    from .sim_sequence_duration import estimate_sequence_duration_sec
 
-                            _mdiag.log_runner_preempt(
-                                diag_ext,
-                                screen=diag_scr,
-                                ctx=ctx_nm,
-                            )
-                        except Exception:
-                            pass
-                        self._lam_runner.stop(cancel_all_move_rotate=not peer_busy)
-                    try:
-                        self._lam_thread.join(timeout=10.0)
-                    except Exception:
-                        pass
-                    self._lam_running = False
+                    prev_steps = list(self._lam_last_steps or normalized)
+                    dur = float(estimate_sequence_duration_sec(prev_steps) or 0.0)
+                    join_t = min(600.0, max(5.0, float(dur) * 2.0 + 5.0))
+                except Exception:
+                    join_t = min(600.0, 120.0)
+                try:
+                    self._lam_thread.join(timeout=float(join_t))
                 except Exception:
                     pass
+                self._lam_running = False
 
         self._lam_last_steps = list(normalized)
         self._steps = list(normalized)
@@ -231,6 +223,9 @@ class SequenceRunner(_LegacySequenceRunner):
                 getattr(self, "_gate_play0", 0.0) or 0.0
             )
             self._lam_runner._gate_play_end = getattr(self, "_gate_play_end", None)  # type: ignore[attr-defined]
+            self._lam_runner._catchup_mul = float(  # type: ignore[attr-defined]
+                getattr(self, "_catchup_mul", 1.0) or 1.0
+            )
         except Exception:
             pass
         self._lam_running = True
@@ -267,13 +262,23 @@ class SequenceRunner(_LegacySequenceRunner):
                         parallel_moves_enabled() and rail in ("oht", "move")
                     )
                     peer_now = self._peer_rail_busy()
-                    if scoped or peer_now:
-                        # 병렬 레일: 이번 JSON prim 만 정리 (채널 전체 stop/drain 금지)
+                    _playback_now = False
+                    try:
+                        from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
+
+                        _dext = getattr(self, "_diag_ext", None)
+                        _playback_now = bool(SIM_PRERUN_PLAN_SSOT) and bool(
+                            getattr(_dext, "_sim_playback_started", False)
+                        )
+                    except Exception:
+                        _playback_now = False
+                    if scoped or peer_now or _playback_now:
+                        # 재생/병렬: 이번 JSON prim 만 정리 (채널 전체 stop 금지)
                         _own = _collect_prim_paths_for_reset(list(self._lam_last_steps or []))
                         stop_channel_animations_for_paths(
                             self._last_usd_context_name,
                             _own,
-                            diag_reason="lam_run_end_peer_preserve",
+                            diag_reason="lam_run_end_own_paths",
                         )
                         try:
                             from .tbs_lam_sequence_engine import pause_timesample_replays_for_paths
@@ -297,24 +302,12 @@ class SequenceRunner(_LegacySequenceRunner):
                             )
                         except Exception:
                             pass
-                        # SSOT 재생: drain 이 다음 JSON anim_play_start 를 민다.
-                        _ssot_skip_drain = False
-                        try:
-                            from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
-
-                            _dext = getattr(self, "_diag_ext", None)
-                            _ssot_skip_drain = bool(SIM_PRERUN_PLAN_SSOT) and bool(
-                                getattr(_dext, "_sim_playback_started", False)
-                            )
-                        except Exception:
-                            _ssot_skip_drain = False
-                        if not _ssot_skip_drain:
-                            drain_channel_motion_complete(
-                                self._last_usd_context_name,
-                                self._tbs_registry,
-                                max_sec=4.0,
-                                stable_ticks=2,
-                            )
+                        drain_channel_motion_complete(
+                            self._last_usd_context_name,
+                            self._tbs_registry,
+                            max_sec=4.0,
+                            stable_ticks=2,
+                        )
                 except Exception:
                     pass
                 if callable(cb):

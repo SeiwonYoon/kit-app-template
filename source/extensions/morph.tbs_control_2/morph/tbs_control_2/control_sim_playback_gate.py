@@ -9,6 +9,21 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 
+def compute_late_start_catchup_mul(
+    anim_1x_sec: float,
+    remaining_sim_sec: float,
+    *,
+    late: bool,
+    cap: float = 8.0,
+) -> float:
+    """늦게 시작된 JSON 을 예정 종료에 맞출 추가 배수. UI 배속은 실행기가 곱한다."""
+    if not bool(late):
+        return 1.0
+    anim = max(1e-6, float(anim_1x_sec))
+    rem = max(1e-6, float(remaining_sim_sec))
+    return min(float(cap), max(1.0, anim / rem))
+
+
 def compute_json_effective_speed(user_sp: float, proc_sec: float, est_total: float) -> float:
     """
     사용자 배속 위에, JSON(1배속 길이)이 공정시간보다 길면 압축 배속을 곱한다.
@@ -772,6 +787,7 @@ __all__ = [
     "clear_proc_gate_end",
     "clear_proc_gates",
     "compute_json_effective_speed",
+    "compute_late_start_catchup_mul",
     "get_proc_gate_end",
     "is_json_anim_slot_held",
     "is_json_sequence_busy",

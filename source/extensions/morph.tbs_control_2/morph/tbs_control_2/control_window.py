@@ -1512,7 +1512,11 @@ def _execute_mapped_sequence_stub(
                 # 다음 JSON 직전 drain — SSOT 는 최대 5초 대기가 애니 지연의 주원인.
                 # 재생은 시간표 SSOT: 짧은 정리만 하고 다음 play_start 를 지체하지 않는다.
                 try:
-                    from .sim_channel_scope import drain_channel_motion_complete, stop_channel_animations
+                    from .sim_channel_scope import (
+                        drain_channel_motion_complete,
+                        stop_channel_animations_for_paths,
+                    )
+                    from .tbs_lam_sequence_engine import _collect_prim_paths_for_reset
                     from .tbs_split_composed_loader import get_split_runtime_for_screen
                     from .sim_parallel_rails import parallel_moves_enabled
                     from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
@@ -1541,8 +1545,14 @@ def _execute_mapped_sequence_stub(
                                 )
                             except Exception:
                                 pass
-                            stop_channel_animations(
-                                _ctx_done, diag_reason="on_done_drain_timeout"
+                            # 채널 전체 stop 금지 — 이번 JSON prim 만 정리
+                            _own_done = _collect_prim_paths_for_reset(
+                                list((job or {}).get("parsed") or [])
+                            )
+                            stop_channel_animations_for_paths(
+                                _ctx_done,
+                                _own_done,
+                                diag_reason="on_done_drain_timeout",
                             )
                 except Exception:
                     pass
@@ -1838,20 +1848,13 @@ def _execute_mapped_sequence_stub(
                             # SSOT: 막대는 sim_now 키프레임. LAM 이 UI wait 하면
                             # renewal 이후 3D 가 더 늦고, wait 자체도 체감 지연.
                             _ctx_ui = _usd_context_name_for_sim_screen(ext, int(scr_i))
-                            if bool(_ssot_play):
-                                dispatch_main(
-                                    _apply_renewal_playback_ui,
-                                    usd_context_name=_ctx_ui,
-                                    priority=True,
-                                )
-                                ok_ui = True
-                            else:
-                                ok_ui = dispatch_main_wait(
-                                    _apply_renewal_playback_ui,
-                                    timeout=5.0,
-                                    usd_context_name=_ctx_ui,
-                                    priority=True,
-                                )
+                            # occupancy prim 은 메인에서 반드시 끝나야 renewal 타이밍이 맞다
+                            ok_ui = dispatch_main_wait(
+                                _apply_renewal_playback_ui,
+                                timeout=2.0,
+                                usd_context_name=_ctx_ui,
+                                priority=True,
+                            )
                             if not ok_ui:
                                 try:
                                     print(
@@ -2089,6 +2092,41 @@ def _execute_mapped_sequence_stub(
                             runner_obj._gate_play_end = (  # type: ignore[attr-defined]
                                 float(_gpe) if float(_gpe) > 1e-9 else None
                             )
+                        except Exception:
+                            _gpe = 0.0
+                        catchup_mul = 1.0
+                        if bool(_ssot_play):
+                            try:
+                                from .control_sim_playback_gate import (
+                                    compute_late_start_catchup_mul,
+                                )
+                                from .control_sim_screen_playback import (
+                                    get_sim_playback_player,
+                                )
+
+                                _pl_cu = get_sim_playback_player(ext, scr_i)
+                                _now_cu = (
+                                    float(_pl_cu.sim_now(scr_i))
+                                    if _pl_cu is not None
+                                    else float(json_run_start_sim)
+                                )
+                                _plan0 = float(json_run_start_sim)
+                                _late = float(_now_cu) > float(_plan0) + 0.05
+                                _pend = float(_gpe) if float(_gpe) > 1e-9 else (
+                                    float(_plan0) + float(est_total_f)
+                                )
+                                _rem = max(1e-6, float(_pend) - float(_now_cu))
+                                catchup_mul = float(
+                                    compute_late_start_catchup_mul(
+                                        float(est_total_f),
+                                        float(_rem),
+                                        late=bool(_late),
+                                    )
+                                )
+                            except Exception:
+                                catchup_mul = 1.0
+                        try:
+                            runner_obj._catchup_mul = float(catchup_mul)  # type: ignore[attr-defined]
                         except Exception:
                             pass
                         runner_obj.run(
@@ -2358,6 +2396,7 @@ def _execute_mapped_sequence_stub(
             )
         except Exception:
             _ssot_play = False
+        # 재생: 이전 JSON 이 살아 있으면 큐. 채널(FOUP) motion 은 점유 아님.
         try:
             from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
             from .control_sim_playback_gate import (
@@ -2368,13 +2407,17 @@ def _execute_mapped_sequence_stub(
             if parallel_moves_enabled() and job.get("sim_rail"):
                 _slot_rail = str(job.get("sim_rail") or "").strip().lower() or None
                 _pending_key = rail_queue_key(_scr, str(job.get("sim_rail")))
-            if not _ssot_play:
+            if _ssot_play:
+                runner_busy = bool(
+                    is_json_sequence_busy(ext, int(_scr), rail=_slot_rail)
+                )
+            else:
                 runner_busy = bool(
                     is_json_sequence_busy(ext, int(_scr), rail=_slot_rail)
                 ) or bool(is_json_anim_slot_held(ext, int(_scr), rail=_slot_rail))
         except Exception:
             runner_busy = False
-        if runner_busy:
+        if runner_busy and not bool((job or {}).get("_start_json_now")):
             try:
                 from . import sim_multi_diag as _mdiag
 
@@ -7218,6 +7261,16 @@ def _prepare_playback_emit_environment(
     except Exception:
         pass
     try:
+        from .control_sim_playback_plan import clear_playback_prim_apply_holds
+
+        if scope_screens_only and scoped:
+            for scr_i in scoped:
+                clear_playback_prim_apply_holds(ext, int(scr_i))
+        else:
+            clear_playback_prim_apply_holds(ext)
+    except Exception:
+        pass
+    try:
         if scope_screens_only and scoped:
             by = getattr(ext, "_sim_playback_json_jobs_by_screen", None)
             if isinstance(by, dict):
@@ -9312,39 +9365,59 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
         occ = {}
     occ_panel = dict(occ)
     occ_prims = dict(occ)
-    # REMOVED renewal / hide-hold: 패널 EMPTY 여도 prim 은 hold 구간 유지
-    try:
-        from .control_sim_playback_plan import prim_occ_for_playback_visibility
-
-        occ_prims = prim_occ_for_playback_visibility(ext, scr, dict(occ_panel))
-    except Exception:
-        if bool(payload.get("_from_renewal_step")):
-            try:
-                by_hold = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-                prev = by_hold.get(str(scr)) if isinstance(by_hold, dict) else None
-                if isinstance(prev, dict):
-                    for pk, pv in prev.items():
-                        pu = str(pk or "").strip().upper()
-                        if not pu:
-                            continue
-                        if str(pv or "").strip() and not str(
-                            occ_panel.get(pu) or occ_panel.get(pk) or ""
-                        ).strip():
-                            occ_prims[pu] = str(pv)
-            except Exception:
-                pass
+    skip_prim = bool(payload.get("_skip_prim_visibility"))
+    skip_panel = bool(payload.get("_skip_panel_occupancy"))
     ctx_nm = _usd_context_name_for_sim_screen(ext, scr)
+    # REMOVED renewal / hide-hold: 패널 EMPTY 여도 prim 은 hold 구간 유지
+    if not skip_prim:
+        try:
+            from .control_sim_playback_plan import prim_occ_for_playback_visibility
+
+            occ_prims = prim_occ_for_playback_visibility(ext, scr, dict(occ_panel))
+        except Exception:
+            if bool(payload.get("_from_renewal_step")):
+                try:
+                    by_hold = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+                    prev = by_hold.get(str(scr)) if isinstance(by_hold, dict) else None
+                    if isinstance(prev, dict):
+                        for pk, pv in prev.items():
+                            pu = str(pk or "").strip().upper()
+                            if not pu:
+                                continue
+                            if str(pv or "").strip() and not str(
+                                occ_panel.get(pu) or occ_panel.get(pk) or ""
+                            ).strip():
+                                occ_prims[pu] = str(pv)
+                except Exception:
+                    pass
+        # from_reset 은 plan/초기 적재 occ 그대로. 스테이지에 보이는 prim 을
+        # FULL 로 합치면 비적재 포트가 숨겨지지 않는다.
     active_ep = _remember_foup_active_ep(ext, scr, payload)
     vis_ok = False
     try:
-        import omni.usd as _ou  # type: ignore
+        if not skip_prim:
+            import omni.usd as _ou  # type: ignore
 
-        _nm = str(ctx_nm or "").strip()
-        _ctx = _ou.get_context(_nm) if _nm else _ou.get_context()
-        _stage = _ctx.get_stage() if _ctx else None
-        if _stage is not None:
-            apply_port_lot_prim_visibility_for_context(ctx_nm, occ_prims)
-            vis_ok = True
+            _nm = str(ctx_nm or "").strip()
+            _ctx = _ou.get_context(_nm) if _nm else _ou.get_context()
+            _stage = _ctx.get_stage() if _ctx else None
+            if _stage is not None:
+                prev_occ = None
+                if not bool(payload.get("_from_playback_reset")):
+                    try:
+                        by_prim = getattr(
+                            ext, "_sim_last_prim_ports_occupancy_by_screen", None
+                        )
+                        if isinstance(by_prim, dict):
+                            prev_occ = by_prim.get(str(scr))
+                    except Exception:
+                        prev_occ = None
+                apply_port_lot_prim_visibility_for_context(
+                    ctx_nm, occ_prims, prev_occupancy=prev_occ
+                )
+                vis_ok = True
+        else:
+            vis_ok = False
     except Exception as exc:
         try:
             print(
@@ -9355,21 +9428,31 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
             pass
     try:
         if vis_ok:
-            sync_port_lot_positions_after_visibility(ctx_nm, foup_proc_active_ep=active_ep)
+            # 재생 중 occupancy 가시성 뒤에 authoring 위치 복원을 붙이면
+            # 매핑 prim 의 MOVE/ROTATE 가 stop 되고 자세가 튕긴다.
+            _playback = bool(getattr(ext, "_sim_playback_started", False))
+            _pose_ok = (not _playback) or bool(
+                payload.get("_from_playback_reset") or payload.get("_from_seek")
+            )
+            if _pose_ok:
+                sync_port_lot_positions_after_visibility(
+                    ctx_nm, foup_proc_active_ep=active_ep
+                )
     except Exception:
         pass
     try:
-        by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
-        if not isinstance(by_prev, dict):
-            by_prev = {}
-            ext._sim_last_ports_occupancy_by_screen = by_prev
-        if occ_panel:
-            by_prev[str(scr)] = dict(occ_panel)
+        if not skip_panel:
+            by_prev = getattr(ext, "_sim_last_ports_occupancy_by_screen", None)
+            if not isinstance(by_prev, dict):
+                by_prev = {}
+                ext._sim_last_ports_occupancy_by_screen = by_prev
+            if occ_panel:
+                by_prev[str(scr)] = dict(occ_panel)
     except Exception:
         pass
     # USD 가시성 성공 시에만 last_prim 기록 — stage 없는 no-op 후
-    # 스킵되어 prim 이 영구 고정되는 회귀 방지
-    if bool(getattr(ext, "_sim_playback_started", False)) and vis_ok:
+    # 키프레임 skip_prim 이 초기 숨김을 영구 생략하지 않게 한다.
+    if vis_ok:
         try:
             by_prim = getattr(ext, "_sim_last_prim_ports_occupancy_by_screen", None)
             if not isinstance(by_prim, dict):
@@ -9379,7 +9462,10 @@ def _apply_sim_event_state_only(ext: Any, payload: Dict[str, Any], *, screen: in
         except Exception:
             pass
     try:
-        _update_port_occupancy_panel(ext, occ_panel, str(payload.get("sim_time", "")), screen=scr)
+        if not skip_panel:
+            _update_port_occupancy_panel(
+                ext, occ_panel, str(payload.get("sim_time", "")), screen=scr
+            )
     except Exception:
         pass
 
@@ -11378,7 +11464,7 @@ def _drain_sim_anim_pending_when_idle(ext: Any) -> None:
     if not callable(fn):
         return
     try:
-        from .control_sim_playback_gate import is_json_anim_slot_held
+        from .control_sim_playback_gate import is_json_sequence_busy
         from .sim_parallel_rails import parallel_moves_enabled
     except Exception:
         return
@@ -11398,7 +11484,7 @@ def _drain_sim_anim_pending_when_idle(ext: Any) -> None:
         except Exception:
             continue
         try:
-            if is_json_anim_slot_held(ext, scr, rail=rail):
+            if is_json_sequence_busy(ext, scr, rail=rail):
                 continue
         except Exception:
             continue
@@ -14877,7 +14963,8 @@ def _reset_sim_motion_before_json_run(
         # main 에서 pause+join 하면 교착/초기화 누락. restore 만 강제.
         if not on_main:
             try:
-                runner_obj.pause(cancel_all_move_rotate=not preserve_channel)
+                _playback_rst = bool(getattr(ext, "_sim_playback_started", False))
+                runner_obj.pause(cancel_all_move_rotate=bool(not preserve_channel and not _playback_rst))
                 th = getattr(runner_obj, "_lam_thread", None)
                 if th is not None and getattr(th, "is_alive", lambda: False)():
                     try:
@@ -14887,7 +14974,12 @@ def _reset_sim_motion_before_json_run(
             except Exception:
                 try:
                     if getattr(runner_obj, "is_running", lambda: False)():
-                        runner_obj.pause(cancel_all_move_rotate=not preserve_channel)
+                        runner_obj.pause(
+                            cancel_all_move_rotate=bool(
+                                not preserve_channel
+                                and not bool(getattr(ext, "_sim_playback_started", False))
+                            )
+                        )
                 except Exception:
                     pass
         else:
@@ -14984,6 +15076,7 @@ def _restore_sim_prim_motion_to_initial(
 
     포트 LOT 숨김/보임(visibility)은 건드리지 않는다 — transform·TBS_OFFSET·인스턴스 replay 만 복원.
     ``preserve_foup_offsets=True`` 이면 FOUP 공정 플래그를 지우지 않고 EP plateau 를 유지한다.
+    JSON 직전(``motion_only``)에는 이번 JSON prim 의 TBS_OFFSET 은 매핑 FOUP 이어도 0 으로 둔다.
     ``motion_only=True`` 이면 JSON 직전용 — ``end_replay_mode`` 는 생략하되,
     대상 TIMESAMPLES 인스턴스는 **이번 JSON step 의 start_frame/end_frame** 으로
     ``scheduler.begin_replay`` + ``start(reset=True)`` + ``stop`` 하여 end-pose 잔류를
@@ -15103,9 +15196,12 @@ def _restore_sim_prim_motion_to_initial(
             except Exception:
                 pass
 
+    ts_snap_jobs: List[Callable[[], None]] = []
+
     def _do_on_main() -> None:
         # USD write / stage 접근은 반드시 main thread 에서만 수행한다.
-        if preserve_peer_channel:
+        _playback_restore = bool(getattr(ext, "_sim_playback_started", False))
+        if preserve_peer_channel or _playback_restore:
             try:
                 from .sim_channel_scope import stop_channel_animations_for_paths
 
@@ -15126,21 +15222,8 @@ def _restore_sim_prim_motion_to_initial(
                     diag_reason=f"restore_motion motion_only={motion_only}",
                 )
             except Exception:
-                if not preserve_foup_offsets:
-                    try:
-                        from . import tbs_lam_rotate_animation as _lrx
-                        from . import tbs_lam_translate_animation as _ltx
-
-                        _ltx.stop_all_translate_animations()
-                        _lrx.stop_all_rotate_animations()
-                    except Exception:
-                        pass
-                try:
-                    stop_all_translate_animations(preserve_foup_port_lot_prims=bool(preserve_foup_offsets))
-                    stop_all_rotate_animations()
-                    stop_all_curve_animations()
-                except Exception:
-                    pass
+                pass
+            # stop_all_* 폴백 금지 — 화면1 ctx=None 에서 화면2 MOVE/ROTATE 가 끊김
         try:
             from . import port_lot_visibility as _plv
 
@@ -15155,7 +15238,7 @@ def _restore_sim_prim_motion_to_initial(
                 )
         except Exception:
             pass
-        if not preserve_peer_channel:
+        if (not preserve_peer_channel) and (not _playback_restore):
             try:
                 from .tbs_split_composed_loader import get_split_runtime_for_usd_context
 
@@ -15183,7 +15266,9 @@ def _restore_sim_prim_motion_to_initial(
             from .tbs_usd_stage_context import pop_usd_context_name, push_usd_context_name
 
             reset_paths = list(paths)
-            if preserve_foup_offsets:
+            # JSON 직전: 이번 JSON prim 은 매핑 FOUP 이어도 TBS_OFFSET 을 0 으로.
+            # preserve_foup_offsets 는 공정 플래그·타 prim 복원만 건너뛴다.
+            if preserve_foup_offsets and not motion_only:
                 try:
                     port_set = set(_plv_paths._iter_unique_mapped_prim_paths())
                     reset_paths = [p for p in reset_paths if p not in port_set]
@@ -15272,65 +15357,89 @@ def _restore_sim_prim_motion_to_initial(
                         if pp not in path_set:
                             continue
                         spec = playback_specs.get(pp)
-                        # TIMESAMPLES: 스텝 재생과 동일한 start(reset)+즉시 stop → start_frame 홀드.
+                        # TIMESAMPLES 스냅은 prim 당 별도 dispatch — 한 틱에 몰면 타 화면 MOVE 가 끊김.
                         if sch is not None and spec is not None:
-                            try:
-                                fn_begin = getattr(sch, "begin_replay_mode", None)
-                                if callable(fn_begin):
-                                    fn_begin(pp)
-                            except Exception:
-                                pass
-                            try:
-                                rm, rs, re_ = spec
-                                ok = bool(
-                                    sch.start(
-                                        pp,
-                                        reset=True,
-                                        speed=1.0,
-                                        loop=False,
-                                        range_mode=str(rm),
-                                        range_start=float(rs),
-                                        range_end=float(re_),
-                                    )
-                                )
-                                if ok:
-                                    try:
-                                        sch.stop(pp)
-                                    except Exception:
-                                        pass
-                            except Exception:
-                                pass
-                            continue
-                        # step range 없는 registry path — leftover inst.range start 로라도 스냅.
-                        try:
-                            inst.virtual_time = _range_start_seconds_for_instance(inst)
-                            inst.state = "stopped"
-                        except Exception:
-                            pass
-                        if ev is None:
-                            continue
-                        try:
-                            fn_begin = getattr(ev, "begin_replay_mode", None)
-                            if callable(fn_begin):
-                                fn_begin(pp)
-                        except Exception:
-                            pass
-                        for fn_name in (
-                            "invalidate_mapping",
-                            "force_rebuild_attr_cache",
-                        ):
-                            fn = getattr(ev, fn_name, None)
-                            if callable(fn):
+                            def _snap_spec(
+                                _pp=pp, _spec=spec, _sch=sch
+                            ) -> None:
                                 try:
-                                    fn(pp)
+                                    fn_begin = getattr(_sch, "begin_replay_mode", None)
+                                    if callable(fn_begin):
+                                        fn_begin(_pp)
                                 except Exception:
                                     pass
-                        fn_now = getattr(ev, "evaluate_instance_now", None)
-                        if callable(fn_now):
+                                try:
+                                    rm, rs, re_ = _spec
+                                    ok = bool(
+                                        _sch.start(
+                                            _pp,
+                                            reset=True,
+                                            speed=1.0,
+                                            loop=False,
+                                            range_mode=str(rm),
+                                            range_start=float(rs),
+                                            range_end=float(re_),
+                                        )
+                                    )
+                                    if ok:
+                                        try:
+                                            _sch.stop(_pp)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            fn_hold = getattr(
+                                                _sch, "suspend_replay_tick", None
+                                            )
+                                            if callable(fn_hold):
+                                                fn_hold(_pp)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+
+                            ts_snap_jobs.append(_snap_spec)
+                            continue
+                        # step range 없는 registry path — leftover inst.range start 로라도 스냅.
+                        def _snap_left(_pp=pp, _ev=ev, _inst=inst) -> None:
                             try:
-                                fn_now(pp)
+                                _inst.virtual_time = _range_start_seconds_for_instance(
+                                    _inst
+                                )
+                                _inst.state = "stopped"
                             except Exception:
                                 pass
+                            if _ev is None:
+                                return
+                            try:
+                                fn_begin = getattr(_ev, "begin_replay_mode", None)
+                                if callable(fn_begin):
+                                    fn_begin(_pp)
+                            except Exception:
+                                pass
+                            for fn_name in (
+                                "invalidate_mapping",
+                                "force_rebuild_attr_cache",
+                            ):
+                                fn = getattr(_ev, fn_name, None)
+                                if callable(fn):
+                                    try:
+                                        fn(_pp)
+                                    except Exception:
+                                        pass
+                            fn_now = getattr(_ev, "evaluate_instance_now", None)
+                            if callable(fn_now):
+                                try:
+                                    fn_now(_pp)
+                                except Exception:
+                                    pass
+                            fn_hold = getattr(_ev, "suspend_replay_tick", None)
+                            if callable(fn_hold):
+                                try:
+                                    fn_hold(_pp)
+                                except Exception:
+                                    pass
+
+                        ts_snap_jobs.append(_snap_left)
             except Exception:
                 pass
 
@@ -15370,7 +15479,7 @@ def _restore_sim_prim_motion_to_initial(
                 pass
 
         # 병렬 타 레일 보호: 공유 USD timeline stop/seek 금지
-        if not preserve_peer_channel:
+        if (not preserve_peer_channel) and (not _playback_restore):
             try:
                 usd_animation_control.stop_usd_animation(usd_context_name)
                 usd_animation_control.reset_timeline_to_zero(usd_context_name)
@@ -15380,12 +15489,24 @@ def _restore_sim_prim_motion_to_initial(
     try:
         if threading.current_thread() is threading.main_thread():
             _do_on_main()
+            for job in ts_snap_jobs:
+                try:
+                    job()
+                except Exception:
+                    pass
         else:
             from .tbs_lam_sequence_engine import _dispatch_main_wait
 
             _dispatch_main_wait(
                 _do_on_main, timeout=20.0, usd_context_name=usd_context_name
             )
+            for job in ts_snap_jobs:
+                try:
+                    _dispatch_main_wait(
+                        job, timeout=5.0, usd_context_name=usd_context_name
+                    )
+                except Exception:
+                    pass
     except Exception as exc:
         print(f"[TBS/SIM] restore motion failed: {exc}", flush=True)
 

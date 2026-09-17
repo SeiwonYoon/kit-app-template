@@ -174,6 +174,127 @@ def reset_playback_renewal_runtime(ext: Any, screen: int) -> None:
             by_fr.pop(sk, None)
     except Exception:
         pass
+    clear_playback_prim_apply_holds(ext, scr)
+
+
+_RENEWAL_PRIM_HOLD_SLACK_SEC = 0.35
+
+
+def _playback_hold_key(screen: int, src: Optional[Dict[str, Any]] = None) -> str:
+    scr = int(screen)
+    rail = ""
+    if isinstance(src, dict):
+        rail = str(src.get("sim_rail") or "").strip().lower()
+    try:
+        from .sim_parallel_rails import parallel_moves_enabled, rail_queue_key
+
+        if parallel_moves_enabled() and rail in ("oht", "move"):
+            return rail_queue_key(scr, rail)
+    except Exception:
+        pass
+    return str(scr)
+
+
+def _prim_hold_map(ext: Any) -> Dict[str, float]:
+    by = getattr(ext, "_sim_playback_prim_hold_t_by_screen", None)
+    if not isinstance(by, dict):
+        by = {}
+        try:
+            ext._sim_playback_prim_hold_t_by_screen = by
+        except Exception:
+            pass
+    return by
+
+
+def _renewal_done_map(ext: Any) -> Dict[str, bool]:
+    by = getattr(ext, "_sim_renewal_step_done_by_screen", None)
+    if not isinstance(by, dict):
+        by = {}
+        try:
+            ext._sim_renewal_step_done_by_screen = by
+        except Exception:
+            pass
+    return by
+
+
+def clear_playback_prim_apply_holds(ext: Any, screen: Optional[int] = None) -> None:
+    """Seek/Reset/재생 시작 — 키프레임 prim 보류·renewal 실행 플래그 무효화."""
+    if screen is None:
+        try:
+            by = getattr(ext, "_sim_playback_prim_hold_t_by_screen", None)
+            if isinstance(by, dict):
+                by.clear()
+        except Exception:
+            pass
+        try:
+            by2 = getattr(ext, "_sim_renewal_step_done_by_screen", None)
+            if isinstance(by2, dict):
+                by2.clear()
+        except Exception:
+            pass
+        return
+    prefix = str(int(screen))
+    for mp_name in (
+        "_sim_playback_prim_hold_t_by_screen",
+        "_sim_renewal_step_done_by_screen",
+    ):
+        try:
+            by = getattr(ext, mp_name, None)
+            if not isinstance(by, dict):
+                continue
+            for k in list(by.keys()):
+                ks = str(k)
+                if ks == prefix or ks.startswith(prefix + ":"):
+                    by.pop(k, None)
+        except Exception:
+            pass
+
+
+def mark_renewal_step_executed(
+    ext: Any, screen: int, src: Optional[Dict[str, Any]] = None
+) -> None:
+    key = _playback_hold_key(int(screen), src)
+    _renewal_done_map(ext)[key] = True
+    _prim_hold_map(ext).pop(key, None)
+
+
+def is_renewal_step_executed(
+    ext: Any, screen: int, src: Optional[Dict[str, Any]] = None
+) -> bool:
+    return bool(_renewal_done_map(ext).get(_playback_hold_key(int(screen), src)))
+
+
+def _active_renewal_src_near_t(
+    ext: Any, screen: int, t_apply: float
+) -> Optional[Dict[str, Any]]:
+    src = _active_gated_event_src(ext, int(screen))
+    if not isinstance(src, dict) or not src:
+        return None
+    has_r = bool(src.get("has_renewal"))
+    if not has_r:
+        hv = str(src.get("has_renewal") or "").strip().lower()
+        has_r = hv in ("1", "true", "yes")
+    if not has_r:
+        return None
+    if is_renewal_step_executed(ext, int(screen), src):
+        return None
+    sync_t = _resolve_renewal_sync_t_for_wall(ext, int(screen), src)
+    if sync_t is None:
+        return None
+    t = float(t_apply)
+    if t + 1e-6 < float(sync_t) - float(_RENEWAL_PRIM_HOLD_SLACK_SEC):
+        return None
+    return src
+
+
+def note_keyframe_prim_hold(ext: Any, screen: int, t_apply: float) -> bool:
+    """키프레임이 renewal 근처이고 아직 실실행 전이면 보류 기록."""
+    src = _active_renewal_src_near_t(ext, int(screen), float(t_apply))
+    if src is None:
+        return False
+    key = _playback_hold_key(int(screen), src)
+    _prim_hold_map(ext)[key] = float(t_apply)
+    return True
 
 
 def _proc_gate_plan_cap_sim(ext: Any, screen: int) -> Optional[float]:
@@ -2088,6 +2209,8 @@ def _apply_plan_ports_to_panel(
     from_seek: bool = False,
     from_reset: bool = False,
     from_keyframe: bool = False,
+    skip_prim: bool = False,
+    skip_panel: bool = False,
 ) -> bool:
     try:
         from .control_window import _apply_sim_event_state_only
@@ -2107,6 +2230,10 @@ def _apply_plan_ports_to_panel(
             payload["_from_seek"] = True
         if bool(from_reset):
             payload["_from_playback_reset"] = True
+        if bool(skip_prim):
+            payload["_skip_prim_visibility"] = True
+        if bool(skip_panel):
+            payload["_skip_panel_occupancy"] = True
         try:
             ext._sim_playback_plan_panel_apply = True
             _apply_sim_event_state_only(ext, payload, screen=int(screen))
@@ -2167,6 +2294,10 @@ def sync_playback_ui_at_sim(ext: Any, screen: int, t_sim: float, *, force: bool 
 
 def seek_playback_ui_at_sim(ext: Any, screen: int, t_sim: float) -> bool:
     """Seek 직후 — 목표 sim 시각으로 plan lookup 후 UI 반영."""
+    try:
+        clear_playback_prim_apply_holds(ext, int(screen))
+    except Exception:
+        pass
     refresh_playback_display_at_sim(
         ext,
         int(screen),
@@ -2221,6 +2352,7 @@ def clear_playback_plan_runtime_state(ext: Any) -> None:
             kf_by.clear()
     except Exception:
         pass
+    clear_playback_prim_apply_holds(ext)
     clear_runtime_bar_rows(ext)
 
 
@@ -2539,8 +2671,18 @@ def apply_due_playback_port_keyframes(
     sk = str(scr)
     last = -1.0 if bool(reset_cursor) else float(cur.get(sk, -1.0) or -1.0)
     due = [t for t in times if float(t) <= float(t_now) + 1e-6 and float(t) > float(last) + 1e-6]
+    skip_prim = bool(from_keyframe) and not (from_seek or from_reset)
+    if skip_prim:
+        try:
+            by_prim = getattr(ext, "_sim_last_prim_ports_occupancy_by_screen", None)
+            if not isinstance(by_prim, dict) or not by_prim.get(sk):
+                skip_prim = False
+        except Exception:
+            skip_prim = False
     if not due:
         if bool(reset_cursor):
+            if bool(from_seek or from_reset):
+                clear_playback_prim_apply_holds(ext, scr)
             occ0 = _ensure_panel_occ_keys(dict(snap.ports_at(float(t_now))))
             _apply_plan_ports_to_panel(
                 ext,
@@ -2552,11 +2694,17 @@ def apply_due_playback_port_keyframes(
                 from_renewal=bool(from_renewal) and not (from_seek or from_reset),
                 from_json_end=bool(from_json_end),
                 from_keyframe=bool(from_keyframe) and not (from_seek or from_reset),
+                skip_prim=bool(skip_prim),
             )
             cur[sk] = float(t_now) if float(t_now) > 1e-6 else 0.0
             return True
         return False
     t_apply = float(max(due))
+    if bool(skip_prim):
+        try:
+            note_keyframe_prim_hold(ext, scr, float(t_apply))
+        except Exception:
+            pass
     occ = _ensure_panel_occ_keys(dict(snap.ports_at(float(t_apply))))
     ok = _apply_plan_ports_to_panel(
         ext,
@@ -2568,6 +2716,7 @@ def apply_due_playback_port_keyframes(
         from_seek=bool(from_seek),
         from_reset=bool(from_reset),
         from_keyframe=bool(from_keyframe) and not (from_seek or from_reset),
+        skip_prim=bool(skip_prim),
     )
     cur[sk] = float(t_apply)
     return bool(ok)
@@ -2586,7 +2735,49 @@ def apply_playback_renewal_from_wall(ext: Any, screen: int, src: Dict[str, Any])
         from .sim_control_defaults import SIM_PRERUN_PLAN_SSOT
 
         if bool(SIM_PRERUN_PLAN_SSOT):
-            # 막대·포트는 LAM 콜백으로 덤프하지 않는다. heartbeat 가 sim_now 로 재생.
+            # 막대/패널은 heartbeat 키프레임. prim 만 실제 renewal 콜백에서 반영.
+            mark_renewal_step_executed(ext, scr, dict(src))
+            ev = ""
+            try:
+                from .control_sim_prerun_playback import _normalize_anim_event_seq, _s_val
+
+                ev = _normalize_anim_event_seq(
+                    _s_val(src.get("event") or src.get("event_seq") or src.get("seq"))
+                )
+            except Exception:
+                ev = str(src.get("event") or src.get("event_seq") or "").strip().upper()
+            if ev == "REMOVED":
+                return True
+            snap = ensure_plan_snapshot(ext, scr)
+            if snap is None:
+                snap = rebuild_plan_snapshot_for_screen(ext, scr)
+            sync_t = _resolve_renewal_sync_t_for_wall(ext, scr, dict(src))
+            lookup_t = (
+                float(sync_t)
+                if sync_t is not None and float(sync_t) > 1e-9
+                else float(_sim_now_for_screen(ext, scr, None))
+            )
+            last = _last_panel_occ(ext, scr)
+            if any(str(v or "").strip() for v in last.values()):
+                occ = _ensure_panel_occ_keys(dict(last))
+            elif snap is not None:
+                # lookup 직후 키프레임까지 포함 (경계 exclusive 로 pre-move 가 남는 것 방지)
+                occ = _ensure_panel_occ_keys(
+                    dict(snap.ports_at(max(0.0, float(lookup_t) + 1e-4)))
+                )
+            else:
+                occ = _ensure_panel_occ_keys({})
+            delta = _occ_delta_for_anim_src(dict(src))
+            if delta:
+                occ = _merge_renewal_delta_onto_plan(occ, delta)
+            _apply_plan_ports_to_panel(
+                ext,
+                scr,
+                occ,
+                t_display=float(lookup_t),
+                from_renewal=True,
+                skip_panel=True,
+            )
             return True
     except Exception:
         pass
@@ -2706,6 +2897,7 @@ def apply_playback_json_end_ports(
                 )
             except Exception:
                 ev = str(src.get("event") or src.get("event_seq") or "").strip().upper()
+            has_renewal = bool(src.get("has_renewal"))
             if ev == "REMOVED":
                 try:
                     _expire_removed_prim_hold_for_src(ext, scr, dict(src))
@@ -2717,7 +2909,8 @@ def apply_playback_json_end_ports(
                 float(t_now),
                 from_json_end=True,
             )
-            if ev == "REMOVED":
+            # REMOVED 또는 renewal 없는 JSON: 종료 시 prim 일괄. renewal JSON 은 콜백에서 이미 반영.
+            if ev == "REMOVED" or (not has_renewal):
                 occ = _last_panel_occ(ext, scr)
                 _apply_plan_ports_to_panel(
                     ext,
@@ -2725,7 +2918,12 @@ def apply_playback_json_end_ports(
                     occ,
                     t_display=float(t_now),
                     from_json_end=True,
+                    skip_panel=True,
                 )
+            try:
+                _prim_hold_map(ext).pop(_playback_hold_key(scr, dict(src)), None)
+            except Exception:
+                pass
             return True
     except Exception:
         pass
@@ -2941,6 +3139,7 @@ __all__ = [
     "clear_parallel_rail_port_hold",
     "clear_plan_replay_floors",
     "clear_playback_plan_runtime_state",
+    "clear_playback_prim_apply_holds",
     "clear_removed_prim_hide_holds",
     "clear_renewal_occ_hold",
     "clear_runtime_bar_rows",
@@ -2955,6 +3154,7 @@ __all__ = [
     "get_stored_playback_schedule_for_screen",
     "handle_playback_renewal_step",
     "install_playback_renewal_handlers",
+    "mark_renewal_step_executed",
     "plan_lookup_sim_t",
     "playback_plan_active",
     "playback_plan_frontier_sim",

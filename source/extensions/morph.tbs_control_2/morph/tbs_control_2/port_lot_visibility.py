@@ -25,7 +25,32 @@ from pxr import Gf, Sdf, UsdGeom, UsdShade
 
 from .rotate_animation import stop_prim_rotate_animation
 from .sim_control_defaults import SIM_CONTROL_DEFAULTS
-from .translate_animation import stop_prim_translate_animation, stop_prim_translate_animation_all_contexts
+from .translate_animation import stop_prim_translate_animation
+
+
+def _stop_mapped_prim_motion_for_ctx(
+    prim_path: str, usd_context_name: Optional[str]
+) -> None:
+    """이 USD 컨텍스트의 MOVE/ROTATE 만 중지. 타 화면 같은 path 는 건드리지 않는다."""
+    pp = str(prim_path or "").strip()
+    if not pp:
+        return
+    try:
+        stop_prim_translate_animation(pp, usd_context_name)
+    except Exception:
+        pass
+    try:
+        from . import tbs_lam_rotate_animation as _lam_rx
+        from . import tbs_lam_translate_animation as _lam_tx
+
+        _lam_tx.stop_prim_translate_animation(pp, usd_context_name)
+        _lam_rx.stop_prim_rotate_animation(pp, usd_context_name)
+    except Exception:
+        pass
+    try:
+        stop_prim_rotate_animation(pp)
+    except Exception:
+        pass
 
 _CONFIG_FILENAME = "port_lot_prim_paths.json"
 _CACHE: Optional[Dict[str, str]] = None
@@ -441,8 +466,7 @@ def snap_foup_prim_to_lifted(
     try:
         from .sequence_engine import _set_rotate_xyz, _set_translate
 
-        stop_prim_translate_animation_all_contexts(p)
-        stop_prim_rotate_animation(p)
+        _stop_mapped_prim_motion_for_ctx(p, usd_context_name)
         prim = stage.GetPrimAtPath(p)
         if not prim or not prim.IsValid():
             return False
@@ -472,8 +496,7 @@ def snap_foup_prim_to_baseline(
     try:
         from .sequence_engine import _set_rotate_xyz, _set_translate
 
-        stop_prim_translate_animation_all_contexts(p)
-        stop_prim_rotate_animation(p)
+        _stop_mapped_prim_motion_for_ctx(p, usd_context_name)
         prim = stage.GetPrimAtPath(p)
         if not prim or not prim.IsValid():
             return False
@@ -633,7 +656,7 @@ def run_foup_smooth_y_anim(
                 pass
 
     try:
-        stop_prim_translate_animation_all_contexts(p)
+        _stop_mapped_prim_motion_for_ctx(p, usd_context_name)
     except Exception:
         pass
     try:
@@ -819,8 +842,7 @@ def restore_port_lot_prims_to_authoring(
             except Exception:
                 pass
             try:
-                stop_prim_translate_animation_all_contexts(path)
-                stop_prim_rotate_animation(path)
+                _stop_mapped_prim_motion_for_ctx(path, usd_context_name)
             except Exception:
                 pass
             try:
@@ -869,8 +891,7 @@ def restore_port_lot_prims_to_authoring(
         ):
             continue
         try:
-            stop_prim_translate_animation_all_contexts(path)
-            stop_prim_rotate_animation(path)
+            _stop_mapped_prim_motion_for_ctx(path, usd_context_name)
         except Exception:
             pass
         try:
@@ -1003,19 +1024,27 @@ def restore_port_lot_prims_to_default_material(usd_context_name: Optional[str] =
             continue
 
 
-def apply_port_lot_prim_visibility_for_context(usd_context_name: Optional[str], ports_occupancy: Any) -> None:
+def apply_port_lot_prim_visibility_for_context(
+    usd_context_name: Optional[str],
+    ports_occupancy: Any,
+    *,
+    prev_occupancy: Any = None,
+) -> None:
     """
     지정 USD 컨텍스트(이름)의 스테이지에 포트 LOT prim 가시성을 적용한다.
     ``usd_context_name`` 이 None/빈 문자열이면 기본 컨텍스트(``get_context()``)와 동일.
 
-    추가 동작(요청 사양):
-    - LOT 이 비어 있을 때(포트 상태 초기화 = 숨김 처리)에는 동시에 material 을
-      ``MATERIAL_PATH_FOUP_DEFAULT`` (예: ``/Root/World/Looks/phong1``) 로 되돌린다.
-      이렇게 하면 다음에 prim 이 다시 visible 될 때 깨끗한 기본 외형으로 시작한다.
+    ``prev_occupancy`` 가 있으면 점유가 바뀐 포트만 USD 에 쓴다.
+    material 재바인드는 occupied→empty 전환 때만 (재생 중 매 틱 전체 bind 는 애니 끊김).
     """
     occ = _normalized_ports_occupancy(ports_occupancy)
     if not occ:
         return
+    prev = (
+        _normalized_ports_occupancy(prev_occupancy)
+        if prev_occupancy is not None
+        else None
+    )
     mapping = load_port_lot_prim_paths()
     if not mapping:
         return
@@ -1030,20 +1059,28 @@ def apply_port_lot_prim_visibility_for_context(usd_context_name: Optional[str], 
     for port, prim_path in mapping.items():
         if not prim_path:
             continue
-        lot_id = occ.get(str(port).strip().upper(), "")
+        pu = str(port).strip().upper()
+        lot_id = occ.get(pu, "")
         has_lot = bool(lot_id)
         path_s = str(prim_path).strip()
-        # LOT 이 사라진(=포트상태 초기화) 시점에는 외형도 기본 material 로 되돌린다.
-        # (가시성 변경과 같은 호흡으로 처리해 시각적 잔상 없이 다음 visible 진입에 대비)
-        if not has_lot:
+        had_lot = bool(prev.get(pu, "")) if prev is not None else None
+        if had_lot is not None and bool(had_lot) == bool(has_lot):
+            continue
+        # occupied→empty 만 기본 material. 시작 일괄 숨김(prev 없음)은 vis 만.
+        if (not has_lot) and (had_lot is True):
             try:
                 bind_material_to_prim(stage, path_s, MATERIAL_PATH_FOUP_DEFAULT)
             except Exception:
                 pass
         _set_prim_visible_on_stage(stage, path_s, has_lot)
     hide_ports = _BP_LAYOUT_HIDE_PORTS_BY_CTX.get(_ctx_key(usd_context_name))
-    if hide_ports:
+    # 재생 중 델타 적용 때는 occupancy 가 vis SSOT. 레이아웃 hide 를 매 번 다시 쓰면 애니가 끊긴다.
+    if hide_ports and prev is None:
         for port in hide_ports:
+            pu = str(port or "").strip().upper()
+            # 점유 SSOT 가 올린 포트(BP→EP 의 EP 등)는 EBS 레이아웃 hide 로 다시 끄지 않는다.
+            if pu and str(occ.get(pu) or "").strip():
+                continue
             path_h = str(mapping.get(str(port), "") or "").strip()
             if path_h:
                 _set_prim_visible_on_stage(stage, path_h, False)

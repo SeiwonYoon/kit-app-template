@@ -1442,6 +1442,19 @@ class RuntimeEvaluator:
         )
         return True
 
+    def suspend_replay_tick(self, prim_path: str) -> None:
+        """시작 자세 default 는 유지하고 매 프레임 evaluate 만 끈다.
+
+        JSON 시작 스냅이 ``begin_replay_mode`` 를 켜 두면 MOVE 구간에도
+        TIMESAMPLES writer 가 매 틱 시작 프레임을 다시 써서 보간이 끊긴다.
+        ``end_replay_mode`` 는 default 를 지워 leftover 끝 자세로 돌아가므로
+        쓰지 않고, active set 에서만 빼 둔다. TIMESAMPLES step 시작 때
+        ``begin_replay_mode`` 가 다시 켠다.
+        """
+        if not prim_path or not prim_path.startswith("/"):
+            return
+        self._evaluator_active_prims.discard(prim_path)
+
     def end_replay_mode(self, prim_path: str) -> None:
         """TIMESAMPLES_REPLAY 종료 — Reset 시에만 호출. evaluator default 청소 + OmniGraph 복원.
 
@@ -1735,8 +1748,8 @@ class RuntimeEvaluator:
             dt = 0.0
         self._last_perf = now
         # 한 번에 너무 큰 dt 는 인위적으로 잘라낸다(브레이크포인트 등).
-        if dt > 0.25:
-            dt = 0.25
+        if dt > 0.08:
+            dt = 0.08
 
         # 매 프레임 EditTarget 을 root layer 로 강제(다른 코드가 session 으로 바꾸어도 복구).
         stage = None

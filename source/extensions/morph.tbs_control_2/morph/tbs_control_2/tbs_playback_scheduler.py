@@ -140,6 +140,18 @@ class PlaybackScheduler:
             )
             return False
 
+    def suspend_replay_tick(self, prim_path: str) -> None:
+        """시작 자세 default 유지, 매 프레임 TIMESAMPLES write 중지."""
+        try:
+            fn = getattr(self._evaluator, "suspend_replay_tick", None)
+            if callable(fn):
+                fn(prim_path)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} suspend_replay_tick EXC prim={prim_path}: {exc}",
+                flush=True,
+            )
+
     def end_replay_mode(self, prim_path: str) -> None:
         """`RuntimeEvaluator.end_replay_mode` 위임 (TIMESAMPLES_REPLAY step 종료)."""
         try:

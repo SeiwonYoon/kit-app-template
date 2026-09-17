@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import deque
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
@@ -21,8 +22,10 @@ _ctx_keys: List[str] = []
 _pending_by_ctx: Dict[str, int] = {}
 
 _sub_box: Dict[str, Any] = {"sub": None}
-_MAX_PER_TICK = 32
-_MAX_PER_CTX_PER_TICK = 32
+_MAX_PER_TICK = 8
+_MAX_PER_CTX_PER_TICK = 1
+# 한 화면 JSON 시작(USD evaluate)이 한 틱을 독식하면 타 화면 MOVE 가 dt 점프한다.
+_TICK_BUDGET_SEC = 0.006
 
 _QueueItem = Tuple[Callable[[], None], threading.Event, List[Optional[BaseException]]]
 _BatchItem = Tuple[Optional[str], Callable[[], None], threading.Event, List[Optional[BaseException]]]
@@ -143,27 +146,36 @@ def _ensure_subscription() -> None:
         import omni.kit.app as _kapp
 
         def _on_update(_e=None) -> None:
-            if is_multi_instance_dispatch_mode():
-                batch = _dequeue_isolated_per_ctx(_MAX_PER_CTX_PER_TICK)
-            else:
-                batch = _dequeue_legacy_batch(_MAX_PER_TICK)
-            if not batch:
-                return
             from .tbs_usd_stage_context import pop_usd_context_name, push_usd_context_name
 
-            for ctx, fn, done_evt, err_holder in batch:
-                if is_multi_instance_dispatch_mode():
-                    _decr_pending_ctx(ctx)
+            t0 = time.perf_counter()
+            multi = is_multi_instance_dispatch_mode()
+            n_done = 0
+            while True:
+                if multi:
+                    batch = _dequeue_isolated_per_ctx(_MAX_PER_CTX_PER_TICK)
                 else:
-                    _decr_pending_legacy()
-                prev = push_usd_context_name(ctx)
-                try:
-                    fn()
-                except BaseException as exc:
-                    err_holder[0] = exc
-                finally:
-                    pop_usd_context_name(prev)
-                    done_evt.set()
+                    batch = _dequeue_legacy_batch(1)
+                if not batch:
+                    return
+                for ctx, fn, done_evt, err_holder in batch:
+                    if multi:
+                        _decr_pending_ctx(ctx)
+                    else:
+                        _decr_pending_legacy()
+                    prev = push_usd_context_name(ctx)
+                    try:
+                        fn()
+                    except BaseException as exc:
+                        err_holder[0] = exc
+                    finally:
+                        pop_usd_context_name(prev)
+                        done_evt.set()
+                    n_done += 1
+                if (time.perf_counter() - t0) >= _TICK_BUDGET_SEC:
+                    return
+                if not multi and n_done >= _MAX_PER_TICK:
+                    return
 
         _sub_box["sub"] = _kapp.get_app().get_update_event_stream().create_subscription_to_pop(
             _on_update,
