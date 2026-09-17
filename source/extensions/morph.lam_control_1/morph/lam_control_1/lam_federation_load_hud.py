@@ -62,20 +62,30 @@ _PLAY_BTN_W = 140
 _PLAY_BTN_H = _PANEL_H
 _PLAY_BTN_BORDER_WIDTH = 0
 _PLAY_BTN_BORDER_ARGB = 0x00000000
-_PLAY_BTN_BG_ARGB = 0xFF4747B3  # #4747B3
-_PLAY_BTN_BG_CLICK_ARGB = 0xFFFF7A00  # #FF7A00
-_PLAY_GLYPH_ARGB = 0xFFFFFFFF  # 세모 흰색
+_PLAY_BTN_BG_ARGB = 0xFF5C51D6  # #5C51D6
+_PLAY_BTN_BG_CLICK_ARGB = 0xFF808080  # #808080
+_PLAY_GLYPH_ARGB = 0xFFFFFFFF
 _PLAY_GLYPH_FONT_SIZE = 18
-_PLAY_ICON_W = 18
-_PLAY_ICON_H = 18
 _PLAY_CLICK_DELAY_SEC = 1.0
-_PLAY_IMAGE_NAME = "ic_play.png"  # data/img/ — 없으면 문자 ▶
 _FAIL_GLYPH = "✕"
 
 
 def _play_center_pad() -> int:
     """로딩칩 너비 안에서 재생 버튼이 같은 중심을 갖도록 좌우 여백."""
     return max(0, (int(_PANEL_W) - int(_PLAY_BTN_W)) // 2)
+
+
+def _play_rect_style(bg_argb: int) -> Dict[str, Any]:
+    """omni.ui Rectangle 은 생성자 style 보다 set_style 가 이긴다.
+
+    평탄 키와 ``Rectangle`` 중첩 키를 같이 넣어 부모/테마 간섭을 막는다.
+    """
+    inner: Dict[str, Any] = {
+        "background_color": int(bg_argb),
+        "border_width": float(_PLAY_BTN_BORDER_WIDTH),
+        "border_color": int(_PLAY_BTN_BORDER_ARGB),
+    }
+    return {"Rectangle": dict(inner), **inner}
 
 _lock = threading.RLock()
 _panels: Dict[int, "_FedLoadPanel"] = {}
@@ -212,12 +222,6 @@ def _img_dir() -> Path:
 def _loading_icon_path() -> Optional[Path]:
     """``data/img/ic_loading.png``."""
     p = _img_dir() / "ic_loading.png"
-    return p if p.is_file() else None
-
-
-def _play_icon_path() -> Optional[Path]:
-    """``data/img/ic_play.png`` (없으면 None → 문자 ▶)."""
-    p = _img_dir() / str(_PLAY_IMAGE_NAME or "ic_play.png")
     return p if p.is_file() else None
 
 
@@ -959,89 +963,52 @@ class _FedLoadPanel:
                     pass
 
     def _build_play_chip(self, ui: Any) -> None:
-        """로딩 칩과 같은 가로 중심의 재생 버튼 (흰 ▶, 배경 #4747B3)."""
+        """로딩 칩과 같은 가로 중심의 재생 버튼 (Play 텍스트, 배경 #5C51D6)."""
         pw = int(_PLAY_BTN_W)
         ph = int(_PLAY_BTN_H)
         ra = getattr(ui, "Alignment", None)
         center = getattr(ra, "CENTER", None) if ra is not None else None
         self._play_root = ui.ZStack(width=pw, height=ph)
         with self._play_root:
-            self._play_bg = ui.Rectangle(
-                width=pw,
-                height=ph,
-                style={
-                    "background_color": int(_PLAY_BTN_BG_ARGB),
-                    "border_width": float(_PLAY_BTN_BORDER_WIDTH),
-                    "border_color": int(_PLAY_BTN_BORDER_ARGB),
+            self._play_bg = ui.Rectangle(width=pw, height=ph)
+            glyph_kw: Dict[str, Any] = {
+                "width": pw,
+                "height": ph,
+                "style": {
+                    "color": int(_PLAY_GLYPH_ARGB),
+                    "font_size": int(_PLAY_GLYPH_FONT_SIZE),
                 },
-            )
-            glyph_stack_kw: Dict[str, Any] = {"width": pw, "height": ph}
+            }
             if center is not None:
-                glyph_stack_kw["alignment"] = center
-            with ui.VStack(**glyph_stack_kw):
-                ui.Spacer()
-                row_kw: Dict[str, Any] = {"height": int(_PLAY_ICON_H)}
-                if center is not None:
-                    row_kw["alignment"] = center
-                with ui.HStack(**row_kw):
-                    ui.Spacer()
-                    icon_w = int(_PLAY_ICON_W)
-                    icon_h = int(_PLAY_ICON_H)
-                    with ui.ZStack(width=icon_w, height=icon_h):
-                        play_img = _play_icon_path()
-                        if play_img is not None:
-                            try:
-                                self._play_mark = ui.Image(
-                                    str(play_img),
-                                    width=icon_w,
-                                    height=icon_h,
-                                )
-                            except Exception:
-                                self._play_mark = ui.Image(
-                                    width=icon_w,
-                                    height=icon_h,
-                                    style={"image_url": str(play_img)},
-                                )
-                        else:
-                            glyph_kw: Dict[str, Any] = {
-                                "width": icon_w,
-                                "height": icon_h,
-                                "style": {
-                                    "color": int(_PLAY_GLYPH_ARGB),
-                                    "font_size": int(_PLAY_GLYPH_FONT_SIZE),
-                                },
-                            }
-                            if center is not None:
-                                glyph_kw["alignment"] = center
-                            self._play_mark = ui.Label("▶", **glyph_kw)
-                        fail_kw: Dict[str, Any] = {
-                            "width": icon_w,
-                            "height": icon_h,
-                            "style": {
-                                "color": int(_PLAY_GLYPH_ARGB),
-                                "font_size": int(_PLAY_GLYPH_FONT_SIZE),
-                            },
-                        }
-                        if center is not None:
-                            fail_kw["alignment"] = center
-                        self._fail_mark = ui.Label(str(_FAIL_GLYPH), **fail_kw)
-                    self._set_widget_visible(self._fail_mark, False)
-                    ui.Spacer()
-                ui.Spacer()
+                glyph_kw["alignment"] = center
+            self._play_mark = ui.Label("Play", **glyph_kw)
+            fail_kw: Dict[str, Any] = {
+                "width": pw,
+                "height": ph,
+                "style": {
+                    "color": int(_PLAY_GLYPH_ARGB),
+                    "font_size": int(_PLAY_GLYPH_FONT_SIZE),
+                },
+            }
+            if center is not None:
+                fail_kw["alignment"] = center
+            self._fail_mark = ui.Label(str(_FAIL_GLYPH), **fail_kw)
+            self._set_widget_visible(self._fail_mark, False)
+            # Kit 기본 Button 회색이 Rectangle 을 가리지 않게 완전 투명.
             btn_style = {
                 "Button": {
-                    "background_color": 0x01000000,
+                    "background_color": 0x00000000,
                     "border_width": 0,
                     "border_color": 0x00000000,
                     "padding": 0,
                     "margin": 0,
                 },
                 "Button:hovered": {
-                    "background_color": 0x01000000,
+                    "background_color": 0x00000000,
                     "border_width": 0,
                 },
                 "Button:pressed": {
-                    "background_color": 0x01000000,
+                    "background_color": 0x00000000,
                     "border_width": 0,
                 },
             }
@@ -1052,6 +1019,7 @@ class _FedLoadPanel:
                 clicked_fn=self._on_play_clicked,
                 style=btn_style,
             )
+        self._apply_play_bg()
         self._set_widget_visible(self._play_root, False)
 
     def _set_widget_visible(self, widget: Any, want: bool) -> None:
@@ -1069,6 +1037,12 @@ class _FedLoadPanel:
     def _set_play_visible(self, play_on: bool) -> None:
         self._set_widget_visible(self._load_root, not bool(play_on))
         self._set_widget_visible(self._play_root, bool(play_on))
+        # 숨김 상태에서 set_style 가 먹지 않는 경우가 있어, 보일 때 다시 입힌다.
+        if play_on:
+            if self._play_starting:
+                self._set_play_bg_color(int(_PLAY_BTN_BG_CLICK_ARGB))
+            else:
+                self._apply_play_bg()
 
     def _enter_load_mode(self) -> None:
         self._play_starting = False
@@ -1080,27 +1054,22 @@ class _FedLoadPanel:
         self._set_widget_visible(self._fail_mark, bool(failed))
 
     def _apply_play_bg(self) -> None:
+        self._set_play_bg_color(int(_PLAY_BTN_BG_ARGB))
+
+    def _set_play_bg_color(self, bg_argb: int) -> None:
+        st = _play_rect_style(int(bg_argb))
         try:
             if self._play_bg is not None:
-                self._play_bg.set_style(
-                    {
-                        "background_color": int(_PLAY_BTN_BG_ARGB),
-                        "border_width": float(_PLAY_BTN_BORDER_WIDTH),
-                        "border_color": int(_PLAY_BTN_BORDER_ARGB),
-                    }
-                )
+                self._play_bg.set_style(st)
         except Exception:
             try:
                 if self._play_bg is not None:
-                    self._play_bg.style = {
-                        "background_color": int(_PLAY_BTN_BG_ARGB),
-                        "border_width": 0,
-                    }
+                    self._play_bg.style = st
             except Exception:
                 pass
 
     def _enter_fail_mode(self) -> None:
-        """재생 버튼과 같은 자리·배경, 세모 대신 가운데 X. 클릭해도 재생하지 않음."""
+        """재생 버튼과 같은 자리·배경, Play 대신 가운데 X. 클릭해도 재생하지 않음."""
         if bool(getattr(self, "_i_preview", False)):
             return
         self._stop_anim()
@@ -1158,24 +1127,7 @@ class _FedLoadPanel:
         if not callable(fn):
             return
         self._play_starting = True
-        try:
-            if self._play_bg is not None:
-                self._play_bg.set_style(
-                    {
-                        "background_color": int(_PLAY_BTN_BG_CLICK_ARGB),
-                        "border_width": float(_PLAY_BTN_BORDER_WIDTH),
-                        "border_color": int(_PLAY_BTN_BORDER_ARGB),
-                    }
-                )
-        except Exception:
-            try:
-                if self._play_bg is not None:
-                    self._play_bg.style = {
-                        "background_color": int(_PLAY_BTN_BG_CLICK_ARGB),
-                        "border_width": 0,
-                    }
-            except Exception:
-                pass
+        self._set_play_bg_color(int(_PLAY_BTN_BG_CLICK_ARGB))
         si = int(self.screen)
         delay = max(0.0, float(_PLAY_CLICK_DELAY_SEC))
 

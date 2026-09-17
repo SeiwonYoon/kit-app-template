@@ -3,7 +3,7 @@
 - pick/place 집계: ``lam_viewport_overlay_state``
   · Play 시작: ``seed_foup_counts_from_non_atm_first`` (slot 최초 wafer → 진행중)
   · JSON 실행: ``record_foup_event_from_schedule_entry`` (``atm_foup{n}_pick|place``)
-- 제목(lot_id) + 반출 / 공정진행 / 공정완료 (좌·우 끝 정렬)
+- 제목(lot_id) + Total / In Progress / Completed (좌·우 끝 정렬)
 - 웨이퍼 번호 3D 라벨 색: ``lam_foup_lot_display`` — FOUP·팔·장비 등 표시 위치와 무관하게 lot 색 유지
 """
 
@@ -64,8 +64,8 @@ _BODY_H = int(FOUP_PANEL_BODY_H_PX)
 _TOP_BAR_H = int(FOUP_PANEL_TOP_BAR_H_PX)
 _PAD_X = int(FOUP_PANEL_PAD_X_PX)
 _DIVIDER_H = float(FOUP_PANEL_DIVIDER_H_PX)
-_BODY_ROW_LABELS = ("반출", "공정진행", "공정완료")
-_LAYOUT_VER = 5
+_BODY_ROW_LABELS = ("Total", "In Progress", "Completed")
+_LAYOUT_VER = 6
 
 
 def force_remove_foup_sceneviews(*, screen: Optional[int] = None) -> None:
