@@ -881,6 +881,8 @@ def handle_screen_visibility(
 
     웹 요청 시 UI「리셋」과 동일하게 ``on_sim_reset_clicked`` 를 먼저 호출한다
     (진행 중이면 강제 stop + 위치 초기화). 제어창 화면 체크박스는 이 경로를 타지 않는다.
+    화면1+2 동시 ON(2분할) 이고 ``SIM_IDLE_CAMERA_VIEW`` 가 있으면 레이아웃 완료 후
+    두 화면 Perspective 를 idle 뷰로 맞춘다. 단화면 요청·idle None 은 기존과 같다.
 
     요청::
         ``{"show_1": true, "show_2": false}``
@@ -931,7 +933,24 @@ def handle_screen_visibility(
         except Exception as exc:
             print(f"[HyView/bridge] screen_visibility reset failed: {exc}", flush=True)
         # Dock 전환은 async — 모델은 즉시 갱신되고 레이아웃은 다음 틱에 적용.
-        request_screen_visibility(ext, show_1, show_2)
+        # 웹 2분할(화면1+2) 만 idle Perspective 적용. 단화면·HUD 체크박스는 제외.
+        def _apply_idle_after_dual() -> None:
+            try:
+                from morph.tbs_control_2.tbs_sim_camera import (
+                    schedule_apply_idle_camera_view,
+                )
+
+                schedule_apply_idle_camera_view(ext, delay_frames=8)
+            except Exception as exc:
+                print(
+                    f"[HyView/bridge] screen_visibility idle camera failed: {exc}",
+                    flush=True,
+                )
+
+        vis_kw: Dict[str, Any] = {}
+        if bool(show_1) and bool(show_2):
+            vis_kw["on_complete"] = _apply_idle_after_dual
+        request_screen_visibility(ext, show_1, show_2, **vis_kw)
         s1, s2 = visible_screens(ext)
         return _ok({"show_1": bool(s1), "show_2": bool(s2)})
 
