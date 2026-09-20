@@ -516,13 +516,21 @@ def sync_play_prim_hide_checkbox_after_play_start(
     *,
     screen: int,
     csv_window: Any = None,
+    notify_top_view: bool = False,
 ) -> None:
-    """Play 시작 자동 숨김 완료 후 「prim숨김」 체크만 ON (visibility 재적용 없음)."""
+    """Play 시작 자동 숨김 완료 후 「prim숨김」 체크만 ON (visibility 재적용 없음).
+
+    ``notify_top_view`` 가 True 이면 같은 ``V2T_notify_control_simulation`` 에
+    ``top_view: true`` 도 함께 넣는다.
+    """
     si = max(1, int(screen))
     try:
-        from .lam_hyview_v2t_notify import notify_prim_hide
+        from .lam_hyview_v2t_notify import notify_control_simulation
 
-        notify_prim_hide(si, prim_hide=True)
+        if notify_top_view:
+            notify_control_simulation(si, prim_hide=True, top_view=True)
+        else:
+            notify_control_simulation(si, prim_hide=True)
     except Exception:
         pass
     if si <= 1:
@@ -545,6 +553,34 @@ def sync_play_prim_hide_checkbox_after_play_start(
     except Exception:
         pass
     _applied_prim_hide_by_screen[si] = True
+
+
+def sync_top_view_checkbox_after_play_start(
+    *,
+    screen: int,
+    csv_window: Any = None,
+) -> None:
+    """Play 시작 탑뷰 fly 후 「탑뷰」 체크만 ON (카메라 재적용은 호출 측에서)."""
+    si = max(1, int(screen))
+    if si <= 1:
+        return
+    if csv_window is None:
+        return
+    try:
+        csv_window.ensure_playback_models()
+    except Exception:
+        pass
+    prev = bool(getattr(csv_window, "_overlay_checkbox_syncing", False))
+    csv_window._overlay_checkbox_syncing = True
+    try:
+        m = getattr(csv_window, "_top_view_model", None)
+        if m is not None:
+            m.set_value(True)
+    except Exception:
+        pass
+    finally:
+        csv_window._overlay_checkbox_syncing = prev
+    _applied_top_view_by_screen[si] = True
 
 
 def is_screen_top_view_applied(screen: int) -> bool:
@@ -937,9 +973,18 @@ def run_csv_screen_play_preflight(runtime: CsvScreenRuntime) -> bool:
     if csv_playback_stop_requested(screen=si):
         return False
     settings = capture_csv_overlay_settings(runtime.csv_window)
+    fly_to_top = False
+    try:
+        from .lam_sim_control_defaults import PLAY_START_FLY_TO_TOP_VIEW
+
+        fly_to_top = bool(PLAY_START_FLY_TO_TOP_VIEW)
+    except Exception:
+        fly_to_top = False
     # 탑뷰만 켜진 경우 — 카메라·prim hide 없이 탑뷰만 동기화
+    # (시뮬 시작 탑뷰 fly 플래그가 켜져 있으면 이 경로를 타지 않는다)
     if (
-        not settings.get("play_camera_fly")
+        not fly_to_top
+        and not settings.get("play_camera_fly")
         and not _play_prim_hide_specs_configured()
         and settings.get("top_view")
     ):
@@ -983,6 +1028,7 @@ __all__ = [
     "restore_play_stop_perspective_for_screen",
     "schedule_play_stop_perspective_restore_for_screen",
     "sync_play_prim_hide_checkbox_after_play_start",
+    "sync_top_view_checkbox_after_play_start",
     "apply_top_view_for_screen",
     "is_screen_top_view_applied",
     "bind_viewport_camera_for_screen",

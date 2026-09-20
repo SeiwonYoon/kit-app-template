@@ -13,7 +13,7 @@ LamHandler — HyView livestream 메시징 ↔ LAM Federation 시뮬 API 진입�
     eqp_info_show·wafer_number_show·prim_hide·speed) — 있는 항목만 적용
   - 실시간 제어 응답 키: ``data`` = 전달 payload echo
   - STATUS 패널 통지(요청 없음): ``V2T_notify_status_panel`` — ``data.title`` + ``data.rows[]``
-  - 자동 prim 숨김 통지(요청 없음): ``V2T_notify_control_simulation`` — ``data.case`` + ``data.prim_hide``
+  - 자동 제어 통지(요청 없음): ``V2T_notify_control_simulation`` — ``data.case`` + optional(``prim_hide`` / ``top_view``)
   - 로딩/재생준비 통지(요청 없음): ``V2T_notify_load_status`` — ``data.case`` + ``data.status``
   - 실패 code: ``1`` (성공 ``0``)
   - 통지는 웹이 무시해도 Kit 동작에 영향 없음

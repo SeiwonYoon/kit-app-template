@@ -17,8 +17,8 @@ V2T_RESPONSE_CONTROL_SIMULATION = "V2T_response_control_simulation"
 # Kit → 웹 단방향 통지 — Viewport STATUS 패널과 동일 스냅샷 (T2V 요청 없음)
 V2T_NOTIFY_STATUS_PANEL = "V2T_notify_status_panel"
 
-# Kit → 웹 단방향 통지 — 시뮬 시작 후 자동 prim 숨김 (T2V 요청 없음)
-# data 키는 T2V_control_simulation 과 동일 (case, prim_hide)
+# Kit → 웹 단방향 통지 — 시뮬 시작 후 자동 prim 숨김·탑뷰 (T2V 요청 없음)
+# data 키는 있는 항목만 포함 (case + optional prim_hide / top_view)
 V2T_NOTIFY_CONTROL_SIMULATION = "V2T_notify_control_simulation"
 
 # Kit → 웹 단방향 통지 — Federation 로딩 HUD 와 동일 단계 (T2V 요청 없음)
@@ -33,7 +33,8 @@ PAYLOAD_DETAIL = "detail"
 
 # T2V_control_simulation payload 키 (모두 optional — 있는 항목만 적용)
 PAYLOAD_PROC_ONLY = "proc_only"            # 공정만보기 (bool)
-PAYLOAD_SHOW_TOP_VIEW = "show_top_view"    # 탑뷰보기 (bool)
+PAYLOAD_SHOW_TOP_VIEW = "show_top_view"    # 탑뷰보기 (bool) — T2V_control_simulation
+PAYLOAD_TOP_VIEW = "top_view"              # 탑뷰 (bool) — V2T_notify_control_simulation
 PAYLOAD_FOUP_INFO_SHOW = "foup_info_show"  # FOUP 상태보기 (bool)
 PAYLOAD_EQP_INFO_SHOW = "eqp_info_show"    # 기기정보보기 (bool)
 PAYLOAD_WAFER_NUMBER_SHOW = "wafer_number_show"  # 웨이퍼 번호보기 (bool)
@@ -56,6 +57,7 @@ __all__ = [
     "PAYLOAD_DETAIL",
     "PAYLOAD_PROC_ONLY",
     "PAYLOAD_SHOW_TOP_VIEW",
+    "PAYLOAD_TOP_VIEW",
     "PAYLOAD_FOUP_INFO_SHOW",
     "PAYLOAD_EQP_INFO_SHOW",
     "PAYLOAD_WAFER_NUMBER_SHOW",

@@ -2878,60 +2878,83 @@ def kickoff_play_camera_fly_for_screen(
     *,
     viewport_api: Any,
     usd_context_name: str,
+    fly_to_top_view: bool = False,
 ) -> bool:
-    """Play camera fly — 화면1·2 공통 구현 (viewport + USD context 만 지정)."""
+    """Play 시작 카메라 fly — 화면1·2 공통. ``fly_to_top_view`` 면 탑뷰 목표."""
     if done is None:
         raise ValueError("done event required")
     if viewport_api is None:
         done.set()
         return False
-    if not play_camera_target_configured():
+    to_top = bool(fly_to_top_view)
+    if to_top:
+        if not top_view_target_configured():
+            done.set()
+            return False
+    elif not play_camera_target_configured():
         done.set()
         return False
 
     ctx = str(usd_context_name or "").strip()
     target = None
     with camera_fly_usd_context(ctx or None):
-        target = get_play_camera_target_snapshot()
+        target = (
+            get_top_view_target_snapshot()
+            if to_top
+            else get_play_camera_target_snapshot()
+        )
     if target is None:
         done.set()
         return False
 
     fly_started = False
     err: List[Optional[BaseException]] = [None]
-    use_prim = not play_camera_use_preset_coords()
-    prim_path = play_assign_prim_path()
-    up = get_session_fly_up_xyz(play=True)
+    use_prim = (
+        not top_view_use_preset_coords()
+        if to_top
+        else not play_camera_use_preset_coords()
+    )
+    prim_path = top_view_assign_prim_path() if to_top else play_assign_prim_path()
+    up = (
+        get_session_fly_up_xyz(top_view=True)
+        if to_top
+        else get_session_fly_up_xyz(play=True)
+    )
+    fly_tag = "top_view" if to_top else "play"
 
     def _kickoff_on_main() -> None:
         nonlocal fly_started
         try:
             # Perspective 로 START_VIEW → fly 목표까지 이동한 뒤,
-            # 종료 시 Camera_fly 에 목표 preset + aperture 적용 후 look-through.
+            # 종료 시 목표 Camera 에 preset + aperture 적용 후 look-through.
             #
             # 중요: Persp 전환을 캡처 **전에** 하면 화면2 에서 기본/이전 줌으로
             # 점프한 뒤 fly 가 시작된다. 화면1처럼 **현재 보이는 시점 먼저 캡처**.
-            purged = purge_top_like_camera_prim_baselines()
-            if purged:
-                print(
-                    f"{_PRINT_PREFIX} top-like Camera baseline purge n={purged} "
-                    f"ctx={ctx!r}",
-                    flush=True,
-                )
+            if not to_top:
+                purged = purge_top_like_camera_prim_baselines()
+                if purged:
+                    print(
+                        f"{_PRINT_PREFIX} top-like Camera baseline purge n={purged} "
+                        f"ctx={ctx!r}",
+                        flush=True,
+                    )
             with camera_fly_usd_context(ctx or None):
                 # 1) look-through 바꾸기 전에 현재 화면 시점 캡처
                 current = capture_view_for_viewport(viewport_api, ctx)
                 active_cam = _camera_path_on_viewport(viewport_api)
                 print(
                     f"{_PRINT_PREFIX} screen fly capture-before-switch "
-                    f"ctx={ctx!r} cam={active_cam!r} "
+                    f"ctx={ctx!r} cam={active_cam!r} to_top={to_top} "
                     f"has_current={current is not None} "
                     f"top_like={is_top_view_like_snapshot(current)}",
                     flush=True,
                 )
 
-                # 2) 탑뷰일 때만 hold 복원·Persp 재캡처. 일반 줌은 건드리지 않음.
-                if current is not None and is_top_view_like_snapshot(current):
+                # 2) 저장된 PLAY 뷰로 갈 때만: 현재가 탑뷰면 hold 복원.
+                #    탑뷰로 가는 fly 는 이탈하지 않는다.
+                if to_top:
+                    clear_pre_top_view_hold_for_viewport(viewport_api, ctx)
+                elif current is not None and is_top_view_like_snapshot(current):
                     print(
                         f"{_PRINT_PREFIX} screen 현재 뷰가 탑뷰 — hold/Persp 복원 "
                         f"ctx={ctx!r}",
@@ -2983,7 +3006,11 @@ def kickoff_play_camera_fly_for_screen(
                             f"{fly_start_up[2]:.3f})",
                             flush=True,
                         )
-                    end_pref = _play_camera_prim_view_pref()
+                    end_pref = (
+                        _top_view_camera_prim_view_pref()
+                        if to_top
+                        else _play_camera_prim_view_pref()
+                    )
                     if end_pref is not None:
                         fly_end_up = _up_from_preset_spec(end_pref)
                 if current is None:
@@ -2995,7 +3022,7 @@ def kickoff_play_camera_fly_for_screen(
                         target,
                         up_xyz=fly_end_up,
                         assign_prim_path=prim_path,
-                        log_context="play_screen_no_current",
+                        log_context=f"{fly_tag}_screen_no_current",
                         viewport_api=viewport_api,
                         usd_context_name=ctx,
                     ):
@@ -3012,7 +3039,7 @@ def kickoff_play_camera_fly_for_screen(
                         target,
                         up_xyz=fly_end_up,
                         assign_prim_path=prim_path,
-                        log_context="play_screen_sync",
+                        log_context=f"{fly_tag}_screen_sync",
                         viewport_api=viewport_api,
                         usd_context_name=ctx,
                     )
@@ -3025,7 +3052,7 @@ def kickoff_play_camera_fly_for_screen(
                 aperture_end_hv: Optional[Tuple[float, float]] = None
                 # 1) Perspective + START_VIEW 로 fly 시작·진행 (Camera 모드 전환 금지)
                 # 2) aperture 목표가 있으면 Persp aperture 도 목표 Camera FOV 로 보간
-                # 3) fly 종료(_complete) 후에만 Camera_fly look-through
+                # 3) fly 종료(_complete) 후에만 목표 Camera look-through
                 if not apply_camera_view(
                     current,
                     up_xyz=fly_start_up,
@@ -3040,7 +3067,11 @@ def kickoff_play_camera_fly_for_screen(
                 fly_path = _PERSP_CAMERA_PATH
 
                 if use_prim and prim_path:
-                    target_ap = _play_camera_aperture_for_screen_count()
+                    target_ap = (
+                        _top_view_aperture_for_screen_count()
+                        if to_top
+                        else _play_camera_aperture_for_screen_count()
+                    )
                     if target_ap is not None:
                         cur_ap = _read_camera_aperture(_PERSP_CAMERA_PATH)
                         end_ap = _persp_aperture_matching_camera_target(
@@ -3064,7 +3095,8 @@ def kickoff_play_camera_fly_for_screen(
 
                 print(
                     f"{_PRINT_PREFIX} screen fly 시작 "
-                    f"ctx={ctx!r} ({play_camera_fly_duration_sec():.2f}s) "
+                    f"ctx={ctx!r} to_top={to_top} "
+                    f"({play_camera_fly_duration_sec():.2f}s) "
                     f"via={fly_path!r} "
                     f"eye=({current.eye_xyz[0]:.3f},{current.eye_xyz[1]:.3f},"
                     f"{current.eye_xyz[2]:.3f})",
@@ -3076,12 +3108,15 @@ def kickoff_play_camera_fly_for_screen(
                     with camera_fly_usd_context(ctx or None):
                         if use_prim and prim_path:
                             # fly 종료 후: 목표 preset + aperture → Camera 모드 bind
-                            apply_play_camera_prim_view_spec(apply_aperture=True)
+                            if to_top:
+                                apply_top_view_camera_prim_view_spec()
+                            else:
+                                apply_play_camera_prim_view_spec(apply_aperture=True)
                         _finish_fly_to_target(
                             target,
                             up_xyz=fly_end_up,
                             assign_prim_path=prim_path if use_prim else "",
-                            log_context="play_screen_fly_end",
+                            log_context=f"{fly_tag}_screen_fly_end",
                             viewport_api=viewport_api,
                             usd_context_name=ctx,
                         )

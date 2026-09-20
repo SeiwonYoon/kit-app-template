@@ -122,6 +122,14 @@ TEMP_FEDERATION_LOAD_HUD_I_HOTKEY: bool = True
 CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 
 # ---------------------------------------------------------------------------
+# CSV 재생 시작 — 카메라 fly 목표
+# ---------------------------------------------------------------------------
+# True: 화면별 시뮬 시작 시 탑뷰로 카메라 fly. fly 완료 후 Kit 탑뷰 체크 +
+#       V2T_notify_control_simulation 에 prim_hide 와 top_view 를 함께 통지.
+# False: 저장된 PLAY_CAMERA 뷰로 fly (기존). 통지는 prim_hide 만.
+PLAY_START_FLY_TO_TOP_VIEW: bool = True
+
+# ---------------------------------------------------------------------------
 # CSV 재생 — plan 모드 (Aligner / 점유 보정 분리)
 # ---------------------------------------------------------------------------
 # raw              : Aligner 합성 OFF, occupancy swap·visibility shift OFF
@@ -341,6 +349,7 @@ __all__ = [
     "SHOW_VIEWPORT_FEDERATION_LOAD_HUD",
     "TEMP_FEDERATION_LOAD_HUD_I_HOTKEY",
     "CSV_PLAY_HIDE_UI_BELOW_TIMELINE",
+    "PLAY_START_FLY_TO_TOP_VIEW",
     "CSV_PLAYBACK_PLAN_MODE",
     "CSV_PLAYBACK_OCCUPANCY_SCHEDULER_ENABLED",
     "PROCESS_ONLY_SEQUENTIAL_LANES",

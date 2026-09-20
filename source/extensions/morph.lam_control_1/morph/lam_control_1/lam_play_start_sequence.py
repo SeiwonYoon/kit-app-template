@@ -189,9 +189,11 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
     from .lam_csv_screen_runtime import (
         apply_top_view_for_screen,
         sync_play_prim_hide_checkbox_after_play_start,
+        sync_top_view_checkbox_after_play_start,
     )
     from .lam_play_camera_fly import (
         kickoff_play_camera_fly_for_screen,
+        play_camera_fly_duration_sec,
         planned_camera_fly_duration_sec,
     )
     from .lam_play_prim_hide import (
@@ -202,7 +204,14 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
 
     si = max(1, int(getattr(runtime, "screen", 1) or 1))
     ctx = str(getattr(runtime, "context_name", None) or "").strip()
-    need_cam = bool(settings.get("play_camera_fly", True))
+    fly_to_top = False
+    try:
+        from .lam_sim_control_defaults import PLAY_START_FLY_TO_TOP_VIEW
+
+        fly_to_top = bool(PLAY_START_FLY_TO_TOP_VIEW)
+    except Exception:
+        fly_to_top = False
+    need_cam = bool(fly_to_top) or bool(settings.get("play_camera_fly", True))
     vp_api = getattr(runtime, "viewport_api", None)
     if vp_api is None and si <= 1:
         try:
@@ -272,6 +281,7 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
             done,
             viewport_api=vp_api,
             usd_context_name=ctx,
+            fly_to_top_view=fly_to_top,
         )
         if not started:
             print(
@@ -304,17 +314,30 @@ def run_screen_play_start_preflight(runtime: Any, settings: dict) -> bool:
             on_hide_complete=lambda: sync_play_prim_hide_checkbox_after_play_start(
                 screen=si,
                 csv_window=getattr(runtime, "csv_window", None),
+                notify_top_view=fly_to_top,
             ),
         )
 
     def _before_prim_hide() -> None:
+        if fly_to_top:
+            apply_top_view_for_screen(runtime, enabled=True, force=True)
+            sync_top_view_checkbox_after_play_start(
+                screen=si,
+                csv_window=getattr(runtime, "csv_window", None),
+            )
+            return
         if settings.get("top_view") and not settings.get("play_camera_fly"):
             apply_top_view_for_screen(runtime, enabled=True, force=True)
+
+    def _planned_camera_sec() -> float:
+        if fly_to_top:
+            return play_camera_fly_duration_sec()
+        return planned_camera_fly_duration_sec()
 
     return _run_play_start_preflight_timeline(
         stop_requested=_stop,
         kickoff_camera=_kickoff_camera,
-        planned_camera_sec=planned_camera_fly_duration_sec,
+        planned_camera_sec=_planned_camera_sec,
         kickoff_prim_hide=_kickoff_prim_hide,
         planned_prim_hide_sec=planned_play_prim_hide_duration_sec,
         on_before_prim_hide=_before_prim_hide,

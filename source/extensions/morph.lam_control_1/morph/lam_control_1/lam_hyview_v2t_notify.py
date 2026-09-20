@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .kit_main_dispatch import schedule_on_main_thread
 
@@ -39,28 +39,46 @@ def dispatch_v2t_notify(event_name: str, data: Dict[str, Any]) -> None:
     schedule_on_main_thread(_send)
 
 
-def notify_prim_hide(screen: int, *, prim_hide: bool = True) -> None:
-    """fly 이후 자동 prim 숨김 완료 — ``T2V_control_simulation`` 과 동일 키."""
+def notify_control_simulation(
+    screen: int,
+    *,
+    prim_hide: Optional[bool] = None,
+    top_view: Optional[bool] = None,
+) -> None:
+    """fly 이후 제어 상태 통지 — ``prim_hide`` / ``top_view`` 는 있는 키만 보낸다."""
     try:
         from sk.hyview_messaging.hyview_event_contract import (  # type: ignore
             PAYLOAD_CASE,
             PAYLOAD_PRIM_HIDE,
+            PAYLOAD_TOP_VIEW,
             V2T_NOTIFY_CONTROL_SIMULATION,
         )
     except Exception:
         PAYLOAD_CASE = "case"
         PAYLOAD_PRIM_HIDE = "prim_hide"
+        PAYLOAD_TOP_VIEW = "top_view"
         V2T_NOTIFY_CONTROL_SIMULATION = "V2T_notify_control_simulation"
     case_index = screen_to_case(screen)
+    data: Dict[str, Any] = {PAYLOAD_CASE: case_index}
+    parts: list[str] = [f"case={case_index}"]
+    if prim_hide is not None:
+        data[PAYLOAD_PRIM_HIDE] = bool(prim_hide)
+        parts.append(f"prim_hide={bool(prim_hide)}")
+    if top_view is not None:
+        data[PAYLOAD_TOP_VIEW] = bool(top_view)
+        parts.append(f"top_view={bool(top_view)}")
+    if len(data) <= 1:
+        return
     print(
-        f"{_PRINT_PREFIX} {V2T_NOTIFY_CONTROL_SIMULATION} "
-        f"case={case_index} prim_hide={bool(prim_hide)}",
+        f"{_PRINT_PREFIX} {V2T_NOTIFY_CONTROL_SIMULATION} " + " ".join(parts),
         flush=True,
     )
-    dispatch_v2t_notify(
-        V2T_NOTIFY_CONTROL_SIMULATION,
-        {PAYLOAD_CASE: case_index, PAYLOAD_PRIM_HIDE: bool(prim_hide)},
-    )
+    dispatch_v2t_notify(V2T_NOTIFY_CONTROL_SIMULATION, data)
+
+
+def notify_prim_hide(screen: int, *, prim_hide: bool = True) -> None:
+    """fly 이후 자동 prim 숨김 완료 — ``notify_control_simulation`` 위임."""
+    notify_control_simulation(screen, prim_hide=prim_hide)
 
 
 def notify_load_status(
@@ -101,6 +119,7 @@ def notify_load_status(
 
 __all__ = [
     "dispatch_v2t_notify",
+    "notify_control_simulation",
     "notify_load_status",
     "notify_prim_hide",
     "screen_to_case",
