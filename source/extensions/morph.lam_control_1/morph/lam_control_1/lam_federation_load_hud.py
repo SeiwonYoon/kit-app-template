@@ -1140,6 +1140,11 @@ class _FedLoadPanel:
 
             def _go() -> None:
                 try:
+                    # HUD 프레임만 끄면 Play 객체가 켜진 채로 남아 재시작 때 다시 보인다.
+                    self._set_widget_visible(self._play_root, False)
+                except Exception:
+                    pass
+                try:
                     _hide_panels_visible(si, skip_i_preview=True)
                 except Exception:
                     pass
