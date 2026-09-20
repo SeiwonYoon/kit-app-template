@@ -639,6 +639,12 @@ class TbsUsdWindow:
                         listener()
                     except Exception as exc:
                         print(f"{_PRINT_PREFIX} master_open_listener: {exc}", flush=True)
+                try:
+                    from .tbs_sim_camera import schedule_apply_idle_camera_view
+
+                    schedule_apply_idle_camera_view(ext=self._kit_ext)
+                except Exception as exc:
+                    print(f"{_PRINT_PREFIX} idle camera after master open failed: {exc}", flush=True)
         return ok
 
     def open_master_at_path(self, path: str, *, log_prefix: str = "") -> bool:

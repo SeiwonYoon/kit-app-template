@@ -6,11 +6,14 @@
 3) ``SIM_CAMERA_FLY_ENABLED=True``  → 현재 뷰 기억 → target 으로 fly → (있으면) Camera prim bind
    ``SIM_CAMERA_FLY_ENABLED=False`` → fly 없이 ``SIM_CAMERA_VIEW`` 로 즉시 이동
 4) 시뮬 정지: Perspective 복귀 + 시작 전 시점·줌(aperture/focal) 복원 (다중 프레임 안정화)
+5) ``SIM_IDLE_CAMERA_VIEW`` (None 이면 기존 유지): 앱 시작·웹 pause 종료 시
+   화면1·2 동일 Perspective 기본 뷰. 재생용 ``SIM_CAMERA_VIEW`` 와 별개.
 
 fly 구간은 Perspective 로만 진행하고 Persp aperture 를 목표 Camera FOV 로 보간한 뒤,
 종료 시에만 Camera prim look-through (LAM 과 동일 — 줌 점프 방지).
 
 UI·웹 모두 ``on_sim_start_clicked`` / ``on_sim_stop_clicked`` 를 타므로 동일 경로.
+웹 ``pause`` 는 stop 이후 idle 뷰(값이 있을 때) + prim 위치 복원을 같은 레벨에서 추가한다.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ _fly_sub: Any = None
 _fly_done_evt: Optional[threading.Event] = None
 _fly_active: bool = False
 _stop_persp_restore_sub: Any = None
+_idle_apply_sub: Any = None
 
 
 @dataclass(frozen=True)
@@ -1109,3 +1113,128 @@ def restore_sim_camera_on_stop(ext: Any = None) -> bool:
     _stop_fly_subscription()
     schedule_restore_perspective_after_sim_stop(ext=ext, delay_frames=8)
     return True
+
+
+def _idle_view_from_config() -> Tuple[Optional[CameraViewSnapshot], Tuple[float, float, float]]:
+    """``SIM_IDLE_CAMERA_VIEW``. None 이면 (None, default up)."""
+    up = (0.0, 0.0, 1.0)
+    try:
+        from .sim_control_defaults import SIM_IDLE_CAMERA_VIEW
+
+        view = SIM_IDLE_CAMERA_VIEW
+    except Exception:
+        return None, up
+    if view is None:
+        return None, up
+    try:
+        snap = CameraViewSnapshot(
+            eye_xyz=tuple(float(x) for x in view.eye_xyz),  # type: ignore[arg-type]
+            target_xyz=tuple(float(x) for x in view.target_xyz),  # type: ignore[arg-type]
+        )
+        up = tuple(float(x) for x in getattr(view, "up_xyz", (0.0, 0.0, 1.0)))
+        return snap, up
+    except Exception:
+        return None, up
+
+
+def _resolve_ext(ext: Any = None) -> Any:
+    if ext is not None:
+        return ext
+    try:
+        from .tbs_extension_singleton import get_tbs_extension_instance
+
+        return get_tbs_extension_instance()
+    except Exception:
+        return None
+
+
+def _stop_idle_apply_subscription() -> None:
+    global _idle_apply_sub
+    try:
+        if _idle_apply_sub is not None:
+            _idle_apply_sub.unsubscribe()
+    except Exception:
+        pass
+    _idle_apply_sub = None
+
+
+def apply_idle_camera_view(ext: Any = None) -> bool:
+    """설정 idle 뷰를 화면1·2 동일 Perspective 로 적용. None 이면 no-op."""
+    snap, up = _idle_view_from_config()
+    if snap is None:
+        return False
+    resolved = _resolve_ext(ext)
+    set_viewport_camera_prim_path(_PERSP_CAMERA_PATH, ext=resolved)
+    ok = apply_view_to_all_screens(
+        snap,
+        up_xyz=up,
+        assign_prim_path="",
+        ext=resolved,
+    )
+    if ok:
+        print(
+            f"{_PRINT_PREFIX} idle Perspective 적용 "
+            f"eye=({snap.eye_xyz[0]:.3f},{snap.eye_xyz[1]:.3f},{snap.eye_xyz[2]:.3f})",
+            flush=True,
+        )
+    return bool(ok)
+
+
+def apply_idle_camera_view_after_web_pause(ext: Any = None) -> bool:
+    """웹 pause 전용 — idle 값이 있으면 stop 의 지연 줌 복원을 끊고 idle Perspective 로 고정.
+
+    None 이면 False 만 반환해 기존 ``restore_sim_camera_on_stop`` 경로를 유지한다.
+    """
+    snap, _up = _idle_view_from_config()
+    if snap is None:
+        return False
+    global _pre_sim_views, _pre_sim_ups, _pre_sim_apertures, _pre_sim_focal_lengths
+    _stop_fly_subscription()
+    _stop_stop_perspective_restore_subscription()
+    _pre_sim_views.clear()
+    _pre_sim_ups.clear()
+    _pre_sim_apertures.clear()
+    _pre_sim_focal_lengths.clear()
+    return apply_idle_camera_view(ext)
+
+
+def schedule_apply_idle_camera_view(
+    ext: Any = None,
+    *,
+    delay_frames: int = 24,
+    extra_retries: int = 12,
+) -> None:
+    """stage/분할 뷰포트 준비 후 idle 뷰 1회 적용. ``SIM_IDLE_CAMERA_VIEW is None`` 이면 생략."""
+    snap, _up = _idle_view_from_config()
+    if snap is None:
+        return
+    _stop_idle_apply_subscription()
+    frames_left = [max(0, int(delay_frames))]
+    retries = [max(0, int(extra_retries))]
+    resolved_holder = [_resolve_ext(ext)]
+
+    def _tick(_e=None) -> None:
+        if frames_left[0] > 0:
+            frames_left[0] -= 1
+            return
+        if resolved_holder[0] is None:
+            resolved_holder[0] = _resolve_ext(None)
+        ok = apply_idle_camera_view(resolved_holder[0])
+        if ok or retries[0] <= 0:
+            _stop_idle_apply_subscription()
+            return
+        retries[0] -= 1
+        frames_left[0] = 2
+
+    try:
+        import omni.kit.app as _app  # type: ignore
+
+        stream = _app.get_app().get_post_update_event_stream()
+        global _idle_apply_sub
+        _idle_apply_sub = stream.create_subscription_to_pop(
+            _tick,
+            name="morph.tbs_control_2:idle_camera_view",
+        )
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} idle view schedule failed: {exc}", flush=True)
+        apply_idle_camera_view(ext)

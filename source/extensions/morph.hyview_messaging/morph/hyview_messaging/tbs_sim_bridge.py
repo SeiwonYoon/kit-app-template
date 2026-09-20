@@ -675,6 +675,22 @@ def handle_control_simulation(
         if action == "pause":
             _set_sim_speed(ext, speed_requested)
             on_sim_stop_clicked(ext)
+            try:
+                from morph.tbs_control_2.control_window import (
+                    _restore_all_sim_channels_prim_motion,
+                )
+
+                _restore_all_sim_channels_prim_motion(ext)
+            except Exception as exc:
+                print(f"[HyView/bridge] pause prim motion restore failed: {exc}", flush=True)
+            try:
+                from morph.tbs_control_2.tbs_sim_camera import (
+                    apply_idle_camera_view_after_web_pause,
+                )
+
+                apply_idle_camera_view_after_web_pause(ext)
+            except Exception as exc:
+                print(f"[HyView/bridge] pause idle camera restore failed: {exc}", flush=True)
             return _ok({"active": "pause", "speed": _read_sim_speed(ext)})
 
         if action == "play":

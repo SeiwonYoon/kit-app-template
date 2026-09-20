@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 
 @dataclass(frozen=True)
 class SimCameraViewSpec:
-    """시뮬 시작용 카메라 뷰 (월드 좌표). 「뷰 저장」 로그를 여기로 붙여넣는다."""
+    """카메라 뷰 (월드 좌표). 「뷰 저장」 로그를 여기로 붙여넣는다."""
 
     eye_xyz: Tuple[float, float, float]
     target_xyz: Tuple[float, float, float]
@@ -246,6 +246,17 @@ SIM_CAMERA_MODE_ENABLED: bool = False
 SIM_CAMERA_PRIM_PATH: str = ""
 # 「뷰 저장」 버튼 로그를 붙여넣는다. None 이면 prim 현재 상태만 bind.
 SIM_CAMERA_VIEW: Optional[SimCameraViewSpec] = None
+# Idle Perspective 기본 뷰 (화면1·2 동일, LAM PLAY_CAMERA_START_VIEW 대응).
+# None(기본) → 지금과 같음: 앱 시작은 USD 저장 줌, 종료는 기존 stop 카메라 복원.
+# 값 설정 → 앱 시작·웹 pause 종료 시 이 뷰로 Perspective 고정.
+# 재생용 SIM_CAMERA_VIEW / fly 와 별개.
+SIM_IDLE_CAMERA_VIEW: Optional[SimCameraViewSpec] = None
+# 예)
+# SIM_IDLE_CAMERA_VIEW = SimCameraViewSpec(
+#     eye_xyz=(0.0, 0.0, 0.0),
+#     target_xyz=(0.0, 0.0, 0.0),
+#     up_xyz=(0.0, 0.0, 1.0),
+# )
 # True  → 현재 뷰에서 SIM_CAMERA_VIEW 로 fly 애니메이션 후 시뮬 진행.
 # False → fly 없이 SIM_CAMERA_VIEW 줌/시점으로 즉시 이동 (SIM_CAMERA_MODE_ENABLED=True 일 때).
 SIM_CAMERA_FLY_ENABLED: bool = True
@@ -296,6 +307,7 @@ __all__ = [
     "SIM_CAMERA_MODE_ENABLED",
     "SIM_CAMERA_PRIM_PATH",
     "SIM_CAMERA_VIEW",
+    "SIM_IDLE_CAMERA_VIEW",
     "SIM_CAMERA_FLY_ENABLED",
     "SIM_CAMERA_FLY_DURATION_SEC",
 ]
