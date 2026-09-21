@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import omni.ui as ui
 from omni.ui import scene as sc
@@ -26,6 +27,8 @@ from .lam_viewport_overlay_config import (
     FOUP_PANEL_FONT_SIZE,
     FOUP_PANEL_HEIGHT_PX,
     FOUP_PANEL_PAD_X_PX,
+    FOUP_PANEL_PAD_Y_PX,
+    foup_panel_bg_rgba,
     foup_panel_offset_xyz_m,
     FOUP_PANEL_TITLE_H_PX,
     FOUP_PANEL_TOP_BAR_H_PX,
@@ -63,9 +66,98 @@ _TITLE_H = int(FOUP_PANEL_TITLE_H_PX)
 _BODY_H = int(FOUP_PANEL_BODY_H_PX)
 _TOP_BAR_H = int(FOUP_PANEL_TOP_BAR_H_PX)
 _PAD_X = int(FOUP_PANEL_PAD_X_PX)
+_PAD_Y = int(FOUP_PANEL_PAD_Y_PX)
 _DIVIDER_H = float(FOUP_PANEL_DIVIDER_H_PX)
 _BODY_ROW_LABELS = ("Total", "In Progress", "Completed")
-_LAYOUT_VER = 6
+# data/img/ 기준 상대경로. 빈 문자열이면 해당 행은 텍스트(_BODY_ROW_LABELS).
+_BODY_ROW_IMAGES = ("ic_takeout.png", "ic_progress.png", "ic_complete.png")
+_BODY_ROW_ICON_WH = 37
+# screen 공간 +z = 카메라 쪽. 배경보다 앞에 고정해 z-fighting 깜빡임 제거.
+_BODY_ROW_IMAGE_Z = 1.0
+_LAYOUT_VER = 8
+_BODY_ROW_IMAGE_PROVIDERS: Dict[str, Any] = {}
+
+
+def _foup_img_dir() -> Path:
+    try:
+        from .lam_data_paths import extension_data_root
+
+        return extension_data_root() / "img"
+    except Exception:
+        return Path(__file__).resolve().parent.parent.parent / "data" / "img"
+
+
+def _body_row_image_paths() -> List[Optional[str]]:
+    """각 본문 행 아이콘 절대경로. 빈 문자열·파일 없음이면 None."""
+    img_dir = _foup_img_dir()
+    out: List[Optional[str]] = []
+    for name in _BODY_ROW_IMAGES:
+        s = str(name or "").strip()
+        if not s:
+            out.append(None)
+            continue
+        p = img_dir / s
+        out.append(str(p.resolve()) if p.is_file() else None)
+    return out
+
+
+def _body_row_icon_provider(path: str) -> Any:
+    """경로 → ByteImageProvider. 최초 1회 디코드·업로드 후 캐시."""
+    key = str(path or "").strip()
+    if not key:
+        return None
+    cached = _BODY_ROW_IMAGE_PROVIDERS.get(key)
+    if cached is not None:
+        return cached
+    try:
+        from PIL import Image  # type: ignore
+
+        wh = int(_BODY_ROW_ICON_WH)
+        im = Image.open(key).convert("RGBA")
+        if im.size != (wh, wh):
+            im = im.resize((wh, wh), Image.Resampling.LANCZOS)
+        data = im.getdata()
+        w, h = int(im.size[0]), int(im.size[1])
+        provider_cls = getattr(ui, "ByteImageProvider", None)
+        if provider_cls is None:
+            print(
+                f"{_PRINT_PREFIX} ByteImageProvider unavailable path={key!r}",
+                flush=True,
+            )
+            return None
+        prov = provider_cls()
+        fmt = None
+        try:
+            from omni.gpu_foundation_factory import TextureFormat  # type: ignore
+
+            fmt = getattr(TextureFormat, "RGBA8_UNORM", None)
+        except Exception:
+            fmt = None
+        uploaded = False
+        if hasattr(prov, "set_bytes_data"):
+            try:
+                if fmt is not None:
+                    prov.set_bytes_data(data, [w, h], fmt)
+                else:
+                    prov.set_bytes_data(data, [w, h])
+                uploaded = True
+            except TypeError:
+                prov.set_bytes_data(data, [w, h])
+                uploaded = True
+        if not uploaded:
+            print(
+                f"{_PRINT_PREFIX} icon provider upload failed path={key!r}",
+                flush=True,
+            )
+            return None
+        _BODY_ROW_IMAGE_PROVIDERS[key] = prov
+        return prov
+    except Exception as exc:
+        print(
+            f"{_PRINT_PREFIX} icon provider failed path={key!r}: {exc}",
+            flush=True,
+        )
+        return None
 
 
 def force_remove_foup_sceneviews(*, screen: Optional[int] = None) -> None:
@@ -641,6 +733,8 @@ class LamFoupStatus3dPanel:
 
     def _clear_node_texts(self, node: Dict[str, Any]) -> None:
         for lbl in self._iter_node_labels(node):
+            if not hasattr(lbl, "text"):
+                continue
             try:
                 lbl.text = ""
             except Exception:
@@ -668,12 +762,14 @@ class LamFoupStatus3dPanel:
         title_y = half_h - float(_TOP_BAR_H) - (float(_TITLE_H) - float(_TOP_BAR_H)) * 0.5
         bar_y = half_h - float(_TOP_BAR_H) * 0.5
         div_y = half_h - float(_TITLE_H)
-        body_top = half_h - float(_TITLE_H)
-        slot_h = float(_BODY_H) / float(_BODY_ROW_COUNT)
+        body_top = half_h - float(_TITLE_H) - float(_PAD_Y)
+        slot_h = max(1.0, (float(_BODY_H) - 2.0 * float(_PAD_Y)) / float(_BODY_ROW_COUNT))
         align_left = ui.Alignment.LEFT_CENTER
         align_right = getattr(ui.Alignment, "RIGHT_CENTER", None) or align_left
         title_font = int(FOUP_LOT_ID_FONT_SIZE)
         body_font = int(FOUP_PANEL_FONT_SIZE)
+        row_img_paths = _body_row_image_paths()
+        icon_wh = float(_BODY_ROW_ICON_WH)
 
         with self._root:
             for fi in (1, 2, 3):
@@ -686,7 +782,7 @@ class LamFoupStatus3dPanel:
                 )
                 with root:
                     with sc.Transform(scale_to=sc.Space.SCREEN):
-                        bg = tuple(FOUP_PANEL_BG_RGBA)
+                        bg = tuple(foup_panel_bg_rgba(int(fi)))
                         sc.Rectangle(
                             width=_PANEL_W,
                             height=_PANEL_H,
@@ -723,17 +819,54 @@ class LamFoupStatus3dPanel:
                         rows: list = []
                         for i in range(_BODY_ROW_COUNT):
                             y = body_top - slot_h * (float(i) + 0.5)
-                            with sc.Transform(
-                                transform=sc.Matrix44.get_translation_matrix(
-                                    left_x, y, 0.0
-                                )
-                            ):
-                                left_lbl = sc.Label(
-                                    "",
-                                    size=body_font,
-                                    color=_WHITE,
-                                    alignment=align_left,
-                                )
+                            img_path = (
+                                row_img_paths[i] if i < len(row_img_paths) else None
+                            )
+                            left_w = None
+                            prov = (
+                                _body_row_icon_provider(img_path)
+                                if img_path
+                                else None
+                            )
+                            if prov is not None:
+                                try:
+                                    with sc.Transform(
+                                        transform=sc.Matrix44.get_translation_matrix(
+                                            left_x, y, 0.0
+                                        )
+                                    ):
+                                        with sc.Transform(
+                                            transform=sc.Matrix44.get_translation_matrix(
+                                                icon_wh * 0.5,
+                                                0.0,
+                                                float(_BODY_ROW_IMAGE_Z),
+                                            )
+                                        ):
+                                            left_w = sc.Image(
+                                                prov,
+                                                width=icon_wh,
+                                                height=icon_wh,
+                                                image_width=int(_BODY_ROW_ICON_WH),
+                                                image_height=int(_BODY_ROW_ICON_WH),
+                                            )
+                                except Exception as exc:
+                                    print(
+                                        f"{_PRINT_PREFIX} sc.Image provider fail: {exc}",
+                                        flush=True,
+                                    )
+                                    left_w = None
+                            if left_w is None:
+                                with sc.Transform(
+                                    transform=sc.Matrix44.get_translation_matrix(
+                                        left_x, y, 0.0
+                                    )
+                                ):
+                                    left_w = sc.Label(
+                                        "",
+                                        size=body_font,
+                                        color=_WHITE,
+                                        alignment=align_left,
+                                    )
                             with sc.Transform(
                                 transform=sc.Matrix44.get_translation_matrix(
                                     right_x, y, 0.0
@@ -745,7 +878,7 @@ class LamFoupStatus3dPanel:
                                     color=_WHITE,
                                     alignment=align_right,
                                 )
-                            rows.append({"left": left_lbl, "right": right_lbl})
+                            rows.append({"left": left_w, "right": right_lbl})
                 self._panel_nodes[fi] = {
                     "layout_ver": _LAYOUT_VER,
                     "root": root,
@@ -813,11 +946,19 @@ class LamFoupStatus3dPanel:
                 str(int(c.done_count)),
             )
             rows = list(node.get("rows") or [])
+            img_paths = _body_row_image_paths()
             for i, row in enumerate(rows[:_BODY_ROW_COUNT]):
                 left = row.get("left") if isinstance(row, dict) else None
                 right = row.get("right") if isinstance(row, dict) else None
                 try:
-                    if left is not None:
+                    is_image_row = (
+                        i < len(img_paths) and img_paths[i] is not None
+                    )
+                    if (
+                        left is not None
+                        and not is_image_row
+                        and hasattr(left, "text")
+                    ):
                         left.text = _BODY_ROW_LABELS[i]
                         left.color = _WHITE
                         left.size = int(FOUP_PANEL_FONT_SIZE)

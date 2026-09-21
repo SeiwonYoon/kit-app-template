@@ -1,4 +1,4 @@
-"""Viewport 좌상단 Federation API 로딩 HUD (화면별).
+"""Viewport 화면 중앙 Federation API 로딩 HUD (화면별).
 
 요청~준비완료까지 ``Loading data... N%`` 단일 칩 UI.
 아이콘: ``data/img/ic_loading.png`` 를 중심 기준으로 계속 회전 (ByteImageProvider).
@@ -37,8 +37,6 @@ _PHASE_TARGET_PCT: Dict[str, int] = {
 
 _PANEL_W = 200
 _PANEL_H = 36
-_TOP = 10
-_LEFT = 10
 _PAD_LEFT = 14
 _ICON_W = 18
 _ICON_H = 18
@@ -63,7 +61,8 @@ _PLAY_BTN_H = _PANEL_H
 _PLAY_BTN_BORDER_WIDTH = 0
 _PLAY_BTN_BORDER_ARGB = 0x00000000
 _PLAY_BTN_BG_ARGB = 0xFF5C51D6  # #5C51D6
-_PLAY_BTN_BG_CLICK_ARGB = 0xFF808080  # #808080
+_PLAY_BTN_BG_CLICK_ARGB = 0xFFB34747
+_PLAY_BTN_BG_HOVER_ARGB = 0xFFF16D95
 _PLAY_GLYPH_ARGB = 0xFFFFFFFF
 _PLAY_GLYPH_FONT_SIZE = 18
 _PLAY_CLICK_DELAY_SEC = 1.0
@@ -658,10 +657,10 @@ class _FedLoadPanel:
                 self._root = root
                 with root:
                     with ui.VStack():
-                        ui.Spacer(height=_TOP)
+                        ui.Spacer()
                         row_h = max(int(_PANEL_H), int(_PLAY_BTN_H))
                         with ui.HStack(height=row_h):
-                            ui.Spacer(width=_LEFT)
+                            ui.Spacer()
                             # Viewport overlay 에서 Frame.style 배경이 무시되는 경우가 많아
                             # CSV HUD 와 같이 ZStack + Rectangle 로 배경을 그림.
                             wrap_w = int(_PANEL_W)
@@ -799,6 +798,8 @@ class _FedLoadPanel:
                             self._wire_hud_pick_block(
                                 self._chip_wrap, on_press=self._on_overlay_pressed
                             )
+                            ui.Spacer()
+                        ui.Spacer()
             self._display_pct = 0.0
             self._target_pct = 0.0
             self._failed = False
@@ -1020,7 +1021,37 @@ class _FedLoadPanel:
                 style=btn_style,
             )
         self._apply_play_bg()
+        self._wire_play_hover()
         self._set_widget_visible(self._play_root, False)
+
+    def _wire_play_hover(self) -> None:
+        """재생 버튼 ZStack 에 호버 색. Button/chip_wrap 이 아니라 play_root 에 건다."""
+        widget = self._play_root
+        if widget is None:
+            return
+        setter = getattr(widget, "set_mouse_hovered_fn", None)
+        if not callable(setter):
+            setter = getattr(widget, "set_hovered_fn", None)
+        if not callable(setter):
+            print(f"{_PRINT_PREFIX} play_hover fn unavailable", flush=True)
+            return
+        try:
+            setter(self._on_play_hovered)
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} play_hover fn unavailable: {exc}",
+                flush=True,
+            )
+
+    def _on_play_hovered(self, hovered: Any = False, *_a: Any, **_k: Any) -> bool:
+        if self._play_starting:
+            self._set_play_bg_color(int(_PLAY_BTN_BG_CLICK_ARGB))
+            return True
+        if bool(hovered):
+            self._set_play_bg_color(int(_PLAY_BTN_BG_HOVER_ARGB))
+        else:
+            self._set_play_bg_color(int(_PLAY_BTN_BG_ARGB))
+        return True
 
     def _set_widget_visible(self, widget: Any, want: bool) -> None:
         if widget is None:

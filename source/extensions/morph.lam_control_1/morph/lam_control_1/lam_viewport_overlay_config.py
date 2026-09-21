@@ -406,6 +406,13 @@ def foup_panel_offset_xyz_m(foup_index: int, *, top_view: bool = False) -> Tuple
         rec = FOUP_PANEL_OFFSET_XYZ_M.get(int(foup_index), (-20, -35, 0.10))
     return (float(rec[0]), float(rec[1]), float(rec[2]))
 
+
+def foup_panel_bg_rgba(foup_index: int) -> Tuple[float, float, float, float]:
+    rec = FOUP_PANEL_BG_RGBA_BY_INDEX.get(int(foup_index))
+    if rec is None:
+        rec = FOUP_PANEL_BG_RGBA
+    return (float(rec[0]), float(rec[1]), float(rec[2]), float(rec[3]))
+
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
 FOUP_PANEL_WIDTH_PX: int = 200
 FOUP_PANEL_HEIGHT_PX: int = 160
@@ -413,6 +420,7 @@ FOUP_PANEL_TITLE_H_PX: int = 52
 FOUP_PANEL_BODY_H_PX: int = 110
 FOUP_PANEL_TOP_BAR_H_PX: int = 3
 FOUP_PANEL_PAD_X_PX: int = 12
+FOUP_PANEL_PAD_Y_PX: int = 12
 FOUP_PANEL_LINE_HEIGHT_PX: int = 25
 FOUP_PANEL_FONT_SIZE: int = 14
 FOUP_PANEL_DIVIDER_H_PX: float = 0.5
@@ -423,6 +431,11 @@ FOUP_PANEL_BG_RGBA: Tuple[float, float, float, float] = (
     64.0 / 255.0,
     0.5,
 )
+FOUP_PANEL_BG_RGBA_BY_INDEX: Dict[int, Tuple[float, float, float, float]] = {
+    1: (35.0 / 255.0, 43.0 / 255.0, 41.0 / 255.0, 0.9),
+    2: (44.0 / 255.0, 41.0 / 255.0, 75.0 / 255.0, 0.9),
+    3: (38.0 / 255.0, 27.0 / 255.0, 16.0 / 255.0, 0.9),
+}
 FOUP_PANEL_BORDER_RGBA: Tuple[float, float, float, float] = (0.45, 0.55, 0.70, 0.90)
 
 
@@ -631,16 +644,19 @@ __all__ = [
     "FOUP_PANEL_OFFSET_XYZ_M",
     "FOUP_PANEL_OFFSET_XYZ_M_TOP_VIEW",
     "foup_panel_offset_xyz_m",
+    "foup_panel_bg_rgba",
     "FOUP_PANEL_WIDTH_PX",
     "FOUP_PANEL_HEIGHT_PX",
     "FOUP_PANEL_TITLE_H_PX",
     "FOUP_PANEL_BODY_H_PX",
     "FOUP_PANEL_TOP_BAR_H_PX",
     "FOUP_PANEL_PAD_X_PX",
+    "FOUP_PANEL_PAD_Y_PX",
     "FOUP_PANEL_LINE_HEIGHT_PX",
     "FOUP_PANEL_FONT_SIZE",
     "FOUP_PANEL_DIVIDER_H_PX",
     "FOUP_PANEL_BG_RGBA",
+    "FOUP_PANEL_BG_RGBA_BY_INDEX",
     "FOUP_PANEL_BORDER_RGBA",
     "FOUP_PANEL_DIVIDER_RGBA",
     "DEVICE_LABEL_DEFAULT_BG_RGBA",
