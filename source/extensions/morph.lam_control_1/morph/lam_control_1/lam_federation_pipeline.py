@@ -28,7 +28,7 @@ from .lam_federation_client import (
     fetch_simulation_get_pages,
     simulation_get_auth_from_body,
 )
-from .lam_federation_load_hud import set_federation_load_status
+from .lam_federation_load_hud import hide_federation_load_hud, set_federation_load_status
 from .lam_screen_visibility import request_screen_visibility
 from .simulation_play import (
     build_and_cache_from_dwells,
@@ -1366,6 +1366,12 @@ def run_federation_start_simulation(
         url=url[:80],
         limit=limit,
     )
+    # 이전 재생 버튼·로딩 칩이 남지 않게 화면1·2 HUD를 먼저 숨긴다.
+    # 이후 화면1부터 ``requesting`` 이 오면 기존처럼 로딩 패널만 다시 켠다.
+    try:
+        hide_federation_load_hud()
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} hide load HUD at start: {exc}", flush=True)
 
     def _work_after_visibility() -> Dict[str, Any]:
         _fed_diag("S06_work_begin", "after visibility — fetch/parse then per-screen play button")

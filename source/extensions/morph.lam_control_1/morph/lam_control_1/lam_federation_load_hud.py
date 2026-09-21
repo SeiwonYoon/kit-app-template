@@ -339,12 +339,18 @@ def _hide_panels_visible(
     *,
     skip_i_preview: bool = False,
 ) -> None:
-    """패널 객체는 유지하고 ``visible`` 만 False. pop/destroy 없음."""
+    """패널 객체는 유지하고 ``visible`` 만 False. pop/destroy 없음.
+
+    루트만 끄면 재생 버튼 위젯이 켜진 채로 남아, 다음 표시 때 Play 가 먼저 보인다.
+    숨길 때 Play 클릭 콜백·재생 칩도 같이 끈다.
+    """
     with _lock:
         if screen is None:
             targets = list(_panels.keys())
+            _play_click_fns.clear()
         else:
             targets = [max(1, int(screen))]
+            _play_click_fns.pop(targets[0], None)
         panels = []
         for si in targets:
             panel = _panels.get(si)
@@ -354,6 +360,12 @@ def _hide_panels_visible(
                 continue
             panels.append(panel)
     for panel in panels:
+        try:
+            panel._play_fn = None
+            panel._play_starting = False
+            panel._set_play_visible(False)
+        except Exception:
+            pass
         try:
             panel.apply_user_overlay_visible(False)
         except Exception:
