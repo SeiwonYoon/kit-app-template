@@ -78,7 +78,7 @@ _BODY_ROW_IMAGES = ("ic_takeout.png", "ic_progress.png", "ic_complete.png")
 _BODY_ROW_ICON_WH = 37
 # screen 공간 +z = 카메라 쪽. 배경보다 앞에 고정해 z-fighting 깜빡임 제거.
 _BODY_ROW_IMAGE_Z = 1.0
-_LAYOUT_VER = 9
+_LAYOUT_VER = 10
 _BODY_ROW_IMAGE_PROVIDERS: Dict[str, Any] = {}
 
 
@@ -87,6 +87,34 @@ def _foup_marker_glyph_px() -> float:
     w = max(1, int(FOUP_MARKER_WIDTH_PX))
     h = max(1, int(FOUP_MARKER_HEIGHT_PX))
     return float(h if w == h else (w + h) * 0.5)
+
+
+def _estimate_lot_id_text_width(text: str, font_size: int) -> int:
+    """lot_id ``sc.Label`` SCREEN 폭 추정 (기기 라벨과 같은 글자별 비율)."""
+    fs = max(8, int(font_size))
+    total = 0.0
+    for ch in str(text or ""):
+        o = ord(ch)
+        if ch == " ":
+            total += fs * 0.40
+        elif o > 127:
+            total += fs * 1.10
+        elif ch.isupper():
+            total += fs * 1.12
+        elif ch.isdigit():
+            total += fs * 0.72
+        elif ch in "1il|":
+            total += fs * 0.48
+        else:
+            total += fs * 0.90
+    return int(total * 1.05) + 8
+
+
+def _panel_width_for_lot_id(lot_id: str) -> int:
+    """최소 ``FOUP_PANEL_WIDTH_PX``, lot_id 가 더 길면 패딩 포함해 확장."""
+    content = _estimate_lot_id_text_width(lot_id, int(FOUP_LOT_ID_FONT_SIZE))
+    need = int(content) + 2 * int(_PAD_X)
+    return max(int(_PANEL_W), need)
 
 
 def _foup_img_dir() -> Path:
@@ -724,8 +752,9 @@ class LamFoupStatus3dPanel:
         rows = node.get("rows")
         return (
             node.get("layout_ver") == _LAYOUT_VER
-            and node.get("title") is not None
-            and node.get("top_bar") is not None
+            and node.get("bg") is not None
+            and node.get("divider") is not None
+            and node.get("title_tf") is not None
             and node.get("marker") is not None
             and node.get("marker_root") is not None
             and isinstance(rows, list)
@@ -752,6 +781,57 @@ class LamFoupStatus3dPanel:
                 lbl.text = ""
             except Exception:
                 pass
+
+    def _apply_panel_width(self, node: Dict[str, Any], width_px: int) -> None:
+        """lot_id 에 맞춰 배경·띠·본문 x 를 갱신. 최소 너비는 FOUP_PANEL_WIDTH_PX."""
+        w = max(int(_PANEL_W), int(width_px))
+        if int(node.get("panel_w") or 0) == w:
+            return
+        half_w = float(w) * 0.5
+        left_x = -half_w + float(_PAD_X)
+        right_x = half_w - float(_PAD_X)
+        half_h = float(_PANEL_H) * 0.5
+        title_y = (
+            half_h
+            - float(_TOP_BAR_H)
+            - (float(_TITLE_H) - float(_TOP_BAR_H)) * 0.5
+        )
+        body_top = half_h - float(_TITLE_H) - float(_PAD_Y)
+        slot_h = max(1.0, (float(_BODY_H) - 2.0 * float(_PAD_Y)) / float(_BODY_ROW_COUNT))
+        for key in ("bg", "top_bar", "divider"):
+            rect = node.get(key)
+            if rect is None:
+                continue
+            try:
+                rect.width = float(w)
+            except Exception:
+                pass
+        title_tf = node.get("title_tf")
+        if title_tf is not None:
+            try:
+                title_tf.transform = sc.Matrix44.get_translation_matrix(
+                    left_x, title_y, 0.0
+                )
+            except Exception:
+                pass
+        rows = list(node.get("rows") or [])
+        for i, row in enumerate(rows[:_BODY_ROW_COUNT]):
+            if not isinstance(row, dict):
+                continue
+            y = body_top - slot_h * (float(i) + 0.5)
+            ltf = row.get("left_tf")
+            rtf = row.get("right_tf")
+            if ltf is not None:
+                try:
+                    ltf.transform = sc.Matrix44.get_translation_matrix(left_x, y, 0.0)
+                except Exception:
+                    pass
+            if rtf is not None:
+                try:
+                    rtf.transform = sc.Matrix44.get_translation_matrix(right_x, y, 0.0)
+                except Exception:
+                    pass
+        node["panel_w"] = w
 
     def _ensure_ui_built(self) -> None:
         """Scene graph는 1회만 만든 뒤, text/transform만 업데이트."""
@@ -796,7 +876,7 @@ class LamFoupStatus3dPanel:
                 with root:
                     with sc.Transform(scale_to=sc.Space.SCREEN):
                         bg = tuple(foup_panel_bg_rgba(int(fi)))
-                        sc.Rectangle(
+                        bg_rect = sc.Rectangle(
                             width=_PANEL_W,
                             height=_PANEL_H,
                             color=bg,
@@ -814,15 +894,16 @@ class LamFoupStatus3dPanel:
                         with sc.Transform(
                             transform=sc.Matrix44.get_translation_matrix(0.0, div_y, 0.0)
                         ):
-                            sc.Rectangle(
+                            divider = sc.Rectangle(
                                 width=_PANEL_W,
                                 height=_DIVIDER_H,
                                 color=tuple(FOUP_PANEL_DIVIDER_RGBA),
                                 wireframe=False,
                             )
-                        with sc.Transform(
+                        title_tf = sc.Transform(
                             transform=sc.Matrix44.get_translation_matrix(left_x, title_y, 0.0)
-                        ):
+                        )
+                        with title_tf:
                             title = sc.Label(
                                 "",
                                 size=title_font,
@@ -836,18 +917,19 @@ class LamFoupStatus3dPanel:
                                 row_img_paths[i] if i < len(row_img_paths) else None
                             )
                             left_w = None
+                            left_tf = sc.Transform(
+                                transform=sc.Matrix44.get_translation_matrix(
+                                    left_x, y, 0.0
+                                )
+                            )
                             prov = (
                                 _body_row_icon_provider(img_path)
                                 if img_path
                                 else None
                             )
-                            if prov is not None:
-                                try:
-                                    with sc.Transform(
-                                        transform=sc.Matrix44.get_translation_matrix(
-                                            left_x, y, 0.0
-                                        )
-                                    ):
+                            with left_tf:
+                                if prov is not None:
+                                    try:
                                         with sc.Transform(
                                             transform=sc.Matrix44.get_translation_matrix(
                                                 icon_wh * 0.5,
@@ -862,36 +944,39 @@ class LamFoupStatus3dPanel:
                                                 image_width=int(_BODY_ROW_ICON_WH),
                                                 image_height=int(_BODY_ROW_ICON_WH),
                                             )
-                                except Exception as exc:
-                                    print(
-                                        f"{_PRINT_PREFIX} sc.Image provider fail: {exc}",
-                                        flush=True,
-                                    )
-                                    left_w = None
-                            if left_w is None:
-                                with sc.Transform(
-                                    transform=sc.Matrix44.get_translation_matrix(
-                                        left_x, y, 0.0
-                                    )
-                                ):
+                                    except Exception as exc:
+                                        print(
+                                            f"{_PRINT_PREFIX} sc.Image provider fail: {exc}",
+                                            flush=True,
+                                        )
+                                        left_w = None
+                                if left_w is None:
                                     left_w = sc.Label(
                                         "",
                                         size=body_font,
                                         color=_WHITE,
                                         alignment=align_left,
                                     )
-                            with sc.Transform(
+                            right_tf = sc.Transform(
                                 transform=sc.Matrix44.get_translation_matrix(
                                     right_x, y, 0.0
                                 )
-                            ):
+                            )
+                            with right_tf:
                                 right_lbl = sc.Label(
                                     "",
                                     size=body_font,
                                     color=_WHITE,
                                     alignment=align_right,
                                 )
-                            rows.append({"left": left_w, "right": right_lbl})
+                            rows.append(
+                                {
+                                    "left": left_w,
+                                    "right": right_lbl,
+                                    "left_tf": left_tf,
+                                    "right_tf": right_tf,
+                                }
+                            )
                 marker_root = sc.Transform(
                     look_at=sc.Transform.LookAt.CAMERA,
                     transform=sc.Matrix44.get_translation_matrix(0.0, 0.0, 0.0),
@@ -909,11 +994,15 @@ class LamFoupStatus3dPanel:
                 self._panel_nodes[fi] = {
                     "layout_ver": _LAYOUT_VER,
                     "root": root,
+                    "bg": bg_rect,
                     "title": title,
+                    "title_tf": title_tf,
                     "top_bar": top_bar,
+                    "divider": divider,
                     "rows": rows,
                     "marker_root": marker_root,
                     "marker": marker,
+                    "panel_w": int(_PANEL_W),
                 }
 
     def _update_ui(self) -> None:
@@ -982,13 +1071,15 @@ class LamFoupStatus3dPanel:
             except Exception:
                 pass
             title = node.get("title")
+            lot_text = str(lot_id or "")
             if title is not None:
                 try:
-                    title.text = str(lot_id or "")
+                    title.text = lot_text
                     title.color = lot_color
                     title.size = int(FOUP_LOT_ID_FONT_SIZE)
                 except Exception:
                     pass
+            self._apply_panel_width(node, _panel_width_for_lot_id(lot_text))
             values = (
                 f"{c.current_in_foup_now}/{c.total}",
                 str(int(c.in_process_count)),

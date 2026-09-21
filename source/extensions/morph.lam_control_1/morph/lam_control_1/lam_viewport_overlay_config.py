@@ -429,6 +429,7 @@ def foup_marker_rgba(foup_index: int) -> Tuple[float, float, float, float]:
     return (float(rec[0]), float(rec[1]), float(rec[2]), float(rec[3]))
 
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
+# WIDTH 는 최소 너비. lot_id 타이틀이 더 길면 해당 패널만 늘어난다.
 FOUP_PANEL_WIDTH_PX: int = 170
 FOUP_PANEL_HEIGHT_PX: int = 170
 FOUP_PANEL_TITLE_H_PX: int = 52
