@@ -432,7 +432,7 @@ def foup_marker_rgba(foup_index: int) -> Tuple[float, float, float, float]:
 FOUP_PANEL_WIDTH_PX: int = 170
 FOUP_PANEL_HEIGHT_PX: int = 170
 FOUP_PANEL_TITLE_H_PX: int = 52
-FOUP_PANEL_BODY_H_PX: int = 110
+FOUP_PANEL_BODY_H_PX: int = 120
 FOUP_PANEL_TOP_BAR_H_PX: int = 3
 FOUP_PANEL_PAD_X_PX: int = 12
 FOUP_PANEL_PAD_Y_PX: int = 8
