@@ -381,7 +381,7 @@ STATUS_PANEL_ROWS: List[StatusRowSpec] = [
 FOUP_ANCHOR_PRIM_BY_INDEX: Dict[int, str] = {
     # 1: "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_01/Foup_01_Body",
     1: "/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r07__________B_1114/O6_0mm________1115/Mesh_583",
-    2: "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_02/Foup_02_Body",
+    2: "/World/aaa_1/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1001_000___________1262/TL14_1001_r11___________SSA4001A_04_1319",
     3: "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_03/Foup_03_Body",
 }
 
@@ -413,14 +413,29 @@ def foup_panel_bg_rgba(foup_index: int) -> Tuple[float, float, float, float]:
         rec = FOUP_PANEL_BG_RGBA
     return (float(rec[0]), float(rec[1]), float(rec[2]), float(rec[3]))
 
+
+def foup_marker_offset_xyz_m(foup_index: int, *, top_view: bool = False) -> Tuple[float, float, float]:
+    src = FOUP_MARKER_OFFSET_XYZ_M_TOP_VIEW if bool(top_view) else FOUP_MARKER_OFFSET_XYZ_M
+    rec = src.get(int(foup_index))
+    if rec is None:
+        rec = FOUP_MARKER_OFFSET_XYZ_M.get(int(foup_index), (0.0, 0.0, 0.10))
+    return (float(rec[0]), float(rec[1]), float(rec[2]))
+
+
+def foup_marker_rgba(foup_index: int) -> Tuple[float, float, float, float]:
+    rec = FOUP_MARKER_RGBA_BY_INDEX.get(int(foup_index))
+    if rec is None:
+        return (1.0, 1.0, 1.0, 1.0)
+    return (float(rec[0]), float(rec[1]), float(rec[2]), float(rec[3]))
+
 # FOUP 3D 패널 스타일(표 형태) — 줄간격/배경 크기/글자 크기 등은 여기서 조정
-FOUP_PANEL_WIDTH_PX: int = 200
-FOUP_PANEL_HEIGHT_PX: int = 160
+FOUP_PANEL_WIDTH_PX: int = 170
+FOUP_PANEL_HEIGHT_PX: int = 170
 FOUP_PANEL_TITLE_H_PX: int = 52
 FOUP_PANEL_BODY_H_PX: int = 110
 FOUP_PANEL_TOP_BAR_H_PX: int = 3
 FOUP_PANEL_PAD_X_PX: int = 12
-FOUP_PANEL_PAD_Y_PX: int = 12
+FOUP_PANEL_PAD_Y_PX: int = 8
 FOUP_PANEL_LINE_HEIGHT_PX: int = 25
 FOUP_PANEL_FONT_SIZE: int = 14
 FOUP_PANEL_DIVIDER_H_PX: float = 0.5
@@ -437,6 +452,25 @@ FOUP_PANEL_BG_RGBA_BY_INDEX: Dict[int, Tuple[float, float, float, float]] = {
     3: (38.0 / 255.0, 27.0 / 255.0, 16.0 / 255.0, 0.9),
 }
 FOUP_PANEL_BORDER_RGBA: Tuple[float, float, float, float] = (0.45, 0.55, 0.70, 0.90)
+
+# FOUP ◆ 마커 — 크기는 세 FOUP 공유, 오프셋·색은 번호별.
+FOUP_MARKER_WIDTH_PX: int = 20
+FOUP_MARKER_HEIGHT_PX: int = 20
+FOUP_MARKER_OFFSET_XYZ_M: Dict[int, Tuple[float, float, float]] = {
+    1: (0.0, 0.0, 0.10),
+    2: (0.0, 0.0, 0.10),
+    3: (0.0, 0.0, 0.10),
+}
+FOUP_MARKER_OFFSET_XYZ_M_TOP_VIEW: Dict[int, Tuple[float, float, float]] = {
+    1: (0.0, 0.0, 0.10),
+    2: (0.0, 0.0, 0.10),
+    3: (0.0, 0.0, 0.10),
+}
+FOUP_MARKER_RGBA_BY_INDEX: Dict[int, Tuple[float, float, float, float]] = {
+    1: (0.20, 0.55, 1.00, 1.00),
+    2: (1.00, 0.25, 0.25, 1.00),
+    3: (0.25, 0.90, 0.35, 1.00),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +679,13 @@ __all__ = [
     "FOUP_PANEL_OFFSET_XYZ_M_TOP_VIEW",
     "foup_panel_offset_xyz_m",
     "foup_panel_bg_rgba",
+    "FOUP_MARKER_WIDTH_PX",
+    "FOUP_MARKER_HEIGHT_PX",
+    "FOUP_MARKER_OFFSET_XYZ_M",
+    "FOUP_MARKER_OFFSET_XYZ_M_TOP_VIEW",
+    "FOUP_MARKER_RGBA_BY_INDEX",
+    "foup_marker_offset_xyz_m",
+    "foup_marker_rgba",
     "FOUP_PANEL_WIDTH_PX",
     "FOUP_PANEL_HEIGHT_PX",
     "FOUP_PANEL_TITLE_H_PX",

@@ -28,6 +28,10 @@ from .lam_viewport_overlay_config import (
     FOUP_PANEL_HEIGHT_PX,
     FOUP_PANEL_PAD_X_PX,
     FOUP_PANEL_PAD_Y_PX,
+    FOUP_MARKER_HEIGHT_PX,
+    FOUP_MARKER_WIDTH_PX,
+    foup_marker_offset_xyz_m,
+    foup_marker_rgba,
     foup_panel_bg_rgba,
     foup_panel_offset_xyz_m,
     FOUP_PANEL_TITLE_H_PX,
@@ -74,8 +78,15 @@ _BODY_ROW_IMAGES = ("ic_takeout.png", "ic_progress.png", "ic_complete.png")
 _BODY_ROW_ICON_WH = 37
 # screen 공간 +z = 카메라 쪽. 배경보다 앞에 고정해 z-fighting 깜빡임 제거.
 _BODY_ROW_IMAGE_Z = 1.0
-_LAYOUT_VER = 8
+_LAYOUT_VER = 9
 _BODY_ROW_IMAGE_PROVIDERS: Dict[str, Any] = {}
+
+
+def _foup_marker_glyph_px() -> float:
+    """◆ 글자 크기. 세 FOUP 공유 WIDTH×HEIGHT (기본 20×20)."""
+    w = max(1, int(FOUP_MARKER_WIDTH_PX))
+    h = max(1, int(FOUP_MARKER_HEIGHT_PX))
+    return float(h if w == h else (w + h) * 0.5)
 
 
 def _foup_img_dir() -> Path:
@@ -715,6 +726,8 @@ class LamFoupStatus3dPanel:
             node.get("layout_ver") == _LAYOUT_VER
             and node.get("title") is not None
             and node.get("top_bar") is not None
+            and node.get("marker") is not None
+            and node.get("marker_root") is not None
             and isinstance(rows, list)
             and len(rows) == _BODY_ROW_COUNT
         )
@@ -879,12 +892,28 @@ class LamFoupStatus3dPanel:
                                     alignment=align_right,
                                 )
                             rows.append({"left": left_w, "right": right_lbl})
+                marker_root = sc.Transform(
+                    look_at=sc.Transform.LookAt.CAMERA,
+                    transform=sc.Matrix44.get_translation_matrix(0.0, 0.0, 0.0),
+                )
+                with marker_root:
+                    with sc.Transform(scale_to=sc.Space.SCREEN):
+                        align_c = getattr(ui.Alignment, "CENTER", None) or align_left
+                        marker_kw: Dict[str, Any] = {
+                            "size": _foup_marker_glyph_px(),
+                            "color": tuple(foup_marker_rgba(int(fi))),
+                        }
+                        if align_c is not None:
+                            marker_kw["alignment"] = align_c
+                        marker = sc.Label("◆", **marker_kw)
                 self._panel_nodes[fi] = {
                     "layout_ver": _LAYOUT_VER,
                     "root": root,
                     "title": title,
                     "top_bar": top_bar,
                     "rows": rows,
+                    "marker_root": marker_root,
+                    "marker": marker,
                 }
 
     def _update_ui(self) -> None:
@@ -907,12 +936,17 @@ class LamFoupStatus3dPanel:
                 continue
             prim = st.GetPrimAtPath(anchor_path)
             if not prim or not prim.IsValid():
+                hide = sc.Matrix44.get_translation_matrix(1e9, 1e9, 1e9)
                 try:
-                    node["root"].transform = sc.Matrix44.get_translation_matrix(
-                        1e9, 1e9, 1e9
-                    )
+                    node["root"].transform = hide
                 except Exception:
                     pass
+                marker_root = node.get("marker_root")
+                if marker_root is not None:
+                    try:
+                        marker_root.transform = hide
+                    except Exception:
+                        pass
                 self._clear_node_texts(node)
                 continue
             center = _prim_world_center(prim)
@@ -924,6 +958,21 @@ class LamFoupStatus3dPanel:
                 node["root"].transform = sc.Matrix44.get_translation_matrix(*pos)
             except Exception:
                 pass
+            mx, my, mz = foup_marker_offset_xyz_m(int(fi), top_view=top_view)
+            mpos = (center[0] + mx, center[1] + my, center[2] + mz)
+            marker_root = node.get("marker_root")
+            if marker_root is not None:
+                try:
+                    marker_root.transform = sc.Matrix44.get_translation_matrix(*mpos)
+                except Exception:
+                    pass
+            marker = node.get("marker")
+            if marker is not None:
+                try:
+                    marker.color = tuple(foup_marker_rgba(int(fi)))
+                    marker.size = _foup_marker_glyph_px()
+                except Exception:
+                    pass
 
             c: FoupCounts = get_foup_counts(fi, screen=self._screen)
             lot_id = get_lot_id_for_foup(fi, screen=self._screen)
