@@ -1047,21 +1047,32 @@ class LamFoupStatus3dPanel:
                 node["root"].transform = sc.Matrix44.get_translation_matrix(*pos)
             except Exception:
                 pass
-            mx, my, mz = foup_marker_offset_xyz_m(int(fi), top_view=top_view)
-            mpos = (center[0] + mx, center[1] + my, center[2] + mz)
             marker_root = node.get("marker_root")
             if marker_root is not None:
                 try:
-                    marker_root.transform = sc.Matrix44.get_translation_matrix(*mpos)
+                    if top_view:
+                        # 「탑뷰 보기」 체크 시 ◆ 숨김. 패널 본체는 그대로.
+                        marker_root.transform = sc.Matrix44.get_translation_matrix(
+                            1e9, 1e9, 1e9
+                        )
+                    else:
+                        mx, my, mz = foup_marker_offset_xyz_m(
+                            int(fi), top_view=False
+                        )
+                        mpos = (center[0] + mx, center[1] + my, center[2] + mz)
+                        marker_root.transform = sc.Matrix44.get_translation_matrix(
+                            *mpos
+                        )
                 except Exception:
                     pass
-            marker = node.get("marker")
-            if marker is not None:
-                try:
-                    marker.color = tuple(foup_marker_rgba(int(fi)))
-                    marker.size = _foup_marker_glyph_px()
-                except Exception:
-                    pass
+            if not top_view:
+                marker = node.get("marker")
+                if marker is not None:
+                    try:
+                        marker.color = tuple(foup_marker_rgba(int(fi)))
+                        marker.size = _foup_marker_glyph_px()
+                    except Exception:
+                        pass
 
             c: FoupCounts = get_foup_counts(fi, screen=self._screen)
             lot_id = get_lot_id_for_foup(fi, screen=self._screen)

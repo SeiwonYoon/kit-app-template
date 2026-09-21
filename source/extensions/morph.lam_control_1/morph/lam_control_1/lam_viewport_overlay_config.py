@@ -455,6 +455,7 @@ FOUP_PANEL_BG_RGBA_BY_INDEX: Dict[int, Tuple[float, float, float, float]] = {
 FOUP_PANEL_BORDER_RGBA: Tuple[float, float, float, float] = (0.45, 0.55, 0.70, 0.90)
 
 # FOUP ◆ 마커 — 크기는 세 FOUP 공유, 오프셋·색은 번호별.
+# 「탑뷰 보기」 체크 시 숨김. 원근 뷰에서만 FOUP_MARKER_OFFSET_XYZ_M 사용.
 FOUP_MARKER_WIDTH_PX: int = 20
 FOUP_MARKER_HEIGHT_PX: int = 20
 FOUP_MARKER_OFFSET_XYZ_M: Dict[int, Tuple[float, float, float]] = {
