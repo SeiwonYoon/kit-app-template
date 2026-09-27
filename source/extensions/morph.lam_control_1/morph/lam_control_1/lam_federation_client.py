@@ -20,6 +20,17 @@ _FETCH_RETRY_DELAY_SEC = 1.0
 
 _SIMULATION_PATH_SUFFIX = "/api/v1/lam/simulations/"
 
+_FetchProgressCb = Optional[Callable[[int, bool], None]]
+
+
+def _emit_fetch_progress(cb: _FetchProgressCb, pages: int, is_last: bool) -> None:
+    if cb is None:
+        return
+    try:
+        cb(int(pages), bool(is_last))
+    except Exception:
+        pass
+
 
 def build_simulation_get_headers(
     *,
@@ -280,6 +291,7 @@ def fetch_simulation_get_pages(
     timeout_sec: float = 300.0,
     quiet: bool = False,
     headers: Optional[Dict[str, str]] = None,
+    progress_cb: _FetchProgressCb = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """``len(page) < limit`` 될 때까지 Simulation GET pagination 후 병합."""
     t0 = time.perf_counter()
@@ -326,7 +338,9 @@ def fetch_simulation_get_pages(
                 flush=True,
             )
         # limit 만큼 가득 찬 페이지만 다음 offset 으로 이어 받는다 (예: 1000건 초과).
-        if len(objects) < int(limit):
+        is_last = len(objects) < int(limit)
+        _emit_fetch_progress(progress_cb, pages, is_last)
+        if is_last:
             break
         offset += int(limit)
         if pages > 10000:
@@ -419,6 +433,7 @@ def fetch_federation_pages(
     log_row_sample: int = 5,
     log_full_response: bool = False,
     quiet: bool = False,
+    progress_cb: _FetchProgressCb = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """``has_next=false`` 까지 pagination fetch 후 rows 병합.
 
@@ -501,6 +516,8 @@ def fetch_federation_pages(
             _log_response_sample(
                 data, row_sample=log_row_sample, full=log_full_response, quiet=False
             )
+        is_last = not has_next
+        _emit_fetch_progress(progress_cb, pages, is_last)
         if not has_next:
             break
         # Federation offset은 페이지 번호가 아니라 rows 행 오프셋이다.

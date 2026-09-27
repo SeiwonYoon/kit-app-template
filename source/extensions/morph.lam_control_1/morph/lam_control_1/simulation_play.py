@@ -116,6 +116,10 @@ _csv_play_compact_log_refs: int = 0
 _csv_play_compact_log_lock = threading.Lock()
 # CSV Play 빌드 배치: True 이면 ensure/refresh 를 plan 시작 시 1회만 (이벤트 빌드 가속)
 _csv_bulk_build_active: bool = False
+# bulk 중 동일 dwells 리스트 객체에 대한 tour 그룹핑 재계산 방지 (최대 8개)
+_TOUR_GROUP_CACHE: Dict[int, List[Tuple[Tuple[str, int], List["DwellRecord"]]]] = {}
+_TOUR_GROUP_CACHE_LOCK = threading.Lock()
+_TOUR_GROUP_CACHE_MAX = 8
 # path+mtime → 재생 계획 캐시 (Kit 세션 메모리, 파일 수정 시 무효화)
 _csv_playback_cache: Dict[str, "CachedCsvPlayback"] = {}
 _csv_playback_cache_lock = threading.Lock()
@@ -637,13 +641,35 @@ def _estimate_csv_build_units(dwells: List["DwellRecord"]) -> int:
     return max(1, n)
 
 
-def _group_dwell_tours(dwells: List["DwellRecord"]) -> List[Tuple[Tuple[str, int], List["DwellRecord"]]]:
+def _clear_tour_group_cache() -> None:
+    with _TOUR_GROUP_CACHE_LOCK:
+        _TOUR_GROUP_CACHE.clear()
+
+
+def _group_dwell_tours(
+    dwells: List["DwellRecord"],
+) -> List[Tuple[Tuple[str, int], List["DwellRecord"]]]:
+    """(lot_id, cassette_slot) 투어 그룹. 캐시된 리스트는 호출자가 변경하지 않는다.
+
+    키는 ``id(dwells)`` — 내용이 같아도 객체가 다르면 재계산한다.
+    bulk 중 동일 리스트를 반복 전달하는 호출만 히트한다.
+    """
+    key = id(dwells)
+    with _TOUR_GROUP_CACHE_LOCK:
+        hit = _TOUR_GROUP_CACHE.get(key)
+        if hit is not None:
+            return hit
     tours: Dict[Tuple[str, int], List["DwellRecord"]] = {}
     for d in dwells:
         tours.setdefault((d.lot_id, d.cassette_slot), []).append(d)
-    for key in list(tours.keys()):
-        tours[key].sort(key=lambda x: x.start_sec)
-    return sorted(tours.items(), key=lambda kv: kv[1][0].start_sec)
+    for tk in list(tours.keys()):
+        tours[tk].sort(key=lambda x: x.start_sec)
+    result = sorted(tours.items(), key=lambda kv: kv[1][0].start_sec)
+    with _TOUR_GROUP_CACHE_LOCK:
+        if len(_TOUR_GROUP_CACHE) >= _TOUR_GROUP_CACHE_MAX:
+            _TOUR_GROUP_CACHE.clear()
+        _TOUR_GROUP_CACHE[key] = result
+    return result
 
 
 def _event_step_count_estimate(event_name: str) -> int:
@@ -1788,7 +1814,8 @@ def build_steps_for_dwell_transfer(prev: DwellRecord, curr: DwellRecord) -> LamS
             f"{curr.lot_id!r}/{curr.cassette_slot} ({prev.slot_key!r} -> {curr.slot_key!r}).",
         )
         return []
-    refresh_lam_sim_runtime_tables_from_config()
+    if not is_csv_bulk_build_active():
+        refresh_lam_sim_runtime_tables_from_config()
     robot = _classify_transfer_robot(prev.slot_key, curr.slot_key)
     try:
         if robot == "ATM":
@@ -1929,7 +1956,8 @@ def _other_wafer_atm_action_times_in_window(
     hi = float(window_hi)
     if hi <= lo + 1e-9:
         return times
-    for (lot_id, cassette_slot), tour in _group_dwell_tours(list(dwells)):
+    tour_src = dwells if isinstance(dwells, list) else list(dwells)
+    for (lot_id, cassette_slot), tour in _group_dwell_tours(tour_src):
         if lot_id == exclude_lot_id and int(cassette_slot) == int(exclude_cassette_slot):
             continue
         if not tour:
@@ -1968,13 +1996,14 @@ def _resolve_synth_aligner_pick_time(
         (pick_t|None, deferred, airlock_place_t)
         pick_t 가 None 이면 airlock place 가 투어에 없음 → place 만 삽입, pick 보류.
     """
-    from .lam_aligner_process_rules import resolve_aligner_pick_schedule
+    from .lam_aligner_process_rules import (
+        find_first_airlock_place_time_in_tour,
+        resolve_aligner_pick_schedule,
+    )
 
     anchor = float(anchor_time_sec)
     airlock_probe = None
     try:
-        from .lam_aligner_process_rules import find_first_airlock_place_time_in_tour
-
         airlock_probe = find_first_airlock_place_time_in_tour(tour)
     except Exception:
         airlock_probe = None
@@ -3764,9 +3793,17 @@ def build_csv_playback_plan(
         progress._total = max(progress._total, _estimate_csv_build_units(dwells))
 
     _csv_bulk_build_active = True
+    t_build0 = time.perf_counter()
+    tour_elapsed = 0.0
     try:
+        from .lam_event_sequences import clear_steps_build_cache
+
+        clear_steps_build_cache()
+        _clear_tour_group_cache()
         refresh_lam_sim_runtime_tables_from_config()
         ensure_event_json_scaffolds(overwrite=False)
+        if not is_csv_playback_compact_log():
+            print(f"{_PRINT_PREFIX} tour step build begin", flush=True)
 
         for (lot_id, cassette_slot), tour in _group_dwell_tours(dwells):
             foup_n = tour[0].foup_index
@@ -3862,15 +3899,38 @@ def build_csv_playback_plan(
                     progress.tick(1)
     finally:
         _csv_bulk_build_active = False
+        try:
+            from .lam_event_sequences import clear_steps_build_cache
+
+            clear_steps_build_cache()
+        except Exception:
+            pass
+        _clear_tour_group_cache()
+        tour_elapsed = time.perf_counter() - t_build0
         if progress is not None:
             progress.finish()
 
+    compact = is_csv_playback_compact_log()
     schedule.sort(key=lambda e: (e.time_sec, e.sort_order))
     blocks.sort(key=lambda b: (b.time_sec, b.sort_order))
+    if not compact:
+        print(
+            f"{_PRINT_PREFIX} tour step build done in {tour_elapsed:.2f}초, "
+            f"entries={len(schedule)}",
+            flush=True,
+        )
+    t_serial = time.perf_counter()
     schedule, blocks = _apply_csv_playback_arm_serial_rules(
         schedule, blocks, dwells=dwells
     )
     assert blocks is not None
+    if not compact:
+        print(
+            f"{_PRINT_PREFIX} arm/slot serial rules done in "
+            f"{time.perf_counter() - t_serial:.2f}초",
+            flush=True,
+        )
+    t_post = time.perf_counter()
     schedule, blocks = _enforce_aligner_absolute_rules(schedule, blocks)
     assert blocks is not None
     schedule, blocks = _ensure_buffer_to_foup_absolute_rules(
@@ -3884,6 +3944,12 @@ def build_csv_playback_plan(
     assert blocks is not None
     schedule = _stamp_schedule_row_ids(schedule)
     blocks = _reattach_block_schedules(blocks, schedule)
+    if not compact:
+        print(
+            f"{_PRINT_PREFIX} postprocess rules done in "
+            f"{time.perf_counter() - t_post:.2f}초",
+            flush=True,
+        )
     return schedule, blocks
 
 

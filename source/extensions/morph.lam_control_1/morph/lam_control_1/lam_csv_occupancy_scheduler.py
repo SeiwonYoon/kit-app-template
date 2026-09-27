@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -75,6 +76,7 @@ def apply_occupancy_scheduler(
     if not blocks:
         return list(schedule or []), list(blocks or []), tuple()
 
+    t0 = time.perf_counter()
     # 1) visibility 오프셋만큼 블록 시작 시각 앞당김
     blocks2, schedule2, d1 = _shift_blocks_by_visibility_offset(blocks, schedule)
     diags.extend(d1)
@@ -82,6 +84,11 @@ def apply_occupancy_scheduler(
     # 2) 점유 dry-run — 위반 후보만 진단 (재생 목록은 유지, 시각 이동만 반영)
     d2 = _occupancy_dry_run_diagnostics(dwells, blocks2)
     diags.extend(d2)
+    print(
+        f"{_PRINT_PREFIX} occupancy postprocess: block={len(blocks2)} "
+        f"shift+dryrun={time.perf_counter() - t0:.2f}초",
+        flush=True,
+    )
 
     # 최종 정렬 + row id
     schedule2.sort(key=lambda e: (float(e.time_sec), int(e.sort_order)))

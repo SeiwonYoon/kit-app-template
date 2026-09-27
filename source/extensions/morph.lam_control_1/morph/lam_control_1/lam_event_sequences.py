@@ -23,6 +23,7 @@ import copy
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -40,6 +41,17 @@ from .lam_wafer_prim_paths import (
 )
 
 _PRINT_PREFIX = "[LAM/EVENT]"
+
+# CSV bulk build — 동일 (이벤트, 슬롯, VTM EE 스왑) 재조립 방지.
+# 값은 스텝 리스트 스냅샷. 호출자는 deepcopy 복사본만 받아 스탬프한다.
+_STEPS_BUILD_CACHE: Dict[Tuple[str, Optional[int], bool], List[Dict[str, Any]]] = {}
+_STEPS_BUILD_CACHE_LOCK = threading.Lock()
+
+
+def clear_steps_build_cache() -> None:
+    """bulk build 진입/종료 시 스텝 조립 캐시 비움."""
+    with _STEPS_BUILD_CACHE_LOCK:
+        _STEPS_BUILD_CACHE.clear()
 
 # ---------------------------------------------------------------------------
 # 상수 — 이벤트 이름·JSON 토큰
@@ -594,6 +606,10 @@ def build_steps_for_event(
       [0] 자동 Z MOVE (항상 Python 삽입)
       [1..] JSON 파일 스텝 (visibility, TIMESAMPLES_REPLAY, DELAY …)
 
+    CSV bulk build 중에는 (이벤트, 슬롯, VTM EE 스왑) 키가 같으면 재조립하지 않고
+    캐시 스냅샷의 deepcopy 를 반환한다. 호출자가 반환 리스트에 스탬프를 찍어도
+    캐시가 오염되지 않는다.
+
     수정 포인트:
       - JSON 내용만 바꿀 때: ``lam/lam_event_sequences/<event_name>.json``
       - Z 높이: ``lam_slot_z_config.py`` (이 함수는 Δ→dz 만 계산)
@@ -601,8 +617,14 @@ def build_steps_for_event(
     """
     from .simulation_play import (  # 순환 import 방지 — 런타임만
         LAM_SIM_VIRTUAL_CONFIG,
+        is_csv_bulk_build_active,
         refresh_lam_sim_runtime_tables_from_config,
     )
+
+    try:
+        bulk = bool(is_csv_bulk_build_active())
+    except Exception:
+        bulk = False
 
     # --- 1) 이벤트명·슬롯 번호 검증 ---
     name = (event_name or "").strip()
@@ -612,15 +634,16 @@ def build_steps_for_event(
     if name in _EVENT_NEEDS_SLOT_NUMBER and slot_number is None:
         slot_number = 1
 
+    cache_key = (name, slot_number, bool(vtm_ee_swap))
+    if bulk:
+        with _STEPS_BUILD_CACHE_LOCK:
+            hit = _STEPS_BUILD_CACHE.get(cache_key)
+        if hit is not None:
+            return copy.deepcopy(hit)
+
     log_event_invoke(name, slot_number=slot_number)
 
     # --- 2) JSON 파일 로드 (없으면 스캐폴드만 생성, 덮어쓰기 안 함) ---
-    try:
-        from .simulation_play import is_csv_bulk_build_active
-
-        bulk = is_csv_bulk_build_active()
-    except Exception:
-        bulk = False
     if not bulk:
         ensure_event_json_scaffolds(overwrite=False)
     path = event_json_path(name)
@@ -729,6 +752,14 @@ def build_steps_for_event(
 
     out.extend(steps)
     log_event_steps_built(name, out, slot_number=slot_number)
+    if bulk:
+        with _STEPS_BUILD_CACHE_LOCK:
+            _STEPS_BUILD_CACHE[cache_key] = copy.deepcopy(out)
+        print(
+            f"{_PRINT_PREFIX} steps cache store event={name!r} "
+            f"slot={slot_number} n={len(out)}",
+            flush=True,
+        )
     return out
 
 
@@ -761,4 +792,5 @@ __all__ = [
     "atm_event_name_for_slot",
     "vtm_event_name_for_slot",
     "robot_for_event",
+    "clear_steps_build_cache",
 ]

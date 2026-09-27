@@ -1,9 +1,9 @@
 """Viewport 화면 중앙 Federation API 로딩 HUD (화면별).
 
-요청~준비완료까지 ``Loading data... N%`` 단일 칩 UI.
+요청~준비완료까지 ``Loading data... N%`` / parse 시 ``Parsing data... N%``.
 아이콘: ``data/img/ic_loading.png`` 를 중심 기준으로 계속 회전 (ByteImageProvider).
-실 로딩 %: 약 60초 동안 0→99, 준비 완료 시 그 숫자부터 2초 동안 100까지 채운 뒤
-같은 자리에 재생 버튼.
+fetch: 페이지당 2.5% (40페이지=100%). 40페이지 초과 시 현재%→99% 를 30초에 램프.
+마지막 페이지·ready 시 현재 %에서 2초 동안 100까지 채운 뒤 재생 버튼.
 재생 클릭 → ``_PLAY_CLICK_DELAY_SEC`` 뒤 버튼 숨김 + 그 화면만 시뮬 시작.
 전 화면 100% 후 일괄 자동 재생은 하지 않는다. I 단축키 미리보기와는 별개.
 
@@ -25,7 +25,7 @@ from .kit_main_dispatch import schedule_on_main_thread
 _PRINT_PREFIX = "[LAM/FedLoadHUD]"
 _FRAME_SLOT_PREFIX = "morph.lam_control_1:federation_load_hud_s"
 
-# phase 목록 (실로딩 % 는 시간 램프 — phase 목표 % 미사용)
+# phase 목록 (실로딩 % 는 fetch 페이지·parse 틱)
 _PHASE_TARGET_PCT: Dict[str, int] = {
     "requesting": 0,
     "received": 0,
@@ -48,10 +48,13 @@ _BG_ARGB = 0x80302F40
 _TEXT_ARGB = 0xFFE8EEF5
 _FAIL_ARGB = 0xFFE06060
 _SPIN_DEG_PER_SEC = 360.0  # 1초에 1바퀴
-# 실 API 로딩 전용: 60초 동안 0→99, 완료(ready) 시 현재 %에서 2초 동안 100
-_RAMP_TO_99_SEC = 60.0
+# fetch: 40페이지 = 100% (페이지당 2.5%). 초과 시 현재%→99% 를 30초 램프.
+_FETCH_PAGES_FULL = 40.0
+_FETCH_OVERRUN_RAMP_SEC = 30.0
 _RAMP_CAP_PCT = 99.0
 _FINISH_TO_100_SEC = 2.0
+_LABEL_LOADING = "Loading data..."
+_LABEL_PARSING = "Parsing data..."
 # 전 화면 ready 후 fly/play 직전 HUD 유지(레거시 hold_ready 경로)
 _PRE_PLAY_HIDE_DELAY_SEC = 1.0
 
@@ -271,12 +274,15 @@ def set_federation_load_status(
     ext: Any = None,
     lam_window: Any = None,
     progress_pct: Optional[float] = None,
+    fetch_progress: Optional[float] = None,
+    fetch_overrun: bool = False,
 ) -> None:
     """화면별 Federation 로딩 상태 갱신 (워커 스레드에서도 호출 가능).
 
     HUD 표시 여부와 무관하게 웹으로 ``V2T_notify_load_status`` 를 보낸다.
     웹이 무시해도 Kit 동작은 변하지 않는다.
     ``progress_pct`` 가 있으면 0~100 으로 직접 반영(단계 목표보다 우선).
+    ``fetch_progress`` / ``fetch_overrun`` 은 fetch 페이지 콜백.
     """
     si = max(1, int(screen))
     ph = str(phase or "").strip().lower()
@@ -297,6 +303,13 @@ def set_federation_load_status(
             pct_override = max(0.0, min(100.0, float(progress_pct)))
         except Exception:
             pct_override = None
+    fetch_pct = None
+    if fetch_progress is not None:
+        try:
+            fetch_pct = max(0.0, min(100.0, float(fetch_progress)))
+        except Exception:
+            fetch_pct = None
+    overrun = bool(fetch_overrun)
 
     def _apply() -> None:
         if not federation_load_hud_enabled():
@@ -330,6 +343,16 @@ def set_federation_load_status(
             pass
         # --- END TEMP: I-hotkey ---
         panel.set_phase(ph, detail=str(detail or ""), progress_pct=pct_override)
+        if fetch_pct is not None:
+            try:
+                panel.set_fetch_progress(fetch_pct)
+            except Exception:
+                pass
+        if overrun:
+            try:
+                panel.set_fetch_overrun()
+            except Exception:
+                pass
 
     schedule_on_main_thread(_apply)
 
@@ -561,7 +584,13 @@ class _FedLoadPanel:
         self._ramp_t0: Optional[float] = None
         self._finish_t0: Optional[float] = None
         self._finish_from_pct: float = 0.0
-        self._pct_mode: str = "idle"  # idle|ramp|fixed|finish|complete
+        self._finish_enter_play: bool = True
+        self._pct_mode: str = "idle"  # idle|fetch|parse|fixed|finish|complete
+        self._label_text: str = _LABEL_LOADING
+        self._fetch_pct: float = 0.0
+        self._pending_fetch_pct: Optional[float] = None
+        self._overrun_t0: Optional[float] = None
+        self._overrun_from_pct: float = 0.0
         # --- BEGIN TEMP: I-hotkey ---
         self._i_preview = False
         # --- END TEMP: I-hotkey ---
@@ -1201,11 +1230,44 @@ class _FedLoadPanel:
 
             schedule_on_main_thread(_go)
 
-        threading.Thread(
+            threading.Thread(
             target=_after_delay,
             name=f"lam-fed-play-click-s{si}",
             daemon=True,
         ).start()
+
+    def set_fetch_progress(self, pct: float) -> None:
+        """fetch 페이지 완료 콜백. 단조 증가만. fetch 모드가 아니면 pending."""
+        try:
+            val = max(0.0, min(100.0, float(pct)))
+        except Exception:
+            return
+        if self._pct_mode == "finish":
+            return
+        if self._pct_mode != "fetch":
+            prev = self._pending_fetch_pct
+            if prev is None or val > float(prev):
+                self._pending_fetch_pct = val
+            return
+        if val <= float(self._fetch_pct) + 1e-9:
+            return
+        self._fetch_pct = val
+        if val >= 99.5:
+            self._finish_enter_play = False
+            self._begin_finish_to_100()
+            return
+        self._display_pct = val
+        self._refresh_label()
+
+    def set_fetch_overrun(self) -> None:
+        """40페이지 초과 — 현재 표시 %에서 99%까지 30초 램프."""
+        if self._pct_mode != "fetch":
+            return
+        if self._overrun_t0 is not None:
+            return
+        self._overrun_t0 = time.perf_counter()
+        self._overrun_from_pct = float(self._display_pct)
+        self._start_anim()
 
     def set_phase(
         self,
@@ -1250,6 +1312,12 @@ class _FedLoadPanel:
         # 실 로딩 완료 → 현재 %에서 2초 동안 100, 끝난 뒤 재생 버튼 (I 미리보기 제외)
         if phase == "ready":
             self._i_preview = False
+            self._label_text = _LABEL_LOADING
+            self._fetch_pct = 0.0
+            self._pending_fetch_pct = None
+            self._overrun_t0 = None
+            self._overrun_from_pct = 0.0
+            self._finish_enter_play = True
             if self._pct_mode == "complete":
                 self._enter_play_mode()
                 return
@@ -1261,33 +1329,63 @@ class _FedLoadPanel:
             self._pct_mode = "complete"
             self._ramp_t0 = None
             self._finish_t0 = None
+            self._overrun_t0 = None
             self._display_pct = 100.0
             self._target_pct = 100.0
             self._stop_anim()
             return
 
-        # 실 API 로딩(requesting/received/parsing): 60초 동안 0→99
+        # fetch / parse
         self._i_preview = False
         with _lock:
             _play_click_fns.pop(self.screen, None)
         self._play_fn = None
         self._play_starting = False
         self._enter_load_mode()
-        self._pct_mode = "ramp"
         self._finish_t0 = None
-        if phase == "requesting" or self._ramp_t0 is None:
-            self._ramp_t0 = time.perf_counter()
+        if phase == "parsing":
+            first_parse = self._pct_mode != "parse"
+            self._pct_mode = "parse"
+            self._label_text = _LABEL_PARSING
+            self._overrun_t0 = None
+            if first_parse:
+                self._display_pct = 0.0
+            if progress_pct is not None and float(progress_pct) > float(self._display_pct):
+                self._display_pct = float(progress_pct)
+            self._target_pct = float(_RAMP_CAP_PCT)
+            self._refresh_label()
+            self._start_anim()
+            return
+
+        # requesting / received — fetch 모드 (60초 벽시계 램프 없음)
+        self._label_text = _LABEL_LOADING
+        first_req = phase == "requesting" and self._pct_mode != "fetch"
+        if self._pct_mode == "finish":
+            self._refresh_label()
+            self._start_anim()
+            return
+        self._pct_mode = "fetch"
+        if first_req:
+            self._fetch_pct = 0.0
             self._display_pct = 0.0
+            self._overrun_t0 = None
+            self._overrun_from_pct = 0.0
+        pending = self._pending_fetch_pct
+        if pending is not None and self._pct_mode != "finish":
+            self._display_pct = max(float(self._display_pct), float(pending))
+            self._fetch_pct = max(float(self._fetch_pct), float(pending))
+            self._pending_fetch_pct = None
         self._target_pct = float(_RAMP_CAP_PCT)
         self._refresh_label()
         self._start_anim()
 
     def _begin_finish_to_100(self) -> None:
-        """ready 시점 표시 %에서 2초 동안 100까지. 끝나면 재생 버튼."""
+        """현재 표시 %에서 2초 동안 100까지."""
         from_pct = max(0.0, min(float(_RAMP_CAP_PCT), float(self._display_pct)))
         self._finish_from_pct = from_pct
         self._finish_t0 = time.perf_counter()
         self._ramp_t0 = None
+        self._overrun_t0 = None
         self._pct_mode = "finish"
         self._target_pct = 100.0
         self._refresh_label()
@@ -1299,7 +1397,8 @@ class _FedLoadPanel:
         self._pct_mode = "complete"
         self._finish_t0 = None
         self._refresh_label()
-        self._enter_play_mode()
+        if bool(self._finish_enter_play):
+            self._enter_play_mode()
 
     def _refresh_label(self) -> None:
         if self._label is None:
@@ -1308,7 +1407,8 @@ class _FedLoadPanel:
             if self._failed:
                 return
             pct = int(round(max(0.0, min(100.0, self._display_pct))))
-            self._label.text = f"Loading data... {pct}%"
+            prefix = str(self._label_text or _LABEL_LOADING)
+            self._label.text = f"{prefix} {pct}%"
         except Exception:
             pass
 
@@ -1340,17 +1440,17 @@ class _FedLoadPanel:
                     self._angle_deg + _SPIN_DEG_PER_SEC * elapsed
                 ) % 360.0
                 self._push_rotated_icon(self._angle_deg)
-            # 실로딩: 벽시계 기준 60초 → 99% (그 전에는 99 캡)
+            # fetch overrun: 시작 % → 99% 를 30초 선형
             if (
-                self._pct_mode == "ramp"
-                and self._ramp_t0 is not None
+                self._pct_mode == "fetch"
+                and self._overrun_t0 is not None
                 and not self._failed
             ):
-                t = max(0.0, now - float(self._ramp_t0))
-                new_pct = min(
-                    float(_RAMP_CAP_PCT),
-                    (t / float(_RAMP_TO_99_SEC)) * float(_RAMP_CAP_PCT),
-                )
+                t = max(0.0, now - float(self._overrun_t0))
+                dur = max(1e-6, float(_FETCH_OVERRUN_RAMP_SEC))
+                span = float(_RAMP_CAP_PCT) - float(self._overrun_from_pct)
+                u = min(1.0, t / dur)
+                new_pct = float(self._overrun_from_pct) + span * u
                 if int(round(new_pct)) != int(round(self._display_pct)) or abs(
                     new_pct - self._display_pct
                 ) >= 0.2:

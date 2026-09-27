@@ -38,6 +38,7 @@ from .simulation_play import (
 )
 
 _PRINT_PREFIX = "[LAM/federation-pipe]"
+_FETCH_PAGES_FULL = 40.0
 # 실무 배포 진단용 — 콘솔에서 ``[LAM/FED-DIAG]`` 로 grep.
 # 단계 번호·이름은 docs/LAM_Federation_Deploy_Diagnose_ko.md 와 동일.
 _FED_DIAG_PREFIX = "[LAM/FED-DIAG]"
@@ -770,6 +771,9 @@ def _fed_load_hud(
     detail: str = "",
     ext: Any = None,
     lam_window: Any = None,
+    progress_pct: Optional[float] = None,
+    fetch_progress: Optional[float] = None,
+    fetch_overrun: bool = False,
 ) -> None:
     try:
         set_federation_load_status(
@@ -778,9 +782,89 @@ def _fed_load_hud(
             detail=detail,
             ext=ext,
             lam_window=lam_window,
+            progress_pct=progress_pct,
+            fetch_progress=fetch_progress,
+            fetch_overrun=fetch_overrun,
         )
     except Exception:
         pass
+
+
+def _plan_build_progress_tick(
+    screen: int,
+    *,
+    ext: Any = None,
+    lam_window: Any = None,
+) -> Callable[[int, int], None]:
+    """plan 빌드 (완료 수, 전체 수) → HUD parsing %."""
+    last_bucket = [-1]
+
+    def _tick(done: int, total: int) -> None:
+        tot = max(1, int(total))
+        pct = max(0.0, min(100.0, (float(done) / float(tot)) * 100.0))
+        bucket = int(pct // 10.0) * 10
+        if bucket != last_bucket[0] and pct < 100.0 - 1e-9:
+            last_bucket[0] = bucket
+            _fed_diag(
+                "S09_plan_build_progress",
+                "plan build progress",
+                screen=screen,
+                pct=round(pct, 1),
+                done=int(done),
+                total=tot,
+            )
+        _fed_load_hud(
+            screen,
+            "parsing",
+            ext=ext,
+            lam_window=lam_window,
+            progress_pct=pct,
+        )
+
+    return _tick
+
+
+def _fetch_progress_hud(
+    screen: int,
+    *,
+    ext: Any = None,
+    lam_window: Any = None,
+) -> Callable[[int, bool], None]:
+    """페이지 완료 수·마지막 여부 → fetch HUD % / overrun."""
+    overrun_sent = [False]
+
+    def _cb(pages_done: int, is_last: bool) -> None:
+        n = max(0, int(pages_done))
+        if bool(is_last):
+            _fed_load_hud(
+                screen,
+                "requesting",
+                ext=ext,
+                lam_window=lam_window,
+                fetch_progress=100.0,
+            )
+            return
+        if n >= int(_FETCH_PAGES_FULL):
+            if not overrun_sent[0]:
+                overrun_sent[0] = True
+                _fed_load_hud(
+                    screen,
+                    "requesting",
+                    ext=ext,
+                    lam_window=lam_window,
+                    fetch_overrun=True,
+                )
+            return
+        pct = float(n) * (100.0 / float(_FETCH_PAGES_FULL))
+        _fed_load_hud(
+            screen,
+            "requesting",
+            ext=ext,
+            lam_window=lam_window,
+            fetch_progress=pct,
+        )
+
+    return _cb
 
 
 def _process_merged_response(
@@ -806,6 +890,9 @@ def _process_merged_response(
     if _federation_start_stale(si, gen):
         msg = f"screen{si}: superseded by newer web start (before parse)"
         _fed_diag("S09_stale", msg, screen=si, gen=gen)
+        _fed_load_hud(
+            si, "failed", detail=msg, ext=ext, lam_window=lam_window
+        )
         return ScreenPipelineResult(si, False, msg, meta)
     quiet = not _federation_verbose_parse_log()
     if quiet:
@@ -836,6 +923,9 @@ def _process_merged_response(
         if _federation_start_stale(si, gen):
             msg = f"screen{si}: superseded by newer web start (after parse)"
             _fed_diag("S09_stale", msg, screen=si, gen=gen)
+            _fed_load_hud(
+                si, "failed", detail=msg, ext=ext, lam_window=lam_window
+            )
             return ScreenPipelineResult(si, False, msg, meta)
         meta["parse"] = parse_stats
         if eqp_id_from_rows:
@@ -868,12 +958,38 @@ def _process_merged_response(
             invalidate_csv_playback_cache_for_path(vpath)
         except Exception:
             pass
-        cached = build_and_cache_from_dwells(vpath, dwells)
+        t_plan = time.perf_counter()
+        cached = build_and_cache_from_dwells(
+            vpath,
+            dwells,
+            progress_tick=_plan_build_progress_tick(
+                si, ext=ext, lam_window=lam_window
+            ),
+        )
         if _federation_start_stale(si, gen):
             msg = f"screen{si}: superseded by newer web start (after plan build)"
             _fed_diag("S10_stale", msg, screen=si, gen=gen)
+            _fed_load_hud(
+                si, "failed", detail=msg, ext=ext, lam_window=lam_window
+            )
             return ScreenPipelineResult(si, False, msg, meta)
+        t_prerun = time.perf_counter()
         prerun = build_prerun_result_from_cached(cached, screen=si)
+        _fed_diag(
+            "S10_prerun_build_done",
+            "prerun built",
+            screen=si,
+            ms=round((time.perf_counter() - t_prerun) * 1000.0, 1),
+            items=len(prerun.items),
+        )
+        _fed_diag(
+            "S10_plan_build_done",
+            "plan+prerun ready",
+            screen=si,
+            build_ms=round((time.perf_counter() - t_plan) * 1000.0, 1),
+            schedule=len(getattr(cached, "schedule", None) or []),
+            blocks=len(getattr(cached, "blocks", None) or []),
+        )
         _fed_diag(
             "S10_prerun_ok",
             "cached playback ready",
@@ -1113,6 +1229,9 @@ def _process_one_screen(
     if _federation_start_stale(si, gen):
         msg = f"screen{si}: superseded by newer web start (before fetch)"
         _fed_diag("S08_stale", msg, screen=si, gen=gen)
+        _fed_load_hud(
+            si, "failed", detail=msg, ext=ext, lam_window=lam_window
+        )
         return ScreenPipelineResult(si, False, msg, meta)
     use_get = config_use_simulation_get(body)
     meta["fetch_mode"] = "simulation_get" if use_get else "federation_post"
@@ -1149,6 +1268,9 @@ def _process_one_screen(
                 timeout_sec=timeout_sec,
                 quiet=not _federation_verbose_parse_log(),
                 headers=get_headers,
+                progress_cb=_fetch_progress_hud(
+                    screen, ext=ext, lam_window=lam_window
+                ),
             )
         else:
             api_body = _normalize_federation_body_periods(body)
@@ -1184,6 +1306,9 @@ def _process_one_screen(
                 log_row_sample=log_row_sample,
                 log_full_response=log_full_response,
                 quiet=not _federation_verbose_parse_log(),
+                progress_cb=_fetch_progress_hud(
+                    screen, ext=ext, lam_window=lam_window
+                ),
             )
         meta["fetch"] = fetch_meta
         _fed_diag(
@@ -1200,6 +1325,9 @@ def _process_one_screen(
         if _federation_start_stale(si, gen):
             msg = f"screen{si}: superseded by newer web start (after fetch)"
             _fed_diag("S08_stale", msg, screen=si, gen=gen)
+            _fed_load_hud(
+                si, "failed", detail=msg, ext=ext, lam_window=lam_window
+            )
             return ScreenPipelineResult(si, False, msg, meta)
         _fed_load_hud(screen, "received", ext=ext, lam_window=lam_window)
         result = _process_merged_response(
