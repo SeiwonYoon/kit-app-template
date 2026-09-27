@@ -127,9 +127,11 @@ PLAY_CAMERA_START_VIEW_2_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraPres
 )
 
 # [Play fly 종료 줌(aperture) — 화면 수별]
+# 「뷰 저장」이 찍은 **horizontal** aperture. vertical 은 Camera 필름백 비율을 유지.
+# (같은 숫자를 h·v 둘 다에 넣으면 정사각 필름 → 과줌아웃)
 # fly: Perspective + START_VIEW → 목표 preset (동일 Perspective 모드에서 진행).
-# aperture 값이 있으면 fly 중 Persp aperture 도 목표 Camera FOV 로 함께 보간.
-# fly 종료 후 Camera_fly 모드로 전환하며 아래 aperture 를 Camera 에 적용.
+# 값이 있으면 fly 중 Persp 가로 FOV 도 목표 Camera 에 맞춰 보간(Persp 비율 유지).
+# fly 종료 후 Camera_fly 모드로 전환하며 아래 가로값을 Camera 에 적용.
 # None = aperture 보간/변경 안 함.
 PLAY_CAMERA_APERTURE_1_SCREEN: Optional[float] = 41
 PLAY_CAMERA_APERTURE_2_SCREEN: Optional[float] = 41
@@ -162,8 +164,10 @@ TOP_VIEW_CAMERA_PRIM_VIEW_2_SCREEN: Optional[PlayCameraPresetSpec] = PlayCameraP
 )
 
 # [탑뷰 줌(aperture) — 화면 수별]
-# 탑뷰 카메라는 줌 시 transform(x,y,z)이 아니라 horizontal/vertical aperture 가 변한다.
-# 탑뷰 진입 시 두 aperture 를 아래 값으로 설정. None = 변경 안 함(현재 상태 유지).
+# 탑뷰 카메라는 줌 시 transform(x,y,z)이 아니라 aperture 가 변한다.
+# 「뷰 저장」한 한 값은 **horizontal** aperture.
+# 적용 시 vertical 은 해당 Camera 필름 비율을 유지 (h=v 동일 숫자 금지 → 과줌아웃).
+# None = 변경 안 함(현재 상태 유지).
 TOP_VIEW_APERTURE_1_SCREEN: Optional[float] = 35.0
 TOP_VIEW_APERTURE_2_SCREEN: Optional[float] = 20.0
 

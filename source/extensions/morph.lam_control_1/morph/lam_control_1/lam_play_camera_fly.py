@@ -1616,6 +1616,115 @@ def _read_camera_aperture(prim_path: str) -> Optional[Tuple[float, float]]:
         return None
 
 
+# UsdGeom.Camera 스키마 기본 필름백(mm). config 한 값은 horizontal aperture.
+_USD_CAMERA_DEFAULT_H_APERTURE = 20.955
+_USD_CAMERA_DEFAULT_V_APERTURE = 15.2908
+
+
+def _attr_float_skip_session(attr: Any, stage: Any) -> Optional[float]:
+    """session 레이어 의견을 건너뛴 aperture (줌 캡처 전 원본 필름백)."""
+    session_id = ""
+    try:
+        session = stage.GetSessionLayer()
+        if session is not None:
+            session_id = str(session.identifier or "")
+    except Exception:
+        session_id = ""
+    try:
+        stack = attr.GetPropertyStack(Usd.TimeCode.Default())
+    except Exception:
+        stack = []
+    for spec in stack:
+        try:
+            layer = getattr(spec, "layer", None)
+            ident = str(getattr(layer, "identifier", "") or "") if layer is not None else ""
+            if session_id and ident == session_id:
+                continue
+            if spec.HasDefault():
+                val = spec.default
+                if val is not None:
+                    return float(val)
+        except Exception:
+            continue
+    try:
+        got = attr.Get()
+        if got is not None:
+            return float(got)
+    except Exception:
+        pass
+    return None
+
+
+def _is_square_film(h: float, v: float) -> bool:
+    return abs(float(h) - float(v)) < 1e-4
+
+
+def _film_hv_for_aspect(prim_path: str) -> Tuple[float, float]:
+    """비율 계산용 (h, v). session 정사각 오적용보다 원본 필름백을 우선."""
+    fallback = (_USD_CAMERA_DEFAULT_H_APERTURE, _USD_CAMERA_DEFAULT_V_APERTURE)
+    path = str(prim_path or "").strip()
+    if not path:
+        return fallback
+    stage = _get_stage()
+    if not stage:
+        return fallback
+    cam_prim = stage.GetPrimAtPath(path)
+    if not cam_prim or not cam_prim.IsValid():
+        return fallback
+    try:
+        cam = UsdGeom.Camera(cam_prim)
+        h = _attr_float_skip_session(cam.GetHorizontalApertureAttr(), stage)
+        v = _attr_float_skip_session(cam.GetVerticalApertureAttr(), stage)
+        if (
+            h is not None
+            and v is not None
+            and abs(h) > 1e-9
+            and not _is_square_film(h, v)
+        ):
+            return (float(h), float(v))
+    except Exception:
+        pass
+    composed = _read_camera_aperture(path)
+    if (
+        composed is not None
+        and abs(composed[0]) > 1e-9
+        and not _is_square_film(composed[0], composed[1])
+    ):
+        return composed
+    return fallback
+
+
+def _vertical_for_horizontal(target_h: float, src_h: float, src_v: float) -> float:
+    h = float(target_h)
+    if abs(float(src_h)) < 1e-9:
+        return h * (_USD_CAMERA_DEFAULT_V_APERTURE / _USD_CAMERA_DEFAULT_H_APERTURE)
+    return h * (float(src_v) / float(src_h))
+
+
+def _hv_keeping_film_aspect(prim_path: str, target_h: float) -> Tuple[float, float]:
+    """config 한 값 = horizontal. vertical 은 해당 prim 필름 비율 유지."""
+    src_h, src_v = _film_hv_for_aspect(prim_path)
+    h = float(target_h)
+    return (h, _vertical_for_horizontal(h, src_h, src_v))
+
+
+def _apply_config_horizontal_aperture(
+    prim_path: str,
+    target_h: float,
+    *,
+    log_label: str,
+    verbose: bool = True,
+) -> bool:
+    hv = _hv_keeping_film_aspect(prim_path, target_h)
+    return _set_camera_aperture(
+        prim_path,
+        hv[0],
+        hv[1],
+        log_label=log_label,
+        verbose=verbose,
+    )
+
+
 def _set_camera_aperture(
     prim_path: str,
     horizontal: float,
@@ -1668,8 +1777,9 @@ def _play_camera_aperture_for_screen_count() -> Optional[float]:
 def apply_play_camera_aperture(prim_path: str = "") -> bool:
     """Play Camera_fly FOV — fly 종료·Camera 모드 진입 시 화면 수별 aperture 적용.
 
-    fly 구간은 Perspective 로만 진행하고, aperture 목표가 있으면 Persp aperture 를
-    목표 Camera FOV 로 보간한 뒤, 종료 시 Camera_fly 에 이 값을 기록한다.
+    config 값은 캡처한 **horizontal** aperture. vertical 은 필름백 비율을 유지한다.
+    fly 구간은 Perspective 로만 진행하고, 목표가 있으면 Persp 가로 FOV 를 맞춘 뒤
+    종료 시 Camera_fly 에 같은 가로값·비율을 기록한다.
     """
     if play_camera_use_preset_coords():
         return False
@@ -1677,7 +1787,7 @@ def apply_play_camera_aperture(prim_path: str = "") -> bool:
     value = _play_camera_aperture_for_screen_count()
     if not path or value is None:
         return False
-    return _set_camera_aperture(path, value, value, log_label="play camera")
+    return _apply_config_horizontal_aperture(path, value, log_label="play camera")
 
 
 def _read_camera_focal_length(prim_path: str) -> Optional[float]:
@@ -1720,21 +1830,31 @@ def _persp_aperture_matching_camera_target(
     prim_path: str,
     camera_aperture: float,
 ) -> Optional[Tuple[float, float]]:
-    """Camera_fly 목표 aperture 와 같은 FOV 가 되는 Persp (h,v) aperture.
+    """Camera 목표 **horizontal** aperture 와 같은 가로 FOV 가 되는 Persp (h,v).
 
-    Perspective fly 중 줌을 목표 Camera FOV 로 맞춘 뒤 look-through 전환한다.
+    FOV = 2*atan(aperture / 2f) 이므로 persp_h = cam_h * (persp_f / prim_f).
+    vertical 은 Persp 기존 필름 비율을 유지한다 (h=v 정사각이면 과줌아웃).
     """
     try:
-        cam_ap = float(camera_aperture)
+        cam_h = float(camera_aperture)
     except Exception:
         return None
     persp_f = _read_camera_focal_length(_PERSP_CAMERA_PATH)
     prim_f = _read_camera_focal_length(prim_path)
-    if not persp_f or not prim_f:
-        return (cam_ap, cam_ap)
-    scale = persp_f / prim_f
-    v = cam_ap * scale
-    return (float(v), float(v))
+    if persp_f and prim_f:
+        persp_h = cam_h * (float(persp_f) / float(prim_f))
+    else:
+        persp_h = cam_h
+    persp_ap = _read_camera_aperture(_PERSP_CAMERA_PATH)
+    if persp_ap is not None and abs(persp_ap[0]) > 1e-9:
+        persp_v = _vertical_for_horizontal(persp_h, persp_ap[0], persp_ap[1])
+    else:
+        persp_v = _vertical_for_horizontal(
+            persp_h,
+            _USD_CAMERA_DEFAULT_H_APERTURE,
+            _USD_CAMERA_DEFAULT_V_APERTURE,
+        )
+    return (float(persp_h), float(persp_v))
 
 
 def _play_camera_aperture_blend_sec() -> float:
@@ -1776,28 +1896,34 @@ def start_play_camera_aperture_blend(
     ctx = str(usd_context_name or "").strip()
     with camera_fly_usd_context(ctx or None):
         cur = _read_camera_aperture(path)
+        end_hv = _hv_keeping_film_aspect(path, float(target))
     if cur is None:
         with camera_fly_usd_context(ctx or None):
-            _set_camera_aperture(path, target, target, log_label="play camera")
+            _set_camera_aperture(
+                path, end_hv[0], end_hv[1], log_label="play camera"
+            )
         return
     dur = _play_camera_aperture_blend_sec()
     if dur <= 1e-9 or (
-        abs(cur[0] - target) < 1e-6 and abs(cur[1] - target) < 1e-6
+        abs(cur[0] - end_hv[0]) < 1e-6 and abs(cur[1] - end_hv[1]) < 1e-6
     ):
         with camera_fly_usd_context(ctx or None):
-            _set_camera_aperture(path, target, target, log_label="play camera")
+            _set_camera_aperture(
+                path, end_hv[0], end_hv[1], log_label="play camera"
+            )
         return
 
     key = f"{ctx}|{path}"
     _stop_play_camera_aperture_blend(key)
     t0 = time.perf_counter()
     start_h, start_v = float(cur[0]), float(cur[1])
+    end_h, end_v = float(end_hv[0]), float(end_hv[1])
 
     def _tick(_event) -> None:
         elapsed = time.perf_counter() - t0
         u = _smoothstep01(elapsed / dur) if dur > 1e-9 else 1.0
-        h = start_h + (float(target) - start_h) * u
-        v = start_v + (float(target) - start_v) * u
+        h = start_h + (end_h - start_h) * u
+        v = start_v + (end_v - start_v) * u
         with camera_fly_usd_context(ctx or None):
             _set_camera_aperture(
                 path, h, v, log_label="play camera", verbose=False
@@ -1806,7 +1932,7 @@ def start_play_camera_aperture_blend(
             _stop_play_camera_aperture_blend(key)
             with camera_fly_usd_context(ctx or None):
                 _set_camera_aperture(
-                    path, target, target, log_label="play camera(blend 완료)"
+                    path, end_h, end_v, log_label="play camera(blend 완료)"
                 )
 
     try:
@@ -1819,7 +1945,7 @@ def start_play_camera_aperture_blend(
         )
         print(
             f"{_PRINT_PREFIX} play camera aperture blend 시작 path={path!r} "
-            f"ctx={ctx!r} h={start_h:.3f}->{float(target):.3f} ({dur:.2f}s)",
+            f"ctx={ctx!r} h={start_h:.3f}->{end_h:.3f} ({dur:.2f}s)",
             flush=True,
         )
     except Exception as exc:
@@ -1828,7 +1954,9 @@ def start_play_camera_aperture_blend(
             flush=True,
         )
         with camera_fly_usd_context(ctx or None):
-            _set_camera_aperture(path, target, target, log_label="play camera")
+            _set_camera_aperture(
+                path, end_h, end_v, log_label="play camera"
+            )
 
 
 def _top_view_aperture_for_screen_count() -> Optional[float]:
@@ -1843,10 +1971,10 @@ def _top_view_aperture_for_screen_count() -> Optional[float]:
 
 
 def apply_top_view_aperture(prim_path: str = "") -> bool:
-    """탑뷰 Camera prim 줌 — 화면 수별 aperture 적용.
+    """탑뷰 Camera prim 줌 — 화면 수별 **horizontal** aperture 적용.
 
-    탑뷰 카메라는 줌 시 transform 이 아니라 horizontal/vertical aperture 가
-    변하므로, 화면 수(1·2)에 맞는 config 값을 두 aperture 에 기록한다.
+    「뷰 저장」이 찍은 한 값은 가로 필름. vertical 에 같은 숫자를 넣으면
+    정사각 필름이 되어 체크박스 탑뷰보다 과줌아웃된다. 필름 비율을 유지한다.
     """
     if top_view_use_preset_coords():
         return False
@@ -1854,7 +1982,7 @@ def apply_top_view_aperture(prim_path: str = "") -> bool:
     value = _top_view_aperture_for_screen_count()
     if not path or value is None:
         return False
-    return _set_camera_aperture(path, value, value, log_label="탑뷰")
+    return _apply_config_horizontal_aperture(path, value, log_label="탑뷰")
 
 
 def apply_top_view_camera_prim_view_spec() -> bool:
@@ -2035,7 +2163,7 @@ def format_config_snippet(
     ap_line = ""
     if aperture is not None:
         ap_line = (
-            f"\n# Play fly 종료 후 Camera_fly aperture (화면 수별)\n"
+            f"\n# Play/탑뷰 **horizontal** aperture (화면 수별). vertical 은 필름 비율 유지.\n"
             f"# PLAY_CAMERA_APERTURE_1_SCREEN / _2_SCREEN\n"
             f"PLAY_CAMERA_APERTURE_1_SCREEN = {float(aperture):.6f}\n"
             f"# 탑뷰 aperture — TOP_VIEW_APERTURE_1_SCREEN / _2_SCREEN\n"
@@ -3050,8 +3178,10 @@ def kickoff_play_camera_fly_for_screen(
                 fly_path = _PERSP_CAMERA_PATH
                 aperture_start_hv: Optional[Tuple[float, float]] = None
                 aperture_end_hv: Optional[Tuple[float, float]] = None
+                persp_ap_restore: Optional[Tuple[float, float]] = None
                 # 1) Perspective + START_VIEW 로 fly 시작·진행 (Camera 모드 전환 금지)
-                # 2) aperture 목표가 있으면 Persp aperture 도 목표 Camera FOV 로 보간
+                # 2) aperture 목표가 있으면 Persp 가로 FOV 를 목표 Camera 에 맞추고
+                #    필름 비율은 유지한 채 보간
                 # 3) fly 종료(_complete) 후에만 목표 Camera look-through
                 if not apply_camera_view(
                     current,
@@ -3065,6 +3195,7 @@ def kickoff_play_camera_fly_for_screen(
                     )
                 restore_perspective_on_viewport(viewport_api, ctx)
                 fly_path = _PERSP_CAMERA_PATH
+                persp_ap_restore = _read_camera_aperture(_PERSP_CAMERA_PATH)
 
                 if use_prim and prim_path:
                     target_ap = (
@@ -3073,7 +3204,7 @@ def kickoff_play_camera_fly_for_screen(
                         else _play_camera_aperture_for_screen_count()
                     )
                     if target_ap is not None:
-                        cur_ap = _read_camera_aperture(_PERSP_CAMERA_PATH)
+                        cur_ap = persp_ap_restore
                         end_ap = _persp_aperture_matching_camera_target(
                             prim_path, float(target_ap)
                         )
@@ -3089,7 +3220,8 @@ def kickoff_play_camera_fly_for_screen(
                             print(
                                 f"{_PRINT_PREFIX} screen Persp aperture 보간 "
                                 f"h={aperture_start_hv[0]:.3f}->{aperture_end_hv[0]:.3f} "
-                                f"(Camera 목표={float(target_ap):.3f}) ctx={ctx!r}",
+                                f"v={aperture_start_hv[1]:.3f}->{aperture_end_hv[1]:.3f} "
+                                f"(Camera 가로={float(target_ap):.3f}) ctx={ctx!r}",
                                 flush=True,
                             )
 
@@ -3107,7 +3239,7 @@ def kickoff_play_camera_fly_for_screen(
                 def _complete() -> None:
                     with camera_fly_usd_context(ctx or None):
                         if use_prim and prim_path:
-                            # fly 종료 후: 목표 preset + aperture → Camera 모드 bind
+                            # fly 종료 후: 목표 preset + 가로 aperture(비율 유지) → Camera bind
                             if to_top:
                                 apply_top_view_camera_prim_view_spec()
                             else:
@@ -3120,6 +3252,15 @@ def kickoff_play_camera_fly_for_screen(
                             viewport_api=viewport_api,
                             usd_context_name=ctx,
                         )
+                        # 보간으로 커진 Persp 필름을 되돌려, 이후 Persp 스위치 시 과줌아웃 방지
+                        if persp_ap_restore is not None:
+                            _set_camera_aperture(
+                                _PERSP_CAMERA_PATH,
+                                float(persp_ap_restore[0]),
+                                float(persp_ap_restore[1]),
+                                log_label="persp after fly",
+                                verbose=False,
+                            )
 
                 _start_fly_animation(
                     current,

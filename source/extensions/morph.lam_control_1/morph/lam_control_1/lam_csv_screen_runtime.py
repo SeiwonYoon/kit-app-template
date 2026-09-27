@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional
 
@@ -340,28 +341,58 @@ def bind_viewport_camera_for_screen(
         # Camera prim 모드: 화면1 apply_top_view_target / play finish 와 동일 —
         # prim 스펙 적용 후 해당 타일 viewport 만 bind (Persp 스냅 불필요).
         if prim_path and not use_preset:
+            already_bound = False
             if mode == "top_view":
-                apply_top_view_camera_prim_view_spec()
-            else:
-                apply_play_camera_prim_view_spec()
-            ensure_camera_prim_baseline(prim_path)
-            if snap is None:
-                snap = (
-                    get_top_view_target_snapshot()
-                    if mode == "top_view"
-                    else get_play_camera_target_snapshot()
-                )
-            if snap is not None:
-                ok = bool(
-                    _finish_fly_to_target(
-                        snap,
-                        up_xyz=up,
-                        assign_prim_path=prim_path,
-                        log_context=f"screen{runtime.screen}_{mode}",
-                        viewport_api=vp_api,
-                        usd_context_name=ctx_s,
+                try:
+                    from .lam_play_camera_fly import _camera_path_on_viewport
+
+                    already_bound = (
+                        str(_camera_path_on_viewport(vp_api) or "").strip()
+                        == str(prim_path).strip()
                     )
+                except Exception:
+                    already_bound = False
+            if already_bound:
+                ok = True
+                print(
+                    f"{_PRINT_PREFIX} screen{runtime.screen} top view 이미 bind "
+                    f"— 카메라 재적용 생략 path={prim_path!r}",
+                    flush=True,
                 )
+            else:
+                if mode == "top_view":
+                    apply_top_view_camera_prim_view_spec()
+                else:
+                    apply_play_camera_prim_view_spec()
+                ensure_camera_prim_baseline(prim_path)
+                if snap is None:
+                    snap = (
+                        get_top_view_target_snapshot()
+                        if mode == "top_view"
+                        else get_play_camera_target_snapshot()
+                    )
+                if mode == "top_view":
+                    from .lam_play_camera_fly import bind_viewport_to_camera_prim
+
+                    ok = bool(
+                        bind_viewport_to_camera_prim(
+                            prim_path,
+                            log_context=f"screen{runtime.screen}_{mode}",
+                            viewport_api=vp_api,
+                            usd_context_name=ctx_s,
+                        )
+                    )
+                elif snap is not None:
+                    ok = bool(
+                        _finish_fly_to_target(
+                            snap,
+                            up_xyz=up,
+                            assign_prim_path=prim_path,
+                            log_context=f"screen{runtime.screen}_{mode}",
+                            viewport_api=vp_api,
+                            usd_context_name=ctx_s,
+                        )
+                    )
         else:
             # Preset 모드: 해당 context Persp 에 목표 좌표 적용
             restore_perspective_on_viewport(vp_api, ctx_s)
@@ -596,6 +627,34 @@ def apply_top_view_for_screen(
     force: bool = False,
 ) -> bool:
     """탑뷰 — 화면1 은 전역 토글(전환 시만 카메라), 화면2+ 는 타일 viewport."""
+    if threading.current_thread() is not threading.main_thread():
+        box = [False]
+
+        def _on_main() -> None:
+            box[0] = bool(
+                apply_top_view_for_screen(
+                    runtime, enabled=enabled, force=force
+                )
+            )
+
+        try:
+            from .lam_sequence_engine import _dispatch_main_wait
+
+            if not _dispatch_main_wait(_on_main, timeout=15.0):
+                print(
+                    f"{_PRINT_PREFIX} screen{getattr(runtime, 'screen', '?')} "
+                    "top view main dispatch timeout",
+                    flush=True,
+                )
+                return False
+        except Exception as exc:
+            print(
+                f"{_PRINT_PREFIX} screen{getattr(runtime, 'screen', '?')} "
+                f"top view main dispatch: {exc}",
+                flush=True,
+            )
+            return False
+        return bool(box[0])
     want = bool(enabled)
     if runtime.screen <= 1:
         from .lam_viewport_overlay_state import set_toggle_top_view

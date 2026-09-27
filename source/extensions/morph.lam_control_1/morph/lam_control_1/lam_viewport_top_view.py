@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 _PRINT_PREFIX = "[LAM/TopView]"
@@ -593,14 +594,54 @@ def apply_top_view_preset() -> bool:
     return bool(apply_camera_view(snap, up_xyz=up))
 
 
-def apply_top_view_target() -> bool:
-    """탑뷰 시점 적용 — camera prim 모드는 즉시 bind, preset 모드만 Persp 좌표 적용."""
+def _viewport_bound_to_top_camera(viewport_api: Any = None) -> bool:
+    """해당 viewport 가 이미 탑뷰 Camera prim look-through 인지."""
     from .lam_play_camera_fly import (
-        _finish_fly_to_target,
+        _active_camera_path_str,
+        _camera_path_on_viewport,
+        top_view_assign_prim_path,
+        top_view_use_preset_coords,
+    )
+
+    if top_view_use_preset_coords():
+        return False
+    prim = str(top_view_assign_prim_path() or "").strip()
+    if not prim:
+        return False
+    try:
+        if viewport_api is not None:
+            active = str(_camera_path_on_viewport(viewport_api) or "").strip()
+        else:
+            active = str(_active_camera_path_str() or "").strip()
+    except Exception:
+        return False
+    return bool(active) and active == prim
+
+
+def _run_top_view_on_main(fn) -> bool:
+    """Play 워커에서 탑뷰 ON 하면 메인에서만 viewport/USD 를 만진다."""
+    if threading.current_thread() is threading.main_thread():
+        fn()
+        return True
+    try:
+        from .lam_sequence_engine import _dispatch_main_wait
+
+        return bool(_dispatch_main_wait(fn, timeout=15.0))
+    except Exception as exc:
+        print(f"{_PRINT_PREFIX} 탑뷰 main dispatch 실패: {exc}", flush=True)
+        return False
+
+
+def apply_top_view_target() -> bool:
+    """탑뷰 시점 적용 — camera prim 모드는 즉시 bind, preset 모드만 Persp 좌표 적용.
+
+    스펙은 prim 에 한 번만 쓰고 bind 한다. fly 직후 라이브 `/Camera` 에
+    xform 을 다시 쓰면 워커 스레드에서 USD/뷰포트 교착이 난다.
+    """
+    from .lam_play_camera_fly import (
         apply_top_view_camera_prim_view_spec,
+        bind_viewport_to_camera_prim,
         ensure_camera_prim_baseline,
-        ensure_session_perspective_camera,
-        get_session_fly_up_xyz,
         get_top_view_target_snapshot,
         top_view_assign_prim_path,
         top_view_camera_prim_path,
@@ -613,10 +654,6 @@ def apply_top_view_target() -> bool:
     if prim_path:
         apply_top_view_camera_prim_view_spec()
         ensure_camera_prim_baseline(prim_path)
-    ensure_session_perspective_camera(
-        log_label="top_view_apply",
-        restore_navigation=False,
-    )
     target = get_top_view_target_snapshot()
     if target is None:
         print(
@@ -625,11 +662,11 @@ def apply_top_view_target() -> bool:
             flush=True,
         )
         return False
-    up = get_session_fly_up_xyz(top_view=True)
-    return _finish_fly_to_target(
-        target,
-        up_xyz=up,
-        assign_prim_path=top_view_assign_prim_path(),
+    bind_path = prim_path or top_view_assign_prim_path()
+    if not bind_path:
+        return False
+    return bind_viewport_to_camera_prim(
+        bind_path,
         log_context="top_view_bind",
     )
 
@@ -836,6 +873,16 @@ def _release_input_lock(viewport_api: Any) -> None:
 
 def enable_top_view_mode() -> bool:
     """탑뷰 시점 적용 + 뷰포트 카메라 네비게이션 입력 차단."""
+    if threading.current_thread() is not threading.main_thread():
+        box = [False]
+
+        def _on_main() -> None:
+            box[0] = bool(enable_top_view_mode())
+
+        if not _run_top_view_on_main(_on_main):
+            return False
+        return bool(box[0])
+
     from .lam_play_camera_fly import (
         top_view_camera_prim_path,
         top_view_target_configured,
@@ -845,6 +892,10 @@ def enable_top_view_mode() -> bool:
     if _state.get("fly_pending"):
         return True
     if _state.get("active"):
+        if _viewport_bound_to_top_camera():
+            _state["lock_snapshot"] = _capture_lock_snapshot()
+            _reassert_navigation_lock()
+            return True
         if apply_top_view_target():
             _state["lock_snapshot"] = _capture_lock_snapshot()
             _reassert_navigation_lock()
@@ -875,15 +926,17 @@ def enable_top_view_mode() -> bool:
     remember_view_before_top_view_for_viewport(viewport_api, "")
 
     if not top_view_use_preset_coords():
-        from .lam_play_camera_fly import ensure_session_perspective_camera
-
-        ensure_session_perspective_camera(
-            log_label="top_view_enable",
-            restore_navigation=False,
-        )
         _set_viewport_input_enabled(viewport_api, False)
 
-    if apply_top_view_target():
+    # fly 가 이미 /Camera 에 bind 한 뒤 Play 워커가 체크 ON 하면
+    # 라이브 Camera 에 스펙을 다시 쓰지 않는다 (교착·버벅임).
+    already_bound = _viewport_bound_to_top_camera(viewport_api)
+    if already_bound:
+        print(
+            f"{_PRINT_PREFIX} 탑뷰 이미 bind — 카메라 재적용 생략",
+            flush=True,
+        )
+    if already_bound or apply_top_view_target():
         _finish_enable_top_view(viewport_api)
         return True
 

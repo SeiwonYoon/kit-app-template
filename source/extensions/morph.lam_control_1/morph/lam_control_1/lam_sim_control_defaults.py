@@ -127,7 +127,7 @@ CSV_PLAY_HIDE_UI_BELOW_TIMELINE: bool = True
 # True: 화면별 시뮬 시작 시 탑뷰로 카메라 fly. fly 완료 후 Kit 탑뷰 체크 +
 #       V2T_notify_control_simulation 에 prim_hide 와 top_view 를 함께 통지.
 # False: 저장된 PLAY_CAMERA 뷰로 fly (기존). 통지는 prim_hide 만.
-PLAY_START_FLY_TO_TOP_VIEW: bool = True
+PLAY_START_FLY_TO_TOP_VIEW: bool = False
 
 # ---------------------------------------------------------------------------
 # CSV 재생 — plan 모드 (Aligner / 점유 보정 분리)
