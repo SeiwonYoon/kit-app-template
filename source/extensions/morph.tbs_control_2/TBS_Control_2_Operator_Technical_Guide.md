@@ -1,8 +1,8 @@
 # TBS Control 2 — 실무 담당자 기술 가이드
 
-> **대상 독자**: Omniverse Kit / USD를 어느 정도 아는 엔지니어  
-> **목적**: `morph.tbs_control_2` 확장의 주요 기능을 **파일·코드·데이터 흐름**으로 따라갈 수 있게 설명  
-> **패키지명**: `morph.tbs_control_2` (Python 모듈 경로는 `morph/tbs_control_1/` — 역사적 이름 유지)  
+> **대상 독자**: Omniverse Kit / USD를 어느 정도 아는 엔지니어
+> **목적**: `morph.tbs_control_2` 확장의 주요 기능을 **파일·코드·데이터 흐름**으로 따라갈 수 있게 설명
+> **패키지명**: `morph.tbs_control_2` (Python 모듈 경로는 `morph/tbs_control_1/` — 역사적 이름 유지)
 > **용어가 낯설면** → **§0.1 용어 설명**을 먼저 읽으세요.
 
 ---
@@ -32,11 +32,11 @@ source/extensions/morph.tbs_control_2/
 
 **읽는 순서 추천**
 
-0. 이 문서 **§0.1 용어 설명** — 처음 보는 단어 정리  
-1. `extension.py` — 무엇이 언제 뜨는지  
-2. `control_window.py` 상단 docstring — 전체 파이프라인 요약  
-3. 이 문서 **§1.5** — JSON step 타입별 실행 원리·코드  
-4. 이 문서 **§3.7~3.8** — 시뮬 시간·FOUP·material  
+0. 이 문서 **§0.1 용어 설명** — 처음 보는 단어 정리
+1. `extension.py` — 무엇이 언제 뜨는지
+2. `control_window.py` 상단 docstring — 전체 파이프라인 요약
+3. 이 문서 **§1.5** — JSON step 타입별 실행 원리·코드
+4. 이 문서 **§3.7~3.8** — 시뮬 시간·FOUP·material
 5. 이 문서 **§4.5 · §5.5** — 프리런·EP 막대 구현 코드
 
 | 궁금한 것 | 문서 섹션 |
@@ -71,7 +71,7 @@ source/extensions/morph.tbs_control_2/
 
 ### 0.1 용어 설명 (Glossary)
 
-본문에 나오는 전문 용어를 **처음 읽는 사람 기준**으로 풀어 씁니다.  
+본문에 나오는 전문 용어를 **처음 읽는 사람 기준**으로 풀어 씁니다.
 LAM 가이드(`LAM_Control_Operator_Technical_Guide.md`)와 **공통 용어**는 양쪽 문서에 비슷한 설명이 있습니다.
 
 #### A. 이 문서만의 읽기 방식
@@ -190,7 +190,7 @@ LAM 가이드(`LAM_Control_Operator_Technical_Guide.md`)와 **공통 용어**는
 
 ### 1.1 JSON이란?
 
-시퀀스 JSON은 **prim을 어떻게 움직일지**를 step 배열로 적은 파일입니다.  
+시퀀스 JSON은 **prim을 어떻게 움직일지**를 step 배열로 적은 파일입니다.
 최상위는 반드시 **JSON 배열(`[]`)** 이고, 각 원소가 step 하나입니다.
 
 **① 호출부**: 편집기 Run·시뮬 자동 실행이 `json.load` → step list → `TbsLamSequenceRunner.run()` (§1.3·§1.4).
@@ -297,17 +297,17 @@ if _use_lam_engine(registry, scheduler, usd_context_name=None):
     runner = TbsLamSequenceRunner(registry, scheduler, ...)
 ```
 
-**② 원초 구현**: `TbsLamSequenceRunner.run()`이 step 배열을 그룹 단위로 순회하며 `_start_step()` → §1.5 각 타입의 USD write까지 실행.  
+**② 원초 구현**: `TbsLamSequenceRunner.run()`이 step 배열을 그룹 단위로 순회하며 `_start_step()` → §1.5 각 타입의 USD write까지 실행.
 MOVE/ROTATE의 최종 write는 `xformOp:translate:TBS_OFFSET` / `xformOp:rotateXYZ:TBS_OFFSET` 의 `op.Set()` (§1.5.1·§1.5.2).
 
-**TBS_OFFSET이란?**  
+**TBS_OFFSET이란?**
 자산 USD 본체 xform은 유지하고, suffix `TBS_OFFSET` op만 애니메이션합니다. Reset 시 `zero_tbs_offset_*_at_path()`로 `(0,0,0)` 복원 (§3.1).
 
 ---
 
 ### 1.4 시뮬에서 JSON 실행 경로 (자동)
 
-시뮬 중 이벤트가 발생하면 **같은 JSON 파일**이 자동 실행됩니다.  
+시뮬 중 이벤트가 발생하면 **같은 JSON 파일**이 자동 실행됩니다.
 분할 화면 USD 컨텍스트가 있으면 **레거시 엔진** (`usd_context_name` 전달 시)을 씁니다.
 
 **① 호출부** — 이벤트 → JSON 실행 체인:
@@ -326,7 +326,7 @@ parsed = json.loads(path.read_text())   # 빈 [] 이면 skip
 SequenceRunner(registry, ...).run(parsed, usd_context_name=ctx_nm, speed_scale=sp)
 ```
 
-**② 원초 구현**: `SequenceRunner.run()` 내부에서 LAM 또는 legacy 분기 후, 결국 §1.5와 동일한 step 실행·USD write가 일어납니다.  
+**② 원초 구현**: `SequenceRunner.run()` 내부에서 LAM 또는 legacy 분기 후, 결국 §1.5와 동일한 step 실행·USD write가 일어납니다.
 차이점은 `usd_context_name`이 있으면 `translate_animation.py` 등 **컨텍스트별 stage**를 쓰는 legacy 경로가 선택될 수 있다는 점뿐입니다.
 
 ---
@@ -340,7 +340,7 @@ SequenceRunner(registry, ...).run(parsed, usd_context_name=ctx_nm, speed_scale=s
 | **① 호출부** | JSON step → 엔진이 어떤 함수를 부르는지 | `_start_rotate()` → `run_prim_rotate_animation()` |
 | **② 원초 구현** | 그 함수 **안에서** USD/Kit API로 실제로 움직이는 코드 | `RotateXYZOp.Set()`, `update_event_stream` 매 프레임 보간 |
 
-아래 각 소절은 **① 호출부** 다음에 **② 원초 구현** (`tbs_lam_*_animation.py` 등)을 붙입니다.  
+아래 각 소절은 **① 호출부** 다음에 **② 원초 구현** (`tbs_lam_*_animation.py` 등)을 붙입니다.
 “함수 이름만 알면 된다”가 아니라, **prim이 화면에서 움직이는 마지막 한 줄**까지 따라갈 수 있게 정리했습니다.
 
 JSON 배열의 각 step은 `TbsLamSequenceRunner._start_step()` (`tbs_lam_sequence_engine.py`)에서 **type 문자열**로 분기됩니다.
@@ -362,7 +362,7 @@ elif step_kind_is_prim_visibility(t):
     duration = self._start_set_prim_visibility(idx, step, speed_scale)
 ```
 
-러너는 step duration만큼 `sleep`한 뒤 다음 step으로 넘어갑니다.  
+러너는 step duration만큼 `sleep`한 뒤 다음 step으로 넘어갑니다.
 **USD write( prim 이동·회전·타임라인 )는 반드시 Kit 메인 스레드**에서 실행되므로 `_dispatch_main()` / `_dispatch_main_wait()`로 넘깁니다.
 
 ---
@@ -566,7 +566,7 @@ rot.run_prim_rotate_animation(
 
 #### 1.5.3 USD_TIMELINE — Kit omni.timeline + Master stage
 
-인스턴스 registry에 등록된 prim의 **USD 타임라인(프레임)** 을 Master 뷰에서 재생합니다.  
+인스턴스 registry에 등록된 prim의 **USD 타임라인(프레임)** 을 Master 뷰에서 재생합니다.
 step에 `ref` 블록이 필요합니다 (편집기에서 인스턴스 선택 시 자동 채움).
 
 ```json
@@ -775,7 +775,7 @@ for i in range(a + 1, b + 1):
 self._wait_for_motion_complete(...)   # MOVE/ROTATE/TIMESAMPLES 실제 종료까지 폴링
 ```
 
-**② 원초 구현**: follower thread마다 독립적으로 §1.5 step 타입의 USD write가 **동시에** 진행됩니다 (예: prim A MOVE + prim B ROTATE 병렬).  
+**② 원초 구현**: follower thread마다 독립적으로 §1.5 step 타입의 USD write가 **동시에** 진행됩니다 (예: prim A MOVE + prim B ROTATE 병렬).
 앵커(그룹 맨 아래 step) duration + `_wait_for_motion_complete`로 그룹 전체 완료를 보장한 뒤 다음 그룹으로 넘어갑니다.
 
 테스트용 최소 JSON (순차 MOVE 2개 — 병렬 아님):
@@ -806,7 +806,7 @@ USD 관련 설정은 **`tbs_usd_window.py` 한 파일**이 단일 진실 원천(
 | EP2 레이아웃 | `EP2_PORT_LAYOUT` | hide/show prim 튜플 |
 | EP3 레이아웃 | `EP3_PORT_LAYOUT` | hide/show prim 튜플 |
 
-경로 변경은 **이 파일 상단만** 수정하면 됩니다.  
+경로 변경은 **이 파일 상단만** 수정하면 됩니다.
 `equipment_autoload` / `load_window` 등 구 모듈은 제거되었습니다.
 
 ---
@@ -827,7 +827,7 @@ set_master_open_listener(lambda: apply_ep_port_layout(...))
 SequenceEditorWindow(registry, scheduler).show()
 ```
 
-**② 원초 구현**: `TbsUsdWindow.show()`가 Kit `ui.Window`를 생성하고, autoload 시 `omni.kit.app` update 구독으로 N프레임 뒤 `_open_master_at_path()` 호출 (§2.3).  
+**② 원초 구현**: `TbsUsdWindow.show()`가 Kit `ui.Window`를 생성하고, autoload 시 `omni.kit.app` update 구독으로 N프레임 뒤 `_open_master_at_path()` 호출 (§2.3).
 Registry/Evaluator는 빈 dict·구독 객체만 생성 — USD stage는 아직 없음.
 
 ---
@@ -934,8 +934,8 @@ Master open 직후·EP 콤보 변경 시 호출. **USD 재로드 없이** prim v
 
 `simulation_engine.py`의 `TBSSimulationEngine`은 **SimPy** 기반 이산사건 시뮬입니다.
 
-- 포트: INOUT, BP1~BP4, EP1~EP3  
-- LOT(웨이퍼) 생성·이동·공정·회수  
+- 포트: INOUT, BP1~BP4, EP1~EP3
+- LOT(웨이퍼) 생성·이동·공정·회수
 - 이벤트마다 `on_event` 콜백 → UI·애니 파이프라인으로 전달
 
 **시작 / 정지 / 리셋** (`control_window.py`):
@@ -989,7 +989,7 @@ Thread(_prerun_thread_body).start()          # §4.5 프리런 수집
 
 웹: `POST {"cmd":"sim_start"}` → 동일 `on_sim_start_clicked()`
 
-**② 원초 구현**: `TBSSimulationEngine.start()`가 `simpy.Environment`에 `_run_serial_flow` generator를 `env.process()`로 등록하고, `tick(dt)`마다 `env.run(until=env.now+dt)`로 **SimPy 시계만** 전진 (USD write 없음).  
+**② 원초 구현**: `TBSSimulationEngine.start()`가 `simpy.Environment`에 `_run_serial_flow` generator를 `env.process()`로 등록하고, `tick(dt)`마다 `env.run(until=env.now+dt)`로 **SimPy 시계만** 전진 (USD write 없음).
 USD/prim 변경은 이후 `_emit_event` → §3.4 체인에서 발생.
 
 ---
@@ -1007,7 +1007,7 @@ def _emit_event(self, payload):
     self._on_event(merged_payload)    # control_window 에 주입된 콜백
 ```
 
-**② 원초 구현**: `self._on_event`는 `control_window`가 등록한 `post_sim_anim_event()` → 내부 **thread-safe 큐**에 payload 적재.  
+**② 원초 구현**: `self._on_event`는 `control_window`가 등록한 `post_sim_anim_event()` → 내부 **thread-safe 큐**에 payload 적재.
 메인 스레드 `_drain_sim_log_queue()`가 dequeue 후 `handle_sim_event_for_animation()` 호출. (SimPy 스레드에서 직접 USD write 하지 않음)
 
 **payload 주요 필드**: `seq`, `from_port_id`, `to_port_id`, `port_id`, `lot_id`, `sim_time`, `ports_occupancy`
@@ -1067,7 +1067,7 @@ _execute_mapped_sequence_stub(ext, entry.json_path, ...)
 }
 ```
 
-→ 시뮬에서 `EISEAP_PORT_MOVE_REQ` 이벤트가 **BP1→EP1** 일 때  
+→ 시뮬에서 `EISEAP_PORT_MOVE_REQ` 이벤트가 **BP1→EP1** 일 때
 → `data/sim_sequences/move_bp1_ep1.json` 실행
 
 **① 호출부** (`control_window.py` — `_resolve_event_animation_entry()`):
@@ -1168,11 +1168,11 @@ def _run_serial_flow(self):
 
 **우선순위** (위에서 아래, 직렬·병렬 wave 공통 SSOT):
 
-1. 버퍼 → EP (BP→EP)  
-2. OHT → EP 직접투입  
-3. EP → OHT 회수 (REMOVED)  
-4. INOUT → 버퍼  
-5. OHT → INOUT  
+1. 버퍼 → EP (BP→EP)
+2. OHT → EP 직접투입
+3. EP → OHT 회수 (REMOVED)
+4. INOUT → 버퍼
+5. OHT → INOUT
 6. idle 대기
 
 **② 원초 구현** — SimPy generator (`simpy`):
@@ -1227,7 +1227,7 @@ yield self.env.timeout(move_sec)
 # → EP 막대그래프 §5.5 가 이 sim_time 으로 세그먼트 누적
 ```
 
-- `env.now` = 시뮬 공정 시간(초) = 막대 X축  
+- `env.now` = 시뮬 공정 시간(초) = 막대 X축
 - `_emit_event` = 그 순간 UI 큐에 애니 job (프리런 재생 시 동일 timestamp 재emit)
 
 ---
@@ -1251,8 +1251,8 @@ for r in rules:   # event_animation_rules.json, priority 순
 
 **테스트 시나리오**
 
-1. `move_bp1_ep2.json`에 MOVE step 작성·저장  
-2. rules에 `"from_port":"BP1","to_port":"EP2"` 규칙 확인  
+1. `move_bp1_ep2.json`에 MOVE step 작성·저장
+2. rules에 `"from_port":"BP1","to_port":"EP2"` 규칙 확인
 3. 시뮬 시작 → BP1→EP2 이송 이벤트 시 해당 JSON Run 로그 `[ANIM] 실행준비완료` 확인
 
 ---
@@ -1281,7 +1281,7 @@ def _run_ep_foup_process(self, ep_port: str, lot: Lot):
         yield self.env.timeout(1.0)   # -Y 이동 1초
 ```
 
-**② 원초 구현**: `yield env.timeout(sec)` — SimPy 시계만 `env.now += sec`.  
+**② 원초 구현**: `yield env.timeout(sec)` — SimPy 시계만 `env.now += sec`.
 실제 prim Y이동·material 변경은 `_emit_event(FOUP_PROCESS_*)` 직후 §3.4가 메인 스레드에서 처리.
 
 #### 단계 2: prim 경로 조회
@@ -1348,7 +1348,7 @@ run_prim_translate_animation(
 return   # JSON/rules 파이프라인 미진입
 ```
 
-**② 원초 구현**: §1.5.1 MOVE와 동일 — `xformOp:translate:TBS_OFFSET` op에 매 tick `op.Set(Gf.Vec3f(x, y+dy*t, z))` 보간.  
+**② 원초 구현**: §1.5.1 MOVE와 동일 — `xformOp:translate:TBS_OFFSET` op에 매 tick `op.Set(Gf.Vec3f(x, y+dy*t, z))` 보간.
 FOUP는 JSON 없이 **같은 translate 애니메이터**를 직접 호출합니다.
 
 #### FOUP 전체 타임라인 (한 눈에)
@@ -1383,7 +1383,7 @@ plv.apply_port_lot_prim_material_for_context(
 
 > **프리런** = 시뮬을 최대 속도로 끝까지 계산해 이벤트만 기록한 뒤, 나중에 같은 순서로 다시 재생. → §0.1 F절.
 
-실시간 tick으로 시뮬+애니+UI를 동시에 돌리면 배속·동기·막대 타이밍이 복잡해집니다.  
+실시간 tick으로 시뮬+애니+UI를 동시에 돌리면 배속·동기·막대 타이밍이 복잡해집니다.
 **프리런** = (1) 시뮬 전체를 최대 속도로 계산해 타임라인 기록 → (2) wall-clock 배속 재생.
 
 **① 호출부**: `on_sim_start_clicked` → `_prerun_thread_body` → §4.5.
@@ -1611,7 +1611,7 @@ GET /api/state → _serialize_ep_timeline_for_screen(ext, screen)
 { "t_now": 12.5, "total_est": 120.0, "rows": {"EP1":[...]}, "empty_acc": 45.2 }
 ```
 
-`TbsControlTab.tsx` — `EpTimelinePanel` / `tbs_panel.js` — `renderEpBarHtml()`  
+`TbsControlTab.tsx` — `EpTimelinePanel` / `tbs_panel.js` — `renderEpBarHtml()`
 Kit과 웹이 **동일 직렬화**를 사용 — 막대 의미 일치.
 
 ---
@@ -1670,27 +1670,27 @@ flowchart TB
 
 ### 애니 JSON 새로 붙일 때
 
-- [ ] 시퀀스 편집기 Run으로 prim·duration 확인  
-- [ ] `data/sim_sequences/`에 저장 (파일명 규칙)  
-- [ ] `event_animation_rules.json` 규칙 추가  
-- [ ] 시뮬 시작 → 해당 이벤트에서 재생 확인  
+- [ ] 시퀀스 편집기 Run으로 prim·duration 확인
+- [ ] `data/sim_sequences/`에 저장 (파일명 규칙)
+- [ ] `event_animation_rules.json` 규칙 추가
+- [ ] 시뮬 시작 → 해당 이벤트에서 재생 확인
 - [ ] 정지 = 위치 유지 / 리셋·시작 = 초기 위치 확인
 
 ### USD / EP 레이아웃
 
-- [ ] `tbs_usd_window.py` — `default_load_usd_path`, `load_automatically`  
-- [ ] `EP2_PORT_LAYOUT` / `EP3_PORT_LAYOUT` prim 경로  
+- [ ] `tbs_usd_window.py` — `default_load_usd_path`, `load_automatically`
+- [ ] `EP2_PORT_LAYOUT` / `EP3_PORT_LAYOUT` prim 경로
 - [ ] Master open 후 EP 콤보 전환 테스트
 
 ### 포트 LOT / FOUP
 
-- [ ] `port_lot_prim_paths.json` 경로가 스테이지와 일치  
+- [ ] `port_lot_prim_paths.json` 경로가 스테이지와 일치
 - [ ] FOUP 이벤트는 별도 분기(Y±320) — JSON 불필요
 
 ### EP 막대가 안 움직일 때
 
-- [ ] 프리런 재생이 시작됐는지 (`_sim_playback_started`)  
-- [ ] `timeline_only` progress가 emit되는지  
+- [ ] 프리런 재생이 시작됐는지 (`_sim_playback_started`)
+- [ ] `timeline_only` progress가 emit되는지
 - [ ] `ep_count` 콤보와 EP3 행 visible 여부
 
 ---
@@ -1710,3 +1710,30 @@ flowchart TB
 ---
 
 *문서 버전: 2026-06 v5 — §0.1 용어 설명(Glossary) 추가*
+
+
+
+tbs_control_2 확장에서 시뮬레이션 우선순위 규칙 및 실행 방식 등을 수정해야해.
+현재는 직렬방식으로 하나의 공정이 끝나면 우선순위에 따라 다음 공정이 순차적으로 진행되고 있어.  (foup 공정은 별도로 ep 포트에 안착 후 순차적으로 진행)
+
+그런데 시뮬레이션 시나리오 자체가 변경된 부분이 있어서 전체적으로 수정이 필요해.
+
+일단 첫번째로 ep 포트 및 inout 포트는 순서 상관없이 비어있으면 oht 로 요청을 보내.
+즉 ebs 장비가 장착되어 inout 포트가 존재하고 ep 갯수가 2개 짜리 장비라면
+최초 시뮬레이션 시작시 ep1, ep2, inout 이 비어있을 테니 3개의 포트에서 동일하게 oht->ep, oht->inout 설정한 시간 동안 해당 공정이 진행이 되는거야.
+여기서 중요한 것은 현재 만약 공정설정시간이 30초인데 애니메이션 시간이 10초라면  20초 후에 애니메이션이 실행되면서 30초 에 딱 맞춰서 해당 공정이 끝나고 만약 공정설정시간이 7초인데 애니메이션 시간이 10초라면 애니메이션을 7초동안 실행되도록 빠르게 재생해서 공정설정시간 기준으로 맞추고 있어.  하지만 위처럼 방식이 바뀌게 되면
+예를 들어서 ep1, ep2, inout 에서 각각 공정시간이 랜덤으로 설정되어 35, 31, 40초 로 되었고 각 애니메이션 시간이 10초라면 두번째 ep2의 31초 설정된 공정이 애니메이션이 가장 빨리시작하게되.  이 경우 애니메이션 진행중 4초 후에 ep1 도 애니메이션이 시작되어야 하지만 아직 oht->ep2 애니메이션이 실행중이기 때문에 6초 더 후에 oht->ep1 애니메이션을 플레이하면 되는 구조가 되는거야.
+간단히 정리하면 inout, ep1, ep2, ep3 는 비어있을 때마다 바로 공정이 진행되고
+여기서 애니메이션시간이 겹치면 애니메이션끼리 직렬로 대기하다가 이어서 바로 실행해주면 되는 구조야. 마찬가지로 remove 도 동일하게 foup 공정이 끝나는 순간 바로 회수공정이 진행되고  만약 애니메이션이 실행될 타이밍에 다른 애니메이션이 진행중이라면 해당 애니메이션이 끝나고 바로 실행해주도록 하면 되.
+즉 직렬구조는 맞지만 공정시간은 병렬로 상황에 맞게 바로바로 진행이 되고 애니메이션 실행만 직렬로 되면 되는 거야.  겹치는 경우는 애니메이션만 대기하다 이어서 진행하면 되는 구조고.
+
+또한 또 바뀐 것은 만약 inout, bp1, bp2, bp3 에 lot 이 하나라도 안착이 되어있는 경우
+ep포트가 비었다면 oht->ep 공정이 실행되는게 아니라 무조건 bp->ep 공정이 진행이 되어야해.
+만약 inout 포트에만 있다면 거기서 직접 ep로는 못가므로 inout->bp,  bp->ep 순서로 채워지도록 공정이 진행이 되어야 하는거야.
+
+구조가 조금 복잡하긴 한데 한번 더 정리하면
+ep 포트는 비어있는대로 바로바로 oht->ep 공정이 병렬로 시작될 수 있다.
+단 inout, bp1, 2, 3 포트에 lot 이 있는 경우 bp->ep 공정이 우선적으로 실행되면서 bp에 있는 lot 을 먼저 채우도록 한다.
+foup 공정이 끝난 경우에도 바로 oht->ep 공정을 진행한다.
+즉 모든 공정은 상황이 끝나면 바로 병렬로 진행이 된다.
+단 여러 공정이 동시에 진행되면서 애니메이션 플레이 타이밍이 겹치는 경우는 먼저 실행되는 애니메이션 순차적으로 직렬로 겹치지 않고 실행한다  야.

@@ -385,17 +385,17 @@ FOUP_ANCHOR_PRIM_BY_INDEX: Dict[int, str] = {
     3: "/LAM_Foup_v01/LAM_Foup_v01/Foup_Root/Foup_03/Foup_03_Body",
 }
 
-# FOUP 패널 위치 오프셋(객체 중심 기준) — FOUP1·2·3 각각. 초기값은 동일, 실제로 보며 조정.
+# FOUP 패널 위치 오프셋(객체 중심 기준) — FOUP1·2·3 각각.
 FOUP_PANEL_OFFSET_XYZ_M: Dict[int, Tuple[float, float, float]] = {
-    1: (-20, -35, 0.10),
-    2: (-20, -35, 0.10),
-    3: (-20, -35, 0.10),
+    1: (-35, -45, -0.10),
+    2: (-15, -45, -0.10),
+    3: (-5, -45, -0.10),
 }
-# 「탑뷰 보기」 체크 시 사용. 기본과 같은 값으로 시작.
+# 「탑뷰 보기」 체크 시 사용.
 FOUP_PANEL_OFFSET_XYZ_M_TOP_VIEW: Dict[int, Tuple[float, float, float]] = {
-    1: (-20, -35, 0.10),
-    2: (-20, -35, 0.10),
-    3: (-20, -35, 0.10),
+    1: (-30, -15, 0.10),
+    2: (0, -15, 0.10),
+    3: (30, -15, 0.10),
 }
 
 
@@ -452,9 +452,9 @@ FOUP_PANEL_DIVIDER_Z: float = 1.0
 FOUP_PANEL_DIVIDER_RGBA: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.5)
 # FOUP별 디바이더 색. 없으면 FOUP_PANEL_DIVIDER_RGBA.
 FOUP_PANEL_DIVIDER_RGBA_BY_INDEX: Dict[int, Tuple[float, float, float, float]] = {
-    1: (1.0, 1.0, 1.0, 0.5),
-    2: (1.0, 1.0, 1.0, 0.5),
-    3: (1.0, 1.0, 1.0, 0.5),
+    1: (218.0 / 255.0, 255.0 / 255.0, 207.0 / 255.0, 0.3),
+    2: (246.0 / 255.0, 203.0 / 255.0, 255.0 / 255.0, 0.3),
+    3: (255.0 / 255.0, 225.0 / 255.0, 178.0 / 255.0, 0.3),
 }
 FOUP_PANEL_BG_RGBA: Tuple[float, float, float, float] = (
     48.0 / 255.0,
@@ -472,17 +472,17 @@ FOUP_PANEL_BORDER_RGBA: Tuple[float, float, float, float] = (0.45, 0.55, 0.70, 0
 # FOUP ◆ 마커 — 크기는 세 FOUP 공유, 오프셋·색은 번호별.
 # 「탑뷰 보기」 체크 시 숨김. 원근 뷰에서만 FOUP_MARKER_OFFSET_XYZ_M 사용.
 # 뒤에 같은 ◆ 를 검정 1.1배로 깔아 테두리 효과.
-FOUP_MARKER_WIDTH_PX: int = 20
-FOUP_MARKER_HEIGHT_PX: int = 20
+FOUP_MARKER_WIDTH_PX: int = 11
+FOUP_MARKER_HEIGHT_PX: int = 11
 FOUP_MARKER_BORDER_SCALE: float = 1.1
 FOUP_MARKER_BORDER_RGBA: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
 # screen 공간. 테두리(검정)가 뒤에, 본색이 앞에.
 FOUP_MARKER_BORDER_Z: float = 0.0
 FOUP_MARKER_FILL_Z: float = 1.0
 FOUP_MARKER_OFFSET_XYZ_M: Dict[int, Tuple[float, float, float]] = {
-    1: (0.0, 0.0, 0.10),
-    2: (0.0, 0.0, 0.10),
-    3: (0.0, 0.0, 0.10),
+    1: (0.0, -20.0, 0.10),
+    2: (0.0, -20.0, 0.10),
+    3: (0.0, -20.0, 0.10),
 }
 FOUP_MARKER_OFFSET_XYZ_M_TOP_VIEW: Dict[int, Tuple[float, float, float]] = {
     1: (0.0, 0.0, 0.10),
@@ -490,9 +490,9 @@ FOUP_MARKER_OFFSET_XYZ_M_TOP_VIEW: Dict[int, Tuple[float, float, float]] = {
     3: (0.0, 0.0, 0.10),
 }
 FOUP_MARKER_RGBA_BY_INDEX: Dict[int, Tuple[float, float, float, float]] = {
-    1: (0.20, 0.55, 1.00, 1.00),
-    2: (1.00, 0.25, 0.25, 1.00),
-    3: (0.25, 0.90, 0.35, 1.00),
+    1: (199.0 / 255.0, 229.0 / 255.0, 84.0 / 255.0, 1.00),
+    2: (242.0 / 255.0, 126.0 / 255.0, 215.0 / 255.0, 1.00),
+    3: (255.0 / 255.0, 154.0 / 255.0, 38.0 / 255.0, 1.00),
 }
 
 
@@ -543,39 +543,107 @@ class DeviceLabelSpec:
         return (float(rec[0]), float(rec[1]), float(rec[2]))
 
 
-# v1: CoolStation 1개만 채우고 나머지는 사용자가 추가
+# LAM Mechanical 기기 라벨
 DEVICE_LABEL_SPECS: List[DeviceLabelSpec] = [
     DeviceLabelSpec(
-        name="CoolStation",
-        # prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
-        prim_path="/World/aaa/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1001_000___________1262/TL14_1001_r11___________SSA4001A_04_1319",
-        offset_xyz_m=(-0.20, 0.0, 0.15),
-        offset_xyz_m_top_view=(-0.20, 0.0, 0.15),
-        color_rgba=(1.0, 1.0, 1.0, 1.0),
-        font_size=16,
-        bg_rgba=(0.10, 0.12, 0.15, 0.75),   # 생략 시 FOUP와 동일
-        padding_px=(12, 8),               # 항목별 padding
+        name="COOL S/T",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
+        offset_xyz_m=(-10, -15.0, 10),
+        offset_xyz_m_top_view=(0, -30.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
         show_border=True,
     ),
     DeviceLabelSpec(
         name="PM1",
-        # prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
-        prim_path="/World/aaa_1/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084",
-        offset_xyz_m=(-0.20, 0.0, 0.15),
-        offset_xyz_m_top_view=(-0.20, 0.0, 0.15),
-        color_rgba=(1.0, 1.0, 1.0, 1.0),
-        font_size=16,
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/PM1_Root/PM1/Chamber_01",
+        offset_xyz_m=(-30, 0.0, 10),
+        offset_xyz_m_top_view=(-40, 0.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
     ),
     DeviceLabelSpec(
-        name="Airlock1",
-        # prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Cooling_Station",
-        prim_path="/World/aaa_1/N_07_Laser_Cutting/_7_Laser_Cutting_Machine/base_link/visual/Geometry/tn__07TL14_0428_kGXkp7c4WYV2ss8XbAac0xoV4lMimv0ohEmjN_0/TL14_1000_A00______________1030/TL14_1003_000___________1084/TL14_1003_r07__________B_1114",
-        offset_xyz_m=(-0.20, 0.0, 0.15),
-        offset_xyz_m_top_view=(-0.20, 0.0, 0.15),
-        color_rgba=(1.0, 1.0, 1.0, 1.0),
-        font_size=16,
-    )
-
+        name="PM2",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/PM2_Root/PM2/Chamber_02",
+        offset_xyz_m=(-30, 20.0, 10),
+        offset_xyz_m_top_view=(-30, 20.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="PM3",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/PM3_Root/PM3/Chamber_03",
+        offset_xyz_m=(-10, 30.0, 10),
+        offset_xyz_m_top_view=(0, 30.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="PM4",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/PM4_Root/PM4/Chamber_04",
+        offset_xyz_m=(10, 25.0, 10),
+        offset_xyz_m_top_view=(30, 20.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="   PM5(Strip)",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/PM5_Root/PM5/Stripper",
+        offset_xyz_m=(30, -30.0, 10),
+        offset_xyz_m_top_view=(50, 0.0, 10),
+        font_size=18,
+        padding_px=(-5, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="Airlock 1",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Airlock_01/Airlock_01_In_Mesh",
+        offset_xyz_m=(-35, -18.0, 10),
+        offset_xyz_m_top_view=(-45, -10.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="Airlock 2",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Airlock_02/Airlock_02_In_Mesh",
+        offset_xyz_m=(-35, -18.0, 10),
+        offset_xyz_m_top_view=(45, -10.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="Buffer 3",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Buffer_3",
+        offset_xyz_m=(-30, -10.0, 10),
+        offset_xyz_m_top_view=(-40, 0.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="Buffer 4",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Buffer_4",
+        offset_xyz_m=(40, -20.0, 10),
+        offset_xyz_m_top_view=(40, 0.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
+    DeviceLabelSpec(
+        name="Aligner",
+        prim_path="/LAM_Machanical_v01/LAM_Machanical_v01/MechanicalEquipment_Root/MechanicalEquipment/LoadPort_Root/LoadPort/Aligner",
+        offset_xyz_m=(50, -30.0, 10),
+        offset_xyz_m_top_view=(5, -30.0, 10),
+        font_size=18,
+        padding_px=(12, 8),
+        show_border=True,
+    ),
 ]
 
 

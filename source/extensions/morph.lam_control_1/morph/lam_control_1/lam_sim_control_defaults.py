@@ -231,14 +231,44 @@ FEDERATION_BEARER_TOKEN: str = ""
 # 추가 헤더 예: {"X-API-Key": "..."}
 FEDERATION_EXTRA_HEADERS: dict = {}
 
-# FOUP lot_id 텍스트 색 (RGBA 0~1) — FOUP1 파랑 / FOUP2 빨강 / FOUP3 초록
-FOUP1_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.20, 0.55, 1.00, 1.00)
-FOUP2_LOT_COLOR_RGBA: tuple[float, float, float, float] = (1.00, 0.25, 0.25, 1.00)
-FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.00)
+# FOUP lot_id 텍스트 색 (RGBA 0~1)
+FOUP1_LOT_COLOR_RGBA: tuple[float, float, float, float] = (
+    199.0 / 255.0,
+    229.0 / 255.0,
+    84.0 / 255.0,
+    1.00,
+)
+FOUP2_LOT_COLOR_RGBA: tuple[float, float, float, float] = (
+    255.0 / 255.0,
+    173.0 / 255.0,
+    233.0 / 255.0,
+    1.00,
+)
+FOUP3_LOT_COLOR_RGBA: tuple[float, float, float, float] = (
+    255.0 / 255.0,
+    147.0 / 255.0,
+    51.0 / 255.0,
+    1.00,
+)
 # 웨이퍼 번호 라벨 원형 배경(●) 색 — lot_id 텍스트 색과 독립
-FOUP1_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (0.20, 0.55, 1.00, 1.00)
-FOUP2_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (1.00, 0.25, 0.25, 1.00)
-FOUP3_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1.00)
+FOUP1_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (
+    199.0 / 255.0,
+    229.0 / 255.0,
+    84.0 / 255.0,
+    1.00,
+)
+FOUP2_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (
+    242.0 / 255.0,
+    126.0 / 255.0,
+    215.0 / 255.0,
+    1.00,
+)
+FOUP3_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (
+    255.0 / 255.0,
+    122.0 / 255.0,
+    0.0 / 255.0,
+    1.00,
+)
 # 색 샘플 (밝은 배경에서도 잘 보이게 채도·명도를 잡음). 필요 시 위 튜플에 복사.
 #   흰색   (1.00, 1.00, 1.00, 1.00)
 #   검정   (0.00, 0.00, 0.00, 1.00)
@@ -254,13 +284,13 @@ FOUP3_WAFER_COLOR_RGBA: tuple[float, float, float, float] = (0.25, 0.90, 0.35, 1
 #   갈색   (0.55, 0.28, 0.08, 1.00)
 #   회색   (0.35, 0.35, 0.38, 1.00)
 # FOUP 상태보기 패널 첫 줄(lot_id) 글자 크기 [px]. 나머지 줄은 overlay 의 FOUP_PANEL_FONT_SIZE.
-FOUP_LOT_ID_FONT_SIZE: int = 20
+FOUP_LOT_ID_FONT_SIZE: int = 18
 # 웨이퍼 번호 3D 라벨 글자 크기 [px] (전 슬롯 공통).
 WAFER_NUMBER_LABEL_FONT_SIZE: int = 14
 # 웨이퍼 번호 전경 색 (RGBA 0~1).
 WAFER_NUMBER_LABEL_COLOR_RGBA: tuple[float, float, float, float] = (0.00, 0.00, 0.00, 1.00)
 # 웨이퍼 번호 라벨 원형 배경 (sc.Widget + ui.Circle). RGBA 0~1.
-WAFER_NUMBER_LABEL_BG_COLOR_RGBA: tuple[float, float, float, float] = (0.00, 0.00, 0.00, 1.00)
+WAFER_NUMBER_BG_COLOR_RGBA: tuple[float, float, float, float] = (0.00, 0.00, 0.00, 1.00)
 # 원형 배경 지름 [px]. 글자보다 약간 크게.
 WAFER_NUMBER_LABEL_BG_SIZE_PX: int = 32
 # 원형 배경(●) 크기 = 글자 크기 × 이 배율.
@@ -383,7 +413,7 @@ __all__ = [
     "FOUP_LOT_ID_FONT_SIZE",
     "WAFER_NUMBER_LABEL_FONT_SIZE",
     "WAFER_NUMBER_LABEL_COLOR_RGBA",
-    "WAFER_NUMBER_LABEL_BG_COLOR_RGBA",
+    "WAFER_NUMBER_BG_COLOR_RGBA",
     "WAFER_NUMBER_LABEL_BG_SIZE_PX",
     "WAFER_NUMBER_LABEL_BG_SCALE",
     "default_viewport_split_count",
