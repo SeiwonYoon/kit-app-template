@@ -63,7 +63,8 @@ def handle_start_simulation(
 ) -> None:
     """T2V_request_start_simulation — ``configs`` → Federation fetch + prerun + 재생.
 
-    완료 시 ``dispatch(event_name, {code, message, data})`` 호출.
+    화면 Dock 배치가 끝나면 ``dispatch(event_name, {code, message, data})`` 를 보낸다.
+    fetch·HUD·재생 버튼은 그 이후 파이프라인이 따로 진행한다.
     성공 data 는 빈 ``results`` 2칸 (웹 응답 형식 확정 전 placeholder).
     """
 

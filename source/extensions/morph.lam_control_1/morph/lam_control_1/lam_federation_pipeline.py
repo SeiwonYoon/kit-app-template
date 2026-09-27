@@ -106,15 +106,19 @@ def _federation_run_after_visibility(
     *,
     work: Callable[[], None],
     thread_name: str,
+    on_layout_ready: Optional[Callable[[], None]] = None,
 ) -> None:
     """화면 표시 전환 후 ``work`` 1회 실행.
 
     - ``on_complete`` 유실(generation race)·레이아웃 지연 시 watchdog 로 진행
     - 동일 요청에 대해 work 중복 기동 방지
+    - ``on_layout_ready`` 는 Dock 배치가 끝난 visibility ``on_complete`` 에서만
+      1회 호출 (watchdog·예외 경로에서는 호출하지 않음)
     - Federation 진입부에만 사용 (일반 CSV Play 무관)
     """
     _federation_ensure_main_dispatch()
     started = {"v": False}
+    layout_notified = {"v": False}
     lock = threading.Lock()
 
     def _kick_once(*, reason: str) -> None:
@@ -129,7 +133,20 @@ def _federation_run_after_visibility(
         _fed_diag("S05_visibility_gate", "work kick", reason=reason)
         threading.Thread(target=work, name=thread_name, daemon=True).start()
 
+    def _notify_layout_ready() -> None:
+        if not callable(on_layout_ready):
+            return
+        with lock:
+            if layout_notified["v"]:
+                return
+            layout_notified["v"] = True
+        try:
+            on_layout_ready()
+        except Exception as exc:
+            print(f"{_PRINT_PREFIX} on_layout_ready failed: {exc}", flush=True)
+
     def _after_visibility() -> None:
+        _notify_layout_ready()
         _kick_once(reason="on_complete")
 
     def _watchdog() -> None:
@@ -1452,6 +1469,9 @@ def run_federation_start_simulation(
 ) -> None:
     """T2V ``configs`` payload → 화면 표시 + fetch + prerun + 화면별 재생 버튼.
 
+    ``on_complete``(웹 V2T)는 Dock 화면 배치가 끝난 직후 1회 호출한다.
+    fetch·파싱·prerun·HUD·재생 버튼은 그 이후 별도로 진행하며 V2T를 다시 보내지 않는다.
+
     요청에 포함된 화면(case)은 시작 전에 UI「정지(초기화)」와 동일하게
     강제 종료한 뒤 fetch·준비한다. 화면마다 준비되는 즉시 재생 버튼을 띄우고,
     클릭한 화면만 시작한다. 실패 화면은 HUD에 실패를 남기고 play 하지 않는다.
@@ -1613,11 +1633,20 @@ def run_federation_start_simulation(
         return _ok(payload_data)
 
     def _apply_visibility_then_run() -> None:
+        def _on_layout_ready() -> None:
+            _fed_diag(
+                "S04_layout_ready_v2t",
+                "V2T after layout settled",
+                show_1=show_1,
+                show_2=show_2,
+            )
+            _finish(on_complete, _ok({"show_1": show_1, "show_2": show_2}))
+
         def _run_fetch() -> None:
             t0 = time.perf_counter()
             result = _work_after_visibility()
             result.setdefault("data", {})["elapsed_sec"] = time.perf_counter() - t0
-            _finish(on_complete, result)
+            _finish(None, result)
 
         _federation_run_after_visibility(
             ext,
@@ -1625,10 +1654,11 @@ def run_federation_start_simulation(
             show_2,
             work=_run_fetch,
             thread_name="lam-federation-start",
+            on_layout_ready=_on_layout_ready,
         )
         _fed_diag(
             "S04_visibility_requested",
-            "waiting on_complete or watchdog",
+            "waiting layout then V2T; fetch after",
             show_1=show_1,
             show_2=show_2,
             watchdog_sec=_FED_VISIBILITY_WATCHDOG_SEC,
