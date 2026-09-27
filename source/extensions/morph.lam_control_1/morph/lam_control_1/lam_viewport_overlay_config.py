@@ -414,6 +414,13 @@ def foup_panel_bg_rgba(foup_index: int) -> Tuple[float, float, float, float]:
     return (float(rec[0]), float(rec[1]), float(rec[2]), float(rec[3]))
 
 
+def foup_panel_divider_rgba(foup_index: int) -> Tuple[float, float, float, float]:
+    rec = FOUP_PANEL_DIVIDER_RGBA_BY_INDEX.get(int(foup_index))
+    if rec is None:
+        rec = FOUP_PANEL_DIVIDER_RGBA
+    return (float(rec[0]), float(rec[1]), float(rec[2]), float(rec[3]))
+
+
 def foup_marker_offset_xyz_m(foup_index: int, *, top_view: bool = False) -> Tuple[float, float, float]:
     src = FOUP_MARKER_OFFSET_XYZ_M_TOP_VIEW if bool(top_view) else FOUP_MARKER_OFFSET_XYZ_M
     rec = src.get(int(foup_index))
@@ -440,7 +447,15 @@ FOUP_PANEL_PAD_Y_PX: int = 8
 FOUP_PANEL_LINE_HEIGHT_PX: int = 25
 FOUP_PANEL_FONT_SIZE: int = 14
 FOUP_PANEL_DIVIDER_H_PX: float = 0.5
+# screen 공간 +z = 카메라 쪽. 배경과 같은 평면이면 깜빡이므로 본문 아이콘과 같이 앞에 둔다.
+FOUP_PANEL_DIVIDER_Z: float = 1.0
 FOUP_PANEL_DIVIDER_RGBA: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 0.5)
+# FOUP별 디바이더 색. 없으면 FOUP_PANEL_DIVIDER_RGBA.
+FOUP_PANEL_DIVIDER_RGBA_BY_INDEX: Dict[int, Tuple[float, float, float, float]] = {
+    1: (1.0, 1.0, 1.0, 0.5),
+    2: (1.0, 1.0, 1.0, 0.5),
+    3: (1.0, 1.0, 1.0, 0.5),
+}
 FOUP_PANEL_BG_RGBA: Tuple[float, float, float, float] = (
     48.0 / 255.0,
     47.0 / 255.0,
@@ -456,8 +471,14 @@ FOUP_PANEL_BORDER_RGBA: Tuple[float, float, float, float] = (0.45, 0.55, 0.70, 0
 
 # FOUP ◆ 마커 — 크기는 세 FOUP 공유, 오프셋·색은 번호별.
 # 「탑뷰 보기」 체크 시 숨김. 원근 뷰에서만 FOUP_MARKER_OFFSET_XYZ_M 사용.
+# 뒤에 같은 ◆ 를 검정 1.1배로 깔아 테두리 효과.
 FOUP_MARKER_WIDTH_PX: int = 20
 FOUP_MARKER_HEIGHT_PX: int = 20
+FOUP_MARKER_BORDER_SCALE: float = 1.1
+FOUP_MARKER_BORDER_RGBA: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
+# screen 공간. 테두리(검정)가 뒤에, 본색이 앞에.
+FOUP_MARKER_BORDER_Z: float = 0.0
+FOUP_MARKER_FILL_Z: float = 1.0
 FOUP_MARKER_OFFSET_XYZ_M: Dict[int, Tuple[float, float, float]] = {
     1: (0.0, 0.0, 0.10),
     2: (0.0, 0.0, 0.10),
@@ -681,8 +702,13 @@ __all__ = [
     "FOUP_PANEL_OFFSET_XYZ_M_TOP_VIEW",
     "foup_panel_offset_xyz_m",
     "foup_panel_bg_rgba",
+    "foup_panel_divider_rgba",
     "FOUP_MARKER_WIDTH_PX",
     "FOUP_MARKER_HEIGHT_PX",
+    "FOUP_MARKER_BORDER_SCALE",
+    "FOUP_MARKER_BORDER_RGBA",
+    "FOUP_MARKER_BORDER_Z",
+    "FOUP_MARKER_FILL_Z",
     "FOUP_MARKER_OFFSET_XYZ_M",
     "FOUP_MARKER_OFFSET_XYZ_M_TOP_VIEW",
     "FOUP_MARKER_RGBA_BY_INDEX",
@@ -698,10 +724,12 @@ __all__ = [
     "FOUP_PANEL_LINE_HEIGHT_PX",
     "FOUP_PANEL_FONT_SIZE",
     "FOUP_PANEL_DIVIDER_H_PX",
+    "FOUP_PANEL_DIVIDER_Z",
     "FOUP_PANEL_BG_RGBA",
     "FOUP_PANEL_BG_RGBA_BY_INDEX",
     "FOUP_PANEL_BORDER_RGBA",
     "FOUP_PANEL_DIVIDER_RGBA",
+    "FOUP_PANEL_DIVIDER_RGBA_BY_INDEX",
     "DEVICE_LABEL_DEFAULT_BG_RGBA",
     "DEVICE_LABEL_DEFAULT_BORDER_RGBA",
     "DEVICE_LABEL_DEFAULT_PADDING_PX",

@@ -23,16 +23,21 @@ from .lam_viewport_overlay_config import (
     FOUP_PANEL_BG_RGBA,
     FOUP_PANEL_BODY_H_PX,
     FOUP_PANEL_DIVIDER_H_PX,
-    FOUP_PANEL_DIVIDER_RGBA,
+    FOUP_PANEL_DIVIDER_Z,
     FOUP_PANEL_FONT_SIZE,
     FOUP_PANEL_HEIGHT_PX,
     FOUP_PANEL_PAD_X_PX,
     FOUP_PANEL_PAD_Y_PX,
+    FOUP_MARKER_BORDER_RGBA,
+    FOUP_MARKER_BORDER_SCALE,
+    FOUP_MARKER_BORDER_Z,
+    FOUP_MARKER_FILL_Z,
     FOUP_MARKER_HEIGHT_PX,
     FOUP_MARKER_WIDTH_PX,
     foup_marker_offset_xyz_m,
     foup_marker_rgba,
     foup_panel_bg_rgba,
+    foup_panel_divider_rgba,
     foup_panel_offset_xyz_m,
     FOUP_PANEL_TITLE_H_PX,
     FOUP_PANEL_TOP_BAR_H_PX,
@@ -78,7 +83,7 @@ _BODY_ROW_IMAGES = ("ic_takeout.png", "ic_progress.png", "ic_complete.png")
 _BODY_ROW_ICON_WH = 37
 # screen 공간 +z = 카메라 쪽. 배경보다 앞에 고정해 z-fighting 깜빡임 제거.
 _BODY_ROW_IMAGE_Z = 1.0
-_LAYOUT_VER = 10
+_LAYOUT_VER = 11
 _BODY_ROW_IMAGE_PROVIDERS: Dict[str, Any] = {}
 
 
@@ -87,6 +92,11 @@ def _foup_marker_glyph_px() -> float:
     w = max(1, int(FOUP_MARKER_WIDTH_PX))
     h = max(1, int(FOUP_MARKER_HEIGHT_PX))
     return float(h if w == h else (w + h) * 0.5)
+
+
+def _foup_marker_border_glyph_px() -> float:
+    """검정 테두리용 ◆. 본색 마커의 ``FOUP_MARKER_BORDER_SCALE`` 배."""
+    return float(_foup_marker_glyph_px()) * max(1.0, float(FOUP_MARKER_BORDER_SCALE))
 
 
 def _estimate_lot_id_text_width(text: str, font_size: int) -> int:
@@ -756,6 +766,7 @@ class LamFoupStatus3dPanel:
             and node.get("divider") is not None
             and node.get("title_tf") is not None
             and node.get("marker") is not None
+            and node.get("marker_border") is not None
             and node.get("marker_root") is not None
             and isinstance(rows, list)
             and len(rows) == _BODY_ROW_COUNT
@@ -892,12 +903,14 @@ class LamFoupStatus3dPanel:
                                 wireframe=False,
                             )
                         with sc.Transform(
-                            transform=sc.Matrix44.get_translation_matrix(0.0, div_y, 0.0)
+                            transform=sc.Matrix44.get_translation_matrix(
+                                0.0, div_y, float(FOUP_PANEL_DIVIDER_Z)
+                            )
                         ):
                             divider = sc.Rectangle(
                                 width=_PANEL_W,
                                 height=_DIVIDER_H,
-                                color=tuple(FOUP_PANEL_DIVIDER_RGBA),
+                                color=tuple(foup_panel_divider_rgba(int(fi))),
                                 wireframe=False,
                             )
                         title_tf = sc.Transform(
@@ -984,13 +997,29 @@ class LamFoupStatus3dPanel:
                 with marker_root:
                     with sc.Transform(scale_to=sc.Space.SCREEN):
                         align_c = getattr(ui.Alignment, "CENTER", None) or align_left
-                        marker_kw: Dict[str, Any] = {
+                        border_kw: Dict[str, Any] = {
+                            "size": _foup_marker_border_glyph_px(),
+                            "color": tuple(FOUP_MARKER_BORDER_RGBA),
+                        }
+                        fill_kw: Dict[str, Any] = {
                             "size": _foup_marker_glyph_px(),
                             "color": tuple(foup_marker_rgba(int(fi))),
                         }
                         if align_c is not None:
-                            marker_kw["alignment"] = align_c
-                        marker = sc.Label("◆", **marker_kw)
+                            border_kw["alignment"] = align_c
+                            fill_kw["alignment"] = align_c
+                        with sc.Transform(
+                            transform=sc.Matrix44.get_translation_matrix(
+                                0.0, 0.0, float(FOUP_MARKER_BORDER_Z)
+                            )
+                        ):
+                            marker_border = sc.Label("◆", **border_kw)
+                        with sc.Transform(
+                            transform=sc.Matrix44.get_translation_matrix(
+                                0.0, 0.0, float(FOUP_MARKER_FILL_Z)
+                            )
+                        ):
+                            marker = sc.Label("◆", **fill_kw)
                 self._panel_nodes[fi] = {
                     "layout_ver": _LAYOUT_VER,
                     "root": root,
@@ -1002,6 +1031,7 @@ class LamFoupStatus3dPanel:
                     "rows": rows,
                     "marker_root": marker_root,
                     "marker": marker,
+                    "marker_border": marker_border,
                     "panel_w": int(_PANEL_W),
                 }
 
@@ -1073,6 +1103,19 @@ class LamFoupStatus3dPanel:
                         marker.size = _foup_marker_glyph_px()
                     except Exception:
                         pass
+                marker_border = node.get("marker_border")
+                if marker_border is not None:
+                    try:
+                        marker_border.color = tuple(FOUP_MARKER_BORDER_RGBA)
+                        marker_border.size = _foup_marker_border_glyph_px()
+                    except Exception:
+                        pass
+            divider = node.get("divider")
+            if divider is not None:
+                try:
+                    divider.color = tuple(foup_panel_divider_rgba(int(fi)))
+                except Exception:
+                    pass
 
             c: FoupCounts = get_foup_counts(fi, screen=self._screen)
             lot_id = get_lot_id_for_foup(fi, screen=self._screen)
