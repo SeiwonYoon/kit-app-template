@@ -51,6 +51,9 @@ class PrerunPlanConfig:
     foup_global_serial: bool = True
     # 시뮬 시작 시 미리 적재할 포트 (엔진 ``initial_full_ports`` 와 동일).
     initial_full_ports: Tuple[str, ...] = ()
+    # LOT 생성간격. 0이면 전부 t=0 에 투입(픽스처·레거시). 엔진 있으면 spawn 풀 우선.
+    spawn_interval_min: float = 0.0
+    spawn_interval_max: float = 0.0
 
 
 @dataclass
@@ -134,6 +137,7 @@ class _Planner:
         # 엔진 인덱스는 건드리지 않는다 (SSOT 는 tick 없음, 화면 공유 풀은 adopt 이후 스냅샷).
         self._proc_pools: Dict[str, List[float]] = {}
         self._proc_idx: Dict[str, int] = {}
+        spawn_arr: List[float] = []
         try:
             src = getattr(engine, "_pre_pool", None) if engine is not None else None
             if isinstance(src, dict):
@@ -144,15 +148,46 @@ class _Planner:
                     "bp_to_ep",
                     "ep_to_oht",
                     "foup_process",
+                    "spawn",
                 ):
                     arr = src.get(k)
                     if isinstance(arr, list) and arr:
-                        self._proc_pools[k] = [float(x) for x in arr]
-                        self._proc_idx[k] = 0
+                        vals = [float(x) for x in arr]
+                        if k == "spawn":
+                            spawn_arr = vals
+                        else:
+                            self._proc_pools[k] = vals
+                            self._proc_idx[k] = 0
         except Exception:
             self._proc_pools = {}
             self._proc_idx = {}
-        self.remaining_lots = [_lot_id(i) for i in range(1, int(cfg.lot_count) + 1)]
+            spawn_arr = []
+        n_lots = max(0, int(cfg.lot_count))
+        self.remaining_lots = [_lot_id(i) for i in range(1, n_lots + 1)]
+        # 엔진 ``_lot_spawn_timer`` 와 동일: 첫 LOT 즉시, 이후 spawn 풀(또는 min~max 중앙값).
+        self._lot_ready_at: Dict[str, float] = {}
+        try:
+            lo = float(getattr(cfg, "spawn_interval_min", 0.0) or 0.0)
+            hi = float(getattr(cfg, "spawn_interval_max", 0.0) or 0.0)
+        except Exception:
+            lo, hi = 0.0, 0.0
+        if lo > hi:
+            lo, hi = hi, lo
+        spawn_mid = max(0.0, (lo + hi) * 0.5)
+        acc = 0.0
+        si = 0
+        for i in range(1, n_lots + 1):
+            lot = _lot_id(i)
+            if i <= 1:
+                self._lot_ready_at[lot] = 0.0
+                continue
+            if si < len(spawn_arr):
+                dt = max(0.0, float(spawn_arr[si]))
+                si += 1
+            else:
+                dt = float(spawn_mid)
+            acc += dt
+            self._lot_ready_at[lot] = acc
         self.completed_lots: List[str] = []
         self.processes: List[PlanProcess] = []
         self.anims: List[PlanAnimSlot] = []
@@ -198,6 +233,24 @@ class _Planner:
             except Exception:
                 pass
         return float(fallback)
+
+    def _pop_spawned_lot(self, t: float) -> Optional[str]:
+        """생성간격이 지난 remaining LOT 만 꺼낸다. 아직이면 None."""
+        if not self.remaining_lots:
+            return None
+        lot = self.remaining_lots[0]
+        ready = float(self._lot_ready_at.get(lot, 0.0) or 0.0)
+        if ready > float(t) + 1e-12:
+            return None
+        return self.remaining_lots.pop(0)
+
+    def _next_spawn_t(self, t: float) -> Optional[float]:
+        """아직 생성 시각이 안 된 remaining LOT 의 다음 생성 시각."""
+        for lot in self.remaining_lots:
+            ready = float(self._lot_ready_at.get(lot, 0.0) or 0.0)
+            if ready > float(t) + 1e-12:
+                return ready
+        return None
 
     def _new_uid(self, kind: str) -> str:
         self._uid_seq += 1
@@ -382,9 +435,9 @@ class _Planner:
         # 2) OHT→EP (버퍼 측 LOT 없을 때만)
         if not self._has_inout_or_bp_lot():
             for ep in list(self._empty_eps()):
-                if not self.remaining_lots:
+                lot = self._pop_spawned_lot(t)
+                if not lot:
                     break
-                lot = self.remaining_lots.pop(0)
                 p = self._start_process(
                     kind=KIND_OHT_TO_EP,
                     lot_id=lot,
@@ -441,20 +494,20 @@ class _Planner:
             cfg.ebs_on
             and not self._inout_reserved
             and not str(self.ports.get("INOUT") or "").strip()
-            and self.remaining_lots
         ):
-            lot = self.remaining_lots.pop(0)
-            p = self._start_process(
-                kind=KIND_OHT_TO_INOUT,
-                lot_id=lot,
-                port="INOUT",
-                from_port="OHT",
-                to_port="INOUT",
-                proc_sec=self._take_proc("oht_to_inout", float(cfg.proc_oht_to_inout)),
-                needs_anim=True,
-                t=t,
-            )
-            self._inout_reserved = True
+            lot = self._pop_spawned_lot(t)
+            if lot:
+                p = self._start_process(
+                    kind=KIND_OHT_TO_INOUT,
+                    lot_id=lot,
+                    port="INOUT",
+                    from_port="OHT",
+                    to_port="INOUT",
+                    proc_sec=self._take_proc("oht_to_inout", float(cfg.proc_oht_to_inout)),
+                    needs_anim=True,
+                    t=t,
+                )
+                self._inout_reserved = True
 
         # FOUP 대기열
         self._try_start_foup(t)
@@ -676,12 +729,15 @@ class _Planner:
                     hold = p.t_hold_end if p.t_hold_end is not None else p.t_wall_end
                     if hold is not None and getattr(p, "_port_applied", False) is True:
                         events.append((float(hold), "wall_end", p.uid))
+            spawn_t = self._next_spawn_t(t)
+            if spawn_t is not None:
+                events.append((float(spawn_t), "spawn", "_"))
 
             events.sort(
                 key=lambda e: (
                     e[0],
                     0
-                    if e[1] == "port_sync"
+                    if e[1] in ("port_sync", "spawn")
                     else 1
                     if e[1] == "anim_end"
                     else 2
@@ -714,6 +770,10 @@ class _Planner:
                     continue
                 leftover = any(str(v or "").strip() for v in self.ports.values())
                 if self.remaining_lots or self._awaiting_remove or leftover:
+                    wait_spawn = self._next_spawn_t(t)
+                    if wait_spawn is not None:
+                        t = float(wait_spawn)
+                        continue
                     # 한 번 더 시도 후에도 못 움직이면 데드락 — 안전 종료
                     before_n = len(self.processes)
                     self._try_start_all(t)
@@ -756,6 +816,9 @@ class _Planner:
                         nxt.append(max(float(pw.t_anim_ready), float(self._anim_free_at)))
                 for _lot, _ep, ready_t in self._pending_foup:
                     nxt.append(max(float(ready_t), float(self._foup_free_at)))
+                wait_spawn = self._next_spawn_t(t)
+                if wait_spawn is not None:
+                    nxt.append(float(wait_spawn))
                 if not nxt:
                     if leftover or self.remaining_lots or self._awaiting_remove:
                         self._try_start_all(t)
@@ -770,6 +833,8 @@ class _Planner:
             t = float(events[0][0])
             batch = [e for e in events if abs(float(e[0]) - t) <= 1e-9]
             for _t_ev, typ, uid in batch:
+                if typ == "spawn":
+                    continue
                 p = self._active.get(uid)
                 if p is None:
                     continue

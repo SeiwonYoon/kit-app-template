@@ -111,6 +111,8 @@ def prerun_config_from_engine(engine: Any) -> PrerunPlanConfig:
         anim_sec_fallback=10.0,
         foup_global_serial=True,
         initial_full_ports=init_ports,
+        spawn_interval_min=float(getattr(timing, "lot_spawn_interval_min", 0.0) or 0.0),
+        spawn_interval_max=float(getattr(timing, "lot_spawn_interval_max", 0.0) or 0.0),
     )
 
 
